@@ -64,6 +64,13 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIn("AWAITING_CLAUDE", s)
         self.assertIn("codex", s)  # mentionne l'autre agent
 
+    def test_stanza_does_not_overpromise_autonomy(self):
+        """La stanza (lue par l'agent) ne promet plus l'autonomie totale et porte la
+        réserve UI : `wait` ne réveille pas l'UI de chat."""
+        s = cowork.stanza_for("claude")
+        self.assertNotIn("no human help required", s)
+        self.assertIn("does not wake your UI", s)
+
     def test_clean_body_neutralizes_markers(self):
         out = cowork.clean_body("x COWORK:TURN 999 claude BEGIN y")
         self.assertNotIn("COWORK:TURN", out)
@@ -788,6 +795,9 @@ class TestRoster(CLIBase):
         md = self.md()
         self.assertNotIn("Claude ⇄ Codex", md)
         self.assertIn("multi-agent relay", md)
+        # le protocole généré ne promet plus l'autonomie totale + porte la réserve UI
+        self.assertNotIn("operate without human help", proto)
+        self.assertIn("does not wake your chat UI", proto)
 
     def test_invalid_token_in_agents_rejected(self):
         """NR-token : un token --agents mal formé est rejeté, pas filtré en silence."""

@@ -123,7 +123,7 @@ fichier d'ancrage.
 
 ---
 
-## 0. TL;DR — opère sans aide humaine
+## 0. TL;DR — la boucle auto-suffisante
 
 Tu viens d'arriver dans le projet et tu vois un `COWORK.md` : voici la boucle
 complète, copiable, **aucune autre instruction n'est nécessaire**. `<toi>` est ton
@@ -154,6 +154,11 @@ propre nom d'agent et `<autre>` l'autre agent actif (le couple déclaré dans
 Règle d'or : **tu ne travailles et n'écris que si tu as acquis le stylo via
 `claim`.** `claim` est exclusif ; `append` n'est accepté que si tu tiens le
 stylo. Tout le reste de ce document n'est que le détail de cette boucle.
+
+> Le protocole te rend auto-suffisant *une fois que tu tournes*. Dans une UI interactive
+> (VS Code, …) un humain te relance quand même entre les tours — `wait` bloque un
+> processus, il ne réveille pas ton UI de chat. Un relais entièrement autonome nécessite
+> un lanceur headless, pas une modification de ce protocole.
 
 ---
 
@@ -385,7 +390,7 @@ Référence Codex : https://developers.openai.com/codex/guides/agents-md
 """
 
 STANZA_FR = """{begin}
-## Co-work relais — autonome, aucune aide humaine requise
+## Co-work relais — auto-suffisant (aucune explication humaine requise)
 
 Tu es **{me}** dans ce projet. Dès qu'un `COWORK.md` est présent à la racine,
 c'est ta source de coordination avec **{other}** : applique `COWORK.protocol.md`
@@ -409,6 +414,10 @@ n'écris que si tu as acquis le stylo via `claim`.**
   `./cowork.py claim {me} --force`.
 
 Un tour clôturé est immuable : pour réagir, ouvre le tour suivant.
+
+_Note UI interactive_ : dans une UI de chat (VS Code, …) un humain te relance entre les
+tours — `wait` bloque un processus, il ne réveille pas ton UI. Un relais entièrement
+autonome nécessite un lanceur headless.
 {end}"""
 
 
@@ -430,7 +439,7 @@ by your anchor file.
 
 ---
 
-## 0. TL;DR — operate without human help
+## 0. TL;DR — the self-contained loop
 
 You have just arrived in the project and you see a `COWORK.md`: here is the
 complete, copy-pasteable loop, **no other instruction is required**. `<you>` is your
@@ -461,6 +470,11 @@ own agent name and `<other>` is the other active agent (the pair declared in
 Golden rule: **you work and write only if you have acquired the pen via
 `claim`.** `claim` is exclusive; `append` is accepted only if you hold the
 pen. Everything else in this document is just the detail of this loop.
+
+> The protocol makes you self-sufficient *once you are running*. In an interactive UI
+> (VS Code, …) a human still resumes you between turns — `wait` blocks a process, it
+> does not wake your chat UI. Fully hands-off relays need a headless runner, not a
+> change to this protocol.
 
 ---
 
@@ -691,7 +705,7 @@ Codex reference: https://developers.openai.com/codex/guides/agents-md
 """
 
 STANZA_EN = """{begin}
-## Co-work relay — autonomous, no human help required
+## Co-work relay — self-contained (no human explanation needed)
 
 You are **{me}** in this project. As soon as a `COWORK.md` is present at the root,
 it is your source of coordination with **{other}**: apply `COWORK.protocol.md`
@@ -715,6 +729,10 @@ you have acquired the pen via `claim`.**
   `./cowork.py claim {me} --force`.
 
 A closed turn is immutable: to react, open the next turn.
+
+_Interactive-UI note_: in a chat UI (VS Code, …) a human resumes you between turns —
+`wait` blocks a process, it does not wake your UI. Fully hands-off relays need a
+headless runner.
 {end}"""
 
 COWORK_EN = r"""<!-- ╔════════════════════════════════════════════════════════════╗

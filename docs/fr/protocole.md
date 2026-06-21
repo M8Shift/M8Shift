@@ -12,7 +12,7 @@ fichier d'ancrage.
 
 ---
 
-## 0. TL;DR — opère sans aide humaine
+## 0. TL;DR — la boucle auto-suffisante
 
 Tu viens d'arriver dans le projet et tu vois un `COWORK.md` : voici la boucle
 complète, copiable, **aucune autre instruction n'est nécessaire**. `<toi>` est ton
@@ -43,6 +43,11 @@ propre nom d'agent et `<autre>` l'autre agent actif (le couple déclaré dans
 Règle d'or : **tu ne travailles et n'écris que si tu as acquis le stylo via
 `claim`.** `claim` est exclusif ; `append` n'est accepté que si tu tiens le
 stylo. Tout le reste de ce document n'est que le détail de cette boucle.
+
+> Le protocole te rend auto-suffisant *une fois que tu tournes*. Dans une UI interactive
+> (VS Code, …) un humain te relance quand même entre les tours — `wait` bloque un
+> processus, il ne réveille pas ton UI de chat. Un relais entièrement autonome nécessite
+> un lanceur headless, pas une modification de ce protocole.
 
 ---
 
