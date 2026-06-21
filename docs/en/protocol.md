@@ -13,7 +13,7 @@ by your anchor file.
 
 ---
 
-## 0. TL;DR — operate without human help
+## 0. TL;DR — the self-contained loop
 
 You have just arrived in the project and you see a `COWORK.md`: here is the
 complete, copy-pasteable loop, **no other instruction is required**. `<you>` is your
@@ -44,6 +44,11 @@ own agent name and `<other>` is the other active agent (the pair declared in
 Golden rule: **you work and write only if you have acquired the pen via
 `claim`.** `claim` is exclusive; `append` is accepted only if you hold the
 pen. Everything else in this document is just the detail of this loop.
+
+> The protocol makes you self-sufficient *once you are running*. In an interactive UI
+> (VS Code, …) a human still resumes you between turns — `wait` blocks a process, it
+> does not wake your chat UI. Fully hands-off relays need a headless runner, not a
+> change to this protocol.
 
 ---
 
