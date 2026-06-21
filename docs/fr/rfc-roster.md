@@ -1,8 +1,11 @@
 # RFC — Couple d'agents configurable (roster) pour CoWork
 
-> **Statut** : `Brouillon` · **Cible** : prochaine mineure (v2.x → v3.0) · **Auteur** : Claude (synthèse d'un panel de conception à 3 propositions) · **Date** : 2026-06-21
+> **Statut** : `Implémenté (étape 1)` · **Livré dans** : v2.1 · **Auteur** : Claude (synthèse d'un panel de conception à 3 propositions) · **Date** : 2026-06-21
 >
-> Ceci est un **brouillon pour discussion**, pas une conception arrêtée. Voir [§ Questions ouvertes](#9-questions-ouvertes).
+> L'étape 1 (couple configurable) est **implémentée** : `init --agents …`, le champ
+> LOCK `agents:`, les états/validations conscients du roster, et l'injection d'ancrage
+> par agent. Les questions ouvertes ci-dessous sont résolues en ligne. L'**étape 2**
+> (N agents *simultanés*) reste à venir — voir [§10](#10-horizon-étape-2--n-agents-simultanés).
 
 ## 1. Résumé
 
@@ -21,7 +24,9 @@ entre les deux agents choisis). C'est un *delta minimal* — le verrou, la séri
 
 **Objectifs**
 - Choisir *quels deux agents* font le relais, au moment du `init` : `cowork.py init --agents claude,lechat`.
-- Par défaut (sans `--agents`) = `claude,codex` → **identique octet pour octet** à aujourd'hui.
+- Par défaut (sans `--agents`) = `claude,codex` → **identique en comportement** (le
+  `COWORK.md` généré gagne une ligne `agents:` et le tour d'amorçage nomme le couple
+  actif ; les transitions du relais et l'injection d'ancrage sont inchangées).
 - **Mapping d'ancrage** par agent pour que chaque outil charge automatiquement son propre fichier d'instructions.
 - Gestion honnête des agents dont l'outil **ne charge automatiquement aucun fichier** (amorçage manuel).
 
@@ -42,9 +47,9 @@ une généralisation paramétrique de noms qui sont *déjà* par agent
 ## 4. Roster & stockage
 
 - CLI : `init --agents claude,codex,lechat` — ordonné, dédupliqué, normalisé en
-  ASCII `[a-z][a-z0-9_-]*`, **exactement 2 membres pour ce RFC** (le relais est binaire ;
-  un roster plus long est réservé à l'étape 2). *Point de décision :* autoriser la déclaration d'un
-  roster plus long mais relayer quand même entre deux participants nommés ? Voir §9.
+  ASCII `[a-z][a-z0-9_-]*`, **au moins 2 membres**. Les **deux premiers** forment le
+  couple actif ; tout nom supplémentaire est **stocké dans `agents:` mais inactif**
+  jusqu'à l'étape 2 (*résolu* — voir §9 Q1).
 - Stockage : une nouvelle ligne LOCK `agents:   claude,codex` (CSV), à côté de `lang`.
   Grep-able, versionnée, parsée par `get_lock` avec un simple `split(",")`.
 - Lecture : `roster(lk)` → `lk["agents"].split(",")` si présent, sinon `("claude","codex")`
@@ -62,7 +67,8 @@ ANCHORS = {
     "codex":   "AGENTS.md",        # + AGENTS.override.md
     "gemini":  "GEMINI.md",        # Gemini CLI auto-loads GEMINI.md
     "lechat":  "AGENTS.md",        # Le Chat / Mistral: AGENTS.md (best-effort) — see below
-    "copilot": ".github/copilot-instructions.md",
+    # nested-path anchors (e.g. Copilot's .github/copilot-instructions.md) are out of
+    # stage 1: ensure_canonical_anchor is not path-aware → manual-bootstrap fallback.
 }
 ```
 
@@ -106,7 +112,7 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
 
 - `append <self> --to <X>` : `X ∈ roster`, `X ≠ self`, accepté **uniquement depuis
   `WORKING_<self>`** (inchangé). Pose `holder=X`, `state=AWAITING_<X>`, `turn+1`.
-  Avec le roster par défaut à 2 agents, `--to` ne peut nommer que l'autre → **identique octet pour octet**.
+  Avec le roster par défaut à 2 agents, `--to` ne peut nommer que l'autre → passation **inchangée**.
 - `need_agent` valide contre le **roster courant** (lu depuis le LOCK), pas la
   constante du module ; l'erreur liste le roster effectif.
 - `other(agent)` est conservé mais son rôle se réduit à la détection de verrou périmé dans
@@ -125,7 +131,13 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
 
 ## 8. Rétrocompatibilité & migration
 
-- `init` sans `--agents` → roster `claude,codex` ; tous les chemins binaires identiques octet pour octet.
+- `init` sans `--agents` → roster `claude,codex` ; tous les chemins de transition du
+  relais sont inchangés. Le `COWORK.md` généré gagne en revanche une ligne `agents:`
+  optionnelle (et le tour d'amorçage nomme le couple actif), donc le *fichier* n'est
+  pas identique octet pour octet à la sortie pré-roster. Un script « roster-unaware »
+  (pré-RFC) reste sûr **uniquement pour le couple par défaut** : il ignore `agents:`
+  et traiterait un roster personnalisé comme `claude,codex`, ce qui peut le corrompre —
+  un roster personnalisé exige un script conscient du roster.
 - Un `COWORK.md` pré-RFC sans ligne `agents:` se charge via le repli `("claude","codex")`
   — pas de réécriture, pas d'outil de migration. `init --force` réécrit le LOCK et ajoute
   `agents:`.
@@ -141,21 +153,29 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
 
 ## 9. Questions ouvertes
 
-1. **Taille du roster.** Strictement 2 noms (renommer le couple), ou autoriser la déclaration d'un roster
-   plus long tout en relayant entre deux ? (Tendance : ne déclarer que le couple ; un roster
-   plus long appartient à l'étape 2.)
-2. **Préservation des champs `set_lock`.** `set_lock` écrit le dict dans l'ordre d'insertion ;
-   `agents` doit être transporté à travers chaque `lk.update(...)` (il l'est, puisque `lk` vient
-   de `get_lock`) — **doit être verrouillé par un test d'aller-retour get/set** afin qu'un
-   futur `update()` ne puisse pas le supprimer.
+1. **Taille du roster.** ✅ *Résolu.* `--agents` accepte **≥2 noms** ; les **deux
+   premiers** font le relais dans cette version et tout nom supplémentaire est stocké
+   (réservé à l'étape 2). On garde le relais binaire tout en laissant un projet
+   déclarer son roster complet d'emblée.
+2. **Préservation des champs `set_lock`.** ✅ *Résolu.* `agents` est transporté à
+   travers chaque `lk.update(...)` (il vient de `get_lock`) ; verrouillé par
+   `test_agents_field_survives_claim` (aller-retour get/set au fil d'un `claim`).
 3. **Identité d'ancrage.** Quand plusieurs agents partagent `AGENTS.md`, comment chaque outil sait-il
    *quel* nom de roster il est ? Probablement insoluble purement dans le fichier → documenter la
    convention au moment du lancement.
-4. **Synchro de la doc protocole.** Garder PROTOCOL v1 identique octet pour octet pour le défaut à 2 agents et
-   ajouter un passage conscient du N seulement derrière le chemin non par défaut, ou passer au protocole v2 et
-   rafraîchir le test de snapshot ? (Tendance : garder le défaut v1 identique octet pour octet.)
-5. **Ancrage `lechat`.** Confirmer ce que Le Chat / Mistral charge réellement automatiquement (s'il
-   charge quoi que ce soit) avant d'expédier l'entrée `ANCHORS`.
+4. **Synchro de la doc protocole.** ✅ *Résolu (étape 1) — implémenté.* La prose du
+   protocole **et** la table des états du LOCK sont désormais **agnostiques au couple**
+   (`WORKING_<X>`/`AWAITING_<X>`, « les deux agents actifs », `holder` générique) ; les
+   indications de `init` et le tour d'amorçage interpolent le couple actif. Les
+   templates `PROTOCOL_EN`/`PROTOCOL_FR` ont été généralisés et `docs/en/protocol.md` /
+   `docs/fr/protocole.md` régénérés — le snapshot **a donc changé** (il n'est *pas*
+   inchangé) et `test_protocol_docs_in_sync` a été re-référencé sur
+   `cowork.PROTOCOL[lang]`. Le champ `agents:` reste un ajout **optionnel**
+   rétrocompatible dans le protocole v1 (les anciens lecteurs l'ignorent).
+5. **Ancrage `lechat`.** ✅ *Résolu (best-effort).* La convention n'est pas confirmée,
+   donc `lechat`/`mistral` pointent vers `AGENTS.md` au mieux ; un agent sans ancrage
+   connu (ou dont l'ancrage est déjà pris) déclenche un avertissement d'amorçage manuel
+   plutôt que de bloquer `init`.
 
 ## 10. Horizon étape 2 — N agents *simultanés*
 

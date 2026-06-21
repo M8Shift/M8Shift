@@ -1,20 +1,23 @@
 # COWORK · Protocole de relais mono-fichier (v1)
 
-Instruction commune à **Claude** et **Codex** pour coopérer via un seul fichier
+Instruction commune aux **deux agents actifs** (par défaut **Claude** et **Codex**)
+pour coopérer via un seul fichier
 `COWORK.md`, en alternance stricte (mutex), avec poll périodique. Portable : ce
 protocole est identique dans tout projet ; seul le titre de `COWORK.md` change.
 
 À lire **une fois en début de session** dès que tu vois un `COWORK.md` à la
-racine d'un projet. Tu es soit `claude`, soit `codex` — identifie-toi.
+racine d'un projet. Tu es **l'un des deux agents actifs** déclarés dans le champ
+`agents:` de `COWORK.md` (par défaut `claude` et `codex`) — identifie-toi par ton
+fichier d'ancrage.
 
 ---
 
 ## 0. TL;DR — opère sans aide humaine
 
 Tu viens d'arriver dans le projet et tu vois un `COWORK.md` : voici la boucle
-complète, copiable, **aucune autre instruction n'est nécessaire**. `<toi>` vaut
-`claude` ou `codex` (selon ton ancrage `CLAUDE.md` / `AGENTS.md`), `<autre>`
-l'autre agent.
+complète, copiable, **aucune autre instruction n'est nécessaire**. `<toi>` est ton
+propre nom d'agent et `<autre>` l'autre agent actif (le couple déclaré dans
+`agents:` ; par défaut `claude` / `codex`, via les ancrages `CLAUDE.md` / `AGENTS.md`).
 
 ```bash
 # 1. Suis-je attendu ? (commandes NON bloquantes)
@@ -52,8 +55,9 @@ stylo. Tout le reste de ce document n'est que le détail de cette boucle.
   pendant que tu tiens le stylo.
 - **`append` clôt ton tour** : il n'est accepté que depuis `WORKING_<toi>`, écrit
   le tour et passe la main (`AWAITING_<autre>`). Pas de `claim` ⇒ pas d'`append`.
-- **Alternance stricte** : claude → codex → claude … Chaque passage de main est
-  un *tour* (`TURN`) numéroté, encadré `BEGIN`/`END`.
+- **Alternance stricte** : les deux agents actifs alternent (p. ex. `claude` →
+  `codex` → `claude` …). Chaque passage de main est un *tour* (`TURN`) numéroté,
+  encadré `BEGIN`/`END`.
 - **Poll** : quand ce n'est pas ton tour, tu attends (`./cowork.py wait <toi>`,
   ~60 s) puis tu retentes `claim`.
 
@@ -66,8 +70,9 @@ Champs (un `clé: valeur` par ligne, faciles à `grep`) :
 
 | champ     | valeurs | sens |
 |-----------|---------|------|
-| `holder`  | `claude` \| `codex` \| `none` | qui tient le stylo |
-| `state`   | `IDLE` \| `WORKING_CLAUDE` \| `WORKING_CODEX` \| `AWAITING_CLAUDE` \| `AWAITING_CODEX` \| `DONE` | état courant |
+| `holder`  | un agent actif \| `none` | qui tient le stylo (défaut `claude`/`codex`) |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | état courant (`<X>` = un agent actif, en majuscules) |
+| `agents`  | CSV, ex. `claude,codex` | le couple du relais (les 2 premiers déclarés) ; défaut `claude,codex` |
 | `turn`    | entier | numéro du dernier tour clôturé |
 | `since`   | ISO-8601 UTC | depuis quand cet état dure |
 | `expires` | ISO-8601 UTC \| `-` | échéance de reprise anti-blocage (TTL 30 min) |
@@ -77,9 +82,9 @@ Champs (un `clé: valeur` par ligne, faciles à `grep`) :
 > TTL 30 min). Il repasse à `-` dès qu'on attend (`AWAITING_*`, `IDLE`, `DONE`) :
 > personne ne tient le stylo, donc pas de péremption à surveiller.
 
-**Lecture des états :**
-- `AWAITING_CLAUDE` → c'est à Claude de jouer (Codex attend).
-- `WORKING_CODEX` → Codex tient le stylo et travaille (Claude attend, ne touche à rien).
+**Lecture des états** (`<X>` = un agent actif — par défaut `claude`/`codex`) :
+- `AWAITING_<X>` → c'est à `<X>` de jouer (l'autre agent attend).
+- `WORKING_<X>` → `<X>` tient le stylo et travaille (l'autre attend, ne touche à rien).
 - `IDLE` → personne n'a la main, le premier qui a quelque chose à dire démarre.
 - `DONE` → session close, plus de relais attendu.
 
@@ -89,7 +94,7 @@ Champs (un `clé: valeur` par ligne, faciles à `grep`) :
 
 ```
 <!-- COWORK:TURN <n> <agent> BEGIN -->
-- from:    <agent>           # claude | codex
+- from:    <agent>           # un agent actif
 - to:      <agent|none>      # à qui tu repasses la main
 - ask:     <ce que tu attends de l'autre, précis et actionnable>
 - done:    <ce que tu viens de faire>
@@ -133,7 +138,7 @@ travailler est ce qui garantit qu'un seul agent modifie le dépôt à la fois.
 
 > **Modèle de concurrence (deux niveaux)** :
 > 1. **Transitions** sérialisées par un verrou inter-process (`.cowork.lock`,
->    `O_CREAT|O_EXCL`, à jeton d'ownership) : chaque read-modify-write du LOCK +
+>    `O_CREAT|O_EXCL`, à jeton de propriété) : chaque read-modify-write du LOCK +
 >    écriture atomique (temporaire unique + `os.replace`) est exclusif.
 > 2. **Fenêtre de travail** protégée par l'état persistant `WORKING_<agent>` :
 >    `claim` est la seule acquisition, et il échoue si quelqu'un d'autre tient ou
@@ -179,7 +184,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ## 7. Outil `cowork.py`
 
 ```
-./cowork.py init [--name PROJET] [--force]        # (re)génère le kit dans CE dossier
+./cowork.py init [--name PROJET] [--agents a,b] [--lang en|fr] [--force]  # (re)génère le kit ici
 ./cowork.py status                                # verrou + dernier tour (NON bloquant)
 ./cowork.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
 ./cowork.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
@@ -217,10 +222,11 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
 - écrit `COWORK.protocol.md` (ce document) et `COWORK.md` (verrou IDLE neuf) ;
   `COWORK.md` n'est **pas** écrasé s'il existe déjà (sauf `--force`) → l'état du
   relais en cours est préservé ;
-- injecte en **tête** un bloc « Co-work relais » dans `CLAUDE.md` et `AGENTS.md`
-  (créés s'ils manquent), entre marqueurs `COWORK:STANZA` → ré-injection
-  **idempotente** (déplace/actualise le bloc sans dupliquer, contenu existant
-  préservé) ;
+- injecte en **tête** un bloc « Co-work relais » dans **l'ancrage de chaque agent
+  actif** (par défaut `CLAUDE.md` et `AGENTS.md` ; créés s'ils manquent), entre
+  marqueurs `COWORK:STANZA` → ré-injection **idempotente** (déplace/actualise le bloc
+  sans dupliquer, contenu existant préservé ; le fichier précédent est sauvegardé dans
+  `<ancrage>.cowork.bak`) ;
 - si `CLAUDE.md` existait mais qu'aucune instruction Codex (`AGENTS.md` ou
   `AGENTS.override.md`) n'existait, crée automatiquement dans `AGENTS.md` un pont
   demandant à Codex de lire les instructions communes de `CLAUDE.md`. Un ancrage
@@ -235,12 +241,13 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
 
 ### Amorçage / prise en compte par les agents
 
-cowork est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention
-de chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`** au
-démarrage de session/exécution. La chaîne d'amorçage est donc :
+cowork est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention de
+chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`**, et tout autre
+agent actif lit son propre ancrage — au démarrage de session/exécution. La chaîne
+d'amorçage est donc :
 
 ```
-cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md (Codex)
+cowork.py init  ──▶  injecte la STANZA dans l'ancrage de chaque agent actif (CLAUDE.md, AGENTS.md, …)
                           │
    chaque IA charge son ancrage au démarrage ──▶ lit la stanza ──▶
    « si un COWORK.md existe, applique COWORK.protocol.md (claim → travail → append) »

@@ -289,6 +289,27 @@ class TestInit(CLIBase):
         self.assertEqual(self.lock()["turn"], "0")
         self.assertEqual(self.lock()["state"], "IDLE")
 
+    def test_init_backs_up_modified_anchor(self):
+        """init sauvegarde le contenu pré-init d'un ancrage existant avant de le modifier."""
+        claude = os.path.join(self.d, "CLAUDE.md")
+        original = "# Mes instructions\n\nGARDE-MOI\n"
+        with open(claude, "w", encoding="utf-8") as f:
+            f.write(original)
+        self.init()
+        bak = claude + ".cowork.bak"
+        self.assertTrue(os.path.exists(bak), "backup .cowork.bak attendu")
+        with open(bak, encoding="utf-8") as f:
+            self.assertEqual(f.read(), original)  # contenu d'origine intact
+        with open(claude, encoding="utf-8") as f:
+            cur = f.read()
+        self.assertIn(cowork.STANZA_BEGIN, cur)   # vivant = stanza + contenu préservé
+        self.assertIn("GARDE-MOI", cur)
+
+    def test_fresh_anchor_has_no_backup(self):
+        """Un ancrage CRÉÉ par init (inexistant avant) ne génère pas de .cowork.bak."""
+        self.init()
+        self.assertFalse(os.path.exists(os.path.join(self.d, "CLAUDE.md.cowork.bak")))
+
     def test_write_preserves_file_mode(self):
         """NR-C : réécrire un ancrage ne doit pas casser ses permissions (mkstemp=0600)."""
         self.init()
@@ -600,6 +621,217 @@ class TestI18n(CLIBase):
         r = self.cw("status")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
+
+
+# ───────────────────────────── roster (RFC stage 1) ────────────────────────
+
+class TestRoster(CLIBase):
+    def test_default_writes_agents_field(self):
+        """Sans --agents, le couple par défaut claude,codex est consigné."""
+        self.init()
+        self.assertEqual(self.lock().get("agents"), "claude,codex")
+
+    def test_custom_pair_field_and_anchors(self):
+        """--agents claude,gemini : champ consigné + ancrage GEMINI.md, pas d'AGENTS.md."""
+        r = self.init("--agents", "claude,gemini")
+        self.assertEqual(self.lock().get("agents"), "claude,gemini")
+        self.assertTrue(os.path.exists(os.path.join(self.d, "CLAUDE.md")))
+        gemini = os.path.join(self.d, "GEMINI.md")
+        self.assertTrue(os.path.exists(gemini), r.stdout)
+        with open(gemini, encoding="utf-8") as f:
+            content = f.read()
+        self.assertTrue(content.startswith(cowork.STANZA_BEGIN))
+        self.assertIn("gemini", content)
+        # codex hors couple → son ancrage n'est pas créé
+        self.assertFalse(os.path.exists(os.path.join(self.d, "AGENTS.md")))
+
+    def test_custom_pair_full_relay(self):
+        """Un couple non-défaut relaie réellement (claim/append/alternance)."""
+        self.init("--agents", "claude,gemini")
+        self.assertEqual(self.cw("claim", "gemini").returncode, 0)
+        r = self.cw("append", "gemini", "--to", "claude", "--ask", "x", "--done", "y")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lk = self.lock()
+        self.assertEqual(lk["state"], "AWAITING_CLAUDE")
+        self.assertEqual(lk["turn"], "1")
+        # codex n'est pas dans le roster → rejeté proprement
+        rc = self.cw("claim", "codex")
+        self.assertNotEqual(rc.returncode, 0)
+        self.assertNotIn("Traceback", rc.stderr)
+
+    def test_extra_agents_only_first_two_active(self):
+        """≥3 noms : tous consignés, mais seuls les 2 premiers relaient (Q1)."""
+        r = self.init("--agents", "claude,codex,lechat")
+        self.assertEqual(self.lock().get("agents"), "claude,codex,lechat")
+        self.assertIn("first two", r.stdout)
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)   # actif
+        self.assertNotEqual(self.cw("claim", "lechat").returncode, 0)  # réservé/inactif
+
+    def test_agents_field_survives_claim(self):
+        """Le champ agents (roster complet) est préservé par un claim (set_lock)."""
+        self.init("--agents", "claude,codex,lechat")
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.lock().get("agents"), "claude,codex,lechat")
+
+    def test_bad_roster_single_name_refused(self):
+        """--agents avec un seul nom est refusé proprement."""
+        r = self.cw("init", "--agents", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("two", (r.stdout + r.stderr).lower())
+
+    def test_unknown_agent_anchor_best_effort(self):
+        """Un agent sans ancrage connu : init réussit + avertit (best effort, Q5)."""
+        r = self.init("--agents", "claude,zzz")
+        self.assertIn("anchor", r.stdout.lower())
+        self.assertFalse(os.path.exists(os.path.join(self.d, "zzz.md")))
+        # il peut tout de même relayer (amorçage manuel) :
+        self.assertEqual(self.cw("claim", "zzz").returncode, 0)
+
+    def test_status_shows_active_pair(self):
+        self.init("--agents", "claude,codex,lechat")
+        r = self.cw("status")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("agents", r.stdout)
+        self.assertIn("claude,codex", r.stdout)
+
+    def test_reinit_preserves_existing_roster(self):
+        """Sans --force, ré-init préserve le roster du COWORK.md vivant."""
+        self.init("--agents", "claude,gemini")
+        r = self.init()  # ré-init sans --agents ni --force
+        self.assertEqual(self.lock().get("agents"), "claude,gemini")
+
+    def test_reinit_same_roster_idempotent(self):
+        """Ré-init avec le MÊME roster (sans --force) réussit, idempotent."""
+        self.init("--agents", "claude,gemini")
+        self.init("--agents", "claude,gemini")  # même couple → OK
+        self.assertEqual(self.lock().get("agents"), "claude,gemini")
+
+    def test_reinit_different_roster_refused_without_force(self):
+        """Ré-init avec un roster DIFFÉRENT (sans --force) est refusé proprement."""
+        self.init("--agents", "claude,codex")
+        r = self.cw("init", "--agents", "claude,gemini")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("--force", r.stdout + r.stderr)
+        self.assertEqual(self.lock().get("agents"), "claude,codex")  # inchangé
+
+    def test_reinit_force_replaces_roster(self):
+        """--force réécrit COWORK.md avec le nouveau roster."""
+        self.init("--agents", "claude,gemini")
+        self.init("--agents", "claude,codex", "--force")
+        self.assertEqual(self.lock().get("agents"), "claude,codex")
+
+    def test_collision_codex_then_lechat(self):
+        """codex,lechat : codex possède AGENTS.md, lechat est averti (collision)."""
+        r = self.init("--agents", "codex,lechat")
+        with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
+            agents = f.read()
+        self.assertEqual(agents.count(cowork.STANZA_BEGIN), 1)
+        self.assertIn("You are **codex**", agents)
+        self.assertIn("already used", r.stdout)
+
+    def test_collision_lechat_then_codex(self):
+        """NR-collision (ordre) : lechat possède AGENTS.md, codex (branche dédiée) averti."""
+        r = self.init("--agents", "lechat,codex")
+        self.assertNotIn("Traceback", r.stderr)
+        with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
+            agents = f.read()
+        self.assertEqual(agents.count(cowork.STANZA_BEGIN), 1)
+        self.assertIn("You are **lechat**", agents)  # le 1er gagne, pas d'écrasement
+        self.assertIn("already used", r.stdout)
+
+    def test_copilot_unmapped_best_effort(self):
+        """copilot (ancrage imbriqué) hors étape 1 : non mappé → avertissement, pas de fichier."""
+        r = self.init("--agents", "claude,copilot")
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("no known anchor", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".github")))
+        # copilot reste un membre du roster : il peut relayer (amorçage manuel)
+        self.assertEqual(self.cw("claim", "copilot").returncode, 0)
+
+    def test_init_rejects_invalid_stored_roster_without_force(self):
+        """init sans --force échoue sur un `agents:` stocké invalide (pas de préservation)."""
+        self.init()
+        p = os.path.join(self.d, "COWORK.md")
+        with open(p, encoding="utf-8") as f:
+            t = f.read()
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(t.replace("agents:   claude,codex", "agents:   claude,codex,@@"))
+        r = self.cw("init")  # sans --force → refuse de préserver la corruption
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("invalid LOCK", r.stdout + r.stderr)
+        r2 = self.cw("init", "--force")  # --force répare / re-sème
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(self.lock().get("agents"), "claude,codex")
+
+    def test_generated_protocol_is_pair_agnostic(self):
+        """Le protocole généré ne fige plus l'identité claude/codex : ouverture, holder,
+        états, commentaire TURN et schéma d'amorçage tous génériques."""
+        self.init("--agents", "gemini,lechat")
+        with open(os.path.join(self.d, "COWORK.protocol.md"), encoding="utf-8") as f:
+            proto = f.read()
+        # plus aucune affirmation exclusive claude/codex
+        self.assertNotIn("either `claude` or `codex`", proto)         # §0 identité
+        self.assertNotIn("`claude` \\| `codex` \\| `none`", proto)    # holder enum
+        self.assertNotIn("# claude | codex", proto)                   # commentaire TURN
+        self.assertNotIn("WORKING_CLAUDE", proto)                     # énum d'états figée
+        self.assertNotIn("(Claude) + AGENTS.md (Codex)", proto)       # schéma d'amorçage
+        self.assertNotIn("block into `CLAUDE.md` and", proto)         # §8 bullet d'injection
+        # formulations génériques présentes
+        self.assertIn("two active agents", proto)
+        self.assertIn("an active agent", proto)
+        self.assertIn("each active agent's anchor", proto)            # §8 bullet générique
+        self.assertIn("WORKING_<X>", proto)
+        # la bannière du COWORK.md généré ne fige plus le couple non plus
+        md = self.md()
+        self.assertNotIn("Claude ⇄ Codex", md)
+        self.assertIn("multi-agent relay", md)
+
+    def test_invalid_token_in_agents_rejected(self):
+        """NR-token : un token --agents mal formé est rejeté, pas filtré en silence."""
+        r = self.cw("init", "--agents", "claude,@@,codex")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "COWORK.md")))
+
+    def test_invalid_token_in_lock_rejected(self):
+        """NR-token (LOCK) : un roster stocké partiellement invalide est rejeté."""
+        self.init()
+        p = os.path.join(self.d, "COWORK.md")
+        with open(p, encoding="utf-8") as f:
+            t = f.read()
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(t.replace("agents:   claude,codex", "agents:   claude,codex,@@"))
+        r = self.cw("status")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("invalid LOCK", r.stdout + r.stderr)
+
+    def test_hyphen_name_visible_and_archivable(self):
+        """NR-hyphen : un agent `foo-bar` est reconnu par status ET archive (regex TURN)."""
+        self.init("--agents", "foo-bar,baz")
+        self.assertEqual(self.cw("claim", "foo-bar").returncode, 0)
+        r = self.cw("append", "foo-bar", "--to", "baz", "--ask", "x", "--done", "y")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        s = self.cw("status")
+        self.assertIn("#1", s.stdout)
+        self.assertIn("foo-bar", s.stdout)
+        a = self.cw("archive", "--keep", "0")
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertNotIn("COWORK:TURN 1 foo-bar", self.md())
+        with open(os.path.join(self.d, "COWORK.archive.md"), encoding="utf-8") as f:
+            self.assertIn("COWORK:TURN 1 foo-bar", f.read())
+
+    def test_bootstrap_text_uses_active_pair(self):
+        """NR-bootstrap : les textes générés nomment le couple actif, pas claude/codex."""
+        r = self.init("--agents", "gemini,lechat")
+        self.assertIn("claim gemini", r.stdout)
+        self.assertNotIn("claim claude", r.stdout)
+        md = self.md()
+        self.assertIn("claim gemini", md)
+        self.assertNotIn("claim claude", md)
 
 
 if __name__ == "__main__":

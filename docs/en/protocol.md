@@ -1,21 +1,24 @@
 # COWORK · Single-file relay protocol (v1)
 
-Shared instruction for **Claude** and **Codex** to cooperate through a single
+Shared instruction for the **two active agents** (by default **Claude** and
+**Codex**) to cooperate through a single
 `COWORK.md` file, in strict alternation (mutex), with periodic polling. Portable:
 this protocol is identical in every project; only the title of `COWORK.md`
 changes.
 
 Read it **once at the start of a session** as soon as you see a `COWORK.md` at
-the root of a project. You are either `claude` or `codex` — identify yourself.
+the root of a project. You are **one of the two active agents** declared in the
+`agents:` field of `COWORK.md` (by default `claude` and `codex`) — identify yourself
+by your anchor file.
 
 ---
 
 ## 0. TL;DR — operate without human help
 
 You have just arrived in the project and you see a `COWORK.md`: here is the
-complete, copy-pasteable loop, **no other instruction is required**. `<you>` is
-`claude` or `codex` (depending on your `CLAUDE.md` / `AGENTS.md` anchor),
-`<other>` is the other agent.
+complete, copy-pasteable loop, **no other instruction is required**. `<you>` is your
+own agent name and `<other>` is the other active agent (the pair declared in
+`agents:`; by default `claude` / `codex`, via the `CLAUDE.md` / `AGENTS.md` anchors).
 
 ```bash
 # 1. Am I expected? (NON-blocking commands)
@@ -53,8 +56,8 @@ pen. Everything else in this document is just the detail of this loop.
   you hold the pen.
 - **`append` closes your turn**: it is accepted only from `WORKING_<you>`,
   writes the turn and hands off (`AWAITING_<other>`). No `claim` ⇒ no `append`.
-- **Strict alternation**: claude → codex → claude … Each hand-off is a numbered
-  *turn* (`TURN`), framed by `BEGIN`/`END`.
+- **Strict alternation**: the two active agents take turns (e.g. `claude` → `codex`
+  → `claude` …). Each hand-off is a numbered *turn* (`TURN`), framed by `BEGIN`/`END`.
 - **Poll**: when it is not your turn, you wait (`./cowork.py wait <you>`,
   ~60 s) then you retry `claim`.
 
@@ -67,8 +70,9 @@ Fields (one `key: value` per line, easy to `grep`):
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | `claude` \| `codex` \| `none` | who holds the pen |
-| `state`   | `IDLE` \| `WORKING_CLAUDE` \| `WORKING_CODEX` \| `AWAITING_CLAUDE` \| `AWAITING_CODEX` \| `DONE` | current state |
+| `holder`  | an active agent \| `none` | who holds the pen (default `claude`/`codex`) |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
+| `agents`  | CSV, e.g. `claude,codex` | the relaying pair (the first two declared); default `claude,codex` |
 | `turn`    | integer | number of the last closed turn |
 | `since`   | ISO-8601 UTC | since when this state has lasted |
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock takeover deadline (TTL 30 min) |
@@ -78,9 +82,9 @@ Fields (one `key: value` per line, easy to `grep`):
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
 > `DONE`): nobody holds the pen, so there is no staleness to watch.
 
-**Reading the states:**
-- `AWAITING_CLAUDE` → it is Claude's turn to play (Codex is waiting).
-- `WORKING_CODEX` → Codex holds the pen and is working (Claude waits, touches nothing).
+**Reading the states** (`<X>` is an active agent — by default `claude`/`codex`):
+- `AWAITING_<X>` → it is `<X>`'s turn to play (the other agent waits).
+- `WORKING_<X>` → `<X>` holds the pen and is working (the other waits, touches nothing).
 - `IDLE` → nobody has the hand, the first who has something to say starts.
 - `DONE` → session closed, no further relay expected.
 
@@ -90,7 +94,7 @@ Fields (one `key: value` per line, easy to `grep`):
 
 ```
 <!-- COWORK:TURN <n> <agent> BEGIN -->
-- from:    <agent>           # claude | codex
+- from:    <agent>           # an active agent
 - to:      <agent|none>      # to whom you hand off
 - ask:     <what you expect from the other, precise and actionable>
 - done:    <what you just did>
@@ -182,7 +186,7 @@ Guardrail:
 ## 7. The `cowork.py` tool
 
 ```
-./cowork.py init [--name PROJECT] [--force]       # (re)generates the kit in THIS folder
+./cowork.py init [--name PROJECT] [--agents a,b] [--lang en|fr] [--force]  # (re)generates the kit here
 ./cowork.py status                                # lock + last turn (NON-blocking)
 ./cowork.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./cowork.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
@@ -220,10 +224,11 @@ cp /path/to/cowork.py .          # copy the only file needed
 - writes `COWORK.protocol.md` (this document) and `COWORK.md` (a fresh IDLE
   lock); `COWORK.md` is **not** overwritten if it already exists (except with
   `--force`) → the state of the ongoing relay is preserved;
-- injects at the **top** a "Co-work relay" block into `CLAUDE.md` and
-  `AGENTS.md` (created if missing), between `COWORK:STANZA` markers →
-  **idempotent** re-injection (moves/updates the block without duplicating,
-  existing content preserved);
+- injects at the **top** a "Co-work relay" block into **each active agent's anchor**
+  (by default `CLAUDE.md` and `AGENTS.md`; created if missing), between
+  `COWORK:STANZA` markers → **idempotent** re-injection (moves/updates the block
+  without duplicating, existing content preserved; the prior file is backed up to
+  `<anchor>.cowork.bak`);
 - if `CLAUDE.md` existed but no Codex instruction (`AGENTS.md` or
   `AGENTS.override.md`) existed, automatically creates in `AGENTS.md` a bridge
   asking Codex to read the shared instructions in `CLAUDE.md`. A pre-existing
@@ -237,12 +242,13 @@ cp /path/to/cowork.py .          # copy the only file needed
 
 ### Bootstrap / uptake by the agents
 
-cowork is **passive**: it never "calls" any AI. It relies on the convention of
-each host tool — **Claude reads `CLAUDE.md`, Codex reads `AGENTS.md`** at
-session/execution startup. The bootstrap chain is therefore:
+cowork is **passive**: it never "calls" any AI. It relies on the convention of each
+host tool — **Claude reads `CLAUDE.md`, Codex reads `AGENTS.md`**, and any other active
+agent reads its own anchor — at session/execution startup. The bootstrap chain is
+therefore:
 
 ```
-cowork.py init  ──▶  injects the STANZA into CLAUDE.md (Claude) + AGENTS.md (Codex)
+cowork.py init  ──▶  injects the STANZA into each active agent's anchor (CLAUDE.md, AGENTS.md, …)
                           │
    each AI loads its anchor at startup ──▶ reads the stanza ──▶
    "if a COWORK.md exists, apply COWORK.protocol.md (claim → work → append)"

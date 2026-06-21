@@ -1,8 +1,11 @@
 # RFC — Configurable agent pair (roster) for CoWork
 
-> **Status**: `Draft` · **Target**: next minor (v2.x → v3.0) · **Author**: Claude (synthesized from a 3-proposal design panel) · **Date**: 2026-06-21
+> **Status**: `Implemented (stage 1)` · **Shipped in**: v2.1 · **Author**: Claude (synthesized from a 3-proposal design panel) · **Date**: 2026-06-21
 >
-> This is a **draft for discussion**, not a committed design. See [§ Open questions](#9-open-questions).
+> Stage 1 (configurable pair) is **implemented**: `init --agents …`, the `agents:`
+> LOCK field, roster-aware states/validation, and per-agent anchor injection. The
+> open questions below are resolved inline. **Stage 2** (N *simultaneous* agents)
+> remains future work — see [§10](#10-stage-2-horizon-n-simultaneous-agents).
 
 ## 1. Summary
 
@@ -21,7 +24,9 @@ TTL lease and the turn journal are untouched.
 
 **Goals**
 - Pick *which two agents* relay, at `init` time: `cowork.py init --agents claude,lechat`.
-- Default (no `--agents`) = `claude,codex` → **byte-identical** to today.
+- Default (no `--agents`) = `claude,codex` → **behaviorally identical** to today (the
+  generated `COWORK.md` gains one `agents:` line and the seed turn names the active
+  pair; relay transitions and anchor injection are unchanged).
 - Per-agent **anchor mapping** so each tool auto-loads its own instruction file.
 - Honest handling of agents whose tool **does not auto-load any file** (manual bootstrap).
 
@@ -42,9 +47,9 @@ a parametric generalization of names that are *already* per-agent
 ## 4. Roster & storage
 
 - CLI: `init --agents claude,codex,lechat` — ordered, de-duplicated, normalized to
-  ASCII `[a-z][a-z0-9_-]*`, **exactly 2 members for this RFC** (the relay is binary;
-  a longer roster is reserved for stage 2). *Decision point:* allow declaring a
-  longer roster but still relay between two named participants? See §9.
+  ASCII `[a-z][a-z0-9_-]*`, **at least 2 members**. The **first two** are the active
+  relaying pair; any extra names are **stored in `agents:` but inactive** until
+  stage 2 (*resolved* — see §9 Q1).
 - Storage: one new LOCK line `agents:   claude,codex` (CSV), next to `lang`.
   Grep-able, versioned, parsed by `get_lock` with a plain `split(",")`.
 - Read: `roster(lk)` → `lk["agents"].split(",")` if present, else `("claude","codex")`
@@ -62,7 +67,8 @@ ANCHORS = {
     "codex":   "AGENTS.md",        # + AGENTS.override.md
     "gemini":  "GEMINI.md",        # Gemini CLI auto-loads GEMINI.md
     "lechat":  "AGENTS.md",        # Le Chat / Mistral: AGENTS.md (best-effort) — see below
-    "copilot": ".github/copilot-instructions.md",
+    # nested-path anchors (e.g. Copilot's .github/copilot-instructions.md) are out of
+    # stage 1: ensure_canonical_anchor is not path-aware → manual-bootstrap fallback.
 }
 ```
 
@@ -106,7 +112,7 @@ Two hard cases, handled explicitly (not silently):
 
 - `append <self> --to <X>`: `X ∈ roster`, `X ≠ self`, accepted **only from
   `WORKING_<self>`** (unchanged). Sets `holder=X`, `state=AWAITING_<X>`, `turn+1`.
-  With the default 2-agent roster, `--to` can only name the other → **byte-identical**.
+  With the default 2-agent roster, `--to` can only name the other → handoff **unchanged**.
 - `need_agent` validates against the **current roster** (read from the LOCK), not the
   module constant; the error lists the effective roster.
 - `other(agent)` is kept but its role shrinks to the stale-lock detection in
@@ -125,7 +131,12 @@ Two hard cases, handled explicitly (not silently):
 
 ## 8. Backward compatibility & migration
 
-- `init` without `--agents` → roster `claude,codex`; all binary paths byte-identical.
+- `init` without `--agents` → roster `claude,codex`; all relay transition paths are
+  unchanged. The generated `COWORK.md` does gain one optional `agents:` line (and the
+  seed turn names the active pair), so the *file* is not byte-for-byte identical to the
+  pre-roster output. A roster-unaware (pre-RFC) script stays safe **only for the
+  default pair**: it ignores `agents:` and would treat a custom roster as
+  `claude,codex`, which can corrupt it — a custom roster requires a roster-aware script.
 - A pre-RFC `COWORK.md` with no `agents:` line loads via the `("claude","codex")`
   fallback — no rewrite, no migration tool. `init --force` rewrites the LOCK and adds
   `agents:`.
@@ -141,21 +152,27 @@ Two hard cases, handled explicitly (not silently):
 
 ## 9. Open questions
 
-1. **Roster size.** Strictly 2 names (rename the pair), or allow declaring a longer
-   roster while still relaying between two? (Leaning: declare the pair only; a longer
-   roster belongs to stage 2.)
-2. **`set_lock` field preservation.** `set_lock` writes the dict in insertion order;
-   `agents` must be carried through every `lk.update(...)` (it is, since `lk` comes
-   from `get_lock`) — **must be locked down by a get/set round-trip test** so a
-   future `update()` cannot drop it.
+1. **Roster size.** ✅ *Resolved.* `--agents` accepts **≥2 names**; the **first two**
+   relay in this version and any extra names are stored (reserved for stage 2). This
+   keeps the binary relay while letting a project declare its full roster up front.
+2. **`set_lock` field preservation.** ✅ *Resolved.* `agents` is carried through every
+   `lk.update(...)` (it comes from `get_lock`); locked down by
+   `test_agents_field_survives_claim` (get/set round-trip across a `claim`).
 3. **Anchor identity.** When several agents share `AGENTS.md`, how does each tool know
    *which* roster name it is? Likely unsolvable purely in-file → document the
    launch-time convention.
-4. **Protocol doc sync.** Keep PROTOCOL v1 byte-identical for the 2-agent default and
-   add an N-aware passage only behind the non-default path, or bump protocol v2 and
-   refresh the snapshot test? (Leaning: keep v1 default byte-identical.)
-5. **`lechat` anchor.** Confirm what Le Chat / Mistral actually auto-loads (if
-   anything) before shipping the `ANCHORS` entry.
+4. **Protocol doc sync.** ✅ *Resolved (stage 1) — implemented.* The protocol prose
+   **and** the LOCK states table are now **pair-agnostic** (`WORKING_<X>`/`AWAITING_<X>`,
+   "the two active agents", generic `holder`); `init` hints and the seed turn
+   interpolate the active pair. The `PROTOCOL_EN`/`PROTOCOL_FR` templates were
+   genericized and `docs/en/protocol.md` / `docs/fr/protocole.md` regenerated — so the
+   snapshot **did change** (it is *not* unchanged) and `test_protocol_docs_in_sync` was
+   re-baselined against `cowork.PROTOCOL[lang]`. The `agents:` field itself stays a
+   backward-compatible **optional** addition within protocol v1 (old readers ignore it).
+5. **`lechat` anchor.** ✅ *Resolved (best-effort).* The convention is unconfirmed, so
+   `lechat`/`mistral` map to `AGENTS.md` as a **best-effort** guess; an agent with no
+   known anchor (or one whose anchor is already taken) triggers a printed
+   manual-bootstrap warning rather than blocking `init`.
 
 ## 10. Stage-2 horizon — N *simultaneous* agents
 
