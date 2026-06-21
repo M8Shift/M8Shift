@@ -152,7 +152,8 @@ Vérifiées par les tests et par revue multi-agents :
   *« reprends CoWork »*). Une opération entièrement autonome exige une boucle **headless**
   (`claude -p`, `codex exec`, cron) enveloppant `wait → relancer l'agent → claim` — une
   intégration à l'hôte, pas une modification du mutex. Une notification système/webhook
-  peut *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule.
+  peut *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule. Un exemple de
+  lanceur est fourni : [`examples/headless_runner.py`](examples/headless_runner.py).
 - **Coopératif, deux agents, verrou conseillé** — voir le
   [cahier des charges](docs/fr/cahier-des-charges.md) §8 (mutex coopératif, verrou
   conseillé, deux agents simultanés).
