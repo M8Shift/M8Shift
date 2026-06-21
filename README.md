@@ -1,17 +1,21 @@
-![CoWork](CoWork-logo.png)
+<p align="center">
+  <img src="CoWork-logo.png" alt="CoWork" width="240">
+</p>
 
-# CoWork
+<h1 align="center">CoWork</h1>
 
-**A single-file relay that lets two AI agents — a configurable pair from a roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation.**
+<p align="center"><strong>A single-file relay that lets two AI agents — a configurable pair from a roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation.</strong></p>
 
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#tests)
-[![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#install)
-[![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](cowork.py)
-[![no API key](https://img.shields.io/badge/API%20key-not%20required-success.svg)](#runs-anywhere--no-api-key)
-[![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](docs/en/specification.md#11-developing-cowork-with-cowork-dogfooding)
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="#tests"><img alt="tests" src="https://img.shields.io/badge/tests-74%20passing-brightgreen.svg"></a>
+  <a href="#install"><img alt="python" src="https://img.shields.io/badge/python-3.8%2B-blue.svg"></a>
+  <a href="cowork.py"><img alt="single file" src="https://img.shields.io/badge/single%20file-cowork.py-orange.svg"></a>
+  <a href="#runs-anywhere--no-api-key"><img alt="no API key" src="https://img.shields.io/badge/API%20key-not%20required-success.svg"></a>
+  <a href="docs/en/specification.md#11-developing-cowork-with-cowork-dogfooding"><img alt="made with CoWork" src="https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg"></a>
+</p>
 
-English | [Français](docs/README_fr.md)
+<p align="center">English | <a href="docs/README_fr.md">Français</a></p>
 
 ---
 

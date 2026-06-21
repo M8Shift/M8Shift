@@ -1,17 +1,21 @@
-![CoWork](../CoWork-logo.png)
+<p align="center">
+  <img src="../CoWork-logo.png" alt="CoWork" width="240">
+</p>
 
-# CoWork
+<h1 align="center">CoWork</h1>
 
-**Un relais en fichier unique qui permet à deux agents IA — un couple configurable depuis un roster (la liste d'agents disponibles : Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte.**
+<p align="center"><strong>Un relais en fichier unique qui permet à deux agents IA — un couple configurable depuis un roster (la liste d'agents disponibles : Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte.</strong></p>
 
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
-[![tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#tests)
-[![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#installation)
-[![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](../cowork.py)
-[![sans clé API](https://img.shields.io/badge/cl%C3%A9%20API-non%20requise-success.svg)](#tourne-partout--sans-clé-api)
-[![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](../docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding)
+<p align="center">
+  <a href="../LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="#tests"><img alt="tests" src="https://img.shields.io/badge/tests-74%20passing-brightgreen.svg"></a>
+  <a href="#installation"><img alt="python" src="https://img.shields.io/badge/python-3.8%2B-blue.svg"></a>
+  <a href="../cowork.py"><img alt="single file" src="https://img.shields.io/badge/single%20file-cowork.py-orange.svg"></a>
+  <a href="#tourne-partout--sans-clé-api"><img alt="sans clé API" src="https://img.shields.io/badge/cl%C3%A9%20API-non%20requise-success.svg"></a>
+  <a href="../docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding"><img alt="made with CoWork" src="https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg"></a>
+</p>
 
-[English](../README.md) | Français
+<p align="center"><a href="../README.md">English</a> | Français</p>
 
 ---
 
