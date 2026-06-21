@@ -590,7 +590,8 @@ def cmd_init(args):
     print(f"✓ cowork init — projet « {name} » dans {HERE}")
     for r in results:
         print(f"  • {r}")
-    print("Démarrer : ./cowork.py append claude --to codex --ask \"…\" --done \"…\"")
+    print("Démarrer : ./cowork.py claim claude  (puis travaille, puis "
+          "./cowork.py append claude --to codex --ask \"…\" --done \"…\")")
     return 0
 
 

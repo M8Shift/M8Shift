@@ -97,6 +97,10 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
   la **discipline** claim→travail→append ; cowork ne peut pas verrouiller le
   système de fichiers, donc un agent qui édite le dépôt **sans** avoir claim n'est
   pas empêché par l'outil (mais ne pourra pas `append`).
+- **Exclusivité par identité, pas par instance** : `claim` exclut l'**autre**
+  agent (claude vs codex), mais plusieurs processus du **même** agent réussissent
+  tous leur `claim` (traité comme un rafraîchissement du TTL). cowork ne distingue
+  pas deux instances de `claude` ; le modèle suppose une instance par identité.
 - **Mutex coopératif, non applicatif** : un agent malveillant peut, avec `--force`,
   outrepasser `release`/`done`. Le modèle suppose deux agents coopératifs.
 - **Concurrence sérialisée par verrou conseillé** : `.cowork.lock` (`O_CREAT|O_EXCL`,
