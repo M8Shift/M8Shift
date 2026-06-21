@@ -160,6 +160,33 @@ class TestInit(CLIBase):
         self.init("--name", "Mon Super Projet")
         self.assertIn("# COWORK · Mon Super Projet", self.md())
 
+    def test_missing_agents_bridges_existing_claude_instructions(self):
+        """Un projet Claude-only devient utilisable par Codex sans action manuelle."""
+        with open(os.path.join(self.d, "CLAUDE.md"), "w", encoding="utf-8") as f:
+            f.write("# Instructions partagées\n\nREGLE-METIER\n")
+
+        r = self.init()
+
+        with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
+            agents = f.read()
+        self.assertTrue(agents.startswith(cowork.STANZA_BEGIN))
+        self.assertIn(cowork.CODEX_CLAUDE_BRIDGE.strip(), agents)
+        self.assertIn("pont automatique", r.stdout)
+
+    def test_existing_agents_does_not_receive_claude_bridge(self):
+        """Des instructions Codex existantes restent autonomes et inchangées."""
+        with open(os.path.join(self.d, "CLAUDE.md"), "w", encoding="utf-8") as f:
+            f.write("# Instructions Claude\n")
+        with open(os.path.join(self.d, "AGENTS.md"), "w", encoding="utf-8") as f:
+            f.write("# Instructions Codex\n\nREGLE-CODEX\n")
+
+        self.init()
+
+        with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
+            agents = f.read()
+        self.assertIn("REGLE-CODEX", agents)
+        self.assertNotIn(cowork.CODEX_CLAUDE_BRIDGE.strip(), agents)
+
     def test_reinit_idempotent_preserves_content(self):
         """NR-idempotence : ré-init ne duplique pas la stanza, préserve contenu + état."""
         claude = os.path.join(self.d, "CLAUDE.md")
@@ -201,6 +228,28 @@ class TestInit(CLIBase):
             content = f.read()
         self.assertIn("GARDE-CODEX", content)
         self.assertIn(cowork.STANZA_BEGIN, content)
+
+    @unittest.skipUnless(shutil.which("git"), "git absent")
+    def test_tracked_anchor_case_rename_updates_git_index(self):
+        """NR-G : un agents.md suivi devient AGENTS.md dans l'index, même sur macOS."""
+        def git(*args):
+            return subprocess.run(
+                ["git", *args], cwd=self.d, capture_output=True, text=True,
+            )
+
+        self.assertEqual(git("init", "-q").returncode, 0)
+        self.assertEqual(git("config", "user.email", "test@example.invalid").returncode, 0)
+        self.assertEqual(git("config", "user.name", "cowork test").returncode, 0)
+        with open(os.path.join(self.d, "agents.md"), "w", encoding="utf-8") as f:
+            f.write("# consignes suivies\n")
+        self.assertEqual(git("add", "agents.md").returncode, 0)
+        self.assertEqual(git("commit", "-qm", "fixture").returncode, 0)
+
+        self.init()
+
+        tracked = git("ls-files").stdout.splitlines()
+        self.assertIn("AGENTS.md", tracked)
+        self.assertNotIn("agents.md", tracked)
 
     def test_stanza_is_moved_to_anchor_start(self):
         """NR-E : la stanza reste avant le contenu utilisateur, y compris après ré-init."""

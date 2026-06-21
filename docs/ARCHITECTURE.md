@@ -101,7 +101,7 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 | Élément | Choix |
 |---------|-------|
 | Langage | Python **3.8+** |
-| Dépendances | **Aucune** (stdlib : `argparse`, `datetime`, `os`, `re`, `sys`) |
+| Dépendances | **Aucune Python** (stdlib : `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`) ; Git optionnel pour préserver un renommage de casse dans l'index |
 | Distribution | **un seul fichier** `cowork.py` (gabarits embarqués) |
 | Tests | `unittest` stdlib — `tests/test_cowork.py` |
 
@@ -121,14 +121,17 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
   (test de non-régression byte-à-byte `test_protocol_doc_in_sync`).
 - **Injection idempotente et prioritaire** : stanza encadrée par marqueurs
   `COWORK:STANZA`, déplacée/actualisée en tête sans duplication. Les variantes de
-  casse sont normalisées vers le nom canonique sur tout FS ;
+  casse sont normalisées vers le nom canonique sur tout FS (`git mv -f` si Git
+  est disponible et le fichier suivi, afin d'actualiser l'index) ;
   `AGENTS.override.md`, prioritaire pour Codex dans le même dossier, est
-  synchronisé s'il existe.
+  synchronisé s'il existe. Si seul un ancrage Claude préexistait, le nouveau
+  `AGENTS.md` reçoit un pont vers ses instructions communes ; aucun pont n'est
+  ajouté lorsqu'une instruction Codex existait déjà.
 - **Marqueurs en commentaires HTML** : invisibles au rendu Markdown, `grep`-ables.
 
 ### 2.3 Stratégie de test
 
-43 tests, sans dépendance externe : unitaires (fonctions pures : `other`,
+46 tests, sans dépendance Python externe : unitaires (fonctions pures : `other`,
 `parse_iso`/`iso`, `get_lock`/`set_lock`, `stanza_for`, `clean_body`) +
 non-régression CLI en sous-processus isolé (modèle claim→append, mutex, **concurrence
 claude/codex** avec un seul gagnant, ancrages canoniques/override, archive,

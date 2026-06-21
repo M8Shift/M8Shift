@@ -221,9 +221,15 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
   (créés s'ils manquent), entre marqueurs `COWORK:STANZA` → ré-injection
   **idempotente** (déplace/actualise le bloc sans dupliquer, contenu existant
   préservé) ;
+- si `CLAUDE.md` existait mais qu'aucune instruction Codex (`AGENTS.md` ou
+  `AGENTS.override.md`) n'existait, crée automatiquement dans `AGENTS.md` un pont
+  demandant à Codex de lire les instructions communes de `CLAUDE.md`. Un ancrage
+  Codex préexistant n'est jamais complété ou remplacé automatiquement ;
 - renomme une variante unique `claude.md`/`agents.md` vers le nom canonique
   auto-chargé, y compris sur un FS insensible à la casse. Plusieurs variantes
-  coexistantes sont refusées plutôt que fusionnées silencieusement ;
+  coexistantes sont refusées plutôt que fusionnées silencieusement. Si Git est
+  disponible et que la variante est suivie, emploie `git mv -f` pour actualiser
+  aussi l'index ;
 - si `AGENTS.override.md` existe, y synchronise aussi la stanza : Codex charge
   cet override à la place de `AGENTS.md` dans le même dossier.
 
@@ -249,11 +255,10 @@ cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md
 - **Override Codex** : `AGENTS.override.md` masque `AGENTS.md` dans un même dossier ;
   `init` injecte donc la stanza dans les deux lorsqu'il est présent.
 - **Taille Codex** : Codex empile les fichiers d'instructions jusqu'à un plafond
-  *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et **saute les fichiers
-  entiers** au-delà — la coupe est au fichier près, pas à l'intérieur. Mettre la
-  stanza en tête la rend prioritaire *dans* le fichier (et un fichier plus proche
-  du cwd prime), mais si l'ancrage dépasse le budget restant il est ignoré en
-  entier : garde-le **léger**.
+  *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et tronque le fichier qui
+  dépasse au nombre d'octets restant. Mettre la stanza en tête la conserve donc en
+  priorité (et un fichier plus proche du cwd prime) ; garde néanmoins les ancrages
+  **légers**.
 - **Limite générale** : cowork ne peut pas forcer une IA à lire quoi que ce soit.
   Sans racine/contexte projet, pointe explicitement l'agent vers
   `COWORK.protocol.md`.

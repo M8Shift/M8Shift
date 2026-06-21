@@ -47,8 +47,9 @@ intervention ni explication humaine**.
 | EF-8 | `release` / `done` n'agissent que si l'appelant tient le stylo (ou personne) ; `--force` outrepasse. | `test_release_done_require_holder`, `test_release_done_force_overrides` |
 | EF-9 | `archive --keep N` purge les anciens tours clôturés sans jamais déplacer le tour d'amorçage `#0` ni toucher au verrou. | `test_archive_preserves_system_turn0` |
 | EF-10 | `init` génère `COWORK.md`, `COWORK.protocol.md` et injecte les ancrages ; idempotent (stanza non dupliquée, contenu existant préservé, `COWORK.md` non écrasé sauf `--force`). | `test_reinit_idempotent_preserves_content`, `test_init_force_resets_lock` |
-| EF-11 | Ancrages auto-chargeables sur FS sensible ou non à la casse : une variante unique est réutilisée ou renommée vers `CLAUDE.md`/`AGENTS.md`, sans doublon ; les variantes ambiguës sont refusées. | `test_anchor_case_insensitive_no_duplicate`, `test_codex_anchor_is_canonical_on_case_sensitive_fs`, `test_ambiguous_anchor_variants_refused` |
+| EF-11 | Ancrages auto-chargeables sur FS sensible ou non à la casse : une variante unique est renommée vers `CLAUDE.md`/`AGENTS.md`, y compris dans l'index si Git est disponible et la suit ; les variantes ambiguës sont refusées. | `test_anchor_case_insensitive_no_duplicate`, `test_codex_anchor_is_canonical_on_case_sensitive_fs`, `test_tracked_anchor_case_rename_updates_git_index`, `test_ambiguous_anchor_variants_refused` |
 | EF-12 | La stanza est idempotente et placée en tête des ancrages ; si `AGENTS.override.md` existe, elle est synchronisée dans l'override et dans `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
+| EF-13 | Si le projet possédait `CLAUDE.md` mais aucune instruction Codex, `init` crée dans le nouveau `AGENTS.md` un pont vers les instructions communes de `CLAUDE.md` ; un ancrage Codex préexistant reste autonome. | `test_missing_agents_bridges_existing_claude_instructions`, `test_existing_agents_does_not_receive_claude_bridge` |
 
 ## 5. Exigences non fonctionnelles
 
@@ -115,16 +116,18 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 - **Chargement des ancrages** : il dépend de l'outil hôte. Codex construit sa
   chaîne d'instructions une fois par exécution, donne priorité à
   `AGENTS.override.md` dans un dossier et applique un plafond de taille (32 Kio
-  par défaut). `init` couvre l'override local et place la stanza en tête, mais ne
-  peut ni recharger une session ouverte ni compenser une configuration globale
-  qui consomme déjà tout le plafond.
+  par défaut), en tronquant le dernier fichier au budget restant. `init` couvre
+  l'override local et place la stanza en tête, mais ne peut ni recharger une
+  session ouverte ni compenser une configuration globale qui consomme déjà tout
+  le plafond.
 
 ## 9. Recette / validation
 
-- Suite `tests/test_cowork.py` : **43 tests** (unitaires + non-régression : modèle
+- Suite `tests/test_cowork.py` : **46 tests** (unitaires + non-régression : modèle
   claim, mutex, concurrence claude/codex, ancrages canoniques/override, archive,
   robustesse, anti-injection),
-  `python3 -m unittest discover -s tests`, sans dépendance externe.
+  `python3 -m unittest discover -s tests`, sans dépendance Python externe (le test
+  d'intégration Git est ignoré si Git est absent).
 - Vérification adversariale multi-agents + 3 revues Codex successives, chaque
   constat reproduit puis corrigé puis re-testé.
 - Test de non-régression documentaire : `docs/COWORK.protocol.md` doit rester

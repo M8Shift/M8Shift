@@ -33,7 +33,7 @@ python3 cowork.py init                # nom du projet = nom du dossier (sinon --
 |-------------------------|------|
 | `COWORK.md`             | **le** fichier vivant : verrou (`LOCK`) + journal des tours |
 | `COWORK.protocol.md`    | l'instruction commune complète (lue une fois par chaque agent) |
-| `CLAUDE.md` / `AGENTS.md` | ancrages canoniques — stanza injectée en tête, sans dupliquer ni écraser le contenu existant |
+| `CLAUDE.md` / `AGENTS.md` | ancrages canoniques — stanza injectée en tête, sans dupliquer ni écraser le contenu existant ; pont automatique vers `CLAUDE.md` si le projet n'avait aucune instruction Codex |
 | `AGENTS.override.md` | s'il existe, ancrage Codex prioritaire ; la stanza y est également synchronisée |
 
 ## Amorçage : comment les IA le prennent en compte
@@ -57,13 +57,19 @@ cowork.py init ─▶ stanza dans CLAUDE.md / AGENTS.md
   ne le découvre pas automatiquement.
 - **`AGENTS.override.md`** masque `AGENTS.md` dans le même dossier. S'il existe,
   `init` synchronise la stanza dans les deux fichiers.
+- **Projet Claude-only** : si `CLAUDE.md` existait avant `init` mais qu'aucun
+  `AGENTS.md` ni `AGENTS.override.md` n'existait, le nouveau `AGENTS.md` demande
+  automatiquement à Codex de lire les instructions communes de `CLAUDE.md`.
+  Tout ancrage Codex préexistant est conservé tel quel, sans ajout de ce pont.
 - **Noms canoniques** : une variante unique comme `agents.md` est renommée
   `AGENTS.md`, y compris sur un FS insensible à la casse. Des variantes multiples
   sont refusées afin de ne pas fusionner silencieusement du contenu utilisateur.
+  Si Git est disponible et que la variante est suivie, `init` utilise `git mv -f`
+  pour actualiser aussi l'index ; sinon le renommage reste purement filesystem.
 - **Limite Codex** : Codex empile les ancrages jusqu'à un plafond *combiné*
-  (32 Kio par défaut) et **saute les fichiers entiers** au-delà (coupe au fichier
-  près). La stanza en tête la rend prioritaire dans le fichier, mais un ancrage
-  trop gros est ignoré en entier — garde-le **léger**.
+  (`project_doc_max_bytes`, 32 Kio par défaut) et tronque le fichier qui dépasse
+  au nombre d'octets restant. La stanza en tête est donc conservée en priorité ;
+  garde néanmoins les ancrages légers.
 - **Limite générale** : cowork ne peut pas forcer une IA à lire son ancrage. Sans
   contexte projet, pointe explicitement l'agent vers `COWORK.protocol.md`.
 
@@ -138,13 +144,13 @@ Conception & exploitation → [document d'architecture](docs/ARCHITECTURE.md).
 
 ## Tests
 
-Aucune dépendance externe (stdlib seule) :
+Aucune dépendance Python externe (stdlib seule) :
 
 ```bash
 python3 -m unittest discover -s tests        # depuis la racine du repo
 ```
 
-43 tests : unitaires (fonctions pures) + non-régression CLI (un test par bug
+46 tests : unitaires (fonctions pures) + non-régression CLI (un test par bug
 corrigé, référencés `NR-n`, + modèle claim, mutex, concurrence claude/codex,
 ancrages canoniques/override, archive, robustesse, anti-injection).
 
@@ -163,7 +169,9 @@ cowork/
 
 ## Prérequis
 
-Python 3.8+ (stdlib uniquement). Aucune installation, aucun paquet tiers.
+Python 3.8+ (stdlib uniquement). Git est optionnel : il sert uniquement à
+enregistrer correctement dans l'index le changement de casse d'un ancrage déjà
+suivi. Aucune installation de paquet Python tiers.
 
 ## Licence
 

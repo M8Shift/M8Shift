@@ -12,6 +12,7 @@ import contextlib
 import datetime as dt
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -39,6 +40,12 @@ STANZA_END = "<!-- COWORK:STANZA:END -->"
 CLAUDE_ANCHOR = "CLAUDE.md"
 CODEX_ANCHOR = "AGENTS.md"
 CODEX_OVERRIDE = "AGENTS.override.md"
+
+CODEX_CLAUDE_BRIDGE = """## Instructions communes du projet
+
+Lis et applique intégralement `CLAUDE.md`, qui contient les instructions communes
+du projet pour Claude et Codex.
+"""
 
 
 # ----------------------------------------------------------------- templates
@@ -306,9 +313,15 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
   (créés s'ils manquent), entre marqueurs `COWORK:STANZA` → ré-injection
   **idempotente** (déplace/actualise le bloc sans dupliquer, contenu existant
   préservé) ;
+- si `CLAUDE.md` existait mais qu'aucune instruction Codex (`AGENTS.md` ou
+  `AGENTS.override.md`) n'existait, crée automatiquement dans `AGENTS.md` un pont
+  demandant à Codex de lire les instructions communes de `CLAUDE.md`. Un ancrage
+  Codex préexistant n'est jamais complété ou remplacé automatiquement ;
 - renomme une variante unique `claude.md`/`agents.md` vers le nom canonique
   auto-chargé, y compris sur un FS insensible à la casse. Plusieurs variantes
-  coexistantes sont refusées plutôt que fusionnées silencieusement ;
+  coexistantes sont refusées plutôt que fusionnées silencieusement. Si Git est
+  disponible et que la variante est suivie, emploie `git mv -f` pour actualiser
+  aussi l'index ;
 - si `AGENTS.override.md` existe, y synchronise aussi la stanza : Codex charge
   cet override à la place de `AGENTS.md` dans le même dossier.
 
@@ -334,11 +347,10 @@ cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md
 - **Override Codex** : `AGENTS.override.md` masque `AGENTS.md` dans un même dossier ;
   `init` injecte donc la stanza dans les deux lorsqu'il est présent.
 - **Taille Codex** : Codex empile les fichiers d'instructions jusqu'à un plafond
-  *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et **saute les fichiers
-  entiers** au-delà — la coupe est au fichier près, pas à l'intérieur. Mettre la
-  stanza en tête la rend prioritaire *dans* le fichier (et un fichier plus proche
-  du cwd prime), mais si l'ancrage dépasse le budget restant il est ignoré en
-  entier : garde-le **léger**.
+  *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et tronque le fichier qui
+  dépasse au nombre d'octets restant. Mettre la stanza en tête la conserve donc en
+  priorité (et un fichier plus proche du cwd prime) ; garde néanmoins les ancrages
+  **légers**.
 - **Limite générale** : cowork ne peut pas forcer une IA à lire quoi que ce soit.
   Sans racine/contexte projet, pointe explicitement l'agent vers
   `COWORK.protocol.md`.
@@ -587,6 +599,32 @@ def ensure_canonical_anchor(canonical, create=True):
     actual = variants[0]
     actual_path = os.path.join(HERE, actual)
     canonical_path = os.path.join(HERE, canonical)
+
+    # Si la variante est suivie par Git, un simple rename sur un FS insensible à
+    # la casse ne met pas à jour l'index (`git add -A` conserve alors agents.md).
+    # `git mv -f` rend le changement de casse durable dans les clones futurs.
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", HERE, "ls-files", "--error-unmatch", "--", actual],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
+    except OSError:
+        tracked = False
+    if tracked:
+        moved = subprocess.run(
+            ["git", "-C", HERE, "mv", "-f", "--", actual, canonical],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if moved.returncode != 0:
+            detail = (moved.stderr or moved.stdout).strip()
+            sys.exit(f"impossible de renommer {actual!r} via Git vers {canonical!r}: "
+                     f"{detail or 'erreur git inconnue'}")
+        return canonical, f"{actual} → {canonical}: renommé via Git pour auto-chargement"
+
     try:
         same_file = os.path.exists(canonical_path) and os.path.samefile(actual_path, canonical_path)
     except OSError:
@@ -617,7 +655,18 @@ def stanza_for(me):
     )
 
 
-def inject_anchor(filename, me):
+def anchor_exists(canonical):
+    """Indique si une variante de casse d'un ancrage existe déjà sur disque."""
+    try:
+        return any(
+            filename.casefold() == canonical.casefold()
+            for filename in os.listdir(HERE)
+        )
+    except OSError:
+        return False
+
+
+def inject_anchor(filename, me, initial_content=""):
     path = os.path.join(HERE, filename)
     block = stanza_for(me)
     if os.path.exists(path):
@@ -646,6 +695,8 @@ def inject_anchor(filename, me):
         # Choix délibéré (testé) : la stanza est la PREMIÈRE chose du fichier, même
         # neuf, pour rester prioritaire/non tronquée — pas de titre H1 au-dessus.
         new = block + "\n"
+        if initial_content:
+            new += "\n" + initial_content.rstrip() + "\n"
         action = "fichier créé"
     write(new, path)
     return f"{filename}: {action}"
@@ -656,6 +707,14 @@ def cmd_init(args):
     results = []
 
     with file_lock():
+        # Capturer l'état AVANT création des ancrages. Le pont CLAUDE → Codex ne
+        # doit être proposé que lorsqu'un projet possédait réellement des
+        # instructions Claude mais aucune instruction Codex.
+        had_claude_anchor = anchor_exists(CLAUDE_ANCHOR)
+        had_codex_anchor = (
+            anchor_exists(CODEX_ANCHOR) or anchor_exists(CODEX_OVERRIDE)
+        )
+
         # protocole : source canonique, (ré)écrit seulement s'il manque ou diffère
         if not os.path.exists(PROTO) or read(PROTO) != PROTOCOL_TEMPLATE:
             write(PROTOCOL_TEMPLATE, PROTO)
@@ -682,7 +741,18 @@ def cmd_init(args):
         codex_anchor, migration = ensure_canonical_anchor(CODEX_ANCHOR)
         if migration:
             results.append(migration)
-        results.append(inject_anchor(codex_anchor, "codex"))
+        codex_initial_content = (
+            CODEX_CLAUDE_BRIDGE
+            if had_claude_anchor and not had_codex_anchor
+            else ""
+        )
+        results.append(inject_anchor(
+            codex_anchor, "codex", initial_content=codex_initial_content
+        ))
+        if codex_initial_content:
+            results.append(
+                "AGENTS.md: pont automatique vers les instructions communes de CLAUDE.md"
+            )
 
         codex_override, migration = ensure_canonical_anchor(CODEX_OVERRIDE, create=False)
         if migration:
