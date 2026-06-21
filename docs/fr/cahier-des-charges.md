@@ -215,3 +215,32 @@ C'est exactement ainsi que l'étape roster (RFC étape 1) a été relue : Claude
 implémenté, puis a passé la main à Codex pour une revue adversariale via un relais figé
 dans `cowork-relay/`. Un **git worktree** du dépôt ne découplerait *pas* le moteur (il
 suit la même branche, donc son `cowork.py` change à l'édition) — utiliser une copie figée.
+
+## 12. Évolutions prévues & non-goals
+
+Chaque évolution prévue reste dans les qualités de CoWork (mono-fichier, passif,
+zéro-identifiant, fondé sur fichiers & versionné) : elle est **append-only ou en lecture
+seule sur des données que CoWork stocke déjà** — jamais un daemon, une intégration, ni une
+seconde source de vérité. (Vettée par une revue de conception adversariale qui a rejeté
+tout ce qui briserait une qualité.)
+
+### 12.1 Retenues (roadmap)
+
+| Évolution | Priorité | Quoi | Pourquoi ça préserve les qualités |
+|-----------|----------|------|-----------------------------------|
+| **Mémoire partagée + recap** | prochain | `cowork.py remember <agent> --key <slug> --note "…"` ajoute un bloc `COWORK:MEM` dans un `COWORK.memory.md` voisin (écriture atomique sous `file_lock()`, gardée par `WORKING_<agent>`) ; `cowork.py recap` est un briefing en lecture seule (LOCK courant + N derniers tours + entêtes mémoire). | Un bloc append-only gardé par le **même** stylo / garde `WORKING_<agent>` que `append` ; recap ne fait que ré-afficher des marqueurs déjà écrits. CoWork ne relit **jamais** le registre dans sa logique — il décide toujours seulement *qui écrit, quand*. |
+| **Handoff structuré + peek** | prochain | Champs de tour optionnels en écriture seule (`branch` / `commit` / `tests` / `next`, défaut `-`) + `cowork.py peek <agent>` pour lire les champs de la dernière passation (rc 0 ton tour, rc 3 sinon). | Les lignes d'en-tête ne sont jamais relues par le moteur (seuls le bloc LOCK + les marqueurs le sont) ; peek est en lecture seule sur des données que `append` a déjà écrites. |
+| **Timeline + status JSON** | prochain | `cowork.py log [--limit N] [--agent X] [--all] [--oneline]` (chronologie depuis les marqueurs de tour existants ; `--all` parcourt l'archive) + `status --json`. | Purs renderers en lecture seule sur des données existantes ; seul le `json` de la stdlib est ajouté. |
+| **`claim --check <globs>`** | plus tard | Sonde consultative, en lecture seule, du chevauchement de fichiers avec le dernier champ `files:` de l'autre agent (`fnmatch` stdlib). | Consultatif seulement — n'accorde aucun bail de chemin, n'ouvre aucune fenêtre de travail concurrente : reste degré 1. |
+| **`subturn`** | plus tard | Consigner le fan-out de sous-agents d'un agent comme annotation `COWORK:SUBTURN <n>.<k>` sous son tour ouvert (accepté seulement depuis `WORKING_<agent>`). | Append-only ; ne touche jamais au LOCK / compteur de tours / bâton ; les sous-agents ne tiennent jamais le stylo. |
+| **Tableau de tâches / block-on** | peut-être | Partition `COWORK.tasks.md` append-only (`tasks claim/done`) ; `block`/`unblock` nomment une dépendance externe comme raison d'attente `blocked_on` explicite. | Sérialisé par le même verrou `O_EXCL` ; n'exécute jamais une tâche, ne sonde pas, ne route pas le bâton. |
+
+### 12.2 Non-goals (rejetés — briseraient une qualité)
+
+| Rejeté | Qualité brisée | Pourquoi |
+|--------|----------------|----------|
+| **Baux par chemin** (écritures disjointes concurrentes) | mutex degré 1 / minimal | Met deux agents en état de travail en même temps — c'est le verrou **degré 2 de l'étape 2**, pas le stylo unique d'aujourd'hui. `claim --check` livre les 80 % sûrs, consultatifs. |
+| **Daemon / watcher / push de notifs en arrière-plan** | passif | CoWork n'a aucun process résident ; le destinataire sonde à son propre tour. Une notification *signale* un tour, ne *réveille* jamais l'IA. |
+| **Lancer git / builds / API / exécuter `--next`** | passif + zéro-identifiant | Agir sur un outil demande auth + réseau et transforme CoWork en orchestrateur ; les champs de handoff restent consultatifs en écriture seule, interprétés par l'agent **destinataire** avec sa propre auth. |
+| **Deps tierces / paquet multi-fichiers** | mono-fichier | Chaque item est cantonné à la stdlib (`json`, `fnmatch`, `re`) ; une BD / file / serveur découperait l'outil — fini le `cp cowork.py`. |
+| **Mémoire *dérivée* « intelligente »** (dédup / résumé / recherche / purge) | minimal / fondé sur fichiers | Le registre est une trace bête append-only ; tout digest est un passthrough verbatim de l'agent. Dès que CoWork cure le contenu, il possède une base de connaissances avec politique — une seconde source de vérité. |
