@@ -189,6 +189,29 @@ python3 -m unittest discover -s tests        # depuis la racine du dépôt
 bug corrigé, référencé `NR-n`) couvrant le modèle de claim, le mutex, la concurrence claude/codex,
 les ancrages canoniques/override, le roster configurable, l'archive, la robustesse et la sûreté face à l'injection.
 
+## Positionnement — ce n'est pas un orchestrateur
+
+CoWork est une **primitive de coordination**, pas une plateforme d'agents. Il fait
+volontairement **une seule chose** : garantir que, parmi les agents déjà lancés sur un
+dépôt partagé, un seul écrit à la fois (alternance stricte).
+
+Les orchestrateurs/runtimes complets (p. ex. **[OpenClaw](https://docs.openclaw.ai/)**)
+couvrent bien plus — ils *font tourner* les agents : gestion de session, dispatch
+d'outils, mémoire, sous-agents, workflows **parallèles et** séquentiels. Eux aussi
+savent alterner ; la vraie différence est le **périmètre et l'empreinte** :
+
+| | Orchestrateur (p. ex. OpenClaw) | CoWork |
+|---|---------------------------------|--------|
+| Nature | un runtime/gateway qui **pilote** les agents | un **verrou** mono-fichier que les agents interrogent |
+| Installation | une plateforme à déployer + configurer (providers, auth) | `cp cowork.py` — stdlib, ni daemon ni serveur |
+| Identifiants | l'auth des agents (abonnement **ou** clé API) | **aucun** — CoWork ne s'authentifie jamais |
+| Périmètre | mémoire, outils, routage, parallèle + séquentiel | seulement *qui écrit, quand* |
+
+Prends un orchestrateur quand tu veux une **équipe d'agents gérée**. Prends CoWork quand
+tu veux juste que deux agents que tu lances déjà (Claude Code, Codex, …) **arrêtent de
+s'écraser** — sans rien installer ni authentifier. Ils sont **complémentaires**, pas
+concurrents (CoWork pourrait même être le verrou au sein d'un montage plus large).
+
 ## Roadmap
 
 CoWork conserve un **mutex à stylo unique** (un seul écrivain à la fois) par
