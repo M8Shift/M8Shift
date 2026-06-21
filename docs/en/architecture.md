@@ -92,6 +92,40 @@ log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
 | `cowork.py init` | `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (if present), `COWORK.protocol.md` | local file system | W |
 | agent | `COWORK.archive.md` | local file system | W (append) |
 
+### 1.8 Concurrency model — a mutex, not a semaphore
+
+CoWork is, at its core, a **mutex** (mutual exclusion): exactly **one** agent holds
+the "pen" at any instant. It is **not a semaphore** — a semaphore would allow *k*
+simultaneous holders (counter); CoWork's degree of concurrency is strictly **1**.
+This is the central invariant: *one agent modifies the repository at a time.*
+
+It is not a single textbook mutex, though: it **composes four classic primitives**
+on **two levels**.
+
+| Classic concept | In CoWork |
+|-----------------|-----------|
+| **OS mutex** (low level) | `.cowork.lock` opened with `O_CREAT\|O_EXCL`: a real OS lock that serializes the **critical section** = the read-modify-write of `COWORK.md`. The *enforced* technical mutex. |
+| **Owned application lock** (high level) | the `WORKING_<agent>` state in the LOCK block: a **named, owned** lock held across the whole **work window** (not just during a single command). The *semantic* mutex protecting the shared resource (the repo). |
+| **Lease / TTL** (anti-deadlock) | `expires` (30-min TTL) + ownership token: the **lease-based distributed-lock** pattern (ZooKeeper ephemeral nodes, Redlock). If the holder dies, the lease expires → `claim --force`. |
+| **Monitor / condition variable + baton** | `wait <agent>` polls until `AWAITING_<self>` (a **condition wait**); the explicit handoff `--to <other>` is **token-passing** (a baton / token ring). |
+
+Two properties set it apart from a strict in-process mutex:
+
+- **Cooperative / advisory, not enforced.** The OS cannot prevent a third process
+  from editing the repository — the real critical section (an agent editing files)
+  is not hardware-lockable. CoWork *enforces* that you cannot **record** a turn
+  without holding the pen (`append` ⇐ `WORKING_<self>`), but the exclusivity of the
+  *work itself* relies on the discipline `claim → work → append` (see
+  [specification](specification.md) §8).
+- **Re-entrant for the holder.** The current holder may re-`claim` to refresh its
+  lease — a holder-recursive lock.
+
+**Why this matters for the roadmap.** Generalizing to a configurable pair of agents
+(claude, codex, lechat, …) keeps the degree at **1**: the baton is simply passed
+among the chosen participants rather than between a hard-wired claude/codex. It
+stays a **token-passing mutex** — it does *not* become a counting semaphore (that
+would mean *k > 1* agents writing concurrently, which is an explicit non-goal).
+
 ---
 
 ## 2. 🛠️ Development View

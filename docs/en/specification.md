@@ -112,9 +112,11 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 - **Immutability by convention**: the tool never rewrites a closed turn, but
   nothing at the file-system level prevents it (manual edit).
 - **Two simultaneous agents (current)**: the protocol is binary (claude ⇄ codex)
-  by design. **Roadmap**: a later version will generalize the relay to N agents
-  (claude, codex, lechat, …); the current version is intentionally limited to two
-  simultaneous agents.
+  by design — a **degree-1 mutex**. **Roadmap (two stages)**: (1) make the relaying
+  **pair configurable** from an extensible roster (claude, codex, lechat, …) while
+  staying 2 simultaneous — draft [RFC — configurable agent pair](rfc-roster.md);
+  (2) **N simultaneous agents** (degree > 1), a separate future step. The current
+  version is intentionally limited to two simultaneous agents.
 - **Anchor loading**: it depends on the host tool. Codex builds its instruction
   chain once per execution, gives priority to `AGENTS.override.md` in a folder
   and applies a size cap (32 KiB by default), truncating the last file to the

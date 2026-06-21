@@ -92,6 +92,41 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 | `cowork.py init` | `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (si présent), `COWORK.protocol.md` | système de fichiers local | W |
 | agent | `COWORK.archive.md` | système de fichiers local | W (append) |
 
+### 1.8 Modèle de concurrence — un mutex, pas un sémaphore
+
+CoWork est, à la base, un **mutex** (exclusion mutuelle) : à tout instant, **un
+seul** agent détient le « stylo ». Ce **n'est pas un sémaphore** — un sémaphore
+autoriserait *k* détenteurs simultanés (compteur) ; le degré de concurrence de
+CoWork est strictement **1**. C'est l'invariant central : *un seul agent modifie le
+dépôt à la fois.*
+
+Ce n'est pas pour autant un unique mutex de manuel : il **compose quatre primitives
+classiques** sur **deux niveaux**.
+
+| Concept classique | Dans CoWork |
+|-------------------|-------------|
+| **Mutex OS** (bas niveau) | `.cowork.lock` ouvert en `O_CREAT\|O_EXCL` : un vrai verrou OS qui sérialise la **section critique** = le read-modify-write de `COWORK.md`. Le mutex technique *appliqué*. |
+| **Lock applicatif possédé** (haut niveau) | l'état `WORKING_<agent>` du bloc LOCK : un verrou **nommé, avec propriétaire**, tenu pendant toute la **fenêtre de travail** (pas seulement le temps d'une commande). Le mutex *sémantique* qui protège la ressource partagée (le dépôt). |
+| **Bail / TTL** (anti-blocage) | `expires` (TTL 30 min) + jeton d'ownership : le pattern des **verrous distribués à bail** (nœuds éphémères ZooKeeper, Redlock). Si le détenteur meurt, le bail expire → `claim --force`. |
+| **Moniteur / variable de condition + témoin** | `wait <agent>` poll jusqu'à `AWAITING_<soi>` (une **attente de condition**) ; la passation explicite `--to <autre>` est du **token-passing** (témoin / anneau à jeton). |
+
+Deux propriétés le distinguent d'un mutex in-process strict :
+
+- **Coopératif / advisory, pas appliqué.** L'OS ne peut pas empêcher un process tiers
+  d'éditer le dépôt — la vraie section critique (un agent qui modifie des fichiers)
+  n'est pas verrouillable matériellement. CoWork *garantit* qu'on ne peut pas
+  **enregistrer** un tour sans tenir le stylo (`append` ⇐ `WORKING_<soi>`), mais
+  l'exclusivité du *travail* repose sur la discipline `claim → travail → append`
+  (voir [cahier des charges](cahier-des-charges.md) §8).
+- **Ré-entrant pour le détenteur.** Le titulaire peut re-`claim` pour rafraîchir son
+  bail — un verrou récursif côté propriétaire.
+
+**Pourquoi ça compte pour la roadmap.** Généraliser à un **couple configurable**
+d'agents (claude, codex, lechat, …) garde le degré à **1** : le témoin circule entre
+les participants choisis au lieu d'un claude/codex câblé en dur. Cela reste un **mutex
+à jeton** — ça ne devient *pas* un sémaphore compteur (ce qui supposerait *k > 1*
+agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-agent).
+
 ---
 
 ## 2. 🛠️ Vue Développement

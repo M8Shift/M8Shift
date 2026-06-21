@@ -112,8 +112,11 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 - **Immutabilité par convention** : l'outil ne réécrit jamais un tour clôturé,
   mais rien au niveau du système de fichiers ne l'empêche (édition manuelle).
 - **Deux agents simultanés (actuel)** : le protocole est binaire (claude ⇄ codex)
-  par conception. **Roadmap** : une version ultérieure généralisera le relais à
-  N agents (claude, codex, lechat, …) ; la version actuelle est volontairement
+  par conception — un **mutex de degré 1**. **Roadmap (deux étapes)** : (1) rendre
+  le **couple** du relais **configurable** depuis un roster extensible (claude,
+  codex, lechat, …) en restant à 2 simultanés — brouillon
+  [RFC — couple d'agents configurable](rfc-roster.md) ; (2) **N agents simultanés**
+  (degré > 1), étape distincte et future. La version actuelle est volontairement
   limitée à deux agents simultanés.
 - **Chargement des ancrages** : il dépend de l'outil hôte. Codex construit sa
   chaîne d'instructions une fois par exécution, donne priorité à

@@ -142,9 +142,14 @@ canonical/override anchors, archive, robustness, and injection safety.
 
 ## Roadmap
 
-CoWork is currently limited to **two simultaneous agents** (claude ⇄ codex) by
-design. A later version will generalize the relay to **N agents** (claude, codex,
-lechat, …).
+CoWork keeps a **single-pen mutex** (one writer at a time) by design — see
+[architecture §1.8](docs/en/architecture.md). Two staged steps:
+
+1. **Configurable pair** — choose the two relaying agents from an **extensible
+   roster** (claude, codex, lechat, …) while staying **2 simultaneous** (degree-1).
+   Draft: [RFC — configurable agent pair](docs/en/rfc-roster.md).
+2. **N simultaneous agents** — true multi-agent (degree > 1); a separate, larger
+   step with its own future RFC.
 
 ## License
 
