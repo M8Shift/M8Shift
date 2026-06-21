@@ -123,13 +123,16 @@ boucle:
 En pratique, `./cowork.py` fait CLAIM+APPEND+RELEASE en une commande atomique
 (`append`), et la boucle d'attente (`wait`).
 
-> **Limite connue (modèle de concurrence)** : chaque commande fait *un* `read`
-> puis *une* écriture atomique (`os.replace`), mais il n'y a pas de
-> compare-and-swap réel. Le verrou repose donc sur l'**alternance stricte** (un
-> seul écrivain légitime à la fois). En cas de course *simultanée* vraie (deux
-> agents écrivant à la même milliseconde), c'est *last-writer-wins* — impossible
-> tant que chacun respecte son tour. Le `step b` (re-lire LOCK avant d'écrire)
-> reste une bonne pratique si tu fais des transitions manuelles.
+> **Modèle de concurrence** : les commandes qui mutent l'état prennent d'abord un
+> **verrou inter-process** (`.cowork.lock`, créé en `O_CREAT|O_EXCL`), puis font
+> le read-modify-write *à l'intérieur* de ce verrou et une écriture atomique
+> (fichier temporaire unique + `os.replace`). Deux `cowork.py` concurrents sont
+> donc **sérialisés** : le double-démarrage depuis `IDLE` est impossible (le 2ᵉ
+> relit le LOCK et voit que ce n'est plus son tour). Un `.cowork.lock` abandonné
+> (process tué) est récupéré après 60 s.
+> *Limites* : le verrou est **conseillé** (une édition manuelle de `COWORK.md`
+> hors outil le contourne) ; sur un FS réseau (NFS) les sémantiques `O_EXCL` /
+> `rename` peuvent être plus faibles — cowork vise un dépôt sur disque local.
 
 ---
 

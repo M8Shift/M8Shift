@@ -88,7 +88,11 @@ Conception & exploitation → [document d'architecture](docs/ARCHITECTURE.md).
 - **Anti-blocage** : `claim --force` ne reprend **qu'un verrou périmé** (refus sur
   un verrou actif) ; le détenteur peut rafraîchir le sien.
 - **Garde-fous** : `release`/`done` exigent de tenir le stylo (`--force` = récupération).
-- **Atomicité** : toute écriture passe par un fichier temporaire + `os.replace`.
+- **Concurrence sérialisée** : verrou inter-process `.cowork.lock` (`O_EXCL`) +
+  écriture atomique (temporaire **unique** + `os.replace`) → deux `cowork.py`
+  simultanés ne se corrompent pas (pas de double-démarrage IDLE).
+- **Anti-injection** : champs mono-ligne (refus saut de ligne / marqueurs
+  réservés) ; corps de tour neutralisé contre les faux marqueurs.
 - **Borné dans le temps** : `archive` purge les anciens tours sans toucher au verrou ni au tour d'amorçage.
 - **Portable** : dossier vide ou dépôt git, chemins à espaces/accents, FS sensible
   ou non à la casse, ancrages préexistants — sans casse ni doublon.

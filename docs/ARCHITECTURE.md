@@ -107,7 +107,15 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 
 ### 2.2 Patterns notables
 
-- **Écriture atomique** : `write()` → fichier `.tmp` puis `os.replace` (POSIX atomic).
+- **Écriture atomique** : `write()` → fichier temporaire **unique** (`mkstemp`)
+  puis `os.replace` (POSIX atomic). **Toutes** les écritures passent par là, y
+  compris l'archive.
+- **Verrou inter-process** : les commandes qui mutent l'état prennent
+  `.cowork.lock` (`O_CREAT|O_EXCL`) et font le read-modify-write *dedans* → deux
+  `cowork.py` concurrents sont sérialisés (pas de double-démarrage IDLE) ; lock
+  abandonné repris après 60 s.
+- **Validation d'entrée** : champs mono-ligne (refus saut de ligne + marqueurs
+  réservés) ; corps neutralisé (anti-injection de faux tours).
 - **Source de vérité unique** : protocole, gabarit `COWORK.md` et stanza sont des
   constantes de `cowork.py` ; `docs/COWORK.protocol.md` en est une *génération*
   (test de non-régression byte-à-byte `test_protocol_doc_in_sync`).
@@ -131,10 +139,9 @@ archive, robustesse, `wait`). Commande : `python3 -m unittest discover -s tests`
 
 ### 2.5 Politique de branches & versionnement
 
-Voir [feedback_git_workflow] : branche `dev/vX.Y.x` par sprint, merge + tag sur
-`main`. Le **protocole** est versionné (v1) : tout changement de format `LOCK`/
-`TURN`/marqueurs incrémente la version et préserve la lecture des `COWORK.md`
-existants.
+Branche `dev/vX.Y.x` par sprint, merge + tag sur `main`. Le **protocole** est
+versionné (v1) : tout changement de format `LOCK`/`TURN`/marqueurs incrémente la
+version et préserve la lecture des `COWORK.md` existants.
 
 ---
 
@@ -221,9 +228,12 @@ Mutex **coopératif**, pas applicatif : conçu pour deux agents **de confiance**
 Aucune frontière de sécurité forte entre eux ; la protection est procédurale.
 
 ### 4.2 Intégrité
-- Tours **immuables** une fois clôturés ; écriture **atomique** (`os.replace`).
+- Tours **immuables par convention** : l'outil ne réécrit jamais un tour clôturé
+  (rien au niveau du FS ne l'empêche en édition manuelle).
+- Écriture **atomique** (`mkstemp` + `os.replace`) et read-modify-write
+  **sérialisé** par `.cowork.lock` (`O_EXCL`).
 - Garde-fous : écriture refusée hors-tour ; `--to` ≠ soi ; `release`/`done`
-  exigent de tenir le stylo.
+  exigent de tenir le stylo ; **anti-injection** (champs mono-ligne, corps neutralisé).
 
 ### 4.3 Confidentialité
 `COWORK.md` peut contenir du contenu de tâche → **même classification que le

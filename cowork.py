@@ -8,17 +8,25 @@ delimite par les commentaires HTML COWORK:LOCK:BEGIN / COWORK:LOCK:END. Les tour
 sont delimites par COWORK:TURN <n> <agent> BEGIN / END. Voir COWORK.protocol.md.
 """
 import argparse
+import contextlib
 import datetime as dt
 import os
 import re
 import sys
+import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 COWORK = os.path.join(HERE, "COWORK.md")
 ARCHIVE = os.path.join(HERE, "COWORK.archive.md")
 PROTO = os.path.join(HERE, "COWORK.protocol.md")
+LOCKFILE = os.path.join(HERE, ".cowork.lock")  # verrou inter-process (O_EXCL)
+LOCK_TIMEOUT = 10        # s : attente max pour acquérir le verrou interne
+LOCK_STALE_S = 60        # s : au-delà, un .cowork.lock est réputé abandonné
 TTL_MIN = 30
 AGENTS = ("claude", "codex")
+# Sous-chaînes réservées au format : interdites dans les champs, neutralisées dans les corps.
+RESERVED = ("COWORK:TURN", "COWORK:LOCK", "COWORK:STANZA")
 
 LOCK_BEGIN = "<!-- COWORK:LOCK:BEGIN -->"
 LOCK_END = "<!-- COWORK:LOCK:END -->"
@@ -197,13 +205,16 @@ boucle:
 En pratique, `./cowork.py` fait CLAIM+APPEND+RELEASE en une commande atomique
 (`append`), et la boucle d'attente (`wait`).
 
-> **Limite connue (modèle de concurrence)** : chaque commande fait *un* `read`
-> puis *une* écriture atomique (`os.replace`), mais il n'y a pas de
-> compare-and-swap réel. Le verrou repose donc sur l'**alternance stricte** (un
-> seul écrivain légitime à la fois). En cas de course *simultanée* vraie (deux
-> agents écrivant à la même milliseconde), c'est *last-writer-wins* — impossible
-> tant que chacun respecte son tour. Le `step b` (re-lire LOCK avant d'écrire)
-> reste une bonne pratique si tu fais des transitions manuelles.
+> **Modèle de concurrence** : les commandes qui mutent l'état prennent d'abord un
+> **verrou inter-process** (`.cowork.lock`, créé en `O_CREAT|O_EXCL`), puis font
+> le read-modify-write *à l'intérieur* de ce verrou et une écriture atomique
+> (fichier temporaire unique + `os.replace`). Deux `cowork.py` concurrents sont
+> donc **sérialisés** : le double-démarrage depuis `IDLE` est impossible (le 2ᵉ
+> relit le LOCK et voit que ce n'est plus son tour). Un `.cowork.lock` abandonné
+> (process tué) est récupéré après 60 s.
+> *Limites* : le verrou est **conseillé** (une édition manuelle de `COWORK.md`
+> hors outil le contourne) ; sur un FS réseau (NFS) les sémantiques `O_EXCL` /
+> `rename` peuvent être plus faibles — cowork vise un dépôt sur disque local.
 
 ---
 
@@ -336,15 +347,80 @@ def read(path=COWORK):
 
 
 def write(text, path=COWORK):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)  # remplacement atomique
+    """Écriture atomique : fichier temporaire UNIQUE (par process) + os.replace."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".cowork-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)  # remplacement atomique
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+@contextlib.contextmanager
+def file_lock(timeout=LOCK_TIMEOUT):
+    """Verrou inter-process via création exclusive d'un fichier (O_CREAT|O_EXCL).
+
+    Sérialise le read-modify-write du LOCK : empêche deux `cowork.py` concurrents
+    de muter `COWORK.md` en même temps (y compris le double-démarrage depuis IDLE).
+    Un `.cowork.lock` plus vieux que LOCK_STALE_S (process mort) est récupéré.
+    """
+    start = time.monotonic()
+    while True:
+        try:
+            fd = os.open(LOCKFILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(LOCKFILE) > LOCK_STALE_S:
+                    os.unlink(LOCKFILE)  # verrou abandonné → on le reprend
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() - start > timeout:
+                sys.exit("verrou interne occupé (un autre cowork.py écrit) — réessaie.")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(LOCKFILE)
 
 
 def require_cowork():
     if not os.path.exists(COWORK):
         sys.exit("COWORK.md introuvable — lance d'abord `./cowork.py init`.")
+
+
+def load_or_die():
+    """Lit COWORK.md en validant la présence du bloc LOCK (sortie propre sinon)."""
+    require_cowork()
+    text = read()
+    if LOCK_BEGIN not in text or LOCK_END not in text:
+        sys.exit("COWORK.md corrompu : bloc LOCK introuvable — "
+                 "`./cowork.py init --force` pour réinitialiser le verrou.")
+    return text
+
+
+def clean_field(label, val):
+    """Champ mono-ligne : refuse sauts de ligne et marqueurs réservés (anti-injection)."""
+    val = (val or "").strip()
+    if "\n" in val or "\r" in val:
+        sys.exit(f"refus: {label} ne doit pas contenir de saut de ligne.")
+    for r in RESERVED:
+        if r in val:
+            sys.exit(f"refus: {label} contient un marqueur réservé ({r}).")
+    return val
+
+
+def clean_body(text):
+    """Corps multi-ligne : neutralise tout marqueur réservé injecté (zero-width
+    après `COWORK`), pour qu'il ne puisse pas se faire passer pour un vrai tour."""
+    return text.replace("COWORK:", "COWORK​:")
 
 
 def get_lock(text):
@@ -429,24 +505,25 @@ def cmd_init(args):
     name = args.name or os.path.basename(HERE) or "projet"
     results = []
 
-    # protocole : source canonique, (ré)écrit seulement s'il manque ou diffère
-    if not os.path.exists(PROTO) or read(PROTO) != PROTOCOL_TEMPLATE:
-        write(PROTOCOL_TEMPLATE, PROTO)
-        results.append("COWORK.protocol.md: écrit")
-    else:
-        results.append("COWORK.protocol.md: déjà à jour")
+    with file_lock():
+        # protocole : source canonique, (ré)écrit seulement s'il manque ou diffère
+        if not os.path.exists(PROTO) or read(PROTO) != PROTOCOL_TEMPLATE:
+            write(PROTOCOL_TEMPLATE, PROTO)
+            results.append("COWORK.protocol.md: écrit")
+        else:
+            results.append("COWORK.protocol.md: déjà à jour")
 
-    # cowork.md : préservé s'il existe (état du relais en cours), sauf --force
-    if os.path.exists(COWORK) and not args.force:
-        results.append("COWORK.md: préservé (existe déjà ; --force pour réinitialiser)")
-    else:
-        text = COWORK_TEMPLATE.replace("__PROJECT__", name).replace("__NOW__", iso(now()))
-        write(text, COWORK)
-        results.append(f"COWORK.md: écrit (projet « {name} », verrou IDLE)")
+        # cowork.md : préservé s'il existe (état du relais en cours), sauf --force
+        if os.path.exists(COWORK) and not args.force:
+            results.append("COWORK.md: préservé (existe déjà ; --force pour réinitialiser)")
+        else:
+            text = COWORK_TEMPLATE.replace("__PROJECT__", name).replace("__NOW__", iso(now()))
+            write(text, COWORK)
+            results.append(f"COWORK.md: écrit (projet « {name} », verrou IDLE)")
 
-    # ancrages
-    results.append(inject_anchor(pick_anchor(CLAUDE_NAMES), "claude"))
-    results.append(inject_anchor(pick_anchor(CODEX_NAMES), "codex"))
+        # ancrages
+        results.append(inject_anchor(pick_anchor(CLAUDE_NAMES), "claude"))
+        results.append(inject_anchor(pick_anchor(CODEX_NAMES), "codex"))
 
     print(f"✓ cowork init — projet « {name} » dans {HERE}")
     for r in results:
@@ -458,8 +535,7 @@ def cmd_init(args):
 # ---------------------------------------------------------------- commandes relais
 
 def cmd_status(args):
-    require_cowork()
-    text = read()
+    text = load_or_die()
     lk = get_lock(text)
     exp = parse_iso(lk.get("expires"))
     stale = (
@@ -480,12 +556,12 @@ def cmd_status(args):
 
 
 def cmd_wait(args):
-    import time
-    require_cowork()
     agent = need_agent(args.agent)
+    if not args.once and args.interval < 1:
+        sys.exit("--interval doit être un entier >= 1.")
     target = f"AWAITING_{agent.upper()}"
     while True:
-        lk = get_lock(read())
+        lk = get_lock(load_or_die())
         st = lk.get("state", "")
         if st in (target, "IDLE"):
             print(f"✓ a toi de jouer ({st}).")
@@ -505,32 +581,32 @@ def cmd_wait(args):
 
 
 def cmd_claim(args):
-    require_cowork()
     agent = need_agent(args.agent)
-    text = read()
-    lk = get_lock(text)
-    st = lk.get("state", "")
-    holder = lk.get("holder", "none")
-    exp = parse_iso(lk.get("expires"))
-    stale = st.startswith("WORKING_") and exp is not None and now() > exp
-    # ton tour / IDLE / ton propre verrou (refresh du TTL) ; --force UNIQUEMENT si périmé.
-    mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")
-    if not (mine or (args.force and stale)):
-        if args.force and st.startswith("WORKING_"):
-            sys.exit(f"refus: verrou de {holder} encore valide (expire {lk.get('expires')}). "
-                     f"--force ne reprend qu'un verrou périmé (protocole §5).")
-        sys.exit(f"refus: state={st}, holder={holder} — ce n'est pas ton tour.")
-    reclaim = args.force and stale and holder not in (agent, "none")
-    t = now()
-    lk.update(
-        holder=agent,
-        state=f"WORKING_{agent.upper()}",
-        since=iso(t),
-        expires=iso(t + dt.timedelta(minutes=TTL_MIN)),
-        note=(f"reprise après lock périmé de {holder}" if reclaim
-              else f"{agent} tient le stylo"),
-    )
-    write(set_lock(text, lk))
+    with file_lock():
+        text = load_or_die()
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        holder = lk.get("holder", "none")
+        exp = parse_iso(lk.get("expires"))
+        stale = st.startswith("WORKING_") and exp is not None and now() > exp
+        # ton tour / IDLE / ton propre verrou (refresh du TTL) ; --force UNIQUEMENT si périmé.
+        mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")
+        if not (mine or (args.force and stale)):
+            if args.force and st.startswith("WORKING_"):
+                sys.exit(f"refus: verrou de {holder} encore valide (expire {lk.get('expires')}). "
+                         f"--force ne reprend qu'un verrou périmé (protocole §5).")
+            sys.exit(f"refus: state={st}, holder={holder} — ce n'est pas ton tour.")
+        reclaim = args.force and stale and holder not in (agent, "none")
+        t = now()
+        lk.update(
+            holder=agent,
+            state=f"WORKING_{agent.upper()}",
+            since=iso(t),
+            expires=iso(t + dt.timedelta(minutes=TTL_MIN)),
+            note=(f"reprise après lock périmé de {holder}" if reclaim
+                  else f"{agent} tient le stylo"),
+        )
+        write(set_lock(text, lk))
     suffix = " — reprise lock périmé" if reclaim else ""
     print(f"✓ verrou pris par {agent} (expire {lk['expires']}{suffix}).")
     return 0
@@ -549,113 +625,116 @@ def _read_body(spec):
 
 
 def cmd_append(args):
-    require_cowork()
     agent = need_agent(args.agent)
     to = need_agent(args.to)
     if to == agent:
         sys.exit("refus: --to doit viser l'autre agent (alternance stricte, protocole §1).")
-    text = read()
-    lk = get_lock(text)
-    st = lk.get("state", "")
-    exp = parse_iso(lk.get("expires"))
-    stale = st.startswith("WORKING_") and exp is not None and now() > exp
-    mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")
-    if not (mine or (args.force and stale)):
-        sys.exit(f"refus: state={st} — claim d'abord, ou ce n'est pas ton tour.")
-    n = int(lk.get("turn", "0")) + 1
-    body = _read_body(args.body)
-    block = (
-        f"<!-- COWORK:TURN {n} {agent} BEGIN -->\n"
-        f"- from:    {agent}\n"
-        f"- to:      {to}\n"
-        f"- ask:     {args.ask or '—'}\n"
-        f"- done:    {args.done or '—'}\n"
-        f"- files:   {args.files or '—'}\n"
-        f"- handoff: {to}\n"
-    )
-    if body:
-        block += "\n" + body + "\n"
-    block += f"<!-- COWORK:TURN {n} {agent} END -->\n"
+    # validation/lecture hors section critique (stdin peut bloquer)
+    ask = clean_field("--ask", args.ask) or "—"
+    done = clean_field("--done", args.done) or "—"
+    files = clean_field("--files", args.files) or "—"
+    body = clean_body(_read_body(args.body))
 
-    # inserer le tour a la fin du fichier (journal append-only)
-    text = text.rstrip("\n") + "\n\n" + block
+    with file_lock():
+        text = load_or_die()
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        exp = parse_iso(lk.get("expires"))
+        stale = st.startswith("WORKING_") and exp is not None and now() > exp
+        mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")
+        if not (mine or (args.force and stale)):
+            sys.exit(f"refus: state={st} — claim d'abord, ou ce n'est pas ton tour.")
+        n = int(lk.get("turn", "0")) + 1
+        block = (
+            f"<!-- COWORK:TURN {n} {agent} BEGIN -->\n"
+            f"- from:    {agent}\n"
+            f"- to:      {to}\n"
+            f"- ask:     {ask}\n"
+            f"- done:    {done}\n"
+            f"- files:   {files}\n"
+            f"- handoff: {to}\n"
+        )
+        if body:
+            block += "\n" + body + "\n"
+        block += f"<!-- COWORK:TURN {n} {agent} END -->\n"
 
-    t = now()
-    lk.update(
-        holder=to,
-        state=f"AWAITING_{to.upper()}",
-        turn=str(n),
-        since=iso(t),
-        expires="-",
-        note=f"tour {n} pose par {agent}, en attente de {to}",
-    )
-    write(set_lock(text, lk))
+        # inserer le tour a la fin du fichier (journal append-only)
+        text = text.rstrip("\n") + "\n\n" + block
+
+        t = now()
+        lk.update(
+            holder=to,
+            state=f"AWAITING_{to.upper()}",
+            turn=str(n),
+            since=iso(t),
+            expires="-",
+            note=f"tour {n} pose par {agent}, en attente de {to}",
+        )
+        write(set_lock(text, lk))
     print(f"✓ tour {n} ecrit par {agent}, main passee a {to}.")
     return 0
 
 
 def cmd_release(args):
-    require_cowork()
     agent = need_agent(args.agent)
     to = need_agent(args.to)
     if to == agent:
         sys.exit("refus: --to doit viser l'autre agent.")
-    text = read()
-    lk = get_lock(text)
-    holder = lk.get("holder", "none")
-    if holder not in (agent, "none") and not args.force:
-        sys.exit(f"refus: {holder} tient le stylo, pas toi (--force pour outrepasser).")
-    t = now()
-    lk.update(
-        holder=to, state=f"AWAITING_{to.upper()}",
-        since=iso(t), expires="-",
-        note=f"main passee a {to} par {agent} (sans tour)",
-    )
-    write(set_lock(text, lk))
+    with file_lock():
+        text = load_or_die()
+        lk = get_lock(text)
+        holder = lk.get("holder", "none")
+        if holder not in (agent, "none") and not args.force:
+            sys.exit(f"refus: {holder} tient le stylo, pas toi (--force pour outrepasser).")
+        t = now()
+        lk.update(
+            holder=to, state=f"AWAITING_{to.upper()}",
+            since=iso(t), expires="-",
+            note=f"main passee a {to} par {agent} (sans tour)",
+        )
+        write(set_lock(text, lk))
     print(f"✓ main passee a {to}.")
     return 0
 
 
 def cmd_done(args):
-    require_cowork()
     agent = need_agent(args.agent)
-    text = read()
-    lk = get_lock(text)
-    holder = lk.get("holder", "none")
-    if holder not in (agent, "none") and not args.force:
-        sys.exit(f"refus: {holder} tient le stylo, pas toi (--force pour clore quand même).")
-    t = now()
-    lk.update(holder="none", state="DONE", since=iso(t), expires="-",
-              note=f"session close par {agent}")
-    write(set_lock(text, lk))
+    with file_lock():
+        text = load_or_die()
+        lk = get_lock(text)
+        holder = lk.get("holder", "none")
+        if holder not in (agent, "none") and not args.force:
+            sys.exit(f"refus: {holder} tient le stylo, pas toi (--force pour clore quand même).")
+        t = now()
+        lk.update(holder="none", state="DONE", since=iso(t), expires="-",
+                  note=f"session close par {agent}")
+        write(set_lock(text, lk))
     print("✓ session DONE.")
     return 0
 
 
 def cmd_archive(args):
-    require_cowork()
-    text = read()
-    # tous les tours clotures, dans l'ordre
     pat = re.compile(
         r"<!-- COWORK:TURN (\d+) (\w+) BEGIN -->.*?<!-- COWORK:TURN \1 \2 END -->\n?",
         re.DOTALL,
     )
-    # le tour d'amorçage #0 (system) reste toujours dans le fichier vivant
-    matches = [m for m in pat.finditer(text) if m.group(1) != "0"]
     keep = max(0, args.keep)
-    if len(matches) <= keep:
-        print(f"rien a archiver ({len(matches)} tour(s) archivable(s), keep={keep}).")
-        return 0
-    to_move = matches[:-keep] if keep else matches
-    moved = "".join(m.group(0) for m in to_move)
-    # retirer du vivant (du dernier vers le premier pour garder les offsets)
-    for m in reversed(to_move):
-        text = text[:m.start()] + text[m.end():]
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    header = "" if os.path.exists(ARCHIVE) else "# COWORK · archive des tours\n\n"
-    with open(ARCHIVE, "a", encoding="utf-8") as f:
-        f.write(header + moved)
-    write(text)
+    with file_lock():
+        text = load_or_die()
+        # le tour d'amorçage #0 (system) reste toujours dans le fichier vivant
+        matches = [m for m in pat.finditer(text) if m.group(1) != "0"]
+        if len(matches) <= keep:
+            print(f"rien a archiver ({len(matches)} tour(s) archivable(s), keep={keep}).")
+            return 0
+        to_move = matches[:-keep] if keep else matches
+        moved = "".join(m.group(0) for m in to_move)
+        # retirer du vivant (du dernier vers le premier pour garder les offsets)
+        for m in reversed(to_move):
+            text = text[:m.start()] + text[m.end():]
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        prev = read(ARCHIVE) if os.path.exists(ARCHIVE) else "# COWORK · archive des tours\n\n"
+        write(prev + moved, ARCHIVE)  # écriture atomique (tmp + os.replace)
+        write(text)
     print(f"✓ {len(to_move)} tour(s) archive(s) → {os.path.basename(ARCHIVE)} (gardes: {keep}).")
     return 0
 

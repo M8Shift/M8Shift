@@ -74,7 +74,7 @@ En tête de `COWORK.md`, entre `<!-- COWORK:LOCK:BEGIN -->` et `:END` :
 
 **Machine à états** (transitions légitimes) :
 
-```
+```text
 IDLE ──append/claim──▶ WORKING_X ──append──▶ AWAITING_Y ──append/claim──▶ WORKING_Y …
   └──────────────────────────────────────────────────────────────▶ DONE (done)
 WORKING_X(périmé) ──claim Y --force──▶ WORKING_Y
@@ -93,9 +93,14 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 
 - **Mutex coopératif, non applicatif** : un agent malveillant peut, avec `--force`,
   outrepasser `release`/`done`. Le modèle suppose deux agents coopératifs.
-- **Pas de compare-and-swap réel** : un `read` puis une écriture atomique. La
-  sûreté repose sur l'alternance stricte (un écrivain à la fois). Course
-  simultanée vraie ⇒ *last-writer-wins* (impossible si chacun respecte son tour).
+- **Concurrence sérialisée par verrou conseillé** : les mutations prennent un
+  verrou inter-process (`.cowork.lock`, `O_CREAT|O_EXCL`) puis font le
+  read-modify-write + écriture atomique dedans — pas de double-démarrage IDLE, pas
+  de course sur le temporaire. Mais le verrou est *conseillé* : une édition
+  manuelle de `COWORK.md` le contourne ; sur FS réseau (NFS) `O_EXCL`/`rename`
+  sont moins fiables (cowork vise un disque local).
+- **Immutabilité par convention** : l'outil ne réécrit jamais un tour clôturé,
+  mais rien au niveau du système de fichiers ne l'empêche (édition manuelle).
 - **Deux agents** : le protocole est binaire (claude ⇄ codex) par conception.
 
 ## 9. Recette / validation

@@ -5,6 +5,10 @@ CLAUDE.md
 AGENTS.md
 *.tmp
 
+# Verrou interne + temporaires d'écriture atomique
+.cowork.lock
+.cowork-*.tmp
+
 # Python
 __pycache__/
 *.pyc
