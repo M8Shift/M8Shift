@@ -35,6 +35,26 @@ python3 cowork.py init                # nom du projet = nom du dossier (sinon --
 | `COWORK.protocol.md`    | l'instruction commune complète (lue une fois par chaque agent) |
 | `CLAUDE.md` / `AGENTS.md` | ancrages — Claude lit `CLAUDE.md`, Codex lit `AGENTS.md` ; une *stanza* y est injectée (entre marqueurs, sans dupliquer ni écraser le contenu existant) |
 
+## Amorçage : comment les IA le prennent en compte
+
+cowork est **passif** — il n'« appelle » aucune IA. Il s'appuie sur la convention
+de chaque outil : **Claude charge `CLAUDE.md`, Codex charge `AGENTS.md`** au
+démarrage. `init` y injecte une *stanza* qui dit à chaque agent :
+« si un `COWORK.md` existe, lis `COWORK.protocol.md` et applique-le
+(`claim → travail → append`) ».
+
+```text
+cowork.py init ─▶ stanza dans CLAUDE.md / AGENTS.md
+                      └─▶ l'IA lit son ancrage ─▶ découvre la stanza ─▶ suit le protocole
+```
+
+- **Déclencheur** : la présence d'un `COWORK.md` à la racine.
+- **Dépendance** : que l'outil hôte auto-charge `CLAUDE.md` / `AGENTS.md` (cas de
+  Claude Code et Codex CLI en session projet).
+- **Limite** : en *headless* / sans contexte projet (cron, CI), l'ancrage n'est
+  pas auto-chargé → pointe explicitement l'IA vers `COWORK.protocol.md`. cowork ne
+  peut pas *forcer* une IA à lire son ancrage.
+
 ## Boucle d'un agent
 
 ```bash

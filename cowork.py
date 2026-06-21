@@ -305,8 +305,26 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
   La détection est **insensible à la casse** : un `claude.md`/`agents.md`
   préexistant est réutilisé tel quel (pas de doublon majuscule créé).
 
-Claude lit `CLAUDE.md`, Codex lit `AGENTS.md` : les deux ancrages pointent vers ce
-protocole, et chaque agent sait alors quoi faire en voyant un `COWORK.md`.
+### Amorçage / prise en compte par les agents
+
+cowork est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention
+de chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`** au
+démarrage de session. La chaîne d'amorçage est donc :
+
+```
+cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md (Codex)
+                          │
+   chaque IA charge son ancrage au démarrage ──▶ lit la stanza ──▶
+   « si un COWORK.md existe, applique COWORK.protocol.md (claim → travail → append) »
+```
+
+- **Déclencheur** : la présence d'un `COWORK.md` à la racine (la stanza le dit).
+- **Dépendance** : que l'outil hôte charge bien `CLAUDE.md` / `AGENTS.md`. C'est le
+  cas de Claude Code et de Codex CLI en session projet.
+- **Limite** : en exécution *headless* / sans contexte projet (cron, CI) où
+  l'ancrage n'est pas auto-chargé, l'amorçage automatique ne se fait pas — il faut
+  alors pointer explicitement l'IA vers `COWORK.protocol.md`. cowork ne peut pas
+  *forcer* une IA à lire quoi que ce soit ; il repose sur la convention d'ancrage.
 """
 
 STANZA_TEMPLATE = """{begin}
