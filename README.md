@@ -33,13 +33,15 @@ python3 cowork.py init                # nom du projet = nom du dossier (sinon --
 |-------------------------|------|
 | `COWORK.md`             | **le** fichier vivant : verrou (`LOCK`) + journal des tours |
 | `COWORK.protocol.md`    | l'instruction commune complète (lue une fois par chaque agent) |
-| `CLAUDE.md` / `AGENTS.md` | ancrages — Claude lit `CLAUDE.md`, Codex lit `AGENTS.md` ; une *stanza* y est injectée (entre marqueurs, sans dupliquer ni écraser le contenu existant) |
+| `CLAUDE.md` / `AGENTS.md` | ancrages canoniques — stanza injectée en tête, sans dupliquer ni écraser le contenu existant |
+| `AGENTS.override.md` | s'il existe, ancrage Codex prioritaire ; la stanza y est également synchronisée |
 
 ## Amorçage : comment les IA le prennent en compte
 
 cowork est **passif** — il n'« appelle » aucune IA. Il s'appuie sur la convention
 de chaque outil : **Claude charge `CLAUDE.md`, Codex charge `AGENTS.md`** au
-démarrage. `init` y injecte une *stanza* qui dit à chaque agent :
+démarrage d'une session/exécution. `init` y injecte en tête une *stanza* qui dit
+à chaque agent :
 « si un `COWORK.md` existe, lis `COWORK.protocol.md` et applique-le
 (`claim → travail → append`) ».
 
@@ -48,12 +50,24 @@ cowork.py init ─▶ stanza dans CLAUDE.md / AGENTS.md
                       └─▶ l'IA lit son ancrage ─▶ découvre la stanza ─▶ suit le protocole
 ```
 
-- **Déclencheur** : la présence d'un `COWORK.md` à la racine.
-- **Dépendance** : que l'outil hôte auto-charge `CLAUDE.md` / `AGENTS.md` (cas de
-  Claude Code et Codex CLI en session projet).
-- **Limite** : en *headless* / sans contexte projet (cron, CI), l'ancrage n'est
-  pas auto-chargé → pointe explicitement l'IA vers `COWORK.protocol.md`. cowork ne
-  peut pas *forcer* une IA à lire son ancrage.
+- **Après `init`** : démarre une nouvelle session/exécution ; une session déjà
+  ouverte ne recharge pas nécessairement ses instructions.
+- **Codex interactif et `codex exec`** chargent `AGENTS.md` lorsqu'ils sont lancés
+  depuis la racine du projet ou un sous-dossier. Un cron/CI lancé hors du projet
+  ne le découvre pas automatiquement.
+- **`AGENTS.override.md`** masque `AGENTS.md` dans le même dossier. S'il existe,
+  `init` synchronise la stanza dans les deux fichiers.
+- **Noms canoniques** : une variante unique comme `agents.md` est renommée
+  `AGENTS.md`, y compris sur un FS insensible à la casse. Des variantes multiples
+  sont refusées afin de ne pas fusionner silencieusement du contenu utilisateur.
+- **Limite Codex** : Codex empile les ancrages jusqu'à un plafond *combiné*
+  (32 Kio par défaut) et **saute les fichiers entiers** au-delà (coupe au fichier
+  près). La stanza en tête la rend prioritaire dans le fichier, mais un ancrage
+  trop gros est ignoré en entier — garde-le **léger**.
+- **Limite générale** : cowork ne peut pas forcer une IA à lire son ancrage. Sans
+  contexte projet, pointe explicitement l'agent vers `COWORK.protocol.md`.
+
+Référence : [découverte des instructions `AGENTS.md` par Codex](https://developers.openai.com/codex/guides/agents-md).
 
 ## Boucle d'un agent
 
@@ -130,9 +144,9 @@ Aucune dépendance externe (stdlib seule) :
 python3 -m unittest discover -s tests        # depuis la racine du repo
 ```
 
-39 tests : unitaires (fonctions pures) + non-régression CLI (un test par bug
+43 tests : unitaires (fonctions pures) + non-régression CLI (un test par bug
 corrigé, référencés `NR-n`, + modèle claim, mutex, concurrence claude/codex,
-archive, robustesse, anti-injection).
+ancrages canoniques/override, archive, robustesse, anti-injection).
 
 ## Structure
 

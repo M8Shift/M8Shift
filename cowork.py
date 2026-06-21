@@ -33,9 +33,12 @@ LOCK_END = "<!-- COWORK:LOCK:END -->"
 STANZA_BEGIN = "<!-- COWORK:STANZA:BEGIN (genere par cowork.py init - ne pas editer a la main) -->"
 STANZA_END = "<!-- COWORK:STANZA:END -->"
 
-# Variantes de noms de fichiers d'ancrage, par ordre de preference si aucune n'existe.
-CLAUDE_NAMES = ("CLAUDE.md", "claude.md", "Claude.md")
-CODEX_NAMES = ("AGENTS.md", "agents.md", "Agents.md")
+# Noms canoniques auto-chargés par les outils hôtes. Les variantes existantes
+# sont renommées vers ces noms pendant `init`, y compris par un renommage en
+# deux temps sur les FS insensibles à la casse.
+CLAUDE_ANCHOR = "CLAUDE.md"
+CODEX_ANCHOR = "AGENTS.md"
+CODEX_OVERRIDE = "AGENTS.override.md"
 
 
 # ----------------------------------------------------------------- templates
@@ -299,17 +302,21 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
 - écrit `COWORK.protocol.md` (ce document) et `COWORK.md` (verrou IDLE neuf) ;
   `COWORK.md` n'est **pas** écrasé s'il existe déjà (sauf `--force`) → l'état du
   relais en cours est préservé ;
-- injecte un bloc « Co-work relais » dans `CLAUDE.md` et `AGENTS.md` (créés s'ils
-  manquent), entre marqueurs `COWORK:STANZA` → ré-injection **idempotente**
-  (remplace le bloc existant au lieu de le dupliquer), le reste du fichier intact.
-  La détection est **insensible à la casse** : un `claude.md`/`agents.md`
-  préexistant est réutilisé tel quel (pas de doublon majuscule créé).
+- injecte en **tête** un bloc « Co-work relais » dans `CLAUDE.md` et `AGENTS.md`
+  (créés s'ils manquent), entre marqueurs `COWORK:STANZA` → ré-injection
+  **idempotente** (déplace/actualise le bloc sans dupliquer, contenu existant
+  préservé) ;
+- renomme une variante unique `claude.md`/`agents.md` vers le nom canonique
+  auto-chargé, y compris sur un FS insensible à la casse. Plusieurs variantes
+  coexistantes sont refusées plutôt que fusionnées silencieusement ;
+- si `AGENTS.override.md` existe, y synchronise aussi la stanza : Codex charge
+  cet override à la place de `AGENTS.md` dans le même dossier.
 
 ### Amorçage / prise en compte par les agents
 
 cowork est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention
 de chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`** au
-démarrage de session. La chaîne d'amorçage est donc :
+démarrage de session/exécution. La chaîne d'amorçage est donc :
 
 ```
 cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md (Codex)
@@ -318,13 +325,25 @@ cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md
    « si un COWORK.md existe, applique COWORK.protocol.md (claim → travail → append) »
 ```
 
-- **Déclencheur** : la présence d'un `COWORK.md` à la racine (la stanza le dit).
-- **Dépendance** : que l'outil hôte charge bien `CLAUDE.md` / `AGENTS.md`. C'est le
-  cas de Claude Code et de Codex CLI en session projet.
-- **Limite** : en exécution *headless* / sans contexte projet (cron, CI) où
-  l'ancrage n'est pas auto-chargé, l'amorçage automatique ne se fait pas — il faut
-  alors pointer explicitement l'IA vers `COWORK.protocol.md`. cowork ne peut pas
-  *forcer* une IA à lire quoi que ce soit ; il repose sur la convention d'ancrage.
+- **Après `init`** : démarre une nouvelle session/exécution de l'agent. Une session
+  déjà ouverte a généralement construit sa chaîne d'instructions avant l'injection.
+- **Codex interactif ou `codex exec`** : `AGENTS.md` est chargé si la commande part
+  de la racine du projet ou d'un de ses sous-dossiers. Le mode *headless* n'est pas
+  en soi une limite ; un cron/CI lancé hors du projet, en revanche, ne découvre pas
+  l'ancrage.
+- **Override Codex** : `AGENTS.override.md` masque `AGENTS.md` dans un même dossier ;
+  `init` injecte donc la stanza dans les deux lorsqu'il est présent.
+- **Taille Codex** : Codex empile les fichiers d'instructions jusqu'à un plafond
+  *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et **saute les fichiers
+  entiers** au-delà — la coupe est au fichier près, pas à l'intérieur. Mettre la
+  stanza en tête la rend prioritaire *dans* le fichier (et un fichier plus proche
+  du cwd prime), mais si l'ancrage dépasse le budget restant il est ignoré en
+  entier : garde-le **léger**.
+- **Limite générale** : cowork ne peut pas forcer une IA à lire quoi que ce soit.
+  Sans racine/contexte projet, pointe explicitement l'agent vers
+  `COWORK.protocol.md`.
+
+Référence Codex : https://developers.openai.com/codex/guides/agents-md
 """
 
 STANZA_TEMPLATE = """{begin}
@@ -537,17 +556,57 @@ def need_agent(a):
 
 # ---------------------------------------------------------------- init / anchors
 
-def pick_anchor(names):
-    """Retourne le nom RÉEL on-disk d'une variante existante (insensible à la
-    casse), sinon names[0]. Évite un rapport trompeur sur FS case-insensitive."""
+def ensure_canonical_anchor(canonical, create=True):
+    """Retourne un ancrage auto-chargeable, avec son éventuelle action de migration.
+
+    Une variante unique (`agents.md`) est renommée vers le nom canonique
+    (`AGENTS.md`). Sur un FS insensible à la casse, un renommage en deux temps
+    force aussi la casse de l'entrée on-disk. Plusieurs variantes coexistantes
+    sont ambiguës : on refuse plutôt que fusionner ou écraser silencieusement du
+    contenu utilisateur.
+    """
     try:
-        on_disk = {f.lower(): f for f in os.listdir(HERE)}
+        on_disk = os.listdir(HERE)
     except OSError:
-        on_disk = {}
-    for n in names:
-        if n.lower() in on_disk:
-            return on_disk[n.lower()]
-    return names[0]
+        on_disk = []
+
+    variants = [f for f in on_disk if f.casefold() == canonical.casefold()]
+    if canonical in variants:
+        if len(variants) > 1:
+            others = ", ".join(repr(v) for v in variants if v != canonical)
+            sys.exit(f"ancrages ambigus: {canonical!r} coexiste avec {others} — "
+                     "consolide-les avant `cowork.py init`.")
+        return canonical, ""
+    if not variants:
+        return (canonical, "") if create else (None, "")
+    if len(variants) > 1:
+        names = ", ".join(repr(v) for v in variants)
+        sys.exit(f"ancrages ambigus pour {canonical!r}: {names} — "
+                 "consolide-les avant `cowork.py init`.")
+
+    actual = variants[0]
+    actual_path = os.path.join(HERE, actual)
+    canonical_path = os.path.join(HERE, canonical)
+    try:
+        same_file = os.path.exists(canonical_path) and os.path.samefile(actual_path, canonical_path)
+    except OSError:
+        same_file = False
+    if same_file:
+        # Un simple rename uniquement sur la casse est inégal selon les OS/FS.
+        # Libérer d'abord le nom via un intermédiaire force l'entrée canonique.
+        intermediate = os.path.join(
+            HERE, f".cowork-anchor-{os.getpid()}-{time.time_ns()}.tmp"
+        )
+        os.replace(actual_path, intermediate)
+        try:
+            os.replace(intermediate, canonical_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.replace(intermediate, actual_path)
+            raise
+    else:
+        os.replace(actual_path, canonical_path)
+    return canonical, f"{actual} → {canonical}: renommé pour auto-chargement"
 
 
 def stanza_for(me):
@@ -563,19 +622,30 @@ def inject_anchor(filename, me):
     block = stanza_for(me)
     if os.path.exists(path):
         cur = read(path)
-        if STANZA_BEGIN in cur and STANZA_END in cur:
-            # remplacement idempotent du bloc existant
+        has_begin = STANZA_BEGIN in cur
+        has_end = STANZA_END in cur
+        if has_begin != has_end:
+            sys.exit(f"{filename}: stanza COWORK incomplète — répare les marqueurs avant init.")
+        if has_begin:
+            # Retirer toute ancienne stanza, même placée en fin de fichier. La
+            # version courante est réinsérée en tête pour rester prioritaire si
+            # l'outil hôte tronque un gros fichier d'instructions.
             pat = re.compile(
                 re.escape(STANZA_BEGIN) + r".*?" + re.escape(STANZA_END),
                 re.DOTALL,
             )
-            new = pat.sub(lambda _m: block, cur)
-            action = "stanza remplacée"
+            remainder = pat.sub("", cur).lstrip("\n")
+            action = "stanza actualisée en tête"
         else:
-            new = cur.rstrip("\n") + "\n\n" + block + "\n"
-            action = "stanza ajoutée"
+            remainder = cur
+            action = "stanza ajoutée en tête"
+        new = block + "\n"
+        if remainder:
+            new += "\n" + remainder
     else:
-        new = f"# {filename}\n\n" + block + "\n"
+        # Choix délibéré (testé) : la stanza est la PREMIÈRE chose du fichier, même
+        # neuf, pour rester prioritaire/non tronquée — pas de titre H1 au-dessus.
+        new = block + "\n"
         action = "fichier créé"
     write(new, path)
     return f"{filename}: {action}"
@@ -601,15 +671,33 @@ def cmd_init(args):
             write(text, COWORK)
             results.append(f"COWORK.md: écrit (projet « {name} », verrou IDLE)")
 
-        # ancrages
-        results.append(inject_anchor(pick_anchor(CLAUDE_NAMES), "claude"))
-        results.append(inject_anchor(pick_anchor(CODEX_NAMES), "codex"))
+        # Ancrages canoniques. AGENTS.override.md masque AGENTS.md dans Codex :
+        # s'il existe, on injecte dans les deux afin que la stanza survive aussi
+        # à la suppression ultérieure de l'override.
+        claude_anchor, migration = ensure_canonical_anchor(CLAUDE_ANCHOR)
+        if migration:
+            results.append(migration)
+        results.append(inject_anchor(claude_anchor, "claude"))
+
+        codex_anchor, migration = ensure_canonical_anchor(CODEX_ANCHOR)
+        if migration:
+            results.append(migration)
+        results.append(inject_anchor(codex_anchor, "codex"))
+
+        codex_override, migration = ensure_canonical_anchor(CODEX_OVERRIDE, create=False)
+        if migration:
+            results.append(migration)
+        if codex_override:
+            results.append(inject_anchor(codex_override, "codex"))
+            results.append(f"{codex_override}: override Codex actif, stanza synchronisée")
 
     print(f"✓ cowork init — projet « {name} » dans {HERE}")
     for r in results:
         print(f"  • {r}")
     print("Démarrer : ./cowork.py claim claude  (puis travaille, puis "
           "./cowork.py append claude --to codex --ask \"…\" --done \"…\")")
+    print("Amorçage : démarre une nouvelle session/exécution de Claude et Codex "
+          "pour recharger les ancrages.")
     return 0
 
 

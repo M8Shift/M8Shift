@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "cowork.py")
@@ -77,6 +78,13 @@ class TestPureFunctions(unittest.TestCase):
                              "docs/COWORK.protocol.md a divergé de cowork.py "
                              "→ régénère : python3 -c \"import cowork;"
                              "open('docs/COWORK.protocol.md','w').write(cowork.PROTOCOL_TEMPLATE)\"")
+
+    def test_ambiguous_anchor_variants_refused(self):
+        """Deux variantes sur un FS sensible sont refusées sans choix arbitraire."""
+        with mock.patch.object(cowork.os, "listdir",
+                               return_value=["AGENTS.md", "agents.md"]):
+            with self.assertRaises(SystemExit):
+                cowork.ensure_canonical_anchor("AGENTS.md")
 
 
 # ───────────────────────────── base CLI (sous-processus isolé) ──────────────
@@ -139,13 +147,14 @@ class CLIBase(unittest.TestCase):
 
 class TestInit(CLIBase):
     def test_init_creates_kit(self):
-        self.init()
+        r = self.init()
         for f in ("COWORK.md", "COWORK.protocol.md", "CLAUDE.md", "AGENTS.md"):
             self.assertTrue(os.path.exists(os.path.join(self.d, f)), f)
         lk = self.lock()
         self.assertEqual(lk["state"], "IDLE")
         self.assertEqual(lk["holder"], "none")
         self.assertEqual(lk["turn"], "0")
+        self.assertIn("nouvelle session", r.stdout)
 
     def test_init_project_name(self):
         self.init("--name", "Mon Super Projet")
@@ -167,7 +176,7 @@ class TestInit(CLIBase):
         self.assertEqual(self.lock()["turn"], "1")  # COWORK.md préservé
 
     def test_anchor_case_insensitive_no_duplicate(self):
-        """NR-7 : un claude.md minuscule préexistant est réutilisé (pas de doublon)."""
+        """NR-7 : une variante unique est réutilisée/normalisée sans doublon."""
         with open(os.path.join(self.d, "claude.md"), "w", encoding="utf-8") as f:
             f.write("# claude.md\n\nGARDE-MOI\n")
         r = self.init()
@@ -176,6 +185,52 @@ class TestInit(CLIBase):
         with open(os.path.join(self.d, anchors[0]), encoding="utf-8") as f:
             self.assertIn("GARDE-MOI", f.read())
         self.assertIn(anchors[0], r.stdout)  # le nom rapporté est le nom réel on-disk
+
+    def test_codex_anchor_is_canonical_on_case_sensitive_fs(self):
+        """NR-D : `agents.md` doit rester auto-chargeable par le chemin `AGENTS.md`."""
+        lower = os.path.join(self.d, "agents.md")
+        canonical = os.path.join(self.d, "AGENTS.md")
+        with open(lower, "w", encoding="utf-8") as f:
+            f.write("# consignes existantes\n\nGARDE-CODEX\n")
+        self.init()
+
+        self.assertTrue(os.path.exists(canonical))
+        variants = [f for f in os.listdir(self.d) if f.casefold() == "agents.md"]
+        self.assertEqual(variants, ["AGENTS.md"])
+        with open(canonical, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("GARDE-CODEX", content)
+        self.assertIn(cowork.STANZA_BEGIN, content)
+
+    def test_stanza_is_moved_to_anchor_start(self):
+        """NR-E : la stanza reste avant le contenu utilisateur, y compris après ré-init."""
+        claude = os.path.join(self.d, "CLAUDE.md")
+        with open(claude, "w", encoding="utf-8") as f:
+            f.write("# Contenu projet\n\nGARDE-MOI\n")
+        self.init()
+        self.init()
+        with open(claude, encoding="utf-8") as f:
+            content = f.read()
+        self.assertTrue(content.startswith(cowork.STANZA_BEGIN))
+        self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
+        self.assertIn("GARDE-MOI", content)
+
+    def test_codex_override_also_receives_stanza(self):
+        """NR-F : AGENTS.override.md masque AGENTS.md, donc les deux sont synchronisés."""
+        override = os.path.join(self.d, "AGENTS.override.md")
+        with open(override, "w", encoding="utf-8") as f:
+            f.write("# Override temporaire\n\nGARDE-OVERRIDE\n")
+
+        r = self.init()
+
+        for name in ("AGENTS.md", "AGENTS.override.md"):
+            with open(os.path.join(self.d, name), encoding="utf-8") as f:
+                content = f.read()
+            self.assertTrue(content.startswith(cowork.STANZA_BEGIN), name)
+            self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
+        with open(override, encoding="utf-8") as f:
+            self.assertIn("GARDE-OVERRIDE", f.read())
+        self.assertIn("override Codex actif", r.stdout)
 
     def test_init_force_resets_lock(self):
         self.init()

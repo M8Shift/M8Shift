@@ -47,7 +47,8 @@ intervention ni explication humaine**.
 | EF-8 | `release` / `done` n'agissent que si l'appelant tient le stylo (ou personne) ; `--force` outrepasse. | `test_release_done_require_holder`, `test_release_done_force_overrides` |
 | EF-9 | `archive --keep N` purge les anciens tours clôturés sans jamais déplacer le tour d'amorçage `#0` ni toucher au verrou. | `test_archive_preserves_system_turn0` |
 | EF-10 | `init` génère `COWORK.md`, `COWORK.protocol.md` et injecte les ancrages ; idempotent (stanza non dupliquée, contenu existant préservé, `COWORK.md` non écrasé sauf `--force`). | `test_reinit_idempotent_preserves_content`, `test_init_force_resets_lock` |
-| EF-11 | Détection des ancrages insensible à la casse (`claude.md` réutilisé, pas de doublon). | `test_anchor_case_insensitive_no_duplicate` |
+| EF-11 | Ancrages auto-chargeables sur FS sensible ou non à la casse : une variante unique est réutilisée ou renommée vers `CLAUDE.md`/`AGENTS.md`, sans doublon ; les variantes ambiguës sont refusées. | `test_anchor_case_insensitive_no_duplicate`, `test_codex_anchor_is_canonical_on_case_sensitive_fs`, `test_ambiguous_anchor_variants_refused` |
+| EF-12 | La stanza est idempotente et placée en tête des ancrages ; si `AGENTS.override.md` existe, elle est synchronisée dans l'override et dans `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
 
 ## 5. Exigences non fonctionnelles
 
@@ -59,6 +60,7 @@ intervention ni explication humaine**.
 | ENF-4 **Robustesse** | Entrées invalides (agent inconnu, `--body` absent, `COWORK.md` manquant, **LOCK au schéma invalide** : `state`/`turn`/`holder`) → sortie propre `sys.exit`, jamais de traceback, jamais d'état corrompu. |
 | ENF-5 **Tenue dans le temps** | `COWORK.md` reste borné via `archive` ; l'archive n'est jamais relue par la boucle. |
 | ENF-6 **Lisibilité** | État et tours lisibles à l'œil et au `grep` ; marqueurs en commentaires HTML invisibles au rendu Markdown ; versionnable en clair. |
+| ENF-7 **Amorçage** | Les noms d'ancrage suivent les conventions auto-chargées ; la stanza est prioritaire dans le fichier et les limites de découverte Codex (override, racine, plafond de taille, rechargement par session) sont documentées. |
 
 ## 6. Modèle de données — le bloc `LOCK`
 
@@ -110,11 +112,18 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 - **Immutabilité par convention** : l'outil ne réécrit jamais un tour clôturé,
   mais rien au niveau du système de fichiers ne l'empêche (édition manuelle).
 - **Deux agents** : le protocole est binaire (claude ⇄ codex) par conception.
+- **Chargement des ancrages** : il dépend de l'outil hôte. Codex construit sa
+  chaîne d'instructions une fois par exécution, donne priorité à
+  `AGENTS.override.md` dans un dossier et applique un plafond de taille (32 Kio
+  par défaut). `init` couvre l'override local et place la stanza en tête, mais ne
+  peut ni recharger une session ouverte ni compenser une configuration globale
+  qui consomme déjà tout le plafond.
 
 ## 9. Recette / validation
 
-- Suite `tests/test_cowork.py` : **39 tests** (unitaires + non-régression : modèle
-  claim, mutex, concurrence claude/codex, archive, robustesse, anti-injection),
+- Suite `tests/test_cowork.py` : **43 tests** (unitaires + non-régression : modèle
+  claim, mutex, concurrence claude/codex, ancrages canoniques/override, archive,
+  robustesse, anti-injection),
   `python3 -m unittest discover -s tests`, sans dépendance externe.
 - Vérification adversariale multi-agents + 3 revues Codex successives, chaque
   constat reproduit puis corrigé puis re-testé.

@@ -217,17 +217,21 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
 - écrit `COWORK.protocol.md` (ce document) et `COWORK.md` (verrou IDLE neuf) ;
   `COWORK.md` n'est **pas** écrasé s'il existe déjà (sauf `--force`) → l'état du
   relais en cours est préservé ;
-- injecte un bloc « Co-work relais » dans `CLAUDE.md` et `AGENTS.md` (créés s'ils
-  manquent), entre marqueurs `COWORK:STANZA` → ré-injection **idempotente**
-  (remplace le bloc existant au lieu de le dupliquer), le reste du fichier intact.
-  La détection est **insensible à la casse** : un `claude.md`/`agents.md`
-  préexistant est réutilisé tel quel (pas de doublon majuscule créé).
+- injecte en **tête** un bloc « Co-work relais » dans `CLAUDE.md` et `AGENTS.md`
+  (créés s'ils manquent), entre marqueurs `COWORK:STANZA` → ré-injection
+  **idempotente** (déplace/actualise le bloc sans dupliquer, contenu existant
+  préservé) ;
+- renomme une variante unique `claude.md`/`agents.md` vers le nom canonique
+  auto-chargé, y compris sur un FS insensible à la casse. Plusieurs variantes
+  coexistantes sont refusées plutôt que fusionnées silencieusement ;
+- si `AGENTS.override.md` existe, y synchronise aussi la stanza : Codex charge
+  cet override à la place de `AGENTS.md` dans le même dossier.
 
 ### Amorçage / prise en compte par les agents
 
 cowork est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention
 de chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`** au
-démarrage de session. La chaîne d'amorçage est donc :
+démarrage de session/exécution. La chaîne d'amorçage est donc :
 
 ```
 cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md (Codex)
@@ -236,10 +240,22 @@ cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md
    « si un COWORK.md existe, applique COWORK.protocol.md (claim → travail → append) »
 ```
 
-- **Déclencheur** : la présence d'un `COWORK.md` à la racine (la stanza le dit).
-- **Dépendance** : que l'outil hôte charge bien `CLAUDE.md` / `AGENTS.md`. C'est le
-  cas de Claude Code et de Codex CLI en session projet.
-- **Limite** : en exécution *headless* / sans contexte projet (cron, CI) où
-  l'ancrage n'est pas auto-chargé, l'amorçage automatique ne se fait pas — il faut
-  alors pointer explicitement l'IA vers `COWORK.protocol.md`. cowork ne peut pas
-  *forcer* une IA à lire quoi que ce soit ; il repose sur la convention d'ancrage.
+- **Après `init`** : démarre une nouvelle session/exécution de l'agent. Une session
+  déjà ouverte a généralement construit sa chaîne d'instructions avant l'injection.
+- **Codex interactif ou `codex exec`** : `AGENTS.md` est chargé si la commande part
+  de la racine du projet ou d'un de ses sous-dossiers. Le mode *headless* n'est pas
+  en soi une limite ; un cron/CI lancé hors du projet, en revanche, ne découvre pas
+  l'ancrage.
+- **Override Codex** : `AGENTS.override.md` masque `AGENTS.md` dans un même dossier ;
+  `init` injecte donc la stanza dans les deux lorsqu'il est présent.
+- **Taille Codex** : Codex empile les fichiers d'instructions jusqu'à un plafond
+  *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et **saute les fichiers
+  entiers** au-delà — la coupe est au fichier près, pas à l'intérieur. Mettre la
+  stanza en tête la rend prioritaire *dans* le fichier (et un fichier plus proche
+  du cwd prime), mais si l'ancrage dépasse le budget restant il est ignoré en
+  entier : garde-le **léger**.
+- **Limite générale** : cowork ne peut pas forcer une IA à lire quoi que ce soit.
+  Sans racine/contexte projet, pointe explicitement l'agent vers
+  `COWORK.protocol.md`.
+
+Référence Codex : https://developers.openai.com/codex/guides/agents-md

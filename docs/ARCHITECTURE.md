@@ -89,7 +89,7 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 | Source | Destination | Canal | Mode |
 |--------|-------------|-------|------|
 | agent | `COWORK.md` | système de fichiers local | R/W |
-| `cowork.py init` | `CLAUDE.md`, `AGENTS.md`, `COWORK.protocol.md` | système de fichiers local | W |
+| `cowork.py init` | `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (si présent), `COWORK.protocol.md` | système de fichiers local | W |
 | agent | `COWORK.archive.md` | système de fichiers local | W (append) |
 
 ---
@@ -119,17 +119,21 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 - **Source de vérité unique** : protocole, gabarit `COWORK.md` et stanza sont des
   constantes de `cowork.py` ; `docs/COWORK.protocol.md` en est une *génération*
   (test de non-régression byte-à-byte `test_protocol_doc_in_sync`).
-- **Injection idempotente** : stanza encadrée par marqueurs `COWORK:STANZA`,
-  remplacée et non dupliquée à la ré-exécution.
+- **Injection idempotente et prioritaire** : stanza encadrée par marqueurs
+  `COWORK:STANZA`, déplacée/actualisée en tête sans duplication. Les variantes de
+  casse sont normalisées vers le nom canonique sur tout FS ;
+  `AGENTS.override.md`, prioritaire pour Codex dans le même dossier, est
+  synchronisé s'il existe.
 - **Marqueurs en commentaires HTML** : invisibles au rendu Markdown, `grep`-ables.
 
 ### 2.3 Stratégie de test
 
-39 tests, sans dépendance externe : unitaires (fonctions pures : `other`,
+43 tests, sans dépendance externe : unitaires (fonctions pures : `other`,
 `parse_iso`/`iso`, `get_lock`/`set_lock`, `stanza_for`, `clean_body`) +
 non-régression CLI en sous-processus isolé (modèle claim→append, mutex, **concurrence
-claude/codex** avec un seul gagnant, archive, robustesse, anti-injection, schéma
-LOCK). Commande : `python3 -m unittest discover -s tests`.
+claude/codex** avec un seul gagnant, ancrages canoniques/override, archive,
+robustesse, anti-injection, schéma LOCK). Commande :
+`python3 -m unittest discover -s tests`.
 
 ### 2.4 Gestion de configuration, encodage, fuseaux
 
@@ -209,8 +213,9 @@ Les sorties CLI vont sur stdout. Pas de PII au-delà du contenu de tâche saisi.
 
 ### 3.5 Décommissionnement
 
-Supprimer `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md` et la stanza des
-ancrages (entre marqueurs `COWORK:STANZA`). Aucune ressource externe à libérer.
+Supprimer `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md` et la stanza de
+`CLAUDE.md`, `AGENTS.md` et, le cas échéant, `AGENTS.override.md` (entre marqueurs
+`COWORK:STANZA`). Aucune ressource externe à libérer.
 
 ### 3.6 Contacts support
 
