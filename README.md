@@ -5,12 +5,12 @@
 **A single-file relay that lets two AI agents — a configurable pair from a roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-73%20passing-brightgreen.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#tests)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#install)
 [![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](cowork.py)
 [![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](docs/en/specification.md#11-developing-cowork-with-cowork-dogfooding)
 
-English | [Français](README_fr.md)
+English | [Français](docs/README_fr.md)
 
 ---
 
@@ -165,7 +165,7 @@ No external Python dependency (stdlib only):
 python3 -m unittest discover -s tests        # from the repo root
 ```
 
-**73 tests**: unit tests (pure functions) + CLI regression tests (one per fixed
+**74 tests**: unit tests (pure functions) + CLI regression tests (one per fixed
 bug, referenced `NR-n`) covering the claim model, mutex, claude/codex concurrency,
 canonical/override anchors, the configurable roster, archive, robustness, and
 injection safety.

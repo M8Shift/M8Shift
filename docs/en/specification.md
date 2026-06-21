@@ -61,6 +61,15 @@ human still nudges each agent to resume between turns — see §8.
 | ENF-7 **Bootstrap** | Anchor names follow the auto-loaded conventions; the stanza takes priority in the file and the Codex discovery limits (override, root, size cap, per-session reload) are documented. |
 | ENF-8 **Internationalization (i18n)** | Generated files and CLI messages are bilingual (en/fr), **English by default**. `init --lang en\|fr` selects the language of the generated artifacts (recorded in the LOCK `lang` field); `$COWORK_LANG` overrides the runtime message language. |
 
+> **i18n authoring (note).** At runtime CoWork stays a **single file**: the `en`/`fr`
+> catalogs live inline in `cowork.py` (`MESSAGES` + the template dicts), so adding a
+> language is just another dict entry. If you want a *translator-friendly* workflow
+> (editing locale files without touching Python), use a **build step**: author
+> per-locale files (`i18n/fr.json`, …) and *assemble* them into the single shipped
+> `cowork.py` (a `build/` scaffold — `assemble.py`, `i18n_logic.py` — exists for this).
+> Runtime = one file; authoring = optional build pipeline. Recommendation: stay inline
+> unless several languages are planned.
+
 ## 6. Data model — the `LOCK` block
 
 At the head of `COWORK.md`, between `<!-- COWORK:LOCK:BEGIN -->` and `:END`:
@@ -134,7 +143,7 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 
 ## 9. Acceptance / validation
 
-- `tests/test_cowork.py` suite: **73 tests** (unit + non-regression: claim model,
+- `tests/test_cowork.py` suite: **74 tests** (unit + non-regression: claim model,
   mutex, claude/codex concurrency, canonical/override anchors, configurable roster,
   archive, robustness, anti-injection),
   `python3 -m unittest discover -s tests`, with no external Python dependency (the

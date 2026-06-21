@@ -44,9 +44,9 @@ voir §8.
 | EF-7 | Le détenteur peut reprendre son propre verrou (rafraîchir le TTL). | `test_reclaim_own_lock_refreshes` |
 | EF-8 | `release` / `done` n'agissent que si l'appelant tient le stylo (ou personne) ; `--force` outrepasse. | `test_release_done_require_holder`, `test_release_done_force_overrides` |
 | EF-9 | `archive --keep N` purge les anciens tours clôturés sans jamais déplacer le tour d'amorçage `#0` ni toucher au verrou. | `test_archive_preserves_system_turn0` |
-| EF-10 | `init` génère `COWORK.md`, `COWORK.protocol.md` et injecte les ancrages ; idempotent (stanza non dupliquée, contenu existant préservé, `COWORK.md` non écrasé sauf `--force`). | `test_reinit_idempotent_preserves_content`, `test_init_force_resets_lock` |
+| EF-10 | `init` génère `COWORK.md`, `COWORK.protocol.md` et injecte les ancrages ; idempotent (strophe non dupliquée, contenu existant préservé, `COWORK.md` non écrasé sauf `--force`). | `test_reinit_idempotent_preserves_content`, `test_init_force_resets_lock` |
 | EF-11 | Ancrages auto-chargeables sur FS sensible ou non à la casse : une variante unique est renommée vers `CLAUDE.md`/`AGENTS.md`, y compris dans l'index si Git est disponible et la suit ; les variantes ambiguës sont refusées. | `test_anchor_case_insensitive_no_duplicate`, `test_codex_anchor_is_canonical_on_case_sensitive_fs`, `test_tracked_anchor_case_rename_updates_git_index`, `test_ambiguous_anchor_variants_refused` |
-| EF-12 | La stanza est idempotente et placée en tête des ancrages ; si `AGENTS.override.md` existe, elle est synchronisée dans l'override et dans `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
+| EF-12 | La strophe est idempotente et placée en tête des ancrages ; si `AGENTS.override.md` existe, elle est synchronisée dans l'override et dans `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
 | EF-13 | Si le projet possédait `CLAUDE.md` mais aucune instruction Codex, `init` crée dans le nouveau `AGENTS.md` un pont vers les instructions communes de `CLAUDE.md` ; un ancrage Codex préexistant reste autonome. | `test_missing_agents_bridges_existing_claude_instructions`, `test_existing_agents_does_not_receive_claude_bridge` |
 
 ## 5. Exigences non fonctionnelles
@@ -55,12 +55,22 @@ voir §8.
 |----|----------|
 | ENF-1 **Portabilité** | Fonctionne sur dossier vide ou dépôt git, chemins à espaces/accents, FS sensible ou non à la casse. Python 3.8+, **stdlib uniquement**, aucun paquet tiers. Tourne sous **Linux, macOS et Windows** (WSL, Git Bash ou `python cowork.py` natif ; voir le guide Windows). |
 | ENF-2 **Atomicité** | Toute écriture (y compris l'archive) passe par fichier temporaire **unique** + `os.replace`, en **préservant le mode** du fichier cible ; sérialisée par un verrou inter-process (`.cowork.lock`, `O_EXCL`, jeton de propriété). |
-| ENF-3 **Autonomie agents** | Toute la marche à suivre est embarquée : `COWORK.protocol.md` (§0 quickstart) + stanza des ancrages. Aucune explication humaine requise. |
+| ENF-3 **Autonomie agents** | Toute la marche à suivre est embarquée : `COWORK.protocol.md` (§0 quickstart) + strophe des ancrages. Aucune explication humaine requise. |
 | ENF-4 **Robustesse** | Entrées invalides (agent inconnu, `--body` absent, `COWORK.md` manquant, **LOCK au schéma invalide** : `state`/`turn`/`holder`) → sortie propre `sys.exit`, jamais de traceback, jamais d'état corrompu. |
 | ENF-5 **Tenue dans le temps** | `COWORK.md` reste borné via `archive` ; l'archive n'est jamais relue par la boucle. |
 | ENF-6 **Lisibilité** | État et tours lisibles à l'œil et au `grep` ; marqueurs en commentaires HTML invisibles au rendu Markdown ; versionnable en clair. |
-| ENF-7 **Amorçage** | Les noms d'ancrage suivent les conventions auto-chargées ; la stanza est prioritaire dans le fichier et les limites de découverte Codex (override, racine, plafond de taille, rechargement par session) sont documentées. |
+| ENF-7 **Amorçage** | Les noms d'ancrage suivent les conventions auto-chargées ; la strophe est prioritaire dans le fichier et les limites de découverte Codex (override, racine, plafond de taille, rechargement par session) sont documentées. |
 | ENF-8 **Internationalisation (i18n)** | Les fichiers générés et les messages de la CLI sont bilingues (en/fr), **anglais par défaut**. `init --lang en\|fr` sélectionne la langue des artefacts générés (consignée dans le champ `lang` du LOCK) ; `$COWORK_LANG` surcharge la langue des messages à l'exécution. |
+
+> **Rédaction i18n (note).** À l'exécution, CoWork reste un **fichier unique** : les
+> catalogues `en`/`fr` vivent dans `cowork.py` (`MESSAGES` + les dictionnaires de
+> gabarits), donc ajouter une langue = une entrée de dictionnaire de plus. Pour un flux
+> **adapté aux traducteurs** (éditer des fichiers de langue sans toucher au Python),
+> utilise une **étape de build** : rédiger des fichiers par langue (`i18n/fr.json`, …)
+> et les *assembler* dans le `cowork.py` unique livré (un échafaudage `build/` —
+> `assemble.py`, `i18n_logic.py` — existe pour ça). Exécution = un fichier ; rédaction =
+> pipeline de build optionnel. Recommandation : rester en ligne sauf si plusieurs
+> langues sont prévues.
 
 ## 6. Modèle de données — le bloc `LOCK`
 
@@ -99,7 +109,7 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 - **Réveiller l'UI d'un agent interactif** : `wait` bloque un *processus* jusqu'à ton
   tour, mais il ne **relance ni ne réveille** un agent tournant dans une UI interactive
   (VS Code, …). Entre les tours, un humain relance chaque agent (p. ex. *« reprends
-  CoWork »*). Une opération entièrement autonome exige une boucle **headless**
+  CoWork »*). Une opération entièrement autonome exige une boucle **headless (sans interface)**
   (`claude -p`, `codex exec`, cron) enveloppant `wait → relancer l'agent → claim` — une
   intégration à l'hôte, pas une modification du mutex. Une notification/webhook peut
   *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule.
@@ -132,13 +142,13 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
   chaîne d'instructions une fois par exécution, donne priorité à
   `AGENTS.override.md` dans un dossier et applique un plafond de taille (32 Kio
   par défaut), en tronquant le dernier fichier au budget restant. `init` couvre
-  l'override local et place la stanza en tête, mais ne peut ni recharger une
+  l'override local et place la strophe en tête, mais ne peut ni recharger une
   session ouverte ni compenser une configuration globale qui consomme déjà tout
   le plafond.
 
 ## 9. Recette / validation
 
-- Suite `tests/test_cowork.py` : **73 tests** (unitaires + non-régression : modèle
+- Suite `tests/test_cowork.py` : **74 tests** (unitaires + non-régression : modèle
   claim, mutex, concurrence claude/codex, ancrages canoniques/override, roster
   configurable, archive, robustesse, anti-injection),
   `python3 -m unittest discover -s tests`, sans dépendance Python externe (le test
@@ -146,7 +156,7 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 - Vérification adversariale multi-agents + 3 revues Codex successives, chaque
   constat reproduit puis corrigé puis re-testé.
 - Test de non-régression documentaire : `docs/en/protocol.md` et `docs/fr/protocole.md`
-  doivent rester byte-identiques à `cowork.PROTOCOL[lang]` (`test_protocol_docs_in_sync`).
+  doivent rester octet-identiques à `cowork.PROTOCOL[lang]` (`test_protocol_docs_in_sync`).
 
 ## 10. Versionnement
 
