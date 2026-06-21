@@ -47,7 +47,7 @@ stylo. Tout le reste de ce document n'est que le détail de cette boucle.
 > Le protocole te rend auto-suffisant *une fois que tu tournes*. Dans une UI interactive
 > (VS Code, …) un humain te relance quand même entre les tours — `wait` bloque un
 > processus, il ne réveille pas ton UI de chat. Un relais entièrement autonome nécessite
-> un lanceur headless, pas une modification de ce protocole.
+> un lanceur headless (sans interface), pas une modification de ce protocole.
 
 ---
 
@@ -241,7 +241,7 @@ cp /chemin/vers/cowork.py .      # copier le seul fichier nécessaire
   coexistantes sont refusées plutôt que fusionnées silencieusement. Si Git est
   disponible et que la variante est suivie, emploie `git mv -f` pour actualiser
   aussi l'index ;
-- si `AGENTS.override.md` existe, y synchronise aussi la stanza : Codex charge
+- si `AGENTS.override.md` existe, y synchronise aussi la strophe : Codex charge
   cet override à la place de `AGENTS.md` dans le même dossier.
 
 ### Amorçage / prise en compte par les agents
@@ -254,7 +254,7 @@ d'amorçage est donc :
 ```
 cowork.py init  ──▶  injecte la STANZA dans l'ancrage de chaque agent actif (CLAUDE.md, AGENTS.md, …)
                           │
-   chaque IA charge son ancrage au démarrage ──▶ lit la stanza ──▶
+   chaque IA charge son ancrage au démarrage ──▶ lit la strophe ──▶
    « si un COWORK.md existe, applique COWORK.protocol.md (claim → travail → append) »
 ```
 
@@ -265,10 +265,10 @@ cowork.py init  ──▶  injecte la STANZA dans l'ancrage de chaque agent acti
   en soi une limite ; un cron/CI lancé hors du projet, en revanche, ne découvre pas
   l'ancrage.
 - **Override Codex** : `AGENTS.override.md` masque `AGENTS.md` dans un même dossier ;
-  `init` injecte donc la stanza dans les deux lorsqu'il est présent.
+  `init` injecte donc la strophe dans les deux lorsqu'il est présent.
 - **Taille Codex** : Codex empile les fichiers d'instructions jusqu'à un plafond
   *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et tronque le fichier qui
-  dépasse au nombre d'octets restant. Mettre la stanza en tête la conserve donc en
+  dépasse au nombre d'octets restant. Mettre la strophe en tête la conserve donc en
   priorité (et un fichier plus proche du cwd prime) ; garde néanmoins les ancrages
   **légers**.
 - **Limite générale** : cowork ne peut pas forcer une IA à lire quoi que ce soit.

@@ -33,7 +33,7 @@ entre les deux agents choisis). C'est un *delta minimal* — le verrou, la séri
 **Non-objectifs (ce RFC)**
 - **N agents travaillant simultanément** (degré > 1). C'est une étape distincte et plus large
   — voir [§10 Horizon étape 2](#10-horizon-étape-2--n-agents-simultanés).
-- Politiques de routage (`--to any`, round-robin, files de travail). Reporté ; la passation
+- Politiques de routage (`--to any`, round-robin (tourniquet), files de travail). Reporté ; la passation
   reste **nommée** (`--to <l'autre>`), exactement comme le relais binaire.
 - Découvrir le roster en scannant quels fichiers d'ancrage existent (trop implicite/fragile).
 
@@ -66,7 +66,7 @@ ANCHORS = {
     "claude":  "CLAUDE.md",
     "codex":   "AGENTS.md",        # + AGENTS.override.md
     "gemini":  "GEMINI.md",        # Gemini CLI auto-loads GEMINI.md
-    "lechat":  "AGENTS.md",        # Le Chat / Mistral: AGENTS.md (best-effort) — see below
+    "lechat":  "AGENTS.md",        # Le Chat / Mistral: AGENTS.md (au mieux) — see below
     # nested-path anchors (e.g. Copilot's .github/copilot-instructions.md) are out of
     # stage 1: ensure_canonical_anchor is not path-aware → manual-bootstrap fallback.
 }
@@ -172,7 +172,7 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
    inchangé) et `test_protocol_docs_in_sync` a été re-référencé sur
    `cowork.PROTOCOL[lang]`. Le champ `agents:` reste un ajout **optionnel**
    rétrocompatible dans le protocole v1 (les anciens lecteurs l'ignorent).
-5. **Ancrage `lechat`.** ✅ *Résolu (best-effort).* La convention n'est pas confirmée,
+5. **Ancrage `lechat`.** ✅ *Résolu (au mieux).* La convention n'est pas confirmée,
    donc `lechat`/`mistral` pointent vers `AGENTS.md` au mieux ; un agent sans ancrage
    connu (ou dont l'ancrage est déjà pris) déclenche un avertissement d'amorçage manuel
    plutôt que de bloquer `init`.

@@ -76,11 +76,11 @@ COWORK.md
 └────────────────────────────────────────────┘
      ▲                         ▲
      │ pilote                  │ injecte
- cowork.py (CLI)          CLAUDE.md / AGENTS.md (ancrages → stanza)
+ cowork.py (CLI)          CLAUDE.md / AGENTS.md (ancrages → strophe)
 ```
 
 **Composants** : (a) le bloc `LOCK` = automate d'état ; (b) le journal de tours
-append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
+append-only ; (c) les ancrages porteurs de la *strophe* d'auto-instruction ;
 (d) la CLI `cowork.py` (commandes init/status/wait/claim/append/release/done/archive).
 
 ### 1.7 Matrice des flux applicatifs
@@ -111,7 +111,7 @@ classiques** sur **deux niveaux**.
 
 Deux propriétés le distinguent d'un mutex in-process strict :
 
-- **Coopératif / advisory, pas appliqué.** L'OS ne peut pas empêcher un process tiers
+- **Coopératif / consultatif, pas appliqué.** L'OS ne peut pas empêcher un process tiers
   d'éditer le dépôt — la vraie section critique (un agent qui modifie des fichiers)
   n'est pas verrouillable matériellement. CoWork *garantit* qu'on ne peut pas
   **enregistrer** un tour sans tenir le stylo (`append` ⇐ `WORKING_<soi>`), mais
@@ -150,11 +150,11 @@ agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-a
   verrou abandonné est repris après 60 s.
 - **Validation d'entrée** : champs mono-ligne (refus saut de ligne + marqueurs
   réservés) ; corps neutralisé (anti-injection de faux tours).
-- **Source de vérité unique** : protocole, gabarit `COWORK.md` et stanza sont des
+- **Source de vérité unique** : protocole, gabarit `COWORK.md` et strophe sont des
   constantes de `cowork.py` ; `docs/en/protocol.md` et `docs/fr/protocole.md` en sont
-  une *génération* de `cowork.PROTOCOL[lang]` (test de non-régression byte-à-byte
+  une *génération* de `cowork.PROTOCOL[lang]` (test de non-régression octet-à-octet
   `test_protocol_docs_in_sync`).
-- **Injection idempotente et prioritaire** : stanza encadrée par marqueurs
+- **Injection idempotente et prioritaire** : strophe encadrée par marqueurs
   `COWORK:STANZA`, déplacée/actualisée en tête sans duplication. Les variantes de
   casse sont normalisées vers le nom canonique sur tout FS (`git mv -f` si Git
   est disponible et le fichier suivi, afin d'actualiser l'index) ;
@@ -255,7 +255,7 @@ Les sorties CLI vont sur stdout. Pas de PII au-delà du contenu de tâche saisi.
 
 ### 3.5 Décommissionnement
 
-Supprimer `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md` et la stanza de
+Supprimer `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md` et la strophe de
 `CLAUDE.md`, `AGENTS.md` et, le cas échéant, `AGENTS.override.md` (entre marqueurs
 `COWORK:STANZA`). Aucune ressource externe à libérer.
 

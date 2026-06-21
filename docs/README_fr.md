@@ -1,16 +1,16 @@
-![CoWork](CoWork-logo.png)
+![CoWork](../CoWork-logo.png)
 
 # CoWork
 
 **Un relais en fichier unique qui permet à deux agents IA — un couple configurable depuis un roster (la liste d'agents disponibles : Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte.**
 
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-73%20passing-brightgreen.svg)](#tests)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
+[![tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#tests)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#installation)
-[![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](cowork.py)
-[![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding)
+[![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](../cowork.py)
+[![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](../docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding)
 
-[English](README.md) | Français
+[English](../README.md) | Français
 
 ---
 
@@ -21,7 +21,7 @@ même dépôt, ils s'écrasent mutuellement. CoWork introduit un unique **stylo*
 tout instant, exactement un agent est autorisé à écrire ; l'autre attend son tour et
 sait précisément ce qu'on attend de lui.
 
-Tout le kit tient dans **un seul fichier** : [`cowork.py`](cowork.py). Vous le copiez à la
+Tout le kit tient dans **un seul fichier** : [`cowork.py`](../cowork.py). Vous le copiez à la
 racine d'un projet, lancez `init`, et les deux agents se passent la main via un
 fichier `COWORK.md` partagé. Toute la procédure est **embarquée dans les fichiers
 générés**, donc les agents n'ont besoin d'**aucune explication humaine**. *Réserve pour
@@ -62,7 +62,7 @@ défaut**). Utilisez `--agents a,b` pour choisir le couple du relais dans le ros
 supplémentaires sont stockés pour le futur mode N agents).
 
 **Sous Windows ?** Aucune dépendance (stdlib uniquement) — lancez via WSL, Git Bash,
-ou `python cowork.py <cmd>` dans PowerShell. Voir [Lancer sous Windows](docs/fr/windows.md).
+ou `python cowork.py <cmd>` dans PowerShell. Voir [Lancer sous Windows](../docs/fr/windows.md).
 
 **Depuis un fork / clone ?** CoWork tient en un fichier — hébergez-le sur n'importe quel
 Git ou GitLab : `git clone https://gitlab.example.com/you/CoWork.git`, puis
@@ -98,12 +98,12 @@ le couple par défaut `claude`/`codex`).
 
 La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 
-- **Tutoriel** — [docs/fr/tutoriel.md](docs/fr/tutoriel.md) — apprenez le relais pas à pas.
-- **Guide (VS Code)** — [docs/fr/guide-vscode.md](docs/fr/guide-vscode.md) — lancez le relais avec Claude + Codex.
-- **Guide (Windows)** — [docs/fr/windows.md](docs/fr/windows.md) — lancez sous Windows (WSL / Git Bash / natif).
-- **Référence (protocole)** — [docs/fr/protocole.md](docs/fr/protocole.md) — le protocole partagé, les états et les règles.
-- **Référence (cahier des charges)** — [docs/fr/cahier-des-charges.md](docs/fr/cahier-des-charges.md) — la spécification complète.
-- **Explication (architecture)** — [docs/fr/architecture.md](docs/fr/architecture.md) — conception et fonctionnement.
+- **Tutoriel** — [docs/fr/tutoriel.md](../docs/fr/tutoriel.md) — apprenez le relais pas à pas.
+- **Guide (VS Code)** — [docs/fr/guide-vscode.md](../docs/fr/guide-vscode.md) — lancez le relais avec Claude + Codex.
+- **Guide (Windows)** — [docs/fr/windows.md](../docs/fr/windows.md) — lancez sous Windows (WSL / Git Bash / natif).
+- **Référence (protocole)** — [docs/fr/protocole.md](../docs/fr/protocole.md) — le protocole partagé, les états et les règles.
+- **Référence (cahier des charges)** — [docs/fr/cahier-des-charges.md](../docs/fr/cahier-des-charges.md) — la spécification complète.
+- **Explication (architecture)** — [docs/fr/architecture.md](../docs/fr/architecture.md) — conception et fonctionnement.
 
 ## Comment ça marche
 
@@ -149,13 +149,13 @@ Vérifiées par les tests et par revue multi-agents :
 - **Réveiller l'UI d'un agent interactif.** `wait` bloque un *processus* jusqu'à ton
   tour ; il ne **relance ni ne réveille** un agent tournant dans une UI interactive
   (VS Code, …). Entre les tours, un humain relance quand même chaque agent (p. ex.
-  *« reprends CoWork »*). Une opération entièrement autonome exige une boucle **headless**
+  *« reprends CoWork »*). Une opération entièrement autonome exige une boucle **headless (sans interface)**
   (`claude -p`, `codex exec`, cron) enveloppant `wait → relancer l'agent → claim` — une
   intégration à l'hôte, pas une modification du mutex. Une notification système/webhook
   peut *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule. Un exemple de
-  lanceur est fourni : [`examples/headless_runner.py`](examples/headless_runner.py).
+  lanceur est fourni : [`examples/headless_runner.py`](../examples/headless_runner.py).
 - **Coopératif, deux agents, verrou conseillé** — voir le
-  [cahier des charges](docs/fr/cahier-des-charges.md) §8 (mutex coopératif, verrou
+  [cahier des charges](../docs/fr/cahier-des-charges.md) §8 (mutex coopératif, verrou
   conseillé, deux agents simultanés).
 
 ## Tests
@@ -166,29 +166,29 @@ Aucune dépendance Python externe (stdlib uniquement) :
 python3 -m unittest discover -s tests        # depuis la racine du dépôt
 ```
 
-**73 tests** : tests unitaires (fonctions pures) + tests de régression CLI (un par
+**74 tests** : tests unitaires (fonctions pures) + tests de régression CLI (un par
 bug corrigé, référencé `NR-n`) couvrant le modèle de claim, le mutex, la concurrence claude/codex,
 les ancrages canoniques/override, le roster configurable, l'archive, la robustesse et la sûreté face à l'injection.
 
 ## Roadmap
 
 CoWork conserve un **mutex à stylo unique** (un seul écrivain à la fois) par
-conception — voir [architecture §1.8](docs/fr/architecture.md). Deux étapes :
+conception — voir [architecture §1.8](../docs/fr/architecture.md). Deux étapes :
 
 1. **Couple configurable (livré)** — choisir les deux agents du relais dans un
    **roster extensible** via `cowork.py init --agents a,b` ; les deux premiers
    relaient, les noms supplémentaires sont stockés pour plus tard. Toujours
-   **2 simultanés** (degré 1). Voir [RFC — couple d'agents configurable](docs/fr/rfc-roster.md).
+   **2 simultanés** (degré 1). Voir [RFC — couple d'agents configurable](../docs/fr/rfc-roster.md).
 2. **N agents simultanés** — vrai multi-agent (degré > 1) ; une étape distincte et
    plus lourde, avec son propre RFC futur.
 
 ## Licence
 
-Sous licence [Apache License 2.0](LICENSE).
+Sous licence [Apache License 2.0](../LICENSE).
 
 ## Contribuer
 
 Les issues et pull requests sont les bienvenues. CoWork est un fichier unique par conception
-([`cowork.py`](cowork.py) est la source de vérité unique — `COWORK.protocol.md` en est
+([`cowork.py`](../cowork.py) est la source de vérité unique — `COWORK.protocol.md` en est
 généré), donc gardez les changements ciblés et couverts par un test dans `tests/`. Lancez
 la suite de tests avant d'ouvrir une PR.

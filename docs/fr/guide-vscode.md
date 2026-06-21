@@ -2,7 +2,7 @@
 
 > **Note Claude —** Guide opérationnel : comment lancer concrètement un relais
 > Claude ⇄ Codex depuis les extensions VS Code. Pour l'installation du kit
-> (`cp cowork.py` + `init`), voir le [README](../../README_fr.md) ; pour le
+> (`cp cowork.py` + `init`), voir le [README](../README_fr.md) ; pour le
 > protocole lui-même, voir [`COWORK.protocol.md`](../COWORK.protocol.md).
 
 Dans VS Code, **les panneaux Claude et Codex *sont* les agents**. Tout le travail
@@ -22,7 +22,7 @@ indique ce que vous devez voir avant de passer à la suivante.
 - Les deux extensions VS Code installées : **Claude Code** et **Codex**.
 
 Si vous n'avez pas encore exécuté `init`, faites-le d'abord — voir le
-[README](../../README_fr.md). Les étapes ci-dessous supposent que les quatre
+[README](../README_fr.md). Les étapes ci-dessous supposent que les quatre
 fichiers existent.
 
 ---
