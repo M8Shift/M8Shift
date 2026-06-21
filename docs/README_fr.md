@@ -246,6 +246,33 @@ conception — voir [architecture §1.8](../docs/fr/architecture.md). Deux étap
 2. **N agents simultanés** — vrai multi-agent (degré > 1) ; une étape distincte et
    plus lourde, avec son propre RFC futur.
 
+**Fonctionnalités prévues** — chaque item reste mono-fichier, passif et zéro-identifiant
+(append-only ou lecture seule sur des données que CoWork stocke déjà ; jamais un daemon,
+une intégration, ni une seconde source de vérité) :
+
+- 🧠 **Mémoire partagée + recap** *(prochain)* — un `COWORK.memory.md` durable, append-only,
+  que les agents tiennent à la main (`cowork.py remember`), + un `cowork.py recap` en
+  lecture seule (LOCK courant + derniers tours + entêtes mémoire) pour reprendre d'une
+  session à l'autre.
+- 📨 **Handoff structuré + peek** *(prochain)* — champs de tour optionnels et consultatifs
+  (`branch` / `commit` / `tests` / `next`, écriture seule) + `cowork.py peek` pour lire la
+  dernière passation en un appel.
+- 📊 **Timeline + status JSON** *(prochain)* — `cowork.py log` (chronologie du relais) et
+  `status --json` pour des tableaux de bord (compatible `watch`).
+- 🧭 **`claim --check`** *(plus tard)* — sonde consultative, en lecture seule, de
+  chevauchement de fichiers (depuis le champ `files:`), sans ouvrir de fenêtre de travail
+  concurrente.
+- 🌿 **`subturn`** *(plus tard)* — consigner le fan-out de sous-agents d'un agent sous son tour.
+- 🗂️ **Tableau de tâches / block-on** *(peut-être)* — une partition de to-do append-only ;
+  nommer une dépendance externe comme raison d'attente `blocked_on` explicite.
+
+**Non-goals** (briseraient une qualité de CoWork) : *baux* par chemin pour des écritures
+disjointes concurrentes (c'est le verrou degré 2 de l'étape 2, pas le stylo degré 1
+d'aujourd'hui) ; un daemon / watcher / push de notifications en arrière-plan ; lancer git,
+des builds ou des API (auth + réseau → un orchestrateur) ; des dépendances tierces ou un
+paquet multi-fichiers ; et une mémoire *dérivée* « intelligente » (dédup / résumé / purge)
+— le registre reste une trace bête, curée à la main.
+
 ## Licence
 
 Sous licence [Apache License 2.0](../LICENSE).
