@@ -188,6 +188,29 @@ bug, referenced `NR-n`) covering the claim model, mutex, claude/codex concurrenc
 canonical/override anchors, the configurable roster, archive, robustness, and
 injection safety.
 
+## Positioning — not an orchestrator
+
+CoWork is a **coordination primitive**, not an agent platform. It deliberately does
+**one thing**: ensure that, of the agents already running on a shared repo, only one
+writes at a time (strict turn-taking).
+
+Full orchestrators/runtimes (e.g. **[OpenClaw](https://docs.openclaw.ai/)**) cover far
+more — they *run* the agents: session management, tool dispatch, memory, sub-agents,
+parallel **and** sequential workflows. They can take turns too; the real difference is
+**scope and footprint**:
+
+| | Orchestrator (e.g. OpenClaw) | CoWork |
+|---|------------------------------|--------|
+| What it is | a runtime/gateway that **drives** the agents | a single-file **lock** the agents poll |
+| Install | a platform to deploy + configure (providers, auth) | `cp cowork.py` — stdlib, no daemon, no server |
+| Credentials | the agents' auth (subscription **or** API key) | **none** — CoWork never authenticates anything |
+| Scope | memory, tools, routing, parallel + sequential | only *who writes, when* |
+
+Reach for an orchestrator when you want a **managed agent team**. Reach for CoWork when
+you just want two agents you already run (Claude Code, Codex, …) to **stop overwriting
+each other** — with nothing to install or authenticate. They are **complementary**, not
+competing (CoWork could even be the lock inside a larger setup).
+
 ## Roadmap
 
 CoWork keeps a **single-pen mutex** (one writer at a time) by design — see
