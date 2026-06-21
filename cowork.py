@@ -6,6 +6,9 @@ Model: copy THIS single file to the root of a project, then `./cowork.py init`.
 CLAUDE.md / AGENTS.md. The lock (mutex) is the LOCK block at the top of COWORK.md,
 delimited by the HTML comments COWORK:LOCK:BEGIN / COWORK:LOCK:END. Turns are
 delimited by COWORK:TURN <n> <agent> BEGIN / END. See COWORK.protocol.md.
+
+No API key, no network, no daemon: a passive local CLI the agents drive with shell
+commands; they bring their own auth, so CoWork adds zero credentials.
 """
 import argparse
 import contextlib

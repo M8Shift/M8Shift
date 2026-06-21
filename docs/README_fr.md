@@ -8,6 +8,7 @@
 [![tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#tests)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#installation)
 [![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](../cowork.py)
+[![sans clé API](https://img.shields.io/badge/cl%C3%A9%20API-non%20requise-success.svg)](#tourne-partout--sans-clé-api)
 [![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](../docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding)
 
 [English](../README.md) | Français
@@ -38,6 +39,24 @@ travailler** — pour que les deux agents ne modifient jamais le dépôt en mêm
 coordination vit dans un fichier versionnable, lisible à l'œil comme par `grep`, et préservé
 dans le temps. Pas de démon, pas de serveur, pas de dépendance externe — juste un fichier
 Python et les conventions propres des outils hôtes.
+
+## Tourne partout — sans clé API
+
+CoWork est un **CLI passif** : les agents le pilotent par des commandes shell, donc il
+fonctionne sur toutes les surfaces où tournent Claude Code ou Codex, et il n'ajoute
+**aucun identifiant**.
+
+| Surface | Marche ? | Notes |
+|---------|----------|-------|
+| Terminal / CLI | ✅ | en *headless* (`claude -p`, `codex exec`, cron) c'est **entièrement automatisable** — voir [`examples/headless_runner.py`](../examples/headless_runner.py) |
+| Application desktop (Mac/Windows) | ✅ | interactif : un humain relance chaque agent entre les tours |
+| VS Code / JetBrains (IDE) | ✅ | comme le desktop |
+| Web (claude.ai/code) | ✅ | partout où l'agent peut lancer un shell et lire son ancrage |
+
+**Aucune clé API. Aucun jeton. Aucun compte pour CoWork lui-même.** `cowork.py` ne fait
+**aucun appel réseau** (stdlib uniquement, fichiers locaux) — les agents utilisent
+l'abonnement ou la connexion que tu as déjà. Rien ne quitte ta machine, aucun coût par
+appel, aucun verrouillage propriétaire.
 
 ## Installation
 

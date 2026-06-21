@@ -61,6 +61,7 @@ voir §8.
 | ENF-6 **Lisibilité** | État et tours lisibles à l'œil et au `grep` ; marqueurs en commentaires HTML invisibles au rendu Markdown ; versionnable en clair. |
 | ENF-7 **Amorçage** | Les noms d'ancrage suivent les conventions auto-chargées ; la strophe est prioritaire dans le fichier et les limites de découverte Codex (override, racine, plafond de taille, rechargement par session) sont documentées. |
 | ENF-8 **Internationalisation (i18n)** | Les fichiers générés et les messages de la CLI sont bilingues (en/fr), **anglais par défaut**. `init --lang en\|fr` sélectionne la langue des artefacts générés (consignée dans le champ `lang` du LOCK) ; `$COWORK_LANG` surcharge la langue des messages à l'exécution. |
+| ENF-9 **Zéro identifiant / toute surface** | `cowork.py` ne fait **aucun appel réseau** et ne requiert **aucune clé API, jeton ou compte** ; il s'appuie entièrement sur l'auth propre des agents hôtes. Il tourne sur toutes les surfaces Claude Code / Codex (terminal/CLI, application desktop, IDE/VS Code, web) — les UI interactives demandent un coup de pouce humain entre les tours, une boucle CLI headless automatise entièrement. |
 
 > **Rédaction i18n (note).** À l'exécution, CoWork reste un **fichier unique** : les
 > catalogues `en`/`fr` vivent dans `cowork.py` (`MESSAGES` + les dictionnaires de
