@@ -123,6 +123,7 @@ archive [--keep N]                      purge les vieux tours clôturés (jamais
 Détail complet, états et règles → [`docs/COWORK.protocol.md`](docs/COWORK.protocol.md)
 (commencer par son **§0 — quickstart**). Spécification → [cahier des charges](docs/CAHIER-DES-CHARGES.md).
 Conception & exploitation → [document d'architecture](docs/ARCHITECTURE.md).
+Opérer le relais dans VS Code (Claude + Codex) → [manuel utilisateur](docs/MANUEL-UTILISATEUR.md).
 
 ## Garanties (vérifiées par les tests et par revue multi-agents)
 
