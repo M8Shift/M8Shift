@@ -1,0 +1,13 @@
+# Artefacts d'exécution du relais (générés par `cowork.py init` lors d'un usage)
+COWORK.md
+COWORK.archive.md
+CLAUDE.md
+AGENTS.md
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets / local
+.env
