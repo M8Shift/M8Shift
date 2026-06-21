@@ -1,13 +1,21 @@
 # Artefacts d'exécution du relais (générés par `cowork.py init` lors d'un usage)
 COWORK.md
 COWORK.archive.md
+COWORK.protocol.md
 CLAUDE.md
 AGENTS.md
+AGENTS.override.md
 *.tmp
+
+# Notes de handoff / travail (hors dépôt public)
+ETAT-DES-LIEUX-*.md
 
 # Verrou interne + temporaires d'écriture atomique
 .cowork.lock
 .cowork-*.tmp
+
+# Sauvegardes des ancrages avant (ré)injection par `init`
+*.cowork.bak
 
 # Python
 __pycache__/

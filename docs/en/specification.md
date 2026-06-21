@@ -9,8 +9,9 @@
 `cowork` lets **two AI agents** (Claude and Codex) work on the same repository
 **without stepping on each other**, coordinating through a **single shared
 file** `COWORK.md`, in strict alternation (cooperative mutex). The system must be
-**portable to any project** and **usable by the agents without human
-intervention or explanation**.
+**portable to any project** and **usable by the agents without a human having to
+explain the protocol** (it is self-contained). *Limit*: in interactive agent UIs a
+human still nudges each agent to resume between turns — see §8.
 
 ## 2. Scope
 
@@ -25,8 +26,7 @@ intervention or explanation**.
 
 | Actor | Role |
 |-------|------|
-| **claude** | AI agent, reads `CLAUDE.md`, operates the relay on the Claude side |
-| **codex** | AI agent, reads `AGENTS.md`, operates the relay on the Codex side |
+| **active agent ×2** | the configured relaying pair (default `claude` → `CLAUDE.md`, `codex` → `AGENTS.md`); each AI agent reads its own anchor and operates the relay on its side |
 | **maintainer** | Human; deploys the kit, arbitrates, reads the journal |
 
 ## 4. Functional requirements
@@ -52,7 +52,7 @@ intervention or explanation**.
 
 | ID | Requirement |
 |----|-------------|
-| ENF-1 **Portability** | Works on an empty folder or a git repository, paths with spaces/accents, case-sensitive or case-insensitive FS. Python 3.8+, **stdlib only**, no third-party package. |
+| ENF-1 **Portability** | Works on an empty folder or a git repository, paths with spaces/accents, case-sensitive or case-insensitive FS. Python 3.8+, **stdlib only**, no third-party package. Runs on **Linux, macOS and Windows** (WSL, Git Bash, or native `python cowork.py`; see the Windows how-to). |
 | ENF-2 **Atomicity** | Every write (including the archive) goes through a **unique** temporary file + `os.replace`, **preserving the mode** of the target file; serialized by an inter-process lock (`.cowork.lock`, `O_EXCL`, ownership token). |
 | ENF-3 **Agent autonomy** | The whole procedure is embedded: `COWORK.protocol.md` (§0 quickstart) + the anchors' stanza. No human explanation required. |
 | ENF-4 **Robustness** | Invalid inputs (unknown agent, missing `--body`, missing `COWORK.md`, **LOCK with invalid schema**: `state`/`turn`/`holder`) → clean `sys.exit` exit, never a traceback, never a corrupted state. |
@@ -67,8 +67,9 @@ At the head of `COWORK.md`, between `<!-- COWORK:LOCK:BEGIN -->` and `:END`:
 
 | field | type | values |
 |-------|------|--------|
-| `holder` | enum | `claude` \| `codex` \| `none` |
-| `state` | enum | `IDLE` \| `WORKING_CLAUDE` \| `WORKING_CODEX` \| `AWAITING_CLAUDE` \| `AWAITING_CODEX` \| `DONE` |
+| `holder` | enum | an active agent \| `none` (default `claude`/`codex`) |
+| `state` | enum | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` (one per active agent) |
+| `agents` | CSV \| absent | declared roster; the **first two** are the active relaying pair (extra names reserved for the future N-agent mode) |
 | `turn` | integer | number of the last closed turn |
 | `since` | ISO-8601 UTC | how long the state has lasted |
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock TTL; date **only** during `WORKING_*` |
@@ -85,7 +86,7 @@ WORKING_X(stale) ──claim Y --force──▶ WORKING_Y
 
 ## 7. Command-line interface
 
-`init` · `status` · `wait <agent> [--once] [--interval N]` · `claim <agent> [--force]` ·
+`init [--agents a,b] [--lang en|fr]` · `status` · `wait <agent> [--once] [--interval N]` · `claim <agent> [--force]` ·
 `append <agent> --to <other> --ask … --done … [--files …] [--body f|-]` ·
 `release <agent> --to <other> [--force]` · `done <agent> [--force]` · `archive [--keep N]`
 
@@ -94,6 +95,12 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 
 ## 8. Constraints & known limits
 
+- **Waking an interactive agent UI**: `wait` blocks a *process* until your turn, but it
+  does **not** relaunch or wake an agent running in an interactive UI (VS Code, …).
+  Between turns a human nudges each agent (e.g. *"resume CoWork"*). Fully hands-off
+  operation needs a **headless** loop (`claude -p`, `codex exec`, cron) wrapping
+  `wait → relaunch the agent → claim` — a host integration, not a change to the mutex. A
+  notification/webhook can *signal* a turn but cannot *wake* the AI by itself.
 - **Work-window exclusivity**: guaranteed by `claim` (exclusive acquisition of
   `WORKING_<self>`) + `append` restricted to `WORKING_<self>`. It relies on the
   **discipline** claim→work→append; cowork cannot lock the file system, so an
@@ -111,12 +118,13 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   FS (NFS) `O_EXCL`/`rename` are less reliable (cowork targets a local disk).
 - **Immutability by convention**: the tool never rewrites a closed turn, but
   nothing at the file-system level prevents it (manual edit).
-- **Two simultaneous agents (current)**: the protocol is binary (claude ⇄ codex)
-  by design — a **degree-1 mutex**. **Roadmap (two stages)**: (1) make the relaying
-  **pair configurable** from an extensible roster (claude, codex, lechat, …) while
-  staying 2 simultaneous — draft [RFC — configurable agent pair](rfc-roster.md);
-  (2) **N simultaneous agents** (degree > 1), a separate future step. The current
-  version is intentionally limited to two simultaneous agents.
+- **Two simultaneous agents (current)**: the protocol is binary by design — a
+  **degree-1 mutex**. **Roadmap (two stages)**: (1) the relaying **pair is
+  configurable** from an extensible roster via `init --agents a,b` — the first two
+  names are the active pair, extra names are stored for later (**implemented,
+  stage 1**; see [RFC — configurable agent pair](rfc-roster.md)); (2) **N
+  simultaneous agents** (degree > 1), a separate future step. The current version
+  stays limited to two simultaneous agents.
 - **Anchor loading**: it depends on the host tool. Codex builds its instruction
   chain once per execution, gives priority to `AGENTS.override.md` in a folder
   and applies a size cap (32 KiB by default), truncating the last file to the
@@ -126,18 +134,61 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 
 ## 9. Acceptance / validation
 
-- `tests/test_cowork.py` suite: **46 tests** (unit + non-regression: claim model,
-  mutex, claude/codex concurrency, canonical/override anchors, archive,
-  robustness, anti-injection),
+- `tests/test_cowork.py` suite: **73 tests** (unit + non-regression: claim model,
+  mutex, claude/codex concurrency, canonical/override anchors, configurable roster,
+  archive, robustness, anti-injection),
   `python3 -m unittest discover -s tests`, with no external Python dependency (the
   Git integration test is skipped if Git is absent).
 - Multi-agent adversarial verification + 3 successive Codex reviews, each finding
   reproduced then fixed then re-tested.
-- Documentary non-regression test: `docs/COWORK.protocol.md` must stay
-  byte-identical to `cowork.PROTOCOL_TEMPLATE` (`test_protocol_doc_in_sync`).
+- Documentary non-regression test: `docs/en/protocol.md` and `docs/fr/protocole.md`
+  must stay byte-identical to `cowork.PROTOCOL[lang]` (`test_protocol_docs_in_sync`).
 
 ## 10. Versioning
 
-Protocol **v1**. Any change to the `LOCK`/`TURN` format or to the markers
-increments the protocol version and must preserve the reading of existing
+Protocol **v1**. Any **breaking** change to the `LOCK`/`TURN` format or to the
+markers increments the protocol version and must preserve the reading of existing
 `COWORK.md` files or provide a migration.
+
+The roster `agents:` field (RFC stage 1) is a **backward-compatible optional
+addition** within v1, not a breaking change: a roster-unaware reader ignores it and
+keeps working **for the default `claude,codex` pair**. A *custom* roster, however,
+requires a roster-aware script — an old script would treat it as `claude,codex` and
+could corrupt it. The markers and the one-`key: value`-per-line format are unchanged.
+
+## 11. Developing CoWork with CoWork (dogfooding)
+
+CoWork can coordinate **its own development** — two agents editing `cowork.py` and the
+repo through the relay. One precaution is decisive: here the **tool is also the
+artifact**. Every `cowork.py <cmd>` reloads the file from disk, so a transient syntax
+error in the source under edit would break the relay itself.
+
+**Pattern — decouple the engine from the source under edit.** Run the relay from a
+**frozen copy** of `cowork.py` in a **separate working directory** outside the repo.
+Because the lock, journal and anchors are created next to the engine
+(`HERE = __file__`), all relay state lives there and the repo's working tree stays
+clean:
+
+```text
+Code/
+├── cowork/                 ← the repo (edited here — the real work)
+│   └── cowork.py           ← source under modification
+└── cowork-relay/           ← relay working directory (outside the repo)
+    ├── cowork.py           ← FROZEN copy = the engine
+    ├── COWORK.md           ← coordination journal + LOCK
+    ├── COWORK.protocol.md · CLAUDE.md · AGENTS.md
+    └── .cowork.lock
+```
+
+- The engine updates **only** on an explicit `cp` — a momentarily broken `cowork.py`
+  in the repo never affects coordination.
+- The anchors live in the relay directory, not the repo root, so **auto-bootstrap does
+  not fire**: each agent is pointed manually at the relay's `COWORK.protocol.md` (the
+  documented "no project root" case). Discipline is unchanged — an agent edits the repo
+  **only** while holding the pen, and keeps `cowork/cowork.py` importable (`ast.parse`)
+  before each `append`.
+
+This is exactly how the roster work (RFC stage 1) was reviewed: Claude implemented,
+then handed off to Codex for an adversarial review through a frozen relay in
+`cowork-relay/`. A **git worktree** of the repo would *not* decouple the engine (it
+tracks the same branch, so its `cowork.py` changes on edit) — use a frozen copy.

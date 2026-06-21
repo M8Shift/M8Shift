@@ -24,7 +24,7 @@ an enterprise infrastructure that is not relevant here.
 
 ### 1.1 General context
 
-`cowork` is a **coordination tool for two AI agents** (Claude, Codex) working on
+`cowork` is a **coordination tool for two AI agents** (a configurable pair; by default Claude, Codex) working on
 the same repository. It materializes a **single pen**: only one agent writes at a
 time, the other waits for its turn. All coordination state lives in a single,
 versionable file `COWORK.md`. The tool is a **self-contained Python script**
@@ -39,8 +39,7 @@ sites, …).
 
 | Actor | Type | Role |
 |-------|------|------|
-| `claude` | AI agent | reads `CLAUDE.md`, operates the relay on the Claude side |
-| `codex` | AI agent | reads `AGENTS.md`, operates the relay on the Codex side |
+| active agent ×2 | AI agents | the configured relaying pair (default `claude`/`codex`); each reads its own anchor (`CLAUDE.md`, `AGENTS.md`, …) and operates the relay on its side |
 | maintainer | human | deploys, arbitrates, reads the log (`COWORK.md`, git) |
 
 ### 1.3 Nature and sensitivity of data
@@ -57,7 +56,7 @@ sites, …).
 - **A single state file**, readable by eye and by `grep`, versionable in clear text.
 - **Zero dependencies**: Python 3.8+ stdlib only; no installation.
 - **Portable**: any project, any FS, paths with spaces/accents.
-- **Two agents** by design (binary relay claude ⇄ codex).
+- **Two agents** by design (a configurable pair; degree-1 relay, default claude ⇄ codex).
 
 ### 1.5 Requirements
 
@@ -89,7 +88,7 @@ log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
 | Source | Destination | Channel | Mode |
 |--------|-------------|---------|------|
 | agent | `COWORK.md` | local file system | R/W |
-| `cowork.py init` | `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (if present), `COWORK.protocol.md` | local file system | W |
+| `cowork.py init` | each active agent's anchor (default `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (if present), `COWORK.protocol.md` | local file system | W |
 | agent | `COWORK.archive.md` | local file system | W (append) |
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
@@ -150,9 +149,9 @@ would mean *k > 1* agents writing concurrently, which is an explicit non-goal).
 - **Input validation**: single-line fields (newlines and reserved markers
   rejected); body neutralized (anti-injection against forged turns).
 - **Single source of truth**: the protocol, the `COWORK.md` template, and the
-  stanza are constants in `cowork.py`; `docs/COWORK.protocol.md` is a
-  *generation* of them (byte-for-byte regression test
-  `test_protocol_doc_in_sync`).
+  stanza are constants in `cowork.py`; `docs/en/protocol.md` and
+  `docs/fr/protocole.md` are a *generation* of `cowork.PROTOCOL[lang]` (byte-for-byte
+  regression test `test_protocol_docs_in_sync`).
 - **Idempotent, priority injection**: the stanza is delimited by `COWORK:STANZA`
   markers, moved/refreshed at the top without duplication. Case variants are
   normalized to the canonical name on any FS (`git mv -f` if Git is available and
@@ -174,7 +173,8 @@ archive, robustness, anti-injection, LOCK schema). Command:
 
 ### 2.4 Configuration management, encoding, time zones
 
-- **Config**: none; everything is embedded. `init` only takes `--name` / `--force`.
+- **Config**: none; everything is embedded. `init` takes `--name` / `--agents a,b`
+  (the relaying pair) / `--lang en|fr` / `--force`.
 - **Encoding**: UTF-8 everywhere (explicit on read/write).
 - **Time zones**: all timestamps in **UTC** ISO-8601 (`...Z`).
 - **Logging**: standard output (`✓`/`refused`/`…` messages), no log file.
@@ -182,8 +182,11 @@ archive, robustness, anti-injection, LOCK schema). Command:
 ### 2.5 Branching & versioning policy
 
 A `dev/vX.Y.x` branch per sprint, merge + tag on `main`. The **protocol** is
-versioned (v1): any change to the `LOCK`/`TURN`/marker format increments the
-version and preserves the ability to read existing `COWORK.md` files.
+versioned (v1): any **breaking** change to the `LOCK`/`TURN`/marker format increments
+the version and preserves the ability to read existing `COWORK.md` files. The roster
+`agents:` field is a **backward-compatible optional** addition within v1 (old readers
+ignore it; safe for the default `claude,codex` pair — a custom roster needs a
+roster-aware script).
 
 ---
 
@@ -258,8 +261,8 @@ from `CLAUDE.md`, `AGENTS.md`, and, where applicable, `AGENTS.override.md`
 
 | Level | Contact |
 |-------|---------|
-| Maintainer | the repository owner |
-| Forge | Forgejo `you/CoWork` (your-forge-host) |
+| Maintainer | the repository owner (see the host where you cloned it) |
+| Source | your own Git / GitLab host — fork & clone (e.g. `git clone https://gitlab.example.com/you/CoWork.git`) |
 
 ---
 

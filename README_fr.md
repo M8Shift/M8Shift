@@ -2,12 +2,13 @@
 
 # CoWork
 
-**Un relais en fichier unique qui permet à deux agents IA (Claude ⇄ Codex) de coopérer sur le même dépôt par alternance stricte.**
+**Un relais en fichier unique qui permet à deux agents IA — un couple configurable depuis un roster (la liste d'agents disponibles : Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-46%20passing-brightgreen.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-73%20passing-brightgreen.svg)](#tests)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#installation)
 [![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](cowork.py)
+[![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding)
 
 [English](README.md) | Français
 
@@ -22,9 +23,11 @@ sait précisément ce qu'on attend de lui.
 
 Tout le kit tient dans **un seul fichier** : [`cowork.py`](cowork.py). Vous le copiez à la
 racine d'un projet, lancez `init`, et les deux agents se passent la main via un
-fichier `COWORK.md` partagé. Il est conçu pour être piloté par les agents eux-mêmes,
-**sans intervention ni explication humaine** — toute la procédure est embarquée dans
-les fichiers générés.
+fichier `COWORK.md` partagé. Toute la procédure est **embarquée dans les fichiers
+générés**, donc les agents n'ont besoin d'**aucune explication humaine**. *Réserve pour
+les UI interactives* (VS Code, …) : un humain relance quand même chaque agent pour qu'il
+*reprenne* entre les tours — `wait` bloque un processus mais ne réveille pas l'UI de chat
+d'un agent. Voir [Limites](#limites).
 
 ## Pourquoi
 
@@ -50,16 +53,26 @@ python3 cowork.py init              # nom du projet = nom du dossier (ou --name 
 |-----------------------------|------|
 | `COWORK.md`                 | **le** fichier vivant : le verrou (`LOCK`) + le journal des tours |
 | `COWORK.protocol.md`        | l'instruction partagée complète (lue une fois par chaque agent) |
-| `CLAUDE.md` / `AGENTS.md`   | ancrages canoniques — une stance est injectée en tête sans dupliquer ni écraser le contenu existant |
-| `AGENTS.override.md`        | s'il est présent, l'ancrage Codex prioritaire ; la stance y est synchronisée aussi |
+| `CLAUDE.md`, `AGENTS.md`, … | l'ancrage canonique de chaque agent actif (le couple par défaut est montré) — une strophe est injectée en tête sans dupliquer ni écraser le contenu existant ; le fichier précédent est sauvegardé dans `<ancrage>.cowork.bak` |
+| `AGENTS.override.md`        | s'il est présent, l'ancrage prioritaire de Codex ; la strophe y est synchronisée aussi |
 
 Utilisez `--lang en|fr` pour choisir la langue des fichiers générés (**anglais par
-défaut**).
+défaut**). Utilisez `--agents a,b` pour choisir le couple du relais dans le roster
+(défaut `claude,codex` ; les **deux premiers** noms sont actifs, les noms
+supplémentaires sont stockés pour le futur mode N agents).
+
+**Sous Windows ?** Aucune dépendance (stdlib uniquement) — lancez via WSL, Git Bash,
+ou `python cowork.py <cmd>` dans PowerShell. Voir [Lancer sous Windows](docs/fr/windows.md).
+
+**Depuis un fork / clone ?** CoWork tient en un fichier — hébergez-le sur n'importe quel
+Git ou GitLab : `git clone https://gitlab.example.com/you/CoWork.git`, puis
+`cp cowork.py /mon/projet/` et lancez `init` comme ci-dessus.
 
 ## Démarrage rapide
 
-Chaque agent exécute la même boucle : `wait → claim → work → append`. `<you>` est `claude`
-ou `codex` ; `<other>` est l'autre agent.
+Chaque agent exécute la même boucle : `wait → claim → work → append`. `<toi>` est ton
+propre nom d'agent et `<autre>` l'autre agent actif (les exemples ci-dessous utilisent
+le couple par défaut `claude`/`codex`).
 
 ```bash
 ./cowork.py status                # qui détient le stylo ? (non bloquant)
@@ -79,7 +92,7 @@ ou `codex` ; `<other>` est l'autre agent.
 ```
 
 **Règle d'or :** vous ne travaillez et n'écrivez **qu'après avoir acquis le stylo via `claim`**
-(`append` n'est accepté que depuis `WORKING_<you>`).
+(`append` n'est accepté que depuis `WORKING_<toi>`).
 
 ## Documentation
 
@@ -87,6 +100,7 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 
 - **Tutoriel** — [docs/fr/tutoriel.md](docs/fr/tutoriel.md) — apprenez le relais pas à pas.
 - **Guide (VS Code)** — [docs/fr/guide-vscode.md](docs/fr/guide-vscode.md) — lancez le relais avec Claude + Codex.
+- **Guide (Windows)** — [docs/fr/windows.md](docs/fr/windows.md) — lancez sous Windows (WSL / Git Bash / natif).
 - **Référence (protocole)** — [docs/fr/protocole.md](docs/fr/protocole.md) — le protocole partagé, les états et les règles.
 - **Référence (cahier des charges)** — [docs/fr/cahier-des-charges.md](docs/fr/cahier-des-charges.md) — la spécification complète.
 - **Explication (architecture)** — [docs/fr/architecture.md](docs/fr/architecture.md) — conception et fonctionnement.
@@ -94,16 +108,18 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 ## Comment ça marche
 
 CoWork stocke son état dans le bloc `LOCK` en tête de `COWORK.md`. Pour travailler, un
-agent doit d'abord **prendre le stylo** avec `claim` (état `WORKING_<you>`), une
+agent doit d'abord **prendre le stylo** avec `claim` (état `WORKING_<toi>`), une
 **acquisition exclusive** : si deux agents font `claim` en même temps, un seul gagne. Comme le
 travail n'a lieu que pendant que vous détenez le stylo et que `append` n'est accepté que depuis
-`WORKING_<you>`, les deux agents n'écrivent jamais le dépôt en concurrence. Cette
+`WORKING_<toi>`, les deux agents n'écrivent jamais le dépôt en concurrence. Cette
 règle **claim-avant-travail** est le cœur de CoWork.
 
-Les champs du verrou — `holder`, `state`, `turn`, `since`, `expires`, `note`, `lang` —
-sont un `key: value` par ligne (faciles à `grep`er). Les états sont `IDLE`,
-`WORKING_CLAUDE`, `WORKING_CODEX`, `AWAITING_CLAUDE`, `AWAITING_CODEX`, `DONE`.
-Les tours sont encadrés par des commentaires HTML `COWORK:TURN <n> <agent> BEGIN/END` (invisibles dans
+Les champs du verrou — `holder`, `state`, `agents`, `turn`, `since`, `expires`,
+`note`, `lang` — sont un `key: value` par ligne (faciles à `grep`er). `holder` est un
+agent actif ou `none` ; `agents` est le couple du relais (les 2 premiers déclarés,
+défaut `claude,codex`) ; les états sont `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE`
+(`<X>` = un agent actif, en majuscules). Les tours sont encadrés par des commentaires
+HTML `COWORK:TURN <n> <agent> BEGIN/END` (invisibles dans
 le rendu Markdown) et sont **immuables** une fois clos.
 
 ## Garanties
@@ -112,13 +128,13 @@ Vérifiées par les tests et par revue multi-agents :
 
 - **Mutex sur la fenêtre de travail** — `claim` est l'acquisition exclusive du stylo
   (deux `claim`s simultanés ⇒ un seul gagnant) ; `append` n'est accepté que depuis
-  `WORKING_<you>`. Vous ne travaillez qu'après un `claim` réussi, donc deux agents ne
+  `WORKING_<toi>`. Vous ne travaillez qu'après un `claim` réussi, donc deux agents ne
   modifient jamais le dépôt en même temps. `--to` ≠ soi-même (alternance stricte).
 - **Récupération de verrou périmé** — `claim --force` ne réclame **qu'un verrou périmé** (refusé
   sur un verrou actif) ; le détenteur peut rafraîchir son propre verrou.
 - **Garde-fous** — `release` / `done` exigent de détenir le stylo (`--force` = récupération).
 - **Concurrence sérialisée** — un verrou inter-processus `.cowork.lock` (`O_EXCL`, avec
-  un jeton d'ownership) plus des écritures atomiques (fichier temporaire unique + `os.replace`, mode
+  un jeton de propriété) plus des écritures atomiques (fichier temporaire unique + `os.replace`, mode
   préservé) ⇒ deux exécutions concurrentes de `cowork.py` ne corrompent jamais le fichier.
 - **Sûr contre l'injection** — champs sur une seule ligne (sauts de ligne et marqueurs
   réservés rejetés) ; corps des tours neutralisés contre les faux marqueurs.
@@ -128,6 +144,19 @@ Vérifiées par les tests et par revue multi-agents :
   systèmes de fichiers sensibles ou insensibles à la casse, ancrages préexistants — sans
   casse ni duplication.
 
+## Limites
+
+- **Réveiller l'UI d'un agent interactif.** `wait` bloque un *processus* jusqu'à ton
+  tour ; il ne **relance ni ne réveille** un agent tournant dans une UI interactive
+  (VS Code, …). Entre les tours, un humain relance quand même chaque agent (p. ex.
+  *« reprends CoWork »*). Une opération entièrement autonome exige une boucle **headless**
+  (`claude -p`, `codex exec`, cron) enveloppant `wait → relancer l'agent → claim` — une
+  intégration à l'hôte, pas une modification du mutex. Une notification système/webhook
+  peut *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule.
+- **Coopératif, deux agents, verrou conseillé** — voir le
+  [cahier des charges](docs/fr/cahier-des-charges.md) §8 (mutex coopératif, verrou
+  conseillé, deux agents simultanés).
+
 ## Tests
 
 Aucune dépendance Python externe (stdlib uniquement) :
@@ -136,18 +165,19 @@ Aucune dépendance Python externe (stdlib uniquement) :
 python3 -m unittest discover -s tests        # depuis la racine du dépôt
 ```
 
-**46 tests** : tests unitaires (fonctions pures) + tests de régression CLI (un par
+**73 tests** : tests unitaires (fonctions pures) + tests de régression CLI (un par
 bug corrigé, référencé `NR-n`) couvrant le modèle de claim, le mutex, la concurrence claude/codex,
-les ancrages canoniques/override, l'archive, la robustesse et la sûreté face à l'injection.
+les ancrages canoniques/override, le roster configurable, l'archive, la robustesse et la sûreté face à l'injection.
 
 ## Roadmap
 
 CoWork conserve un **mutex à stylo unique** (un seul écrivain à la fois) par
 conception — voir [architecture §1.8](docs/fr/architecture.md). Deux étapes :
 
-1. **Couple configurable** — choisir les deux agents du relais dans un **roster
-   extensible** (claude, codex, lechat, …) en restant à **2 simultanés** (degré 1).
-   Brouillon : [RFC — couple d'agents configurable](docs/fr/rfc-roster.md).
+1. **Couple configurable (livré)** — choisir les deux agents du relais dans un
+   **roster extensible** via `cowork.py init --agents a,b` ; les deux premiers
+   relaient, les noms supplémentaires sont stockés pour plus tard. Toujours
+   **2 simultanés** (degré 1). Voir [RFC — couple d'agents configurable](docs/fr/rfc-roster.md).
 2. **N agents simultanés** — vrai multi-agent (degré > 1) ; une étape distincte et
    plus lourde, avec son propre RFC futur.
 

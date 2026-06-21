@@ -24,7 +24,7 @@ infrastructure d'entreprise non pertinente ici.
 
 ### 1.1 Contexte général
 
-`cowork` est un **outil de coordination de deux agents IA** (Claude, Codex)
+`cowork` est un **outil de coordination de deux agents IA** (un couple configurable ; par défaut Claude, Codex)
 travaillant sur un même dépôt. Il matérialise un **stylo unique** : un seul agent
 écrit à la fois, l'autre attend son tour. Tout l'état de coordination vit dans un
 seul fichier versionnable `COWORK.md`. L'outil est un **script Python autonome**
@@ -38,8 +38,7 @@ dépôt. Transverse à tous les projets (livres, code, sites…).
 
 | Acteur | Type | Rôle |
 |--------|------|------|
-| `claude` | agent IA | lit `CLAUDE.md`, opère le relais côté Claude |
-| `codex` | agent IA | lit `AGENTS.md`, opère le relais côté Codex |
+| agent actif ×2 | agents IA | le couple configuré du relais (par défaut `claude`/`codex`) ; chacun lit son propre ancrage (`CLAUDE.md`, `AGENTS.md`, …) et opère le relais de son côté |
 | mainteneur | humain | déploie, arbitre, lit le journal (`COWORK.md`, git) |
 
 ### 1.3 Nature et sensibilité des données
@@ -56,7 +55,7 @@ dépôt. Transverse à tous les projets (livres, code, sites…).
 - **Un seul fichier d'état** lisible à l'œil et au `grep`, versionnable en clair.
 - **Zéro dépendance** : Python 3.8+ stdlib uniquement ; aucune installation.
 - **Portable** : tout projet, tout FS, chemins à espaces/accents.
-- **Deux agents** par conception (relais binaire claude ⇄ codex).
+- **Deux agents** par conception (couple configurable ; relais degré 1, défaut claude ⇄ codex).
 
 ### 1.5 Exigences
 
@@ -89,7 +88,7 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 | Source | Destination | Canal | Mode |
 |--------|-------------|-------|------|
 | agent | `COWORK.md` | système de fichiers local | R/W |
-| `cowork.py init` | `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (si présent), `COWORK.protocol.md` | système de fichiers local | W |
+| `cowork.py init` | l'ancrage de chaque agent actif (défaut `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (si présent), `COWORK.protocol.md` | système de fichiers local | W |
 | agent | `COWORK.archive.md` | système de fichiers local | W (append) |
 
 ### 1.8 Modèle de concurrence — un mutex, pas un sémaphore
@@ -107,7 +106,7 @@ classiques** sur **deux niveaux**.
 |-------------------|-------------|
 | **Mutex OS** (bas niveau) | `.cowork.lock` ouvert en `O_CREAT\|O_EXCL` : un vrai verrou OS qui sérialise la **section critique** = le read-modify-write de `COWORK.md`. Le mutex technique *appliqué*. |
 | **Lock applicatif possédé** (haut niveau) | l'état `WORKING_<agent>` du bloc LOCK : un verrou **nommé, avec propriétaire**, tenu pendant toute la **fenêtre de travail** (pas seulement le temps d'une commande). Le mutex *sémantique* qui protège la ressource partagée (le dépôt). |
-| **Bail / TTL** (anti-blocage) | `expires` (TTL 30 min) + jeton d'ownership : le pattern des **verrous distribués à bail** (nœuds éphémères ZooKeeper, Redlock). Si le détenteur meurt, le bail expire → `claim --force`. |
+| **Bail / TTL** (anti-blocage) | `expires` (TTL 30 min) + jeton de propriété : le pattern des **verrous distribués à bail** (nœuds éphémères ZooKeeper, Redlock). Si le détenteur meurt, le bail expire → `claim --force`. |
 | **Moniteur / variable de condition + témoin** | `wait <agent>` poll jusqu'à `AWAITING_<soi>` (une **attente de condition**) ; la passation explicite `--to <autre>` est du **token-passing** (témoin / anneau à jeton). |
 
 Deux propriétés le distinguent d'un mutex in-process strict :
@@ -152,8 +151,9 @@ agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-a
 - **Validation d'entrée** : champs mono-ligne (refus saut de ligne + marqueurs
   réservés) ; corps neutralisé (anti-injection de faux tours).
 - **Source de vérité unique** : protocole, gabarit `COWORK.md` et stanza sont des
-  constantes de `cowork.py` ; `docs/COWORK.protocol.md` en est une *génération*
-  (test de non-régression byte-à-byte `test_protocol_doc_in_sync`).
+  constantes de `cowork.py` ; `docs/en/protocol.md` et `docs/fr/protocole.md` en sont
+  une *génération* de `cowork.PROTOCOL[lang]` (test de non-régression byte-à-byte
+  `test_protocol_docs_in_sync`).
 - **Injection idempotente et prioritaire** : stanza encadrée par marqueurs
   `COWORK:STANZA`, déplacée/actualisée en tête sans duplication. Les variantes de
   casse sont normalisées vers le nom canonique sur tout FS (`git mv -f` si Git
@@ -175,7 +175,8 @@ robustesse, anti-injection, schéma LOCK). Commande :
 
 ### 2.4 Gestion de configuration, encodage, fuseaux
 
-- **Config** : aucune ; tout est embarqué. `init` ne prend que `--name` / `--force`.
+- **Config** : aucune ; tout est embarqué. `init` prend `--name` / `--agents a,b`
+  (le couple du relais) / `--lang en|fr` / `--force`.
 - **Encodage** : UTF-8 partout (lecture/écriture explicites).
 - **Fuseaux** : tous les horodatages en **UTC** ISO-8601 (`...Z`).
 - **Journalisation** : sortie standard (messages `✓`/`refus`/`…`), pas de fichier de log.
@@ -183,8 +184,11 @@ robustesse, anti-injection, schéma LOCK). Commande :
 ### 2.5 Politique de branches & versionnement
 
 Branche `dev/vX.Y.x` par sprint, merge + tag sur `main`. Le **protocole** est
-versionné (v1) : tout changement de format `LOCK`/`TURN`/marqueurs incrémente la
-version et préserve la lecture des `COWORK.md` existants.
+versionné (v1) : tout changement **cassant** du format `LOCK`/`TURN`/marqueurs
+incrémente la version et préserve la lecture des `COWORK.md` existants. Le champ roster (liste d'agents)
+`agents:` est un ajout **optionnel rétrocompatible** dans la v1 (les anciens lecteurs
+l'ignorent ; sûr pour le couple par défaut `claude,codex` — un roster personnalisé
+exige un script conscient du roster).
 
 ---
 
@@ -259,8 +263,8 @@ Supprimer `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md` et la stanza de
 
 | Niveau | Contact |
 |--------|---------|
-| Mainteneur | the repository owner |
-| Forge | Forgejo `you/CoWork` (your-forge-host) |
+| Mainteneur | le propriétaire du dépôt (voir l'hôte où vous l'avez cloné) |
+| Source | votre propre hôte Git / GitLab — fork & clone (ex. `git clone https://gitlab.example.com/you/CoWork.git`) |
 
 ---
 
