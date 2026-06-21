@@ -41,7 +41,7 @@ CLAUDE_ANCHOR = "CLAUDE.md"
 CODEX_ANCHOR = "AGENTS.md"
 CODEX_OVERRIDE = "AGENTS.override.md"
 
-CODEX_CLAUDE_BRIDGE = """## Instructions communes du projet
+BRIDGE_FR = """## Instructions communes du projet
 
 Lis et applique intégralement `CLAUDE.md`, qui contient les instructions communes
 du projet pour Claude et Codex.
@@ -50,7 +50,7 @@ du projet pour Claude et Codex.
 
 # ----------------------------------------------------------------- templates
 
-COWORK_TEMPLATE = r"""<!-- ╔════════════════════════════════════════════════════════════╗
+COWORK_FR = r"""<!-- ╔════════════════════════════════════════════════════════════╗
      ║  COWORK · relais mono-fichier Claude ⇄ Codex · protocole v1 ║
      ║  Lis COWORK.protocol.md AVANT d'écrire ici.                 ║
      ╚════════════════════════════════════════════════════════════╝ -->
@@ -64,6 +64,7 @@ COWORK_TEMPLATE = r"""<!-- ╔════════════════�
 <!-- COWORK:LOCK:BEGIN -->
 holder:   none
 state:    IDLE
+lang:     __LANG__
 turn:     0
 since:    __NOW__
 expires:  -
@@ -90,7 +91,7 @@ note:     session initialisée, aucun tour ouvert
 <!-- COWORK:TURN 0 system END -->
 """
 
-PROTOCOL_TEMPLATE = r"""# COWORK · Protocole de relais mono-fichier (v1)
+PROTOCOL_FR = r"""# COWORK · Protocole de relais mono-fichier (v1)
 
 Instruction commune à **Claude** et **Codex** pour coopérer via un seul fichier
 `COWORK.md`, en alternance stricte (mutex), avec poll périodique. Portable : ce
@@ -358,7 +359,7 @@ cowork.py init  ──▶  injecte la STANZA dans CLAUDE.md (Claude) + AGENTS.md
 Référence Codex : https://developers.openai.com/codex/guides/agents-md
 """
 
-STANZA_TEMPLATE = """{begin}
+STANZA_FR = """{begin}
 ## Co-work relais (Claude ⇄ Codex) — autonome, aucune aide humaine requise
 
 Tu es **{me}** dans ce projet. Dès qu'un `COWORK.md` est présent à la racine,
@@ -387,6 +388,497 @@ Un tour clôturé est immuable : pour réagir, ouvre le tour suivant.
 
 
 # ------------------------------------------------------------------- helpers
+
+
+PROTOCOL_EN = r"""# COWORK · Single-file relay protocol (v1)
+
+Shared instruction for **Claude** and **Codex** to cooperate through a single
+`COWORK.md` file, in strict alternation (mutex), with periodic polling. Portable:
+this protocol is identical in every project; only the title of `COWORK.md`
+changes.
+
+Read it **once at the start of a session** as soon as you see a `COWORK.md` at
+the root of a project. You are either `claude` or `codex` — identify yourself.
+
+---
+
+## 0. TL;DR — operate without human help
+
+You have just arrived in the project and you see a `COWORK.md`: here is the
+complete, copy-pasteable loop, **no other instruction is required**. `<you>` is
+`claude` or `codex` (depending on your `CLAUDE.md` / `AGENTS.md` anchor),
+`<other>` is the other agent.
+
+```bash
+# 1. Am I expected? (NON-blocking commands)
+./cowork.py status                 # read the `state` field
+./cowork.py wait <you> --once      # rc 0 = you may acquire ; rc 3 = not yet
+
+# 2. ACQUIRE the pen BEFORE working (EXCLUSIVE acquisition: when two agents
+#    try at the same time, only one succeeds):
+./cowork.py claim <you>           # rc 0 = you hold the pen ; rc != 0 = not your turn
+#    • If claim SUCCEEDS: read the `ask:` that <other> left you in the last
+#      turn (at IDLE startup / turn 0, nothing to honour), do the work in the
+#      repository, THEN record your turn and hand off:
+./cowork.py append <you> --to <other> \
+    --ask "what you expect from the other" \
+    --done "what you just did" \
+    --files file1,file2
+#    • If claim FAILS: it is not (or no longer) your turn → go back to waiting.
+
+# 3. Not your turn: touch NOTHING. Block until your turn, then resume at 2:
+./cowork.py wait <you>             # poll every ~60 s (--interval N)
+```
+
+Golden rule: **you work and write only if you have acquired the pen via
+`claim`.** `claim` is exclusive; `append` is accepted only if you hold the
+pen. Everything else in this document is just the detail of this loop.
+
+---
+
+## 1. Mental model
+
+- **A single living file**: `COWORK.md`. The entire work dialogue is there.
+- **A single pen, explicitly acquired**: to work, you **take** the pen via
+  `claim` → state `WORKING_<you>`. `claim` is **exclusive** (two agents trying
+  at the same time: only one succeeds). You modify the repository **only** while
+  you hold the pen.
+- **`append` closes your turn**: it is accepted only from `WORKING_<you>`,
+  writes the turn and hands off (`AWAITING_<other>`). No `claim` ⇒ no `append`.
+- **Strict alternation**: claude → codex → claude … Each hand-off is a numbered
+  *turn* (`TURN`), framed by `BEGIN`/`END`.
+- **Poll**: when it is not your turn, you wait (`./cowork.py wait <you>`,
+  ~60 s) then you retry `claim`.
+
+---
+
+## 2. The LOCK block (the mutex)
+
+Delimited by `<!-- COWORK:LOCK:BEGIN -->` … `<!-- COWORK:LOCK:END -->`.
+Fields (one `key: value` per line, easy to `grep`):
+
+| field     | values | meaning |
+|-----------|---------|------|
+| `holder`  | `claude` \| `codex` \| `none` | who holds the pen |
+| `state`   | `IDLE` \| `WORKING_CLAUDE` \| `WORKING_CODEX` \| `AWAITING_CLAUDE` \| `AWAITING_CODEX` \| `DONE` | current state |
+| `turn`    | integer | number of the last closed turn |
+| `since`   | ISO-8601 UTC | since when this state has lasted |
+| `expires` | ISO-8601 UTC \| `-` | anti-deadlock takeover deadline (TTL 30 min) |
+| `note`    | short text | readable memo |
+
+> `expires` carries a date **only** during `WORKING_*` (an agent is working,
+> TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
+> `DONE`): nobody holds the pen, so there is no staleness to watch.
+
+**Reading the states:**
+- `AWAITING_CLAUDE` → it is Claude's turn to play (Codex is waiting).
+- `WORKING_CODEX` → Codex holds the pen and is working (Claude waits, touches nothing).
+- `IDLE` → nobody has the hand, the first who has something to say starts.
+- `DONE` → session closed, no further relay expected.
+
+---
+
+## 3. Format of a turn
+
+```
+<!-- COWORK:TURN <n> <agent> BEGIN -->
+- from:    <agent>           # claude | codex
+- to:      <agent|none>      # to whom you hand off
+- ask:     <what you expect from the other, precise and actionable>
+- done:    <what you just did>
+- files:   <files touched, comma-separated>
+- handoff: <agent|none>      # = to ; deliberate redundancy, grep-friendly
+<blank line>
+<free body: explanations, questions, code blocks, lists>
+<!-- COWORK:TURN <n> <agent> END -->
+```
+
+Rules:
+- A **closed** turn (`END` set) is **immutable**. To react, you open the next
+  turn. Never retroactive rewriting.
+- `ask` must be actionable: the other agent must be able to start without asking
+  you again. If you expect nothing (just an FYI), put `ask: —`.
+- Keep a turn **bounded**: if it exceeds ~150 lines or several topics, split it
+  into several successive turns (one topic = one turn).
+
+---
+
+## 4. Work cycle (each agent's loop)
+
+```
+loop:
+  1. read LOCK (status / wait)
+  2. if state == AWAITING_<me> or IDLE:
+       a. CLAIM  : ./cowork.py claim <me>   → state=WORKING_<ME>, expires=now+30min
+                   EXCLUSIVE: if someone else has taken the pen in the meantime,
+                   claim FAILS → go to 3.
+       b. WORK in the repository (while you hold the pen, you alone)
+       c. APPEND  : ./cowork.py append <me> --to <other>
+                   writes my turn <turn+1>, state=AWAITING_<OTHER>
+  3. else (WORKING_<other> or AWAITING_<other>):
+       wait ~60 s (wait), go back to 1
+  4. if state == DONE: exit
+```
+
+In practice: `claim` **acquires** the pen (exclusive), `append` **closes** your
+turn and hands off, `wait` waits for your turn. The explicit acquisition before
+working is what guarantees that a single agent modifies the repository at a time.
+
+> **Concurrency model (two levels)**:
+> 1. **Transitions** serialized by an inter-process lock (`.cowork.lock`,
+>    `O_CREAT|O_EXCL`, with an ownership token): each read-modify-write of the
+>    LOCK + atomic write (unique temporary + `os.replace`) is exclusive.
+> 2. **Work window** protected by the persistent state `WORKING_<agent>`:
+>    `claim` is the only acquisition, and it fails if someone else holds or has
+>    already taken the pen. Two simultaneous `claim`s from `IDLE` ⇒ **only one
+>    succeeds**; the other must wait. Since we work only after a successful
+>    `claim`, two agents never modify the repository at the same time.
+>
+> An abandoned `.cowork.lock` (killed process) is taken over after 60 s, token
+> verified. *Limits*: the lock is **advisory** (a manual edit of `COWORK.md`
+> bypasses it); on a network FS (NFS) `O_EXCL`/`rename` are less reliable —
+> cowork targets a repository on local disk. See also §0/§4 (mandatory claim).
+
+---
+
+## 5. Anti-deadlock (stale lock)
+
+If the other agent crashes while holding the pen, the lock would stay stuck.
+Guardrail:
+- on CLAIM, we set `expires = now + 30 min`;
+- if you see `state == WORKING_<other>` **and** `now > expires`, the lock is
+  **stale**: take it over with `./cowork.py claim <you> --force`, then open a
+  turn noting the takeover (`done: takeover after stale lock from <other>`);
+- **the tool enforces the rule**: `--force` is **refused** on a still-valid
+  lock. You therefore cannot steal the pen from an active agent (this is
+  intentional);
+- you can **refresh your own** lock before it expires: `./cowork.py claim
+  <you>` when you already hold it resets `expires` to +30 min;
+- `release` and `done` act only if **you** hold the pen (or if nobody holds it);
+  `--force` overrides, reserved for recovery.
+
+---
+
+## 6. Keeping it bounded over time (bounded length)
+
+`COWORK.md` must not grow indefinitely:
+- keep in `COWORK.md` the `LOCK` block + the **~6 last turns**;
+- `./cowork.py archive --keep 6` moves the older turns (already closed) to
+  `COWORK.archive.md` (append), without ever touching the lock or the last open
+  turn.
+- The archive can be consulted but is **never** re-read by the loop: only the
+  living part of `COWORK.md` drives the relay.
+
+---
+
+## 7. The `cowork.py` tool
+
+```
+./cowork.py init [--name PROJECT] [--force]       # (re)generates the kit in THIS folder
+./cowork.py status                                # lock + last turn (NON-blocking)
+./cowork.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
+./cowork.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
+                                                  #   IDLE / your own lock ; --force = stale lock ONLY
+./cowork.py append <agent> --to <other> \
+     --ask "..." --done "..." [--files a,b] [--body file.md|-]   # closes your turn + hands off
+./cowork.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
+./cowork.py done <agent> [--force]                 # close the session (state=DONE)
+./cowork.py archive [--keep N]                     # purge old closed turns (never turn #0)
+```
+
+- **`claim` first**: you must hold the pen (`WORKING_<you>`) to `append`.
+  `claim` is **exclusive** (a single winner if two agents try together).
+- `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
+  hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
+  without `--body`, the turn has only the header.
+- `--to` must target **the other** agent (self-hand-off refused: strict alternation).
+- **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
+  **without** `--once` blocks until your turn — do not use it if you must return
+  control to your loop in the meantime.
+
+---
+
+## 8. Adoption by any project (portability)
+
+`cowork.py` is **self-sufficient**: it embeds this protocol, the `COWORK.md`
+template and the anchors. To adopt the relay in a project:
+
+```bash
+cp /path/to/cowork.py .          # copy the only file needed
+./cowork.py init                 # project name = folder name (otherwise --name)
+```
+
+`init`:
+- writes `COWORK.protocol.md` (this document) and `COWORK.md` (a fresh IDLE
+  lock); `COWORK.md` is **not** overwritten if it already exists (except with
+  `--force`) → the state of the ongoing relay is preserved;
+- injects at the **top** a "Co-work relay" block into `CLAUDE.md` and
+  `AGENTS.md` (created if missing), between `COWORK:STANZA` markers →
+  **idempotent** re-injection (moves/updates the block without duplicating,
+  existing content preserved);
+- if `CLAUDE.md` existed but no Codex instruction (`AGENTS.md` or
+  `AGENTS.override.md`) existed, automatically creates in `AGENTS.md` a bridge
+  asking Codex to read the shared instructions in `CLAUDE.md`. A pre-existing
+  Codex anchor is never completed or replaced automatically;
+- renames a single `claude.md`/`agents.md` variant to the canonical
+  auto-loaded name, including on a case-insensitive FS. Several coexisting
+  variants are refused rather than silently merged. If Git is available and the
+  variant is tracked, it uses `git mv -f` to also update the index;
+- if `AGENTS.override.md` exists, it also synchronizes the stanza there: Codex
+  loads this override instead of `AGENTS.md` in the same folder.
+
+### Bootstrap / uptake by the agents
+
+cowork is **passive**: it never "calls" any AI. It relies on the convention of
+each host tool — **Claude reads `CLAUDE.md`, Codex reads `AGENTS.md`** at
+session/execution startup. The bootstrap chain is therefore:
+
+```
+cowork.py init  ──▶  injects the STANZA into CLAUDE.md (Claude) + AGENTS.md (Codex)
+                          │
+   each AI loads its anchor at startup ──▶ reads the stanza ──▶
+   "if a COWORK.md exists, apply COWORK.protocol.md (claim → work → append)"
+```
+
+- **After `init`**: start a new session/execution of the agent. A session
+  already open has generally built its instruction chain before the injection.
+- **Interactive Codex or `codex exec`**: `AGENTS.md` is loaded if the command
+  starts from the project root or one of its subfolders. *Headless* mode is not
+  in itself a limit; a cron/CI launched outside the project, however, does not
+  discover the anchor.
+- **Codex override**: `AGENTS.override.md` masks `AGENTS.md` in the same folder;
+  `init` therefore injects the stanza into both when it is present.
+- **Codex size**: Codex stacks the instruction files up to a *combined* ceiling
+  (`project_doc_max_bytes`, 32 KiB by default) and truncates the file that
+  overflows to the remaining byte count. Putting the stanza at the top thus
+  keeps it in priority (and a file closer to the cwd takes precedence);
+  nevertheless keep the anchors **lightweight**.
+- **General limit**: cowork cannot force an AI to read anything. Without a
+  project root/context, point the agent explicitly to `COWORK.protocol.md`.
+
+Codex reference: https://developers.openai.com/codex/guides/agents-md
+"""
+
+STANZA_EN = """{begin}
+## Co-work relay (Claude ⇄ Codex) — autonomous, no human help required
+
+You are **{me}** in this project. As soon as a `COWORK.md` is present at the root,
+it is your source of coordination with **{other}**: apply `COWORK.protocol.md`
+(read it once, see its §0) BEFORE any other work. **You only work and write if
+you have acquired the pen via `claim`.**
+
+```bash
+./cowork.py status                # who holds the pen? (non-blocking)
+./cowork.py wait {me} --once      # rc 0 = you may acquire ; rc 3 = not yet
+```
+
+- **Acquire first** (`state == AWAITING_{ME}` or `IDLE`):
+  `./cowork.py claim {me}` — **exclusive**: if {other} has already taken the pen, it
+  fails → go back to waiting. If it succeeds, you hold the pen (`WORKING_{ME}`).
+- **Then work and close your turn**: read the `ask:` that {other} left you
+  (at IDLE startup, nothing to honor), do the work, then:
+  `./cowork.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+- **Not your turn**: touch nothing; `./cowork.py wait {me}` blocks until your
+  turn (poll ~60 s), then retry `claim`.
+- **{other}'s lock is stale** (`WORKING_{OTHER}` + `now > expires`):
+  `./cowork.py claim {me} --force`.
+
+A closed turn is immutable: to react, open the next turn.
+{end}"""
+
+COWORK_EN = r"""<!-- ╔════════════════════════════════════════════════════════════╗
+     ║  COWORK · single-file relay Claude ⇄ Codex · protocol v1   ║
+     ║  Read COWORK.protocol.md BEFORE writing here.              ║
+     ╚════════════════════════════════════════════════════════════╝ -->
+
+# COWORK · __PROJECT__
+
+> Shared work file. **Only one agent writes at a time.** The lock is the
+> `LOCK` block below. Only write if `state == AWAITING_<you>`. Details →
+> [COWORK.protocol.md](COWORK.protocol.md). Tool → `./cowork.py status`.
+
+<!-- COWORK:LOCK:BEGIN -->
+holder:   none
+state:    IDLE
+lang:     __LANG__
+turn:     0
+since:    __NOW__
+expires:  -
+note:     session initialized, no turn opened
+<!-- COWORK:LOCK:END -->
+
+---
+
+## Turn log
+
+<!-- Turns stack below, from oldest to most recent.                          -->
+<!-- Turn format: see COWORK.protocol.md §3. Never edit a turn that is        -->
+<!-- already closed (END set): add a new turn instead.                        -->
+
+<!-- COWORK:TURN 0 system BEGIN -->
+- from:    system
+- to:      none
+- ask:     —
+- done:    Relay initialization. The first agent that starts runs
+           `./cowork.py claim claude` (or `codex`), works, then
+           `./cowork.py append claude --to codex --ask "..." --done "..."`.
+- files:   COWORK.md, COWORK.protocol.md, cowork.py
+- handoff: none
+<!-- COWORK:TURN 0 system END -->
+"""
+
+BRIDGE_EN = """## Shared project instructions
+
+Read and fully apply `CLAUDE.md`, which contains the shared project instructions
+for Claude and Codex.
+"""
+
+PROTOCOL = {"en": PROTOCOL_EN, "fr": PROTOCOL_FR}
+STANZA = {"en": STANZA_EN, "fr": STANZA_FR}
+COWORK_TPL = {"en": COWORK_EN, "fr": COWORK_FR}
+BRIDGE = {"en": BRIDGE_EN, "fr": BRIDGE_FR}
+
+
+# ----------------------------------------------------------------- i18n (en/fr)
+# Langue résolue : --lang (init) > $COWORK_LANG > champ `lang` du LOCK > en.
+
+def resolve_lang(explicit=None, lk=None):
+    if explicit in ("en", "fr"):
+        return explicit
+    env = os.environ.get("COWORK_LANG", "")
+    if env in ("en", "fr"):
+        return env
+    if lk and lk.get("lang") in ("en", "fr"):
+        return lk["lang"]
+    return "en"
+
+
+LANG = resolve_lang()  # baseline (raffinée par load_or_die / cmd_init)
+
+MESSAGES = {
+    "en": {
+        "lock_busy": "internal lock busy (another cowork.py is writing) — retry.",
+        "cowork_missing": "COWORK.md not found — run `./cowork.py init` first.",
+        "lock_missing": "COWORK.md corrupted: LOCK block not found — `./cowork.py init --force` to reset the lock.",
+        "lock_invalid": "COWORK.md corrupted (invalid LOCK: {errs}) — `./cowork.py init --force` to repair.",
+        "field_newline": "refused: {label} must not contain a line break.",
+        "field_reserved": "refused: {label} contains a reserved marker ({marker}).",
+        "bad_agent": "invalid agent: {a} (expected: {agents})",
+        "anchor_ambiguous": "ambiguous anchors for {canonical}: {others} — consolidate them before `cowork.py init`.",
+        "anchor_git_fail": "could not rename {actual} via Git to {canonical}: {detail}",
+        "git_unknown_err": "unknown git error",
+        "migrated_git": "{actual} → {canonical}: renamed via Git for auto-loading",
+        "migrated_fs": "{actual} → {canonical}: renamed for auto-loading",
+        "stanza_incomplete": "{filename}: incomplete COWORK stanza — fix the markers before init.",
+        "stanza_updated": "stanza refreshed at top",
+        "stanza_added": "stanza added at top",
+        "file_created": "file created",
+        "anchor_result": "{filename}: {action}",
+        "proto_written": "COWORK.protocol.md: written",
+        "proto_uptodate": "COWORK.protocol.md: already up to date",
+        "cowork_preserved": "COWORK.md: preserved (already exists; --force to reset)",
+        "cowork_written": "COWORK.md: written (project “{name}”, lock IDLE)",
+        "bridge_added": "AGENTS.md: automatic bridge to the shared instructions in CLAUDE.md",
+        "override_synced": "{filename}: Codex override active, stanza synced",
+        "init_header": "✓ cowork init — project “{name}” in {here}",
+        "init_start": "Start: ./cowork.py claim claude  (then work, then ./cowork.py append claude --to codex --ask \"…\" --done \"…\")",
+        "init_bootstrap": "Bootstrap: start a new Claude and Codex session/run to reload the anchors.",
+        "status_stale": "  ⚠ stale lock — reclaim with: claim <you> --force",
+        "last_turn": "── last turn: #{n} by {who}",
+        "wait_your_turn": "✓ your turn ({st}) — `./cowork.py claim {agent}` to acquire the pen.",
+        "wait_free": "✓ free ({st}) — `./cowork.py claim {agent}` to acquire the pen.",
+        "wait_done": "session DONE — nothing to wait for.",
+        "wait_stale": "⚠ {other}'s lock is stale — claim --force possible.",
+        "wait_not_yet": "… not your turn: {st} (holder={holder}).",
+        "wait_poll": "… {st} (holder={holder}), re-checking in {interval}s",
+        "bad_interval": "--interval must be an integer >= 1.",
+        "claim_active": "refused: {holder}'s lock is still valid (expires {expires}). --force only reclaims a stale lock (protocol §5).",
+        "claim_refused": "refused: state={st}, holder={holder} — it is not your turn.",
+        "note_reclaim": "reclaimed after {holder}'s stale lock",
+        "note_holds": "{agent} holds the pen",
+        "claim_ok": "✓ pen taken by {agent} (expires {expires}{suffix}).",
+        "claim_reclaim_suffix": " — stale lock reclaimed",
+        "body_error": "--body: {e}",
+        "to_self_append": "refused: --to must target the other agent (strict alternation, protocol §1).",
+        "append_need_claim": "refused: you do not hold the pen (state={st}) — run `./cowork.py claim {agent}` first (exclusive acquisition), then append.",
+        "note_turn": "turn {n} posted by {agent}, awaiting {to}",
+        "append_ok": "✓ turn {n} written by {agent}, handed off to {to}.",
+        "to_self": "refused: --to must target the other agent.",
+        "not_holder_release": "refused: {holder} holds the pen, not you (--force to override).",
+        "note_release": "handed off to {to} by {agent} (no turn)",
+        "release_ok": "✓ handed off to {to}.",
+        "not_holder_done": "refused: {holder} holds the pen, not you (--force to close anyway).",
+        "note_done": "session closed by {agent}",
+        "done_ok": "✓ session DONE.",
+        "archive_none": "nothing to archive ({n} archivable turn(s), keep={keep}).",
+        "archive_header": "# COWORK · turn archive\n\n",
+        "archive_ok": "✓ {n} turn(s) archived → {file} (kept: {keep}).",
+    },
+    "fr": {
+        "lock_busy": "verrou interne occupé (un autre cowork.py écrit) — réessaie.",
+        "cowork_missing": "COWORK.md introuvable — lance d'abord `./cowork.py init`.",
+        "lock_missing": "COWORK.md corrompu : bloc LOCK introuvable — `./cowork.py init --force` pour réinitialiser le verrou.",
+        "lock_invalid": "COWORK.md corrompu (LOCK invalide : {errs}) — `./cowork.py init --force` pour réparer.",
+        "field_newline": "refus: {label} ne doit pas contenir de saut de ligne.",
+        "field_reserved": "refus: {label} contient un marqueur réservé ({marker}).",
+        "bad_agent": "agent invalide: {a} (attendu: {agents})",
+        "anchor_ambiguous": "ancrages ambigus pour {canonical}: {others} — consolide-les avant `cowork.py init`.",
+        "anchor_git_fail": "impossible de renommer {actual} via Git vers {canonical}: {detail}",
+        "git_unknown_err": "erreur git inconnue",
+        "migrated_git": "{actual} → {canonical}: renommé via Git pour auto-chargement",
+        "migrated_fs": "{actual} → {canonical}: renommé pour auto-chargement",
+        "stanza_incomplete": "{filename}: stanza COWORK incomplète — répare les marqueurs avant init.",
+        "stanza_updated": "stanza actualisée en tête",
+        "stanza_added": "stanza ajoutée en tête",
+        "file_created": "fichier créé",
+        "anchor_result": "{filename}: {action}",
+        "proto_written": "COWORK.protocol.md: écrit",
+        "proto_uptodate": "COWORK.protocol.md: déjà à jour",
+        "cowork_preserved": "COWORK.md: préservé (existe déjà ; --force pour réinitialiser)",
+        "cowork_written": "COWORK.md: écrit (projet « {name} », verrou IDLE)",
+        "bridge_added": "AGENTS.md: pont automatique vers les instructions communes de CLAUDE.md",
+        "override_synced": "{filename}: override Codex actif, stanza synchronisée",
+        "init_header": "✓ cowork init — projet « {name} » dans {here}",
+        "init_start": "Démarrer : ./cowork.py claim claude  (puis travaille, puis ./cowork.py append claude --to codex --ask \"…\" --done \"…\")",
+        "init_bootstrap": "Amorçage : démarre une nouvelle session/exécution de Claude et Codex pour recharger les ancrages.",
+        "status_stale": "  ⚠ verrou PERIME — reprenable avec: claim <toi> --force",
+        "last_turn": "── dernier tour: #{n} par {who}",
+        "wait_your_turn": "✓ à toi ({st}) — `./cowork.py claim {agent}` pour acquérir le stylo.",
+        "wait_free": "✓ libre ({st}) — `./cowork.py claim {agent}` pour acquérir le stylo.",
+        "wait_done": "session DONE — rien a attendre.",
+        "wait_stale": "⚠ verrou de {other} PERIME — claim --force possible.",
+        "wait_not_yet": "… pas ton tour: {st} (holder={holder}).",
+        "wait_poll": "… {st} (holder={holder}), nouvelle verif dans {interval}s",
+        "bad_interval": "--interval doit être un entier >= 1.",
+        "claim_active": "refus: verrou de {holder} encore valide (expire {expires}). --force ne reprend qu'un verrou périmé (protocole §5).",
+        "claim_refused": "refus: state={st}, holder={holder} — ce n'est pas ton tour.",
+        "note_reclaim": "reprise après lock périmé de {holder}",
+        "note_holds": "{agent} tient le stylo",
+        "claim_ok": "✓ verrou pris par {agent} (expire {expires}{suffix}).",
+        "claim_reclaim_suffix": " — reprise lock périmé",
+        "body_error": "--body: {e}",
+        "to_self_append": "refus: --to doit viser l'autre agent (alternance stricte, protocole §1).",
+        "append_need_claim": "refus: tu ne tiens pas le stylo (state={st}) — fais d'abord `./cowork.py claim {agent}` (acquisition exclusive), puis append.",
+        "note_turn": "tour {n} pose par {agent}, en attente de {to}",
+        "append_ok": "✓ tour {n} ecrit par {agent}, main passee a {to}.",
+        "to_self": "refus: --to doit viser l'autre agent.",
+        "not_holder_release": "refus: {holder} tient le stylo, pas toi (--force pour outrepasser).",
+        "note_release": "main passee a {to} par {agent} (sans tour)",
+        "release_ok": "✓ main passee a {to}.",
+        "not_holder_done": "refus: {holder} tient le stylo, pas toi (--force pour clore quand même).",
+        "note_done": "session close par {agent}",
+        "done_ok": "✓ session DONE.",
+        "archive_none": "rien a archiver ({n} tour(s) archivable(s), keep={keep}).",
+        "archive_header": "# COWORK · archive des tours\n\n",
+        "archive_ok": "✓ {n} tour(s) archive(s) → {file} (gardes: {keep}).",
+    },
+}
+
+
+def tr(key, **kw):
+    cat = MESSAGES.get(LANG, MESSAGES["en"])
+    s = cat.get(key) or MESSAGES["en"].get(key, key)
+    return s.format(**kw) if kw else s
 
 def now():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
@@ -471,7 +963,7 @@ def file_lock(timeout=LOCK_TIMEOUT):
             except OSError:
                 pass
             if time.monotonic() - start > timeout:
-                sys.exit("verrou interne occupé (un autre cowork.py écrit) — réessaie.")
+                sys.exit(tr("lock_busy"))
             time.sleep(0.05)
     try:
         yield
@@ -488,7 +980,7 @@ def file_lock(timeout=LOCK_TIMEOUT):
 
 def require_cowork():
     if not os.path.exists(COWORK):
-        sys.exit("COWORK.md introuvable — lance d'abord `./cowork.py init`.")
+        sys.exit(tr("cowork_missing"))
 
 
 VALID_STATES = ("IDLE", "DONE", "WORKING_CLAUDE", "WORKING_CODEX",
@@ -501,8 +993,7 @@ def load_or_die():
     require_cowork()
     text = read()
     if LOCK_BEGIN not in text or LOCK_END not in text:
-        sys.exit("COWORK.md corrompu : bloc LOCK introuvable — "
-                 "`./cowork.py init --force` pour réinitialiser le verrou.")
+        sys.exit(tr("lock_missing"))
     lk = get_lock(text)
     errs = []
     if lk.get("state") not in VALID_STATES:
@@ -511,9 +1002,11 @@ def load_or_die():
         errs.append(f"turn={lk.get('turn')!r}")
     if lk.get("holder") not in ("claude", "codex", "none"):
         errs.append(f"holder={lk.get('holder')!r}")
+    if lk.get("lang") not in (None, "en", "fr"):
+        errs.append(f"lang={lk.get('lang')!r}")
     if errs:
-        sys.exit("COWORK.md corrompu (LOCK invalide : " + ", ".join(errs) + ") — "
-                 "`./cowork.py init --force` pour réparer.")
+        sys.exit(tr("lock_invalid", errs=", ".join(errs)))
+    globals()["LANG"] = resolve_lang(lk=lk)
     return text
 
 
@@ -521,10 +1014,10 @@ def clean_field(label, val):
     """Champ mono-ligne : refuse sauts de ligne et marqueurs réservés (anti-injection)."""
     val = (val or "").strip()
     if "\n" in val or "\r" in val:
-        sys.exit(f"refus: {label} ne doit pas contenir de saut de ligne.")
+        sys.exit(tr("field_newline", label=label))
     for r in RESERVED:
         if r in val:
-            sys.exit(f"refus: {label} contient un marqueur réservé ({r}).")
+            sys.exit(tr("field_reserved", label=label, marker=r))
     return val
 
 
@@ -562,7 +1055,7 @@ def other(agent):
 
 def need_agent(a):
     if a not in AGENTS:
-        sys.exit(f"agent invalide: {a!r} (attendu: {' | '.join(AGENTS)})")
+        sys.exit(tr("bad_agent", a=repr(a), agents=" | ".join(AGENTS)))
     return a
 
 
@@ -586,15 +1079,13 @@ def ensure_canonical_anchor(canonical, create=True):
     if canonical in variants:
         if len(variants) > 1:
             others = ", ".join(repr(v) for v in variants if v != canonical)
-            sys.exit(f"ancrages ambigus: {canonical!r} coexiste avec {others} — "
-                     "consolide-les avant `cowork.py init`.")
+            sys.exit(tr("anchor_ambiguous", canonical=repr(canonical), others=others))
         return canonical, ""
     if not variants:
         return (canonical, "") if create else (None, "")
     if len(variants) > 1:
         names = ", ".join(repr(v) for v in variants)
-        sys.exit(f"ancrages ambigus pour {canonical!r}: {names} — "
-                 "consolide-les avant `cowork.py init`.")
+        sys.exit(tr("anchor_ambiguous", canonical=repr(canonical), others=names))
 
     actual = variants[0]
     actual_path = os.path.join(HERE, actual)
@@ -621,9 +1112,9 @@ def ensure_canonical_anchor(canonical, create=True):
         )
         if moved.returncode != 0:
             detail = (moved.stderr or moved.stdout).strip()
-            sys.exit(f"impossible de renommer {actual!r} via Git vers {canonical!r}: "
-                     f"{detail or 'erreur git inconnue'}")
-        return canonical, f"{actual} → {canonical}: renommé via Git pour auto-chargement"
+            sys.exit(tr("anchor_git_fail", actual=repr(actual), canonical=repr(canonical),
+                        detail=detail or tr("git_unknown_err")))
+        return canonical, tr("migrated_git", actual=actual, canonical=canonical)
 
     try:
         same_file = os.path.exists(canonical_path) and os.path.samefile(actual_path, canonical_path)
@@ -644,12 +1135,12 @@ def ensure_canonical_anchor(canonical, create=True):
             raise
     else:
         os.replace(actual_path, canonical_path)
-    return canonical, f"{actual} → {canonical}: renommé pour auto-chargement"
+    return canonical, tr("migrated_fs", actual=actual, canonical=canonical)
 
 
 def stanza_for(me):
     o = other(me)
-    return STANZA_TEMPLATE.format(
+    return STANZA[LANG].format(
         begin=STANZA_BEGIN, end=STANZA_END,
         me=me, ME=me.upper(), other=o, OTHER=o.upper(),
     )
@@ -674,7 +1165,7 @@ def inject_anchor(filename, me, initial_content=""):
         has_begin = STANZA_BEGIN in cur
         has_end = STANZA_END in cur
         if has_begin != has_end:
-            sys.exit(f"{filename}: stanza COWORK incomplète — répare les marqueurs avant init.")
+            sys.exit(tr("stanza_incomplete", filename=filename))
         if has_begin:
             # Retirer toute ancienne stanza, même placée en fin de fichier. La
             # version courante est réinsérée en tête pour rester prioritaire si
@@ -684,10 +1175,10 @@ def inject_anchor(filename, me, initial_content=""):
                 re.DOTALL,
             )
             remainder = pat.sub("", cur).lstrip("\n")
-            action = "stanza actualisée en tête"
+            action = tr("stanza_updated")
         else:
             remainder = cur
-            action = "stanza ajoutée en tête"
+            action = tr("stanza_added")
         new = block + "\n"
         if remainder:
             new += "\n" + remainder
@@ -697,13 +1188,14 @@ def inject_anchor(filename, me, initial_content=""):
         new = block + "\n"
         if initial_content:
             new += "\n" + initial_content.rstrip() + "\n"
-        action = "fichier créé"
+        action = tr("file_created")
     write(new, path)
-    return f"{filename}: {action}"
+    return tr("anchor_result", filename=filename, action=action)
 
 
 def cmd_init(args):
-    name = args.name or os.path.basename(HERE) or "projet"
+    globals()["LANG"] = resolve_lang(explicit=getattr(args, "lang", "") or None)
+    name = args.name or os.path.basename(HERE) or "project"
     results = []
 
     with file_lock():
@@ -716,19 +1208,20 @@ def cmd_init(args):
         )
 
         # protocole : source canonique, (ré)écrit seulement s'il manque ou diffère
-        if not os.path.exists(PROTO) or read(PROTO) != PROTOCOL_TEMPLATE:
-            write(PROTOCOL_TEMPLATE, PROTO)
-            results.append("COWORK.protocol.md: écrit")
+        if not os.path.exists(PROTO) or read(PROTO) != PROTOCOL[LANG]:
+            write(PROTOCOL[LANG], PROTO)
+            results.append(tr("proto_written"))
         else:
-            results.append("COWORK.protocol.md: déjà à jour")
+            results.append(tr("proto_uptodate"))
 
         # cowork.md : préservé s'il existe (état du relais en cours), sauf --force
         if os.path.exists(COWORK) and not args.force:
-            results.append("COWORK.md: préservé (existe déjà ; --force pour réinitialiser)")
+            results.append(tr("cowork_preserved"))
         else:
-            text = COWORK_TEMPLATE.replace("__PROJECT__", name).replace("__NOW__", iso(now()))
+            text = (COWORK_TPL[LANG].replace("__PROJECT__", name)
+                    .replace("__NOW__", iso(now())).replace("__LANG__", LANG))
             write(text, COWORK)
-            results.append(f"COWORK.md: écrit (projet « {name} », verrou IDLE)")
+            results.append(tr("cowork_written", name=name))
 
         # Ancrages canoniques. AGENTS.override.md masque AGENTS.md dans Codex :
         # s'il existe, on injecte dans les deux afin que la stanza survive aussi
@@ -742,7 +1235,7 @@ def cmd_init(args):
         if migration:
             results.append(migration)
         codex_initial_content = (
-            CODEX_CLAUDE_BRIDGE
+            BRIDGE[LANG]
             if had_claude_anchor and not had_codex_anchor
             else ""
         )
@@ -750,24 +1243,20 @@ def cmd_init(args):
             codex_anchor, "codex", initial_content=codex_initial_content
         ))
         if codex_initial_content:
-            results.append(
-                "AGENTS.md: pont automatique vers les instructions communes de CLAUDE.md"
-            )
+            results.append(tr("bridge_added"))
 
         codex_override, migration = ensure_canonical_anchor(CODEX_OVERRIDE, create=False)
         if migration:
             results.append(migration)
         if codex_override:
             results.append(inject_anchor(codex_override, "codex"))
-            results.append(f"{codex_override}: override Codex actif, stanza synchronisée")
+            results.append(tr("override_synced", filename=codex_override))
 
-    print(f"✓ cowork init — projet « {name} » dans {HERE}")
+    print(tr("init_header", name=name, here=HERE))
     for r in results:
         print(f"  • {r}")
-    print("Démarrer : ./cowork.py claim claude  (puis travaille, puis "
-          "./cowork.py append claude --to codex --ask \"…\" --done \"…\")")
-    print("Amorçage : démarre une nouvelle session/exécution de Claude et Codex "
-          "pour recharger les ancrages.")
+    print(tr("init_start"))
+    print(tr("init_bootstrap"))
     return 0
 
 
@@ -783,40 +1272,40 @@ def cmd_status(args):
         and now() > exp
     )
     print("── LOCK ───────────────────────────────")
-    for k in ("holder", "state", "turn", "since", "expires", "note"):
+    for k in ("holder", "state", "lang", "turn", "since", "expires", "note"):
         print(f"  {k:<8} {lk.get(k, '')}")
     if stale:
-        print("  ⚠ verrou PERIME — reprenable avec: claim <toi> --force")
+        print(tr("status_stale"))
     turns = re.findall(r"COWORK:TURN (\d+) (\w+) BEGIN", text)
     if turns:
         n, who = turns[-1]
-        print(f"── dernier tour: #{n} par {who}")
+        print(tr("last_turn", n=n, who=who))
     return 0
 
 
 def cmd_wait(args):
     agent = need_agent(args.agent)
     if not args.once and args.interval < 1:
-        sys.exit("--interval doit être un entier >= 1.")
+        sys.exit(tr("bad_interval"))
     target = f"AWAITING_{agent.upper()}"
     while True:
         lk = get_lock(load_or_die())
         st = lk.get("state", "")
         if st in (target, "IDLE"):
-            hint = "à toi" if st == target else "libre"
-            print(f"✓ {hint} ({st}) — `./cowork.py claim {agent}` pour acquérir le stylo.")
+            key = "wait_your_turn" if st == target else "wait_free"
+            print(tr(key, st=st, agent=agent))
             return 0
         if st == "DONE":
-            print("session DONE — rien a attendre.")
+            print(tr("wait_done"))
             return 0
         exp = parse_iso(lk.get("expires"))
         if st == f"WORKING_{other(agent).upper()}" and exp and now() > exp:
-            print(f"⚠ verrou de {other(agent)} PERIME — claim --force possible.")
+            print(tr("wait_stale", other=other(agent)))
             return 0
         if args.once:  # poll unique, non bloquant : rc=3 = pas (encore) ton tour
-            print(f"… pas ton tour: {st} (holder={lk.get('holder')}).")
+            print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
             return 3
-        print(f"… {st} (holder={lk.get('holder')}), nouvelle verif dans {args.interval}s")
+        print(tr("wait_poll", st=st, holder=lk.get("holder"), interval=args.interval))
         time.sleep(args.interval)
 
 
@@ -833,9 +1322,8 @@ def cmd_claim(args):
         mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")
         if not (mine or (args.force and stale)):
             if args.force and st.startswith("WORKING_"):
-                sys.exit(f"refus: verrou de {holder} encore valide (expire {lk.get('expires')}). "
-                         f"--force ne reprend qu'un verrou périmé (protocole §5).")
-            sys.exit(f"refus: state={st}, holder={holder} — ce n'est pas ton tour.")
+                sys.exit(tr("claim_active", holder=holder, expires=lk.get("expires")))
+            sys.exit(tr("claim_refused", st=st, holder=holder))
         reclaim = args.force and stale and holder not in (agent, "none")
         t = now()
         lk.update(
@@ -843,12 +1331,12 @@ def cmd_claim(args):
             state=f"WORKING_{agent.upper()}",
             since=iso(t),
             expires=iso(t + dt.timedelta(minutes=TTL_MIN)),
-            note=(f"reprise après lock périmé de {holder}" if reclaim
-                  else f"{agent} tient le stylo"),
+            note=(tr("note_reclaim", holder=holder) if reclaim
+                  else tr("note_holds", agent=agent)),
         )
         write(set_lock(text, lk))
-    suffix = " — reprise lock périmé" if reclaim else ""
-    print(f"✓ verrou pris par {agent} (expire {lk['expires']}{suffix}).")
+    suffix = tr("claim_reclaim_suffix") if reclaim else ""
+    print(tr("claim_ok", agent=agent, expires=lk["expires"], suffix=suffix))
     return 0
 
 
@@ -861,14 +1349,14 @@ def _read_body(spec):
         with open(spec, encoding="utf-8") as f:
             return f.read().rstrip("\n")
     except OSError as e:
-        sys.exit(f"--body: {e}")
+        sys.exit(tr("body_error", e=e))
 
 
 def cmd_append(args):
     agent = need_agent(args.agent)
     to = need_agent(args.to)
     if to == agent:
-        sys.exit("refus: --to doit viser l'autre agent (alternance stricte, protocole §1).")
+        sys.exit(tr("to_self_append"))
     # validation/lecture hors section critique (stdin peut bloquer)
     ask = clean_field("--ask", args.ask) or "—"
     done = clean_field("--done", args.done) or "—"
@@ -883,8 +1371,7 @@ def cmd_append(args):
         # C'est ce qui garantit l'exclusivité de la FENÊTRE DE TRAVAIL, pas seulement
         # de l'écriture du journal : on ne peut pas travailler+append depuis IDLE.
         if st != f"WORKING_{agent.upper()}":
-            sys.exit(f"refus: tu ne tiens pas le stylo (state={st}) — fais d'abord "
-                     f"`./cowork.py claim {agent}` (acquisition exclusive), puis append.")
+            sys.exit(tr("append_need_claim", st=st, agent=agent))
         n = int(lk.get("turn", "0")) + 1
         block = (
             f"<!-- COWORK:TURN {n} {agent} BEGIN -->\n"
@@ -909,10 +1396,10 @@ def cmd_append(args):
             turn=str(n),
             since=iso(t),
             expires="-",
-            note=f"tour {n} pose par {agent}, en attente de {to}",
+            note=tr("note_turn", n=n, agent=agent, to=to),
         )
         write(set_lock(text, lk))
-    print(f"✓ tour {n} ecrit par {agent}, main passee a {to}.")
+    print(tr("append_ok", n=n, agent=agent, to=to))
     return 0
 
 
@@ -920,21 +1407,21 @@ def cmd_release(args):
     agent = need_agent(args.agent)
     to = need_agent(args.to)
     if to == agent:
-        sys.exit("refus: --to doit viser l'autre agent.")
+        sys.exit(tr("to_self"))
     with file_lock():
         text = load_or_die()
         lk = get_lock(text)
         holder = lk.get("holder", "none")
         if holder not in (agent, "none") and not args.force:
-            sys.exit(f"refus: {holder} tient le stylo, pas toi (--force pour outrepasser).")
+            sys.exit(tr("not_holder_release", holder=holder))
         t = now()
         lk.update(
             holder=to, state=f"AWAITING_{to.upper()}",
             since=iso(t), expires="-",
-            note=f"main passee a {to} par {agent} (sans tour)",
+            note=tr("note_release", to=to, agent=agent),
         )
         write(set_lock(text, lk))
-    print(f"✓ main passee a {to}.")
+    print(tr("release_ok", to=to))
     return 0
 
 
@@ -945,12 +1432,12 @@ def cmd_done(args):
         lk = get_lock(text)
         holder = lk.get("holder", "none")
         if holder not in (agent, "none") and not args.force:
-            sys.exit(f"refus: {holder} tient le stylo, pas toi (--force pour clore quand même).")
+            sys.exit(tr("not_holder_done", holder=holder))
         t = now()
         lk.update(holder="none", state="DONE", since=iso(t), expires="-",
-                  note=f"session close par {agent}")
+                  note=tr("note_done", agent=agent))
         write(set_lock(text, lk))
-    print("✓ session DONE.")
+    print(tr("done_ok"))
     return 0
 
 
@@ -965,7 +1452,7 @@ def cmd_archive(args):
         # le tour d'amorçage #0 (system) reste toujours dans le fichier vivant
         matches = [m for m in pat.finditer(text) if m.group(1) != "0"]
         if len(matches) <= keep:
-            print(f"rien a archiver ({len(matches)} tour(s) archivable(s), keep={keep}).")
+            print(tr("archive_none", n=len(matches), keep=keep))
             return 0
         to_move = matches[:-keep] if keep else matches
         moved = "".join(m.group(0) for m in to_move)
@@ -973,20 +1460,22 @@ def cmd_archive(args):
         for m in reversed(to_move):
             text = text[:m.start()] + text[m.end():]
         text = re.sub(r"\n{3,}", "\n\n", text)
-        prev = read(ARCHIVE) if os.path.exists(ARCHIVE) else "# COWORK · archive des tours\n\n"
+        prev = read(ARCHIVE) if os.path.exists(ARCHIVE) else tr("archive_header")
         write(prev + moved, ARCHIVE)  # écriture atomique (tmp + os.replace)
         write(text)
-    print(f"✓ {len(to_move)} tour(s) archive(s) → {os.path.basename(ARCHIVE)} (gardes: {keep}).")
+    print(tr("archive_ok", n=len(to_move), file=os.path.basename(ARCHIVE), keep=keep))
     return 0
 
 
 def main():
-    p = argparse.ArgumentParser(description="Relais mono-fichier Claude <-> Codex (portable).")
+    p = argparse.ArgumentParser(description="Single-file Claude <-> Codex relay (portable).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    i = sub.add_parser("init", help="(re)génère le kit dans ce dossier")
+    i = sub.add_parser("init", help="(re)generate the kit in this folder")
     i.add_argument("--name", default="")
-    i.add_argument("--force", action="store_true", help="réinitialise aussi COWORK.md")
+    i.add_argument("--lang", choices=("en", "fr"), default="",
+                   help="language of generated files (default: en, or $COWORK_LANG)")
+    i.add_argument("--force", action="store_true", help="also reset COWORK.md")
     i.set_defaults(fn=cmd_init)
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
@@ -994,7 +1483,7 @@ def main():
     w = sub.add_parser("wait")
     w.add_argument("agent")
     w.add_argument("--interval", type=int, default=60)
-    w.add_argument("--once", action="store_true", help="vérifie une fois et sort (rc 3 si pas ton tour)")
+    w.add_argument("--once", action="store_true", help="check once and exit (rc 3 if not your turn)")
     w.set_defaults(fn=cmd_wait)
 
     c = sub.add_parser("claim")

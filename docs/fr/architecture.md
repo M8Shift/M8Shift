@@ -1,12 +1,12 @@
-# 🏛️ Document d'architecture — cowork
-
-> **Note Claude —** document calqué sur le modèle multi-vues *Architecture
-> Document* (`architecture-document-template`, B. Florat, CC BY-SA 4.0), adapté à
-> un outil mono-fichier. Chaque vue suit le motif **Contraintes → Exigences →
-> Solution**. Marqué *S.O.* (sans objet) là où le modèle suppose une
-> infrastructure d'entreprise non pertinente ici.
+# 🏛️ Document d'architecture — CoWork
 
 > **Statut** : `Validé` · **Version** : protocole v1 · **Revue** : 2026-06-21
+
+Ce document suit le modèle multi-vues *Document d'architecture*
+(`architecture-document-template`, B. Florat, CC BY-SA 4.0), adapté à un
+outil mono-fichier. Chaque vue suit le motif **Contraintes → Exigences →
+Solution**. Marqué *S.O.* (sans objet) partout où le modèle suppose une
+infrastructure d'entreprise non pertinente ici.
 
 ## Structure du document
 
@@ -60,7 +60,7 @@ dépôt. Transverse à tous les projets (livres, code, sites…).
 
 ### 1.5 Exigences
 
-Voir [cahier des charges](CAHIER-DES-CHARGES.md) §4–5 (EF-1→11, ENF-1→6). En
+Voir [cahier des charges](cahier-des-charges.md) §4–5 (EF-1→11, ENF-1→6). En
 synthèse : exclusion mutuelle, atomicité, autonomie des agents, robustesse,
 tenue dans le temps.
 
@@ -101,19 +101,19 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 | Élément | Choix |
 |---------|-------|
 | Langage | Python **3.8+** |
-| Dépendances | **Aucune Python** (stdlib : `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`) ; Git optionnel pour préserver un renommage de casse dans l'index |
+| Dépendances | **Aucune dépendance Python** (stdlib : `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`) ; Git optionnel, pour préserver un renommage de casse dans l'index |
 | Distribution | **un seul fichier** `cowork.py` (gabarits embarqués) |
 | Tests | `unittest` stdlib — `tests/test_cowork.py` |
 
 ### 2.2 Patterns notables
 
 - **Écriture atomique** : `write()` → fichier temporaire **unique** (`mkstemp`)
-  puis `os.replace` (POSIX atomic). **Toutes** les écritures passent par là, y
+  puis `os.replace` (atomique POSIX). **Toutes** les écritures passent par là, y
   compris l'archive.
 - **Verrou inter-process** : les commandes qui mutent l'état prennent
   `.cowork.lock` (`O_CREAT|O_EXCL`) et font le read-modify-write *dedans* → deux
-  `cowork.py` concurrents sont sérialisés (pas de double-démarrage IDLE) ; lock
-  abandonné repris après 60 s.
+  `cowork.py` concurrents sont sérialisés (pas de double-démarrage IDLE) ; un
+  verrou abandonné est repris après 60 s.
 - **Validation d'entrée** : champs mono-ligne (refus saut de ligne + marqueurs
   réservés) ; corps neutralisé (anti-injection de faux tours).
 - **Source de vérité unique** : protocole, gabarit `COWORK.md` et stanza sont des
@@ -161,8 +161,8 @@ version et préserve la lecture des `COWORK.md` existants.
 ### 3.1 Contraintes d'hébergement
 
 - **Aucun serveur, aucun service réseau, aucun port.** L'« infrastructure » est
-  le **système de fichiers du dépôt hôte**. *Disponibilité datacenter, PRA
-  catégorie, pare-feu, certificats : S.O.*
+  le **système de fichiers du dépôt hôte**. *Disponibilité datacenter, catégorie
+  PRA, pare-feu, certificats : S.O.*
 - Exécution **à la demande** : chaque commande est un process court (pas de daemon).
 
 ### 3.2 Exigences d'exploitation
@@ -204,7 +204,7 @@ archivé.
 Le **journal des tours** EST le log fonctionnel (qui, quoi, quand, ask/done).
 Les sorties CLI vont sur stdout. Pas de PII au-delà du contenu de tâche saisi.
 
-### 3.4 Plan de reprise (PRA / DR)
+### 3.4 Plan de reprise (PRA)
 
 | Sinistre | Reprise |
 |----------|---------|
@@ -289,5 +289,5 @@ Le seul paramètre de charge est l'intervalle de poll (`wait --interval N`) ;
 | **Stylo / verrou** | Droit exclusif d'écrire, matérialisé par le bloc `LOCK`. |
 | **Tour (`TURN`)** | Une prise de parole d'un agent, encadrée `BEGIN`/`END`, immuable une fois close. |
 | **Stanza** | Bloc d'auto-instruction injecté dans `CLAUDE.md`/`AGENTS.md` entre marqueurs `COWORK:STANZA`. |
-| **Lock périmé** | `WORKING_*` dont `expires` est dépassé → reprenable avec `--force`. |
+| **Verrou périmé** | `WORKING_*` dont `expires` est dépassé → reprenable avec `--force`. |
 | **TTL** | Durée de validité d'un verrou en travail (30 min). |
