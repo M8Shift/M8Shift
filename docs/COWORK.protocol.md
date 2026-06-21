@@ -19,36 +19,43 @@ l'autre agent.
 ```bash
 # 1. Suis-je attendu ? (commandes NON bloquantes)
 ./cowork.py status                 # lis le champ `state`
-./cowork.py wait <toi> --once      # rc 0 = c'est à toi ; rc 3 = pas encore
+./cowork.py wait <toi> --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
 
-# 2. Si c'est ton tour (state == AWAITING_<TOI> ou IDLE) : lis le `ask:` que
-#    <autre> t'a laissé dans le dernier tour de COWORK.md — en IDLE / tour 0, il
-#    n'y a pas d'`ask:` réel à honorer, tu démarres librement. Fais le travail
-#    dans le dépôt, PUIS dépose ton tour et passe la main en une commande :
+# 2. ACQUIERS le stylo AVANT de travailler (acquisition EXCLUSIVE : sur deux agents
+#    qui tentent en même temps, un seul réussit) :
+./cowork.py claim <toi>            # rc 0 = tu tiens le stylo ; rc != 0 = pas ton tour
+#    • Si claim RÉUSSIT : lis le `ask:` que <autre> t'a laissé dans le dernier
+#      tour (en démarrage IDLE/tour 0, rien à honorer), fais le travail dans le
+#      dépôt, PUIS enregistre ton tour et passe la main :
 ./cowork.py append <toi> --to <autre> \
     --ask "ce que tu attends de l'autre" \
     --done "ce que tu viens de faire" \
     --files fichier1,fichier2
+#    • Si claim ÉCHOUE : ce n'est pas (ou plus) ton tour → reviens à l'attente.
 
-# 3. Si ce n'est PAS ton tour : ne touche à rien d'autre. Soit tu fais autre
-#    chose et reviendras, soit tu bloques jusqu'à ton tour :
+# 3. Pas ton tour : ne touche à RIEN. Bloque jusqu'à ton tour, puis reprends en 2 :
 ./cowork.py wait <toi>             # poll toutes les ~60 s (--interval N)
 ```
 
-Règle d'or : **tu n'écris dans le dépôt que si le verrou t'est attribué.** Tout
-le reste de ce document n'est que le détail de cette boucle.
+Règle d'or : **tu ne travailles et n'écris que si tu as acquis le stylo via
+`claim`.** `claim` est exclusif ; `append` n'est accepté que si tu tiens le
+stylo. Tout le reste de ce document n'est que le détail de cette boucle.
 
 ---
 
 ## 1. Modèle mental
 
 - **Un seul fichier vivant** : `COWORK.md`. Tout le dialogue de travail y est.
-- **Un seul stylo** : le bloc `LOCK` en tête dit qui le tient. Tu n'écris dans le
-  fichier **que** si le verrou t'est attribué.
-- **Alternance stricte** : claude → codex → claude → … Chaque passage de main
-  est un *tour* (`TURN`) numéroté, encadré `BEGIN`/`END`.
-- **Poll** : quand ce n'est pas ton tour, tu attends et tu relis `LOCK` toutes
-  les **~60 s** (`./cowork.py wait <toi>`), jusqu'à ce que `state == AWAITING_<toi>`.
+- **Un seul stylo, acquis explicitement** : pour travailler, tu **prends** le
+  stylo via `claim` → état `WORKING_<toi>`. `claim` est **exclusif** (deux agents
+  qui tentent en même temps : un seul réussit). Tu ne modifies le dépôt **que**
+  pendant que tu tiens le stylo.
+- **`append` clôt ton tour** : il n'est accepté que depuis `WORKING_<toi>`, écrit
+  le tour et passe la main (`AWAITING_<autre>`). Pas de `claim` ⇒ pas d'`append`.
+- **Alternance stricte** : claude → codex → claude … Chaque passage de main est
+  un *tour* (`TURN`) numéroté, encadré `BEGIN`/`END`.
+- **Poll** : quand ce n'est pas ton tour, tu attends (`./cowork.py wait <toi>`,
+  ~60 s) puis tu retentes `claim`.
 
 ---
 
@@ -107,32 +114,37 @@ Règles :
 
 ```
 boucle:
-  1. lire LOCK
-  2. si state == AWAITING_<moi>  (ou IDLE et j'ai qqch à dire) :
-       a. CLAIM  : holder=moi, state=WORKING_<MOI>, since=now, expires=now+30min
-       b. (re-lire LOCK : confirmer que turn n'a pas bougé → sinon abandonner, conflit)
-       c. TRAVAILLER (éditer le code/contenu hors COWORK.md)
-       d. APPEND  : écrire mon tour <turn+1> BEGIN…END en bas du journal
-       e. RELEASE : holder=<autre>, state=AWAITING_<AUTRE>, turn=<turn+1>, since=now
-  3. sinon si state == WORKING_<autre> ou AWAITING_<autre> :
-       attendre ~60 s, retourner en 1
-  4. sinon si state == DONE :
-       sortir
+  1. lire LOCK (status / wait)
+  2. si state == AWAITING_<moi> ou IDLE :
+       a. CLAIM  : ./cowork.py claim <moi>   → state=WORKING_<MOI>, expires=now+30min
+                   EXCLUSIF : si un autre a déjà pris le stylo entre-temps,
+                   claim ÉCHOUE → va en 3.
+       b. TRAVAILLER dans le dépôt (tant que tu tiens le stylo, toi seul)
+       c. APPEND  : ./cowork.py append <moi> --to <autre>
+                   écrit mon tour <turn+1>, state=AWAITING_<AUTRE>
+  3. sinon (WORKING_<autre> ou AWAITING_<autre>) :
+       attendre ~60 s (wait), retourner en 1
+  4. si state == DONE : sortir
 ```
 
-En pratique, `./cowork.py` fait CLAIM+APPEND+RELEASE en une commande atomique
-(`append`), et la boucle d'attente (`wait`).
+En pratique : `claim` **acquiert** le stylo (exclusif), `append` **clôt** ton tour
+et passe la main, `wait` attend ton tour. L'acquisition explicite avant de
+travailler est ce qui garantit qu'un seul agent modifie le dépôt à la fois.
 
-> **Modèle de concurrence** : les commandes qui mutent l'état prennent d'abord un
-> **verrou inter-process** (`.cowork.lock`, créé en `O_CREAT|O_EXCL`), puis font
-> le read-modify-write *à l'intérieur* de ce verrou et une écriture atomique
-> (fichier temporaire unique + `os.replace`). Deux `cowork.py` concurrents sont
-> donc **sérialisés** : le double-démarrage depuis `IDLE` est impossible (le 2ᵉ
-> relit le LOCK et voit que ce n'est plus son tour). Un `.cowork.lock` abandonné
-> (process tué) est récupéré après 60 s.
-> *Limites* : le verrou est **conseillé** (une édition manuelle de `COWORK.md`
-> hors outil le contourne) ; sur un FS réseau (NFS) les sémantiques `O_EXCL` /
-> `rename` peuvent être plus faibles — cowork vise un dépôt sur disque local.
+> **Modèle de concurrence (deux niveaux)** :
+> 1. **Transitions** sérialisées par un verrou inter-process (`.cowork.lock`,
+>    `O_CREAT|O_EXCL`, à jeton d'ownership) : chaque read-modify-write du LOCK +
+>    écriture atomique (temporaire unique + `os.replace`) est exclusif.
+> 2. **Fenêtre de travail** protégée par l'état persistant `WORKING_<agent>` :
+>    `claim` est la seule acquisition, et il échoue si quelqu'un d'autre tient ou
+>    a déjà pris le stylo. Deux `claim` simultanés depuis `IDLE` ⇒ **un seul
+>    réussit** ; l'autre doit attendre. Comme on ne travaille qu'après un `claim`
+>    réussi, deux agents ne modifient jamais le dépôt en même temps.
+>
+> Un `.cowork.lock` abandonné (process tué) est repris après 60 s, jeton vérifié.
+> *Limites* : verrou **conseillé** (une édition manuelle de `COWORK.md` le
+> contourne) ; sur FS réseau (NFS) `O_EXCL`/`rename` sont moins fiables — cowork
+> vise un dépôt sur disque local. Voir aussi §0/§4 (claim obligatoire).
 
 ---
 
@@ -170,18 +182,20 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./cowork.py init [--name PROJET] [--force]        # (re)génère le kit dans CE dossier
 ./cowork.py status                                # verrou + dernier tour (NON bloquant)
 ./cowork.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
-./cowork.py claim <agent> [--force]               # prendre le verrou (ton tour / IDLE / ton propre verrou ;
-                                                  #   --force = verrou périmé UNIQUEMENT)
+./cowork.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
+                                                  #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
 ./cowork.py append <agent> --to <autre> \
-     --ask "..." --done "..." [--files a,b] [--body fichier.md|-]   # tour + passe la main
+     --ask "..." --done "..." [--files a,b] [--body fichier.md|-]   # clôt ton tour + passe la main
 ./cowork.py release <agent> --to <autre> [--force]  # repasser la main sans corps (ne ré-incrémente PAS turn)
 ./cowork.py done <agent> [--force]                 # clore la session (state=DONE)
 ./cowork.py archive [--keep N]                     # purge les vieux tours clôturés (jamais le tour #0)
 ```
 
-- `append` est l'opération principale : elle ouvre le tour suivant **et** repasse
-  la main en un seul geste. `--body -` lit le corps depuis stdin ; `--body f.md`
-  depuis un fichier ; sans `--body`, le tour n'a que l'en-tête.
+- **`claim` d'abord** : tu dois tenir le stylo (`WORKING_<toi>`) pour `append`.
+  `claim` est **exclusif** (un seul gagnant si deux agents tentent ensemble).
+- `append` n'est accepté **que depuis `WORKING_<toi>`** ; il écrit le tour et
+  passe la main. `--body -` lit le corps depuis stdin ; `--body f.md` depuis un
+  fichier ; sans `--body`, le tour n'a que l'en-tête.
 - `--to` doit viser **l'autre** agent (auto-passation refusée : alternance stricte).
 - Inspection **non bloquante** : `status` ou `wait <toi> --once`. `wait <toi>`
   **sans** `--once` bloque jusqu'à ton tour — ne l'utilise pas si tu dois rendre

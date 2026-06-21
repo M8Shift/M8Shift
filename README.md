@@ -39,14 +39,17 @@ python3 cowork.py init                # nom du projet = nom du dossier (sinon --
 
 ```bash
 ./cowork.py status                # qui a la main ? (non bloquant)
-./cowork.py wait claude --once    # rc 0 = à toi de jouer ; rc 3 = pas encore
-# si c'est ton tour : travaille dans le dépôt, puis dépose ton tour ET passe la main :
+./cowork.py wait claude --once    # rc 0 = tu peux acquérir ; rc 3 = pas encore
+# ACQUIERS le stylo AVANT de travailler (exclusif : un seul gagnant) :
+./cowork.py claim claude          # rc 0 = tu tiens le stylo ; sinon ce n'est pas ton tour
+# puis travaille dans le dépôt, et clos ton tour en passant la main :
 ./cowork.py append claude --to codex --ask "ce que tu attends" --done "ce que tu as fait" --files a,b
-# sinon, bloquer jusqu'à ton tour :
+# pas ton tour ? bloque jusqu'à ton tour, puis retente claim :
 ./cowork.py wait claude           # poll ~60 s (--interval N)
 ```
 
-Règle d'or : **on n'écrit dans le dépôt que si le verrou nous est attribué.**
+Règle d'or : **on ne travaille et n'écrit qu'après avoir acquis le stylo via
+`claim`** (`append` n'est accepté que depuis `WORKING_<soi>`).
 
 ## Le verrou (`LOCK`)
 
@@ -70,8 +73,8 @@ BEGIN/END` (invisibles dans le rendu Markdown, faciles à `grep`) et sont
 init [--name PROJET] [--force]          (re)génère le kit dans le dossier courant
 status                                  affiche le verrou + le dernier tour (non bloquant)
 wait <agent> [--once] [--interval N]    attend son tour (--once : 1 check, rc 3 si pas son tour)
-claim <agent> [--force]                 prend le verrou (--force : verrou périmé uniquement)
-append <agent> --to <autre> --ask … --done … [--files …] [--body f|-]   dépose un tour + passe la main
+claim <agent> [--force]                 ACQUIERT le stylo, exclusif (--force : verrou périmé uniquement)
+append <agent> --to <autre> --ask … --done … [--files …] [--body f|-]   clôt ton tour (exige WORKING_<agent>)
 release <agent> --to <autre> [--force]  repasse la main sans corps
 done <agent> [--force]                  clôt la session (state=DONE)
 archive [--keep N]                      purge les vieux tours clôturés (jamais le tour #0)
@@ -83,14 +86,16 @@ Conception & exploitation → [document d'architecture](docs/ARCHITECTURE.md).
 
 ## Garanties (vérifiées par les tests et par revue multi-agents)
 
-- **Mutex** : écriture conditionnée à `state == AWAITING_<soi>` ; `append`/`claim`
-  refusent hors-tour ; `--to` ne peut pas se viser soi-même.
+- **Mutex sur la fenêtre de travail** : `claim` est l'**acquisition exclusive** du
+  stylo (deux `claim` simultanés claude/codex ⇒ un seul gagne) ; `append` n'est
+  accepté que depuis `WORKING_<soi>`. On ne travaille qu'après un `claim` réussi,
+  donc deux agents ne modifient jamais le dépôt en même temps. `--to` ≠ soi.
 - **Anti-blocage** : `claim --force` ne reprend **qu'un verrou périmé** (refus sur
   un verrou actif) ; le détenteur peut rafraîchir le sien.
 - **Garde-fous** : `release`/`done` exigent de tenir le stylo (`--force` = récupération).
-- **Concurrence sérialisée** : verrou inter-process `.cowork.lock` (`O_EXCL`) +
-  écriture atomique (temporaire **unique** + `os.replace`) → deux `cowork.py`
-  simultanés ne se corrompent pas (pas de double-démarrage IDLE).
+- **Concurrence sérialisée** : verrou inter-process `.cowork.lock` (`O_EXCL`, à
+  jeton d'ownership) + écriture atomique (temporaire **unique** + `os.replace`,
+  mode préservé) → deux `cowork.py` simultanés ne se corrompent pas.
 - **Anti-injection** : champs mono-ligne (refus saut de ligne / marqueurs
   réservés) ; corps de tour neutralisé contre les faux marqueurs.
 - **Borné dans le temps** : `archive` purge les anciens tours sans toucher au verrou ni au tour d'amorçage.
@@ -105,8 +110,9 @@ Aucune dépendance externe (stdlib seule) :
 python3 -m unittest discover -s tests        # depuis la racine du repo
 ```
 
-26 tests : unitaires (fonctions pures) + non-régression CLI (un test par bug
-corrigé, référencés `NR-n`, + cycle, mutex, archive, robustesse).
+39 tests : unitaires (fonctions pures) + non-régression CLI (un test par bug
+corrigé, référencés `NR-n`, + modèle claim, mutex, concurrence claude/codex,
+archive, robustesse, anti-injection).
 
 ## Structure
 

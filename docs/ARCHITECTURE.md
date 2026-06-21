@@ -125,10 +125,11 @@ append-only ; (c) les ancrages porteurs de la *stanza* d'auto-instruction ;
 
 ### 2.3 Stratégie de test
 
-26 tests, sans dépendance externe : unitaires (fonctions pures : `other`,
-`parse_iso`/`iso`, `get_lock`/`set_lock`, `stanza_for`) + non-régression CLI en
-sous-processus isolé (un test par bug corrigé, `NR-1`→`NR-7`, + cycle, mutex,
-archive, robustesse, `wait`). Commande : `python3 -m unittest discover -s tests`.
+39 tests, sans dépendance externe : unitaires (fonctions pures : `other`,
+`parse_iso`/`iso`, `get_lock`/`set_lock`, `stanza_for`, `clean_body`) +
+non-régression CLI en sous-processus isolé (modèle claim→append, mutex, **concurrence
+claude/codex** avec un seul gagnant, archive, robustesse, anti-injection, schéma
+LOCK). Commande : `python3 -m unittest discover -s tests`.
 
 ### 2.4 Gestion de configuration, encodage, fuseaux
 

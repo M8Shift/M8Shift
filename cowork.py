@@ -72,9 +72,9 @@ note:     session initialisée, aucun tour ouvert
 - from:    system
 - to:      none
 - ask:     —
-- done:    Initialisation du relais. Le premier agent qui veut démarrer fait
-           `./cowork.py append claude --to codex --ask "..." --done "..."`
-           (ou l'inverse), ce qui ouvre le tour 1 et passe la main.
+- done:    Initialisation du relais. Le premier agent qui démarre fait
+           `./cowork.py claim claude` (ou `codex`), travaille, puis
+           `./cowork.py append claude --to codex --ask "..." --done "..."`.
 - files:   COWORK.md, COWORK.protocol.md, cowork.py
 - handoff: none
 <!-- COWORK:TURN 0 system END -->
@@ -101,36 +101,43 @@ l'autre agent.
 ```bash
 # 1. Suis-je attendu ? (commandes NON bloquantes)
 ./cowork.py status                 # lis le champ `state`
-./cowork.py wait <toi> --once      # rc 0 = c'est à toi ; rc 3 = pas encore
+./cowork.py wait <toi> --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
 
-# 2. Si c'est ton tour (state == AWAITING_<TOI> ou IDLE) : lis le `ask:` que
-#    <autre> t'a laissé dans le dernier tour de COWORK.md — en IDLE / tour 0, il
-#    n'y a pas d'`ask:` réel à honorer, tu démarres librement. Fais le travail
-#    dans le dépôt, PUIS dépose ton tour et passe la main en une commande :
+# 2. ACQUIERS le stylo AVANT de travailler (acquisition EXCLUSIVE : sur deux agents
+#    qui tentent en même temps, un seul réussit) :
+./cowork.py claim <toi>            # rc 0 = tu tiens le stylo ; rc != 0 = pas ton tour
+#    • Si claim RÉUSSIT : lis le `ask:` que <autre> t'a laissé dans le dernier
+#      tour (en démarrage IDLE/tour 0, rien à honorer), fais le travail dans le
+#      dépôt, PUIS enregistre ton tour et passe la main :
 ./cowork.py append <toi> --to <autre> \
     --ask "ce que tu attends de l'autre" \
     --done "ce que tu viens de faire" \
     --files fichier1,fichier2
+#    • Si claim ÉCHOUE : ce n'est pas (ou plus) ton tour → reviens à l'attente.
 
-# 3. Si ce n'est PAS ton tour : ne touche à rien d'autre. Soit tu fais autre
-#    chose et reviendras, soit tu bloques jusqu'à ton tour :
+# 3. Pas ton tour : ne touche à RIEN. Bloque jusqu'à ton tour, puis reprends en 2 :
 ./cowork.py wait <toi>             # poll toutes les ~60 s (--interval N)
 ```
 
-Règle d'or : **tu n'écris dans le dépôt que si le verrou t'est attribué.** Tout
-le reste de ce document n'est que le détail de cette boucle.
+Règle d'or : **tu ne travailles et n'écris que si tu as acquis le stylo via
+`claim`.** `claim` est exclusif ; `append` n'est accepté que si tu tiens le
+stylo. Tout le reste de ce document n'est que le détail de cette boucle.
 
 ---
 
 ## 1. Modèle mental
 
 - **Un seul fichier vivant** : `COWORK.md`. Tout le dialogue de travail y est.
-- **Un seul stylo** : le bloc `LOCK` en tête dit qui le tient. Tu n'écris dans le
-  fichier **que** si le verrou t'est attribué.
-- **Alternance stricte** : claude → codex → claude → … Chaque passage de main
-  est un *tour* (`TURN`) numéroté, encadré `BEGIN`/`END`.
-- **Poll** : quand ce n'est pas ton tour, tu attends et tu relis `LOCK` toutes
-  les **~60 s** (`./cowork.py wait <toi>`), jusqu'à ce que `state == AWAITING_<toi>`.
+- **Un seul stylo, acquis explicitement** : pour travailler, tu **prends** le
+  stylo via `claim` → état `WORKING_<toi>`. `claim` est **exclusif** (deux agents
+  qui tentent en même temps : un seul réussit). Tu ne modifies le dépôt **que**
+  pendant que tu tiens le stylo.
+- **`append` clôt ton tour** : il n'est accepté que depuis `WORKING_<toi>`, écrit
+  le tour et passe la main (`AWAITING_<autre>`). Pas de `claim` ⇒ pas d'`append`.
+- **Alternance stricte** : claude → codex → claude … Chaque passage de main est
+  un *tour* (`TURN`) numéroté, encadré `BEGIN`/`END`.
+- **Poll** : quand ce n'est pas ton tour, tu attends (`./cowork.py wait <toi>`,
+  ~60 s) puis tu retentes `claim`.
 
 ---
 
@@ -189,32 +196,37 @@ Règles :
 
 ```
 boucle:
-  1. lire LOCK
-  2. si state == AWAITING_<moi>  (ou IDLE et j'ai qqch à dire) :
-       a. CLAIM  : holder=moi, state=WORKING_<MOI>, since=now, expires=now+30min
-       b. (re-lire LOCK : confirmer que turn n'a pas bougé → sinon abandonner, conflit)
-       c. TRAVAILLER (éditer le code/contenu hors COWORK.md)
-       d. APPEND  : écrire mon tour <turn+1> BEGIN…END en bas du journal
-       e. RELEASE : holder=<autre>, state=AWAITING_<AUTRE>, turn=<turn+1>, since=now
-  3. sinon si state == WORKING_<autre> ou AWAITING_<autre> :
-       attendre ~60 s, retourner en 1
-  4. sinon si state == DONE :
-       sortir
+  1. lire LOCK (status / wait)
+  2. si state == AWAITING_<moi> ou IDLE :
+       a. CLAIM  : ./cowork.py claim <moi>   → state=WORKING_<MOI>, expires=now+30min
+                   EXCLUSIF : si un autre a déjà pris le stylo entre-temps,
+                   claim ÉCHOUE → va en 3.
+       b. TRAVAILLER dans le dépôt (tant que tu tiens le stylo, toi seul)
+       c. APPEND  : ./cowork.py append <moi> --to <autre>
+                   écrit mon tour <turn+1>, state=AWAITING_<AUTRE>
+  3. sinon (WORKING_<autre> ou AWAITING_<autre>) :
+       attendre ~60 s (wait), retourner en 1
+  4. si state == DONE : sortir
 ```
 
-En pratique, `./cowork.py` fait CLAIM+APPEND+RELEASE en une commande atomique
-(`append`), et la boucle d'attente (`wait`).
+En pratique : `claim` **acquiert** le stylo (exclusif), `append` **clôt** ton tour
+et passe la main, `wait` attend ton tour. L'acquisition explicite avant de
+travailler est ce qui garantit qu'un seul agent modifie le dépôt à la fois.
 
-> **Modèle de concurrence** : les commandes qui mutent l'état prennent d'abord un
-> **verrou inter-process** (`.cowork.lock`, créé en `O_CREAT|O_EXCL`), puis font
-> le read-modify-write *à l'intérieur* de ce verrou et une écriture atomique
-> (fichier temporaire unique + `os.replace`). Deux `cowork.py` concurrents sont
-> donc **sérialisés** : le double-démarrage depuis `IDLE` est impossible (le 2ᵉ
-> relit le LOCK et voit que ce n'est plus son tour). Un `.cowork.lock` abandonné
-> (process tué) est récupéré après 60 s.
-> *Limites* : le verrou est **conseillé** (une édition manuelle de `COWORK.md`
-> hors outil le contourne) ; sur un FS réseau (NFS) les sémantiques `O_EXCL` /
-> `rename` peuvent être plus faibles — cowork vise un dépôt sur disque local.
+> **Modèle de concurrence (deux niveaux)** :
+> 1. **Transitions** sérialisées par un verrou inter-process (`.cowork.lock`,
+>    `O_CREAT|O_EXCL`, à jeton d'ownership) : chaque read-modify-write du LOCK +
+>    écriture atomique (temporaire unique + `os.replace`) est exclusif.
+> 2. **Fenêtre de travail** protégée par l'état persistant `WORKING_<agent>` :
+>    `claim` est la seule acquisition, et il échoue si quelqu'un d'autre tient ou
+>    a déjà pris le stylo. Deux `claim` simultanés depuis `IDLE` ⇒ **un seul
+>    réussit** ; l'autre doit attendre. Comme on ne travaille qu'après un `claim`
+>    réussi, deux agents ne modifient jamais le dépôt en même temps.
+>
+> Un `.cowork.lock` abandonné (process tué) est repris après 60 s, jeton vérifié.
+> *Limites* : verrou **conseillé** (une édition manuelle de `COWORK.md` le
+> contourne) ; sur FS réseau (NFS) `O_EXCL`/`rename` sont moins fiables — cowork
+> vise un dépôt sur disque local. Voir aussi §0/§4 (claim obligatoire).
 
 ---
 
@@ -252,18 +264,20 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./cowork.py init [--name PROJET] [--force]        # (re)génère le kit dans CE dossier
 ./cowork.py status                                # verrou + dernier tour (NON bloquant)
 ./cowork.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
-./cowork.py claim <agent> [--force]               # prendre le verrou (ton tour / IDLE / ton propre verrou ;
-                                                  #   --force = verrou périmé UNIQUEMENT)
+./cowork.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
+                                                  #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
 ./cowork.py append <agent> --to <autre> \
-     --ask "..." --done "..." [--files a,b] [--body fichier.md|-]   # tour + passe la main
+     --ask "..." --done "..." [--files a,b] [--body fichier.md|-]   # clôt ton tour + passe la main
 ./cowork.py release <agent> --to <autre> [--force]  # repasser la main sans corps (ne ré-incrémente PAS turn)
 ./cowork.py done <agent> [--force]                 # clore la session (state=DONE)
 ./cowork.py archive [--keep N]                     # purge les vieux tours clôturés (jamais le tour #0)
 ```
 
-- `append` est l'opération principale : elle ouvre le tour suivant **et** repasse
-  la main en un seul geste. `--body -` lit le corps depuis stdin ; `--body f.md`
-  depuis un fichier ; sans `--body`, le tour n'a que l'en-tête.
+- **`claim` d'abord** : tu dois tenir le stylo (`WORKING_<toi>`) pour `append`.
+  `claim` est **exclusif** (un seul gagnant si deux agents tentent ensemble).
+- `append` n'est accepté **que depuis `WORKING_<toi>`** ; il écrit le tour et
+  passe la main. `--body -` lit le corps depuis stdin ; `--body f.md` depuis un
+  fichier ; sans `--body`, le tour n'a que l'en-tête.
 - `--to` doit viser **l'autre** agent (auto-passation refusée : alternance stricte).
 - Inspection **non bloquante** : `status` ou `wait <toi> --once`. `wait <toi>`
   **sans** `--once` bloque jusqu'à ton tour — ne l'utilise pas si tu dois rendre
@@ -300,20 +314,22 @@ STANZA_TEMPLATE = """{begin}
 
 Tu es **{me}** dans ce projet. Dès qu'un `COWORK.md` est présent à la racine,
 c'est ta source de coordination avec **{other}** : applique `COWORK.protocol.md`
-(lis-le une fois, voir son §0) AVANT tout autre travail. **Tu n'écris dans le
-dépôt que si le verrou t'est attribué.**
+(lis-le une fois, voir son §0) AVANT tout autre travail. **Tu ne travailles et
+n'écris que si tu as acquis le stylo via `claim`.**
 
 ```bash
 ./cowork.py status                # qui a la main ? (non bloquant)
-./cowork.py wait {me} --once      # rc 0 = à toi de jouer ; rc 3 = pas encore
+./cowork.py wait {me} --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
 ```
 
-- **Ton tour** (`state == AWAITING_{ME}` ou `IDLE`) : lis le `ask:` que {other} t'a
-  laissé dans le dernier tour de `COWORK.md` (en `IDLE`/tour 0, rien à honorer :
-  démarre librement), fais le travail, puis dépose-le et passe la main :
+- **Acquiers d'abord** (`state == AWAITING_{ME}` ou `IDLE`) :
+  `./cowork.py claim {me}` — **exclusif** : si {other} a déjà pris le stylo, ça
+  échoue → reviens à l'attente. Si ça réussit, tu tiens le stylo (`WORKING_{ME}`).
+- **Puis travaille et clôts ton tour** : lis le `ask:` que {other} t'a laissé
+  (en démarrage IDLE, rien à honorer), fais le travail, puis :
   `./cowork.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
 - **Pas ton tour** : ne touche à rien ; `./cowork.py wait {me}` bloque jusqu'à ton
-  tour (poll ~60 s), ou reviens plus tard.
+  tour (poll ~60 s), puis retente `claim`.
 - **Verrou de {other} périmé** (`WORKING_{OTHER}` + `now > expires`) :
   `./cowork.py claim {me} --force`.
 
@@ -346,13 +362,24 @@ def read(path=COWORK):
         return f.read()
 
 
+def _current_umask():
+    m = os.umask(0)
+    os.umask(m)
+    return m
+
+
 def write(text, path=COWORK):
-    """Écriture atomique : fichier temporaire UNIQUE (par process) + os.replace."""
+    """Écriture atomique : fichier temporaire UNIQUE + os.replace, en préservant
+    le mode du fichier cible existant (mkstemp force 0600 sinon)."""
     d = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".cowork-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)  # conserver le mode existant
+        except OSError:
+            os.chmod(tmp, 0o666 & ~_current_umask())  # nouveau fichier : mode usuel
         os.replace(tmp, path)  # remplacement atomique
     except BaseException:
         with contextlib.suppress(OSError):
@@ -364,21 +391,34 @@ def write(text, path=COWORK):
 def file_lock(timeout=LOCK_TIMEOUT):
     """Verrou inter-process via création exclusive d'un fichier (O_CREAT|O_EXCL).
 
-    Sérialise le read-modify-write du LOCK : empêche deux `cowork.py` concurrents
-    de muter `COWORK.md` en même temps (y compris le double-démarrage depuis IDLE).
-    Un `.cowork.lock` plus vieux que LOCK_STALE_S (process mort) est récupéré.
+    Sérialise le read-modify-write du LOCK : deux `cowork.py` concurrents ne
+    peuvent pas muter `COWORK.md` en même temps. Le verrou porte un **jeton
+    d'ownership** : on ne le supprime (en fin de section, ou en reprise d'un verrou
+    abandonné depuis LOCK_STALE_S) qu'après avoir vérifié le jeton, pour ne jamais
+    effacer le verrou d'un successeur.
     """
+    token = f"{os.getpid()}:{time.time_ns()}".encode()
     start = time.monotonic()
     while True:
         try:
             fd = os.open(LOCKFILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
+            try:
+                os.write(fd, token)
+            finally:
+                os.close(fd)
             break
         except FileExistsError:
             try:
-                if time.time() - os.path.getmtime(LOCKFILE) > LOCK_STALE_S:
-                    os.unlink(LOCKFILE)  # verrou abandonné → on le reprend
-                    continue
+                victim_age = time.time() - os.path.getmtime(LOCKFILE)
+                if victim_age > LOCK_STALE_S:
+                    with open(LOCKFILE, "rb") as f:
+                        victim = f.read()
+                    # toujours périmé ET inchangé depuis la lecture → reprise sûre
+                    if time.time() - os.path.getmtime(LOCKFILE) > LOCK_STALE_S:
+                        with open(LOCKFILE, "rb") as f2:
+                            if f2.read() == victim:
+                                os.unlink(LOCKFILE)
+                                continue
             except OSError:
                 pass
             if time.monotonic() - start > timeout:
@@ -387,8 +427,14 @@ def file_lock(timeout=LOCK_TIMEOUT):
     try:
         yield
     finally:
-        with contextlib.suppress(OSError):
-            os.unlink(LOCKFILE)
+        # ne supprimer QUE notre propre verrou (jeton vérifié)
+        try:
+            with open(LOCKFILE, "rb") as f:
+                mine = f.read() == token
+            if mine:
+                os.unlink(LOCKFILE)
+        except OSError:
+            pass
 
 
 def require_cowork():
@@ -396,13 +442,29 @@ def require_cowork():
         sys.exit("COWORK.md introuvable — lance d'abord `./cowork.py init`.")
 
 
+VALID_STATES = ("IDLE", "DONE", "WORKING_CLAUDE", "WORKING_CODEX",
+                "AWAITING_CLAUDE", "AWAITING_CODEX")
+
+
 def load_or_die():
-    """Lit COWORK.md en validant la présence du bloc LOCK (sortie propre sinon)."""
+    """Lit COWORK.md en validant le bloc LOCK (présence ET schéma) ; sortie propre
+    sinon — aucune valeur invalide ne doit atteindre la logique (pas de traceback)."""
     require_cowork()
     text = read()
     if LOCK_BEGIN not in text or LOCK_END not in text:
         sys.exit("COWORK.md corrompu : bloc LOCK introuvable — "
                  "`./cowork.py init --force` pour réinitialiser le verrou.")
+    lk = get_lock(text)
+    errs = []
+    if lk.get("state") not in VALID_STATES:
+        errs.append(f"state={lk.get('state')!r}")
+    if not re.fullmatch(r"\d+", lk.get("turn", "")):
+        errs.append(f"turn={lk.get('turn')!r}")
+    if lk.get("holder") not in ("claude", "codex", "none"):
+        errs.append(f"holder={lk.get('holder')!r}")
+    if errs:
+        sys.exit("COWORK.md corrompu (LOCK invalide : " + ", ".join(errs) + ") — "
+                 "`./cowork.py init --force` pour réparer.")
     return text
 
 
@@ -564,7 +626,8 @@ def cmd_wait(args):
         lk = get_lock(load_or_die())
         st = lk.get("state", "")
         if st in (target, "IDLE"):
-            print(f"✓ a toi de jouer ({st}).")
+            hint = "à toi" if st == target else "libre"
+            print(f"✓ {hint} ({st}) — `./cowork.py claim {agent}` pour acquérir le stylo.")
             return 0
         if st == "DONE":
             print("session DONE — rien a attendre.")
@@ -639,11 +702,12 @@ def cmd_append(args):
         text = load_or_die()
         lk = get_lock(text)
         st = lk.get("state", "")
-        exp = parse_iso(lk.get("expires"))
-        stale = st.startswith("WORKING_") and exp is not None and now() > exp
-        mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")
-        if not (mine or (args.force and stale)):
-            sys.exit(f"refus: state={st} — claim d'abord, ou ce n'est pas ton tour.")
+        # append n'est permis QUE si tu tiens déjà le stylo (claim exclusif préalable).
+        # C'est ce qui garantit l'exclusivité de la FENÊTRE DE TRAVAIL, pas seulement
+        # de l'écriture du journal : on ne peut pas travailler+append depuis IDLE.
+        if st != f"WORKING_{agent.upper()}":
+            sys.exit(f"refus: tu ne tiens pas le stylo (state={st}) — fais d'abord "
+                     f"`./cowork.py claim {agent}` (acquisition exclusive), puis append.")
         n = int(lk.get("turn", "0")) + 1
         block = (
             f"<!-- COWORK:TURN {n} {agent} BEGIN -->\n"
@@ -761,14 +825,13 @@ def main():
     c.add_argument("--force", action="store_true")
     c.set_defaults(fn=cmd_claim)
 
-    a = sub.add_parser("append")
+    a = sub.add_parser("append")  # exige WORKING_<agent> : fais `claim` d'abord
     a.add_argument("agent")
     a.add_argument("--to", required=True)
     a.add_argument("--ask", default="")
     a.add_argument("--done", default="")
     a.add_argument("--files", default="")
     a.add_argument("--body", default="")
-    a.add_argument("--force", action="store_true")
     a.set_defaults(fn=cmd_append)
 
     r = sub.add_parser("release")

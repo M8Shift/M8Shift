@@ -36,9 +36,10 @@ intervention ni explication humaine**.
 
 | ID | Exigence | Vérifié par |
 |----|----------|-------------|
-| EF-1 | Un seul agent peut écrire à la fois ; l'écriture n'est permise que si `state == AWAITING_<soi>` (ou `IDLE`). | `test_append_out_of_turn_refused` |
-| EF-2 | `append` ouvre le tour suivant **et** repasse la main en une opération atomique ; `turn` est incrémenté. | `test_handoff_increments_and_alternates` |
-| EF-3 | Un tour clôturé (`END`) est immuable ; on réagit en ouvrant le tour suivant. | (revue) |
+| EF-1 | **`claim` obligatoire et exclusif avant de travailler** : il acquiert `WORKING_<soi>` depuis `IDLE`/`AWAITING_<soi>` ; deux `claim` simultanés (claude/codex) ⇒ un seul réussit, l'autre est exclu. | `test_claim_exclusive_sequential`, `test_concurrent_claim_claude_vs_codex_single_winner` |
+| EF-1b | `append` n'est accepté **que depuis `WORKING_<soi>`** (donc après `claim`) → garantit l'exclusivité de la **fenêtre de travail** dans le dépôt, pas seulement du journal. | `test_append_requires_claim_from_idle`, `test_append_requires_claim_from_awaiting` |
+| EF-2 | `append` écrit le tour suivant **et** repasse la main (`AWAITING_<autre>`) en une opération atomique ; `turn` est incrémenté. | `test_handoff_increments_and_alternates` |
+| EF-3 | Un tour clôturé (`END`) est immuable (par convention : l'outil ne le réécrit jamais). | (revue) |
 | EF-4 | `--to` doit viser l'autre agent (auto-passation interdite). | `test_self_handoff_refused` |
 | EF-5 | `wait <agent>` attend le tour de l'agent ; `--once` ne fait qu'un contrôle (rc 0 = son tour, rc 3 sinon). | `test_wait_once_return_codes` |
 | EF-6 | `claim --force` ne reprend **qu'un verrou périmé** ; refusé sur un verrou actif. | `test_force_refused_on_fresh_lock`, `test_force_accepted_on_stale_lock` |
@@ -53,9 +54,9 @@ intervention ni explication humaine**.
 | ID | Exigence |
 |----|----------|
 | ENF-1 **Portabilité** | Fonctionne sur dossier vide ou dépôt git, chemins à espaces/accents, FS sensible ou non à la casse. Python 3.8+, **stdlib uniquement**, aucun paquet tiers. |
-| ENF-2 **Atomicité** | Toute écriture passe par fichier temporaire + `os.replace` (jamais de fichier d'état à demi écrit). |
+| ENF-2 **Atomicité** | Toute écriture (y compris l'archive) passe par fichier temporaire **unique** + `os.replace`, en **préservant le mode** du fichier cible ; sérialisée par un verrou inter-process (`.cowork.lock`, `O_EXCL`, jeton d'ownership). |
 | ENF-3 **Autonomie agents** | Toute la marche à suivre est embarquée : `COWORK.protocol.md` (§0 quickstart) + stanza des ancrages. Aucune explication humaine requise. |
-| ENF-4 **Robustesse** | Entrées invalides (agent inconnu, `--body` absent, `COWORK.md` manquant) → sortie propre `sys.exit`, jamais de traceback, jamais d'état corrompu. |
+| ENF-4 **Robustesse** | Entrées invalides (agent inconnu, `--body` absent, `COWORK.md` manquant, **LOCK au schéma invalide** : `state`/`turn`/`holder`) → sortie propre `sys.exit`, jamais de traceback, jamais d'état corrompu. |
 | ENF-5 **Tenue dans le temps** | `COWORK.md` reste borné via `archive` ; l'archive n'est jamais relue par la boucle. |
 | ENF-6 **Lisibilité** | État et tours lisibles à l'œil et au `grep` ; marqueurs en commentaires HTML invisibles au rendu Markdown ; versionnable en clair. |
 
@@ -75,7 +76,7 @@ En tête de `COWORK.md`, entre `<!-- COWORK:LOCK:BEGIN -->` et `:END` :
 **Machine à états** (transitions légitimes) :
 
 ```text
-IDLE ──append/claim──▶ WORKING_X ──append──▶ AWAITING_Y ──append/claim──▶ WORKING_Y …
+IDLE ──claim X──▶ WORKING_X ──append──▶ AWAITING_Y ──claim Y──▶ WORKING_Y …
   └──────────────────────────────────────────────────────────────▶ DONE (done)
 WORKING_X(périmé) ──claim Y --force──▶ WORKING_Y
 ```
@@ -91,24 +92,28 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 
 ## 8. Contraintes & limites connues
 
+- **Exclusivité de la fenêtre de travail** : garantie par `claim` (acquisition
+  exclusive de `WORKING_<soi>`) + `append` restreint à `WORKING_<soi>`. Repose sur
+  la **discipline** claim→travail→append ; cowork ne peut pas verrouiller le
+  système de fichiers, donc un agent qui édite le dépôt **sans** avoir claim n'est
+  pas empêché par l'outil (mais ne pourra pas `append`).
 - **Mutex coopératif, non applicatif** : un agent malveillant peut, avec `--force`,
   outrepasser `release`/`done`. Le modèle suppose deux agents coopératifs.
-- **Concurrence sérialisée par verrou conseillé** : les mutations prennent un
-  verrou inter-process (`.cowork.lock`, `O_CREAT|O_EXCL`) puis font le
-  read-modify-write + écriture atomique dedans — pas de double-démarrage IDLE, pas
-  de course sur le temporaire. Mais le verrou est *conseillé* : une édition
-  manuelle de `COWORK.md` le contourne ; sur FS réseau (NFS) `O_EXCL`/`rename`
-  sont moins fiables (cowork vise un disque local).
+- **Concurrence sérialisée par verrou conseillé** : `.cowork.lock` (`O_CREAT|O_EXCL`,
+  jeton d'ownership) sérialise le read-modify-write + écriture atomique. Verrou
+  *conseillé* : une édition manuelle de `COWORK.md` le contourne ; sur FS réseau
+  (NFS) `O_EXCL`/`rename` sont moins fiables (cowork vise un disque local).
 - **Immutabilité par convention** : l'outil ne réécrit jamais un tour clôturé,
   mais rien au niveau du système de fichiers ne l'empêche (édition manuelle).
 - **Deux agents** : le protocole est binaire (claude ⇄ codex) par conception.
 
 ## 9. Recette / validation
 
-- Suite `tests/test_cowork.py` : **26 tests** (unitaires + non-régression NR-1→7),
+- Suite `tests/test_cowork.py` : **39 tests** (unitaires + non-régression : modèle
+  claim, mutex, concurrence claude/codex, archive, robustesse, anti-injection),
   `python3 -m unittest discover -s tests`, sans dépendance externe.
-- Vérification adversariale multi-agents : 9 formes de projet + rejeu des bugs
-  (2 campagnes), 0 bug résiduel après correctifs.
+- Vérification adversariale multi-agents + 3 revues Codex successives, chaque
+  constat reproduit puis corrigé puis re-testé.
 - Test de non-régression documentaire : `docs/COWORK.protocol.md` doit rester
   byte-identique à `cowork.PROTOCOL_TEMPLATE` (`test_protocol_doc_in_sync`).
 
