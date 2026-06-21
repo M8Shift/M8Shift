@@ -1,179 +1,158 @@
-# cowork
+![CoWork](CoWork-logo.png)
 
-**Relais mono-fichier pour faire coopérer deux agents IA** (Claude ⇄ Codex) sur
-un même dépôt, en alternance stricte (mutex coopératif), avec poll périodique.
-Pensé pour être utilisé par les agents **sans intervention ni explication
-humaine** : toute la marche à suivre est embarquée dans les fichiers générés.
+# CoWork
 
-Tout le kit tient dans **un seul fichier** : [`cowork.py`](cowork.py). On le
-copie à la racine d'un projet, on lance `init`, et les deux agents se relaient
-via le fichier partagé `COWORK.md`.
+**A single-file relay that lets two AI agents (Claude ⇄ Codex) cooperate on the same repository through strict alternation.**
+
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![tests](https://img.shields.io/badge/tests-46%20passing-brightgreen.svg)](#tests)
+[![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#install)
+[![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](cowork.py)
+
+English | [Français](README.fr.md)
 
 ---
 
-## Pourquoi
+## What is CoWork?
 
-Quand Claude et Codex travaillent sur le même dépôt, ils s'écrasent. `cowork`
-introduit un **stylo unique** : à tout instant, un seul agent a le droit
-d'écrire ; l'autre attend son tour et sait précisément ce qu'on lui demande.
-L'état de coordination vit dans un fichier versionnable, lisible à l'œil comme
-au `grep`, et conservé dans le temps.
+CoWork is a **cooperative mutex** for AI agents. When Claude and Codex work on the
+same repository, they overwrite each other. CoWork introduces a single **pen**: at
+any moment, exactly one agent is allowed to write; the other waits for its turn and
+knows precisely what is expected of it.
 
-## Installation / déploiement sur un projet
+The whole kit fits in **one file**: [`cowork.py`](cowork.py). You copy it to the
+root of a project, run `init`, and the two agents hand off to each other through a
+shared `COWORK.md` file. It is designed to be driven by the agents themselves,
+**with no human intervention or explanation** — the entire procedure is embedded in
+the generated files.
 
-```bash
-cp cowork.py /mon/projet/             # le SEUL fichier nécessaire
-cd /mon/projet
-python3 cowork.py init                # nom du projet = nom du dossier (sinon --name "X")
-```
+## Why
 
-`init` génère et s'adapte au projet (idempotent, ré-exécutable sans risque) :
+When Claude and Codex share a repository, they have no way to take turns: edits
+collide and work is lost. CoWork fixes this with a single exclusive lock (the
+**pen**) and one simple rule — **acquire the pen before working** — so the two
+agents never modify the repository at the same time. The coordination state lives
+in a versionable file, readable both by eye and by `grep`, and preserved over time.
+No daemon, no server, no external dependency — just one Python file and the host
+tools' own conventions.
 
-| fichier généré          | rôle |
-|-------------------------|------|
-| `COWORK.md`             | **le** fichier vivant : verrou (`LOCK`) + journal des tours |
-| `COWORK.protocol.md`    | l'instruction commune complète (lue une fois par chaque agent) |
-| `CLAUDE.md` / `AGENTS.md` | ancrages canoniques — stanza injectée en tête, sans dupliquer ni écraser le contenu existant ; pont automatique vers `CLAUDE.md` si le projet n'avait aucune instruction Codex |
-| `AGENTS.override.md` | s'il existe, ancrage Codex prioritaire ; la stanza y est également synchronisée |
-
-## Amorçage : comment les IA le prennent en compte
-
-cowork est **passif** — il n'« appelle » aucune IA. Il s'appuie sur la convention
-de chaque outil : **Claude charge `CLAUDE.md`, Codex charge `AGENTS.md`** au
-démarrage d'une session/exécution. `init` y injecte en tête une *stanza* qui dit
-à chaque agent :
-« si un `COWORK.md` existe, lis `COWORK.protocol.md` et applique-le
-(`claim → travail → append`) ».
-
-```text
-cowork.py init ─▶ stanza dans CLAUDE.md / AGENTS.md
-                      └─▶ l'IA lit son ancrage ─▶ découvre la stanza ─▶ suit le protocole
-```
-
-- **Après `init`** : démarre une nouvelle session/exécution ; une session déjà
-  ouverte ne recharge pas nécessairement ses instructions.
-- **Codex interactif et `codex exec`** chargent `AGENTS.md` lorsqu'ils sont lancés
-  depuis la racine du projet ou un sous-dossier. Un cron/CI lancé hors du projet
-  ne le découvre pas automatiquement.
-- **`AGENTS.override.md`** masque `AGENTS.md` dans le même dossier. S'il existe,
-  `init` synchronise la stanza dans les deux fichiers.
-- **Projet Claude-only** : si `CLAUDE.md` existait avant `init` mais qu'aucun
-  `AGENTS.md` ni `AGENTS.override.md` n'existait, le nouveau `AGENTS.md` demande
-  automatiquement à Codex de lire les instructions communes de `CLAUDE.md`.
-  Tout ancrage Codex préexistant est conservé tel quel, sans ajout de ce pont.
-- **Noms canoniques** : une variante unique comme `agents.md` est renommée
-  `AGENTS.md`, y compris sur un FS insensible à la casse. Des variantes multiples
-  sont refusées afin de ne pas fusionner silencieusement du contenu utilisateur.
-  Si Git est disponible et que la variante est suivie, `init` utilise `git mv -f`
-  pour actualiser aussi l'index ; sinon le renommage reste purement filesystem.
-- **Limite Codex** : Codex empile les ancrages jusqu'à un plafond *combiné*
-  (`project_doc_max_bytes`, 32 Kio par défaut) et tronque le fichier qui dépasse
-  au nombre d'octets restant. La stanza en tête est donc conservée en priorité ;
-  garde néanmoins les ancrages légers.
-- **Limite générale** : cowork ne peut pas forcer une IA à lire son ancrage. Sans
-  contexte projet, pointe explicitement l'agent vers `COWORK.protocol.md`.
-
-Référence : [découverte des instructions `AGENTS.md` par Codex](https://developers.openai.com/codex/guides/agents-md).
-
-## Boucle d'un agent
+## Install
 
 ```bash
-./cowork.py status                # qui a la main ? (non bloquant)
-./cowork.py wait claude --once    # rc 0 = tu peux acquérir ; rc 3 = pas encore
-# ACQUIERS le stylo AVANT de travailler (exclusif : un seul gagnant) :
-./cowork.py claim claude          # rc 0 = tu tiens le stylo ; sinon ce n'est pas ton tour
-# puis travaille dans le dépôt, et clos ton tour en passant la main :
-./cowork.py append claude --to codex --ask "ce que tu attends" --done "ce que tu as fait" --files a,b
-# pas ton tour ? bloque jusqu'à ton tour, puis retente claim :
-./cowork.py wait claude           # poll ~60 s (--interval N)
+cp cowork.py /my/project/          # the ONLY file you need
+cd /my/project
+python3 cowork.py init             # project name = folder name (or --name "X")
 ```
 
-Règle d'or : **on ne travaille et n'écrit qu'après avoir acquis le stylo via
-`claim`** (`append` n'est accepté que depuis `WORKING_<soi>`).
+`init` is idempotent (safe to re-run) and generates:
 
-## Le verrou (`LOCK`)
+| generated file              | role |
+|-----------------------------|------|
+| `COWORK.md`                 | **the** living file: the lock (`LOCK`) + the turn journal |
+| `COWORK.protocol.md`        | the full shared instruction (read once by each agent) |
+| `CLAUDE.md` / `AGENTS.md`   | canonical anchors — a stanza is injected at the top without duplicating or overwriting existing content |
+| `AGENTS.override.md`        | if present, the priority Codex anchor; the stanza is synced there too |
 
-En tête de `COWORK.md`, entre `<!-- COWORK:LOCK:BEGIN -->` et `:END` :
+Use `--lang en|fr` to pick the language of the generated files (**English by
+default**).
 
-| champ | valeurs |
-|-------|---------|
-| `holder`  | `claude` \| `codex` \| `none` |
-| `state`   | `IDLE` \| `WORKING_CLAUDE` \| `WORKING_CODEX` \| `AWAITING_CLAUDE` \| `AWAITING_CODEX` \| `DONE` |
-| `turn`    | numéro du dernier tour clôturé |
-| `since` / `expires` | horodatages ISO-8601 UTC (TTL anti-blocage 30 min) |
-| `note`    | mémo lisible |
+## Quickstart
 
-Les tours sont encadrés par des commentaires HTML `COWORK:TURN <n> <agent>
-BEGIN/END` (invisibles dans le rendu Markdown, faciles à `grep`) et sont
-**immuables** une fois clôturés.
+Each agent runs the same loop: `wait → claim → work → append`. `<you>` is `claude`
+or `codex`; `<other>` is the other agent.
 
-## Commandes
+```bash
+./cowork.py status                # who holds the pen? (non-blocking)
+./cowork.py wait claude --once    # rc 0 = you may acquire; rc 3 = not yet
 
-```text
-init [--name PROJET] [--force]          (re)génère le kit dans le dossier courant
-status                                  affiche le verrou + le dernier tour (non bloquant)
-wait <agent> [--once] [--interval N]    attend son tour (--once : 1 check, rc 3 si pas son tour)
-claim <agent> [--force]                 ACQUIERT le stylo, exclusif (--force : verrou périmé uniquement)
-append <agent> --to <autre> --ask … --done … [--files …] [--body f|-]   clôt ton tour (exige WORKING_<agent>)
-release <agent> --to <autre> [--force]  repasse la main sans corps
-done <agent> [--force]                  clôt la session (state=DONE)
-archive [--keep N]                      purge les vieux tours clôturés (jamais le tour #0)
+# Acquire the pen BEFORE working (exclusive: only one winner):
+./cowork.py claim claude          # rc 0 = you hold the pen; otherwise not your turn
+
+# ...work in the repository, then close your turn and hand off:
+./cowork.py append claude --to codex \
+    --ask  "what you need from the other" \
+    --done "what you just did" \
+    --files a,b
+
+# Not your turn? Block until it is, then retry claim:
+./cowork.py wait claude           # polls ~60s (--interval N)
 ```
 
-Détail complet, états et règles → [`docs/COWORK.protocol.md`](docs/COWORK.protocol.md)
-(commencer par son **§0 — quickstart**). Spécification → [cahier des charges](docs/CAHIER-DES-CHARGES.md).
-Conception & exploitation → [document d'architecture](docs/ARCHITECTURE.md).
-Opérer le relais dans VS Code (Claude + Codex) → [manuel utilisateur](docs/MANUEL-UTILISATEUR.md).
+**Golden rule:** you only work and write **after acquiring the pen via `claim`**
+(`append` is accepted only from `WORKING_<you>`).
 
-## Garanties (vérifiées par les tests et par revue multi-agents)
+## Documentation
 
-- **Mutex sur la fenêtre de travail** : `claim` est l'**acquisition exclusive** du
-  stylo (deux `claim` simultanés claude/codex ⇒ un seul gagne) ; `append` n'est
-  accepté que depuis `WORKING_<soi>`. On ne travaille qu'après un `claim` réussi,
-  donc deux agents ne modifient jamais le dépôt en même temps. `--to` ≠ soi.
-- **Anti-blocage** : `claim --force` ne reprend **qu'un verrou périmé** (refus sur
-  un verrou actif) ; le détenteur peut rafraîchir le sien.
-- **Garde-fous** : `release`/`done` exigent de tenir le stylo (`--force` = récupération).
-- **Concurrence sérialisée** : verrou inter-process `.cowork.lock` (`O_EXCL`, à
-  jeton d'ownership) + écriture atomique (temporaire **unique** + `os.replace`,
-  mode préservé) → deux `cowork.py` simultanés ne se corrompent pas.
-- **Anti-injection** : champs mono-ligne (refus saut de ligne / marqueurs
-  réservés) ; corps de tour neutralisé contre les faux marqueurs.
-- **Borné dans le temps** : `archive` purge les anciens tours sans toucher au verrou ni au tour d'amorçage.
-- **Portable** : dossier vide ou dépôt git, chemins à espaces/accents, FS sensible
-  ou non à la casse, ancrages préexistants — sans casse ni doublon.
+Docs follow the [Diátaxis](https://diataxis.fr/) framework:
+
+- **Tutorial** — [docs/en/tutorial.md](docs/en/tutorial.md) — learn the relay step by step.
+- **How-to (VS Code)** — [docs/en/vscode-guide.md](docs/en/vscode-guide.md) — run the relay with Claude + Codex.
+- **Reference (protocol)** — [docs/en/protocol.md](docs/en/protocol.md) — the shared protocol, states and rules.
+- **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
+- **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
+
+## How it works
+
+CoWork stores its state in the `LOCK` block at the top of `COWORK.md`. To work, an
+agent must first **take the pen** with `claim` (state `WORKING_<you>`), an
+**exclusive acquisition**: if two agents claim at once, only one wins. Because work
+happens only while you hold the pen and `append` is accepted only from
+`WORKING_<you>`, the two agents never write the repository concurrently. This
+**claim-before-work** rule is the heart of CoWork.
+
+The lock fields — `holder`, `state`, `turn`, `since`, `expires`, `note`, `lang` —
+are one `key: value` per line (easy to `grep`). States are `IDLE`,
+`WORKING_CLAUDE`, `WORKING_CODEX`, `AWAITING_CLAUDE`, `AWAITING_CODEX`, `DONE`.
+Turns are framed by `COWORK:TURN <n> <agent> BEGIN/END` HTML comments (invisible in
+Markdown rendering) and are **immutable** once closed.
+
+## Guarantees
+
+Verified by the tests and by multi-agent review:
+
+- **Mutex over the work window** — `claim` is the exclusive acquisition of the pen
+  (two simultaneous `claim`s ⇒ a single winner); `append` is accepted only from
+  `WORKING_<you>`. You work only after a successful `claim`, so two agents never
+  modify the repository at the same time. `--to` ≠ self (strict alternation).
+- **Stale-lock recovery** — `claim --force` reclaims **only a stale lock** (refused
+  on an active one); the holder can refresh its own lock.
+- **Guardrails** — `release` / `done` require holding the pen (`--force` = recovery).
+- **Serialized concurrency** — an inter-process lock `.cowork.lock` (`O_EXCL`, with
+  an ownership token) plus atomic writes (unique temp file + `os.replace`, mode
+  preserved) ⇒ two concurrent `cowork.py` runs never corrupt the file.
+- **Injection-safe** — single-line fields (line breaks and reserved markers
+  rejected); turn bodies neutralized against fake markers.
+- **Bounded over time** — `archive` purges old closed turns without touching the
+  lock or the seed turn (turn #0).
+- **Portable** — empty folder or git repo, paths with spaces/accents,
+  case-sensitive or -insensitive filesystems, pre-existing anchors — without
+  breakage or duplication.
 
 ## Tests
 
-Aucune dépendance Python externe (stdlib seule) :
+No external Python dependency (stdlib only):
 
 ```bash
-python3 -m unittest discover -s tests        # depuis la racine du repo
+python3 -m unittest discover -s tests        # from the repo root
 ```
 
-46 tests : unitaires (fonctions pures) + non-régression CLI (un test par bug
-corrigé, référencés `NR-n`, + modèle claim, mutex, concurrence claude/codex,
-ancrages canoniques/override, archive, robustesse, anti-injection).
+**46 tests**: unit tests (pure functions) + CLI regression tests (one per fixed
+bug, referenced `NR-n`) covering the claim model, mutex, claude/codex concurrency,
+canonical/override anchors, archive, robustness, and injection safety.
 
-## Structure
+## Roadmap
 
-```text
-cowork/
-├── cowork.py                 # le kit (source de vérité unique)
-├── README.md
-├── docs/
-│   ├── CAHIER-DES-CHARGES.md  # spécification
-│   └── COWORK.protocol.md     # protocole rendu (généré depuis cowork.py)
-└── tests/
-    └── test_cowork.py
-```
+CoWork is currently limited to **two simultaneous agents** (claude ⇄ codex) by
+design. A later version will generalize the relay to **N agents** (claude, codex,
+lechat, …).
 
-## Prérequis
+## License
 
-Python 3.8+ (stdlib uniquement). Git est optionnel : il sert uniquement à
-enregistrer correctement dans l'index le changement de casse d'un ancrage déjà
-suivi. Aucune installation de paquet Python tiers.
+Licensed under the [Apache License 2.0](LICENSE).
 
-## Licence
+## Contributing
 
-Usage interne. Protocole v1.
+Issues and pull requests are welcome. CoWork is a single file by design
+([`cowork.py`](cowork.py) is the single source of truth — `COWORK.protocol.md` is
+generated from it), so keep changes focused and covered by a test in `tests/`. Run
+the test suite before opening a PR.

@@ -68,16 +68,16 @@ class TestPureFunctions(unittest.TestCase):
         out = cowork.clean_body("x COWORK:TURN 999 claude BEGIN y")
         self.assertNotIn("COWORK:TURN", out)
 
-    def test_protocol_doc_in_sync(self):
-        """Non-régression doc : docs/COWORK.protocol.md == source PROTOCOL_TEMPLATE."""
-        path = os.path.join(REPO, "docs", "COWORK.protocol.md")
-        if not os.path.exists(path):
-            self.skipTest("docs/COWORK.protocol.md absent")
-        with open(path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), cowork.PROTOCOL_TEMPLATE,
-                             "docs/COWORK.protocol.md a divergé de cowork.py "
-                             "→ régénère : python3 -c \"import cowork;"
-                             "open('docs/COWORK.protocol.md','w').write(cowork.PROTOCOL_TEMPLATE)\"")
+    def test_protocol_docs_in_sync(self):
+        """Non-régression doc : docs/en/protocol.md et docs/fr/protocole.md ==
+        cowork.PROTOCOL[lang] (chaque protocole rendu reste fidèle au template)."""
+        for lang, rel in (("en", "docs/en/protocol.md"), ("fr", "docs/fr/protocole.md")):
+            path = os.path.join(REPO, rel)
+            if not os.path.exists(path):
+                self.skipTest(f"{rel} absent")
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), cowork.PROTOCOL[lang],
+                                 f"{rel} a divergé de cowork.PROTOCOL['{lang}'] — régénère.")
 
     def test_ambiguous_anchor_variants_refused(self):
         """Deux variantes sur un FS sensible sont refusées sans choix arbitraire."""
@@ -154,7 +154,7 @@ class TestInit(CLIBase):
         self.assertEqual(lk["state"], "IDLE")
         self.assertEqual(lk["holder"], "none")
         self.assertEqual(lk["turn"], "0")
-        self.assertIn("nouvelle session", r.stdout)
+        self.assertIn("session", r.stdout)
 
     def test_init_project_name(self):
         self.init("--name", "Mon Super Projet")
@@ -170,8 +170,8 @@ class TestInit(CLIBase):
         with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
             agents = f.read()
         self.assertTrue(agents.startswith(cowork.STANZA_BEGIN))
-        self.assertIn(cowork.CODEX_CLAUDE_BRIDGE.strip(), agents)
-        self.assertIn("pont automatique", r.stdout)
+        self.assertIn(cowork.BRIDGE["en"].strip(), agents)
+        self.assertIn("automatic bridge", r.stdout)
 
     def test_existing_agents_does_not_receive_claude_bridge(self):
         """Des instructions Codex existantes restent autonomes et inchangées."""
@@ -185,7 +185,7 @@ class TestInit(CLIBase):
         with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
             agents = f.read()
         self.assertIn("REGLE-CODEX", agents)
-        self.assertNotIn(cowork.CODEX_CLAUDE_BRIDGE.strip(), agents)
+        self.assertNotIn(cowork.BRIDGE["en"].strip(), agents)
 
     def test_reinit_idempotent_preserves_content(self):
         """NR-idempotence : ré-init ne duplique pas la stanza, préserve contenu + état."""
@@ -279,7 +279,7 @@ class TestInit(CLIBase):
             self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
         with open(override, encoding="utf-8") as f:
             self.assertIn("GARDE-OVERRIDE", f.read())
-        self.assertIn("override Codex actif", r.stdout)
+        self.assertIn("Codex override active", r.stdout)
 
     def test_init_force_resets_lock(self):
         self.init()
@@ -306,7 +306,7 @@ class TestClaimModel(CLIBase):
         self.init()
         r = self.cw("append", "claude", "--to", "codex", "--ask", "x", "--done", "y")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("stylo", (r.stdout + r.stderr).lower())
+        self.assertIn("pen", (r.stdout + r.stderr).lower())
         self.assertNotIn("Traceback", r.stderr)
         self.assertEqual(self.lock()["turn"], "0")  # aucun tour écrit
 
@@ -365,7 +365,7 @@ class TestMutexGuards(CLIBase):
         r = self.cw("claim", "codex", "--force")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.lock()["holder"], "codex")
-        self.assertIn("périmé", self.lock()["note"])
+        self.assertIn("stale", self.lock()["note"])
 
     def test_reclaim_own_lock_refreshes(self):
         """NR-4 : le détenteur peut reprendre son propre verrou (refresh TTL)."""
@@ -435,7 +435,7 @@ class TestRobustness(CLIBase):
         r = self.cw("status")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
-        self.assertIn("corrompu", r.stdout + r.stderr)
+        self.assertIn("corrupted", r.stdout + r.stderr)
 
     def test_malformed_lock_schema_clean_exit(self):
         """NR-A : valeur LOCK invalide (turn non entier) → sortie propre, pas de traceback."""
@@ -448,7 +448,7 @@ class TestRobustness(CLIBase):
         r = self.cw("claim", "claude")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
-        self.assertIn("LOCK invalide", r.stdout + r.stderr)
+        self.assertIn("invalid LOCK", r.stdout + r.stderr)
 
     def test_field_rejects_newline(self):
         self.init()
@@ -559,6 +559,47 @@ class TestConcurrency(CLIBase):
         os.utime(lockp, (old, old))
         r = self.cw("claim", "claude")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+# ───────────────────────────── i18n (en / fr) ──────────────────────────────
+
+class TestI18n(CLIBase):
+    def test_init_default_is_english(self):
+        self.init()
+        self.assertEqual(self.lock().get("lang"), "en")
+        with open(os.path.join(self.d, "COWORK.protocol.md"), encoding="utf-8") as f:
+            self.assertIn("Single-file relay protocol", f.read())
+        r = self.cw("claim", "claude")
+        self.assertIn("pen taken", r.stdout)
+
+    def test_init_lang_fr_generates_french(self):
+        self.init("--lang", "fr")
+        self.assertEqual(self.lock().get("lang"), "fr")
+        with open(os.path.join(self.d, "COWORK.protocol.md"), encoding="utf-8") as f:
+            self.assertIn("Protocole de relais", f.read())
+        r = self.cw("claim", "claude")
+        self.assertIn("verrou pris", r.stdout)
+
+    def test_env_overrides_runtime_lang(self):
+        """COWORK_LANG force la langue des messages runtime, même si le LOCK dit en."""
+        self.init()  # lang: en
+        env = dict(os.environ, COWORK_LANG="fr")
+        r = subprocess.run([sys.executable, "cowork.py", "claim", "claude"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("verrou pris", r.stdout)
+
+    def test_lang_field_in_schema(self):
+        """Un champ lang invalide est rejeté proprement (pas de traceback)."""
+        self.init()
+        p = os.path.join(self.d, "COWORK.md")
+        with open(p, encoding="utf-8") as f:
+            t = f.read()
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(t.replace("lang:     en", "lang:     xx"))
+        r = self.cw("status")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":

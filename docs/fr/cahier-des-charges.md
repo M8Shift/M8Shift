@@ -1,7 +1,4 @@
-# Cahier des charges — cowork
-
-> **Note Claude —** spécification rédigée et maintenue par Claude ; source de
-> vérité du comportement attendu, alignée sur `cowork.py` et la suite `tests/`.
+# Cahier des charges — CoWork
 
 > **Statut** : `Validé` · **Version** : protocole v1 · **Dernière revue** : 2026-06-21
 
@@ -38,7 +35,7 @@ intervention ni explication humaine**.
 |----|----------|-------------|
 | EF-1 | **`claim` obligatoire et exclusif avant de travailler** : il acquiert `WORKING_<soi>` depuis `IDLE`/`AWAITING_<soi>` ; deux `claim` simultanés (claude/codex) ⇒ un seul réussit, l'autre est exclu. | `test_claim_exclusive_sequential`, `test_concurrent_claim_claude_vs_codex_single_winner` |
 | EF-1b | `append` n'est accepté **que depuis `WORKING_<soi>`** (donc après `claim`) → garantit l'exclusivité de la **fenêtre de travail** dans le dépôt, pas seulement du journal. | `test_append_requires_claim_from_idle`, `test_append_requires_claim_from_awaiting` |
-| EF-2 | `append` écrit le tour suivant **et** repasse la main (`AWAITING_<autre>`) en une opération atomique ; `turn` est incrémenté. | `test_handoff_increments_and_alternates` |
+| EF-2 | `append` écrit le tour suivant **et** passe la main (`AWAITING_<autre>`) en une opération atomique ; `turn` est incrémenté. | `test_handoff_increments_and_alternates` |
 | EF-3 | Un tour clôturé (`END`) est immuable (par convention : l'outil ne le réécrit jamais). | (revue) |
 | EF-4 | `--to` doit viser l'autre agent (auto-passation interdite). | `test_self_handoff_refused` |
 | EF-5 | `wait <agent>` attend le tour de l'agent ; `--once` ne fait qu'un contrôle (rc 0 = son tour, rc 3 sinon). | `test_wait_once_return_codes` |
@@ -62,6 +59,7 @@ intervention ni explication humaine**.
 | ENF-5 **Tenue dans le temps** | `COWORK.md` reste borné via `archive` ; l'archive n'est jamais relue par la boucle. |
 | ENF-6 **Lisibilité** | État et tours lisibles à l'œil et au `grep` ; marqueurs en commentaires HTML invisibles au rendu Markdown ; versionnable en clair. |
 | ENF-7 **Amorçage** | Les noms d'ancrage suivent les conventions auto-chargées ; la stanza est prioritaire dans le fichier et les limites de découverte Codex (override, racine, plafond de taille, rechargement par session) sont documentées. |
+| ENF-8 **Internationalisation (i18n)** | Les fichiers générés et les messages de la CLI sont bilingues (en/fr), **anglais par défaut**. `init --lang en\|fr` sélectionne la langue des artefacts générés (consignée dans le champ `lang` du LOCK) ; `$COWORK_LANG` surcharge la langue des messages à l'exécution. |
 
 ## 6. Modèle de données — le bloc `LOCK`
 
@@ -75,6 +73,7 @@ En tête de `COWORK.md`, entre `<!-- COWORK:LOCK:BEGIN -->` et `:END` :
 | `since` | ISO-8601 UTC | depuis quand l'état dure |
 | `expires` | ISO-8601 UTC \| `-` | TTL anti-blocage ; date **seulement** pendant `WORKING_*` |
 | `note` | texte | mémo lisible |
+| `lang` | enum \| absent | `en` \| `fr` — langue des fichiers générés / des messages à l'exécution |
 
 **Machine à états** (transitions légitimes) :
 
@@ -112,7 +111,10 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
   (NFS) `O_EXCL`/`rename` sont moins fiables (cowork vise un disque local).
 - **Immutabilité par convention** : l'outil ne réécrit jamais un tour clôturé,
   mais rien au niveau du système de fichiers ne l'empêche (édition manuelle).
-- **Deux agents** : le protocole est binaire (claude ⇄ codex) par conception.
+- **Deux agents simultanés (actuel)** : le protocole est binaire (claude ⇄ codex)
+  par conception. **Roadmap** : une version ultérieure généralisera le relais à
+  N agents (claude, codex, lechat, …) ; la version actuelle est volontairement
+  limitée à deux agents simultanés.
 - **Chargement des ancrages** : il dépend de l'outil hôte. Codex construit sa
   chaîne d'instructions une fois par exécution, donne priorité à
   `AGENTS.override.md` dans un dossier et applique un plafond de taille (32 Kio
