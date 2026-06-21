@@ -90,10 +90,16 @@ En tête de `COWORK.md`, entre `<!-- COWORK:LOCK:BEGIN -->` et `:END` :
 
 **Machine à états** (transitions légitimes) :
 
-```text
-IDLE ──claim X──▶ WORKING_X ──append──▶ AWAITING_Y ──claim Y──▶ WORKING_Y …
-  └──────────────────────────────────────────────────────────────▶ DONE (done)
-WORKING_X(périmé) ──claim Y --force──▶ WORKING_Y
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> WORKING_X: X claim
+    WORKING_X --> AWAITING_Y: X append vers Y
+    AWAITING_Y --> WORKING_Y: Y claim
+    WORKING_X --> WORKING_X: X re-claim (TTL)
+    WORKING_X --> WORKING_Y: Y force-claim (X périmé)
+    WORKING_X --> DONE: done
+    DONE --> [*]
 ```
 
 ## 7. Interface en ligne de commande

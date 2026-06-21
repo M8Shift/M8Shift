@@ -252,11 +252,11 @@ host tool — **Claude reads `CLAUDE.md`, Codex reads `AGENTS.md`**, and any oth
 agent reads its own anchor — at session/execution startup. The bootstrap chain is
 therefore:
 
-```
-cowork.py init  ──▶  injects the STANZA into each active agent's anchor (CLAUDE.md, AGENTS.md, …)
-                          │
-   each AI loads its anchor at startup ──▶ reads the stanza ──▶
-   "if a COWORK.md exists, apply COWORK.protocol.md (claim → work → append)"
+```mermaid
+flowchart LR
+    I["cowork.py init"] --> S["inject the stanza into<br/>each active agent's anchor"]
+    S --> R["each agent reads its anchor<br/>at session start"]
+    R --> L["applies COWORK.protocol.md<br/>(the wait / claim / work / append loop)"]
 ```
 
 - **After `init`**: start a new session/execution of the agent. A session

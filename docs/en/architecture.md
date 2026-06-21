@@ -65,23 +65,53 @@ mutual exclusion, atomicity, agent autonomy, robustness, durability over time.
 
 ### 1.6 Target application architecture
 
-```
-COWORK.md
-┌────────────────────────────────────────────┐
-│  LOCK  (mutex)   holder/state/turn/since/   │ ← a single "pen"
-│                  expires/note               │
-├────────────────────────────────────────────┤
-│  Turn log (append-only, immutable)          │
-│   TURN 0 system  · TURN 1 claude · TURN 2…  │
-└────────────────────────────────────────────┘
-     ▲                         ▲
-     │ drives                  │ injects
- cowork.py (CLI)          CLAUDE.md / AGENTS.md (anchors → stanza)
+```mermaid
+flowchart TB
+    A["Agent A"] -- shell --> CLI["cowork.py CLI"]
+    B["Agent B"] -- shell --> CLI
+    CLI -- "read-modify-write (atomic)" --> LK["COWORK.md<br/>LOCK (mutex) + turn journal"]
+    CLI -- "serialized by" --> LF[".cowork.lock (O_EXCL)"]
+    CLI -- "injects at init" --> AN["CLAUDE.md / AGENTS.md (stanza)"]
+    AN -. "read at startup" .-> A
+    AN -. "read at startup" .-> B
 ```
 
 **Components**: (a) the `LOCK` block = state machine; (b) the append-only turn
 log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
 `cowork.py` CLI (commands init/status/wait/claim/append/release/done/archive).
+
+**State machine** (`A`, `B` = the two active agents — by default `claude`, `codex`):
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> WORKING_A: A claims
+    WORKING_A --> AWAITING_B: A appends to B
+    AWAITING_B --> WORKING_B: B claims
+    WORKING_B --> AWAITING_A: B appends to A
+    AWAITING_A --> WORKING_A: A claims
+    WORKING_A --> WORKING_A: A re-claims (refresh TTL)
+    WORKING_A --> WORKING_B: B force-claims (A stale)
+    WORKING_B --> DONE: done
+    DONE --> [*]
+```
+
+**Relay loop** (one round):
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A
+    participant F as COWORK.md
+    participant B as Agent B
+    A->>F: poll (wait / status)
+    A->>F: claim A (WORKING_A, TTL set)
+    Note over A: works in the repo, holds the pen
+    A->>F: append to B (turn n, AWAITING_B)
+    B->>F: poll, sees its turn
+    B->>F: claim B (WORKING_B)
+    Note over B: works in the repo
+    B->>F: append to A (turn n+1, AWAITING_A)
+```
 
 ### 1.7 Application flow matrix
 

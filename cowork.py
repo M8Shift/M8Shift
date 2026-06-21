@@ -365,11 +365,11 @@ chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`**, et tou
 agent actif lit son propre ancrage — au démarrage de session/exécution. La chaîne
 d'amorçage est donc :
 
-```
-cowork.py init  ──▶  injecte la STANZA dans l'ancrage de chaque agent actif (CLAUDE.md, AGENTS.md, …)
-                          │
-   chaque IA charge son ancrage au démarrage ──▶ lit la strophe ──▶
-   « si un COWORK.md existe, applique COWORK.protocol.md (claim → travail → append) »
+```mermaid
+flowchart LR
+    I["cowork.py init"] --> S["injecte la strophe dans<br/>l'ancrage de chaque agent actif"]
+    S --> R["chaque agent lit son ancrage<br/>au démarrage de session"]
+    R --> L["applique COWORK.protocol.md<br/>(la boucle wait / claim / travail / append)"]
 ```
 
 - **Après `init`** : démarre une nouvelle session/exécution de l'agent. Une session
@@ -681,11 +681,11 @@ host tool — **Claude reads `CLAUDE.md`, Codex reads `AGENTS.md`**, and any oth
 agent reads its own anchor — at session/execution startup. The bootstrap chain is
 therefore:
 
-```
-cowork.py init  ──▶  injects the STANZA into each active agent's anchor (CLAUDE.md, AGENTS.md, …)
-                          │
-   each AI loads its anchor at startup ──▶ reads the stanza ──▶
-   "if a COWORK.md exists, apply COWORK.protocol.md (claim → work → append)"
+```mermaid
+flowchart LR
+    I["cowork.py init"] --> S["inject the stanza into<br/>each active agent's anchor"]
+    S --> R["each agent reads its anchor<br/>at session start"]
+    R --> L["applies COWORK.protocol.md<br/>(the wait / claim / work / append loop)"]
 ```
 
 - **After `init`**: start a new session/execution of the agent. A session

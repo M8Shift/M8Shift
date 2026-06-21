@@ -131,6 +131,16 @@ happens only while you hold the pen and `append` is accepted only from
 `WORKING_<you>`, the two agents never write the repository concurrently. This
 **claim-before-work** rule is the heart of CoWork.
 
+```mermaid
+flowchart LR
+    W["wait / status"] --> Q{your turn?}
+    Q -- no --> W
+    Q -- "yes (IDLE or AWAITING you)" --> C["claim"]
+    C --> K["work in the repo"]
+    K --> A["append --to other"]
+    A --> W
+```
+
 The lock fields — `holder`, `state`, `agents`, `turn`, `since`, `expires`, `note`,
 `lang` — are one `key: value` per line (easy to `grep`). `holder` is an active agent
 or `none`; `agents` is the relaying pair (the first two declared, default
