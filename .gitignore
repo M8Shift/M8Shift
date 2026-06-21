@@ -17,6 +17,9 @@ ETAT-DES-LIEUX-*.md
 # Sauvegardes des ancrages avant (ré)injection par `init`
 *.cowork.bak
 
+# macOS
+.DS_Store
+
 # Python
 __pycache__/
 *.pyc

@@ -208,3 +208,31 @@ This is exactly how the roster work (RFC stage 1) was reviewed: Claude implement
 then handed off to Codex for an adversarial review through a frozen relay in
 `cowork-relay/`. A **git worktree** of the repo would *not* decouple the engine (it
 tracks the same branch, so its `cowork.py` changes on edit) — use a frozen copy.
+
+## 12. Planned features & non-goals
+
+Every planned feature stays within CoWork's qualities (single-file, passive,
+zero-credential, file-based & versioned): it is **append-only or read-only over data
+CoWork already stores** — never a daemon, an integration, or a second source of truth.
+(Vetted by an adversarial design review that rejected anything breaking a quality.)
+
+### 12.1 Retained (roadmap)
+
+| Feature | Priority | What | Why it preserves the qualities |
+|---------|----------|------|--------------------------------|
+| **Shared memory + recap** | next | `cowork.py remember <agent> --key <slug> --note "…"` appends a `COWORK:MEM` block to a sibling `COWORK.memory.md` (atomic write under `file_lock()`, gated on `WORKING_<agent>`); `cowork.py recap` is a read-only briefing (current LOCK + last N turns + memory headlines). | One append-only block guarded by the SAME pen / `WORKING_<agent>` gate as `append`; recap re-renders markers CoWork already writes. CoWork never reads the ledger back into coordination logic — it still decides only *who writes, when*. |
+| **Structured handoff + peek** | next | Optional write-only turn fields (`branch` / `commit` / `tests` / `next`, default `-`) + `cowork.py peek <agent>` to read the last handoff's fields (rc 0 your turn, rc 3 otherwise). | Header lines are never parsed back by the engine (only the LOCK block + markers are); peek is read-only over data `append` already wrote. |
+| **Timeline + JSON status** | next | `cowork.py log [--limit N] [--agent X] [--all] [--oneline]` (relay timeline from existing turn markers; `--all` walks the archive) + `status --json`. | Pure read-only formatters over existing data; only stdlib `json` added. |
+| **`claim --check <globs>`** | later | Advisory, read-only file-overlap probe against the other agent's last `files:` field (stdlib `fnmatch`). | Advisory only — grants no path lease and opens no concurrent work window, so it stays degree-1. |
+| **`subturn`** | later | Record an agent's own sub-agent fan-out as a `COWORK:SUBTURN <n>.<k>` annotation under its open turn (accepted only from `WORKING_<agent>`). | Append-only; never touches the LOCK / turn counter / baton; sub-agents never hold the pen. |
+| **Tasks board / block-on** | maybe | Append-only `COWORK.tasks.md` partition (`tasks claim/done`); `block`/`unblock` name an external dependency as an explicit `blocked_on` wait reason. | Serialized by the same `O_EXCL` lock; never executes a task, polls, or auto-routes the baton. |
+
+### 12.2 Non-goals (rejected — they would break a quality)
+
+| Rejected | Quality broken | Why |
+|----------|----------------|-----|
+| **Path-scoped *leases*** (concurrent disjoint writes) | degree-1 mutex / minimal | Puts two agents in a working state at once — that is the **stage-2 degree-2** lock, not today's single pen. `claim --check` delivers the safe, advisory 80%. |
+| **Background daemon / watcher / push-notifier** | passive | CoWork has no resident process; the recipient polls on its own next turn. A notification can *signal* a turn, never *wake* the AI. |
+| **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns CoWork into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |
+| **Third-party deps / multi-file package** | single file | Every item is scoped to stdlib (`json`, `fnmatch`, `re`); a DB / queue / server would split the tool — no more `cp cowork.py`. |
+| **"Smart" *derived* memory** (dedup / summarize / search / prune) | minimal / file-based | The ledger is a dumb append-only record; any digest is verbatim agent passthrough. The instant CoWork curates content it owns a knowledge base with policy — a second source of truth. |
