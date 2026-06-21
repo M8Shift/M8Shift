@@ -206,6 +206,18 @@ parallel **and** sequential workflows. They can take turns too; the real differe
 | Credentials | the agents' auth (subscription **or** API key) | **none** — CoWork never authenticates anything |
 | Scope | memory, tools, routing, parallel + sequential | only *who writes, when* |
 
+**What CoWork gives that a message-routing orchestrator doesn't:**
+
+- 🔒 **A real write-lock on the repo** — exactly one agent writes at a time. An
+  orchestrator routes *tasks and messages*; it does not stop two agents editing the
+  same files in parallel. CoWork does (its whole job).
+- 🪶 **Zero runtime, zero credentials** — `cp cowork.py` and go. No server to deploy, no
+  provider/auth to configure, no API key, no per-call cost.
+- 🤝 **Peer-to-peer, no coordinator** — the agents pass the baton themselves
+  (`--to <other>`); there is no central "project-manager" agent deciding the turns.
+- 📓 **Durable, readable, git-versioned coordination** — `COWORK.md` *is* the record of
+  who did what and what's next — by eye and by `grep`, committed alongside your code.
+
 Reach for an orchestrator when you want a **managed agent team**. Reach for CoWork when
 you just want two agents you already run (Claude Code, Codex, …) to **stop overwriting
 each other** — with nothing to install or authenticate. They are **complementary**, not

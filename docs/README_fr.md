@@ -207,6 +207,18 @@ savent alterner ; la vraie différence est le **périmètre et l'empreinte** :
 | Identifiants | l'auth des agents (abonnement **ou** clé API) | **aucun** — CoWork ne s'authentifie jamais |
 | Périmètre | mémoire, outils, routage, parallèle + séquentiel | seulement *qui écrit, quand* |
 
+**Ce que CoWork apporte qu'un orchestrateur de messages ne donne pas :**
+
+- 🔒 **Un vrai verrou d'écriture sur le dépôt** — exactement un agent écrit à la fois. Un
+  orchestrateur route des *tâches et messages* ; il n'empêche pas deux agents d'éditer
+  les mêmes fichiers en parallèle. CoWork, si (c'est tout son rôle).
+- 🪶 **Zéro runtime, zéro identifiant** — `cp cowork.py` et c'est parti. Aucun serveur à
+  déployer, aucun provider/auth à configurer, aucune clé API, aucun coût par appel.
+- 🤝 **Pair-à-pair, sans coordinateur** — les agents se passent le bâton eux-mêmes
+  (`--to <autre>`) ; pas d'agent « chef de projet » central qui décide des tours.
+- 📓 **Coordination durable, lisible, versionnée Git** — `COWORK.md` *est* la trace de qui
+  a fait quoi et de la suite — à l'œil et au `grep`, committée avec ton code.
+
 Prends un orchestrateur quand tu veux une **équipe d'agents gérée**. Prends CoWork quand
 tu veux juste que deux agents que tu lances déjà (Claude Code, Codex, …) **arrêtent de
 s'écraser** — sans rien installer ni authentifier. Ils sont **complémentaires**, pas
