@@ -65,23 +65,53 @@ tenue dans le temps.
 
 ### 1.6 Architecture applicative cible
 
-```
-COWORK.md
-┌────────────────────────────────────────────┐
-│  LOCK  (mutex)   holder/state/turn/since/   │ ← un seul "stylo"
-│                  expires/note               │
-├────────────────────────────────────────────┤
-│  Journal des tours (append-only, immuable)  │
-│   TURN 0 system  · TURN 1 claude · TURN 2…  │
-└────────────────────────────────────────────┘
-     ▲                         ▲
-     │ pilote                  │ injecte
- cowork.py (CLI)          CLAUDE.md / AGENTS.md (ancrages → strophe)
+```mermaid
+flowchart TB
+    A["Agent A"] -- shell --> CLI["CLI cowork.py"]
+    B["Agent B"] -- shell --> CLI
+    CLI -- "lecture-modif-écriture (atomique)" --> LK["COWORK.md<br/>LOCK (mutex) + journal des tours"]
+    CLI -- "sérialisé par" --> LF[".cowork.lock (O_EXCL)"]
+    CLI -- "injecte à l'init" --> AN["CLAUDE.md / AGENTS.md (strophe)"]
+    AN -. "lu au démarrage" .-> A
+    AN -. "lu au démarrage" .-> B
 ```
 
 **Composants** : (a) le bloc `LOCK` = automate d'état ; (b) le journal de tours
 append-only ; (c) les ancrages porteurs de la *strophe* d'auto-instruction ;
 (d) la CLI `cowork.py` (commandes init/status/wait/claim/append/release/done/archive).
+
+**Automate d'état** (`A`, `B` = les deux agents actifs — par défaut `claude`, `codex`) :
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> WORKING_A: A claim
+    WORKING_A --> AWAITING_B: A append vers B
+    AWAITING_B --> WORKING_B: B claim
+    WORKING_B --> AWAITING_A: B append vers A
+    AWAITING_A --> WORKING_A: A claim
+    WORKING_A --> WORKING_A: A re-claim (TTL)
+    WORKING_A --> WORKING_B: B force-claim (A périmé)
+    WORKING_B --> DONE: done
+    DONE --> [*]
+```
+
+**Boucle de relais** (un tour) :
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A
+    participant F as COWORK.md
+    participant B as Agent B
+    A->>F: sondage (wait / status)
+    A->>F: claim A (WORKING_A, TTL posé)
+    Note over A: travaille dans le dépôt, tient le stylo
+    A->>F: append vers B (tour n, AWAITING_B)
+    B->>F: sondage, voit son tour
+    B->>F: claim B (WORKING_B)
+    Note over B: travaille dans le dépôt
+    B->>F: append vers A (tour n+1, AWAITING_A)
+```
 
 ### 1.7 Matrice des flux applicatifs
 

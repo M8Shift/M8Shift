@@ -133,6 +133,16 @@ travail n'a lieu que pendant que vous détenez le stylo et que `append` n'est ac
 `WORKING_<toi>`, les deux agents n'écrivent jamais le dépôt en concurrence. Cette
 règle **claim-avant-travail** est le cœur de CoWork.
 
+```mermaid
+flowchart LR
+    W["wait / status"] --> Q{ton tour ?}
+    Q -- non --> W
+    Q -- "oui (IDLE ou AWAITING toi)" --> C["claim"]
+    C --> K["travail dans le dépôt"]
+    K --> A["append --to autre"]
+    A --> W
+```
+
 Les champs du verrou — `holder`, `state`, `agents`, `turn`, `since`, `expires`,
 `note`, `lang` — sont un `key: value` par ligne (faciles à `grep`er). `holder` est un
 agent actif ou `none` ; `agents` est le couple du relais (les 2 premiers déclarés,

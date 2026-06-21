@@ -251,11 +251,11 @@ chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`**, et tou
 agent actif lit son propre ancrage — au démarrage de session/exécution. La chaîne
 d'amorçage est donc :
 
-```
-cowork.py init  ──▶  injecte la STANZA dans l'ancrage de chaque agent actif (CLAUDE.md, AGENTS.md, …)
-                          │
-   chaque IA charge son ancrage au démarrage ──▶ lit la strophe ──▶
-   « si un COWORK.md existe, applique COWORK.protocol.md (claim → travail → append) »
+```mermaid
+flowchart LR
+    I["cowork.py init"] --> S["injecte la strophe dans<br/>l'ancrage de chaque agent actif"]
+    S --> R["chaque agent lit son ancrage<br/>au démarrage de session"]
+    R --> L["applique COWORK.protocol.md<br/>(la boucle wait / claim / travail / append)"]
 ```
 
 - **Après `init`** : démarre une nouvelle session/exécution de l'agent. Une session

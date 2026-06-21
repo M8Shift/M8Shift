@@ -88,10 +88,16 @@ At the head of `COWORK.md`, between `<!-- COWORK:LOCK:BEGIN -->` and `:END`:
 
 **State machine** (legitimate transitions):
 
-```text
-IDLE ──claim X──▶ WORKING_X ──append──▶ AWAITING_Y ──claim Y──▶ WORKING_Y …
-  └──────────────────────────────────────────────────────────────▶ DONE (done)
-WORKING_X(stale) ──claim Y --force──▶ WORKING_Y
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> WORKING_X: X claims
+    WORKING_X --> AWAITING_Y: X appends to Y
+    AWAITING_Y --> WORKING_Y: Y claims
+    WORKING_X --> WORKING_X: X re-claims (refresh TTL)
+    WORKING_X --> WORKING_Y: Y force-claims (X stale)
+    WORKING_X --> DONE: done
+    DONE --> [*]
 ```
 
 ## 7. Command-line interface
