@@ -1087,7 +1087,7 @@ def clean_field(label, val):
 def clean_body(text):
     """Multi-line body: neutralizes any injected reserved marker (zero-width after
     `COWORK`) so it cannot masquerade as a real turn."""
-    return text.replace("COWORK:", "COWORK​:")
+    return text.replace("COWORK:", "COWORK\u200b:")
 
 
 def get_lock(text):
