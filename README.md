@@ -245,6 +245,32 @@ CoWork keeps a **single-pen mutex** (one writer at a time) by design — see
 2. **N simultaneous agents** — true multi-agent (degree > 1); a separate, larger
    step with its own future RFC.
 
+**Planned features** — every item stays single-file, passive and zero-credential
+(append-only or read-only over data CoWork already stores; never a daemon, an
+integration, or a second source of truth):
+
+- 🧠 **Shared memory + recap** *(next)* — a durable, append-only `COWORK.memory.md` the
+  agents curate by hand (`cowork.py remember`), plus a read-only `cowork.py recap`
+  session-start briefing (current LOCK + last turns + memory headlines) so an agent can
+  resume across sessions.
+- 📨 **Structured handoff + peek** *(next)* — optional advisory turn fields
+  (`branch` / `commit` / `tests` / `next`, write-only) and `cowork.py peek` to read the
+  last handoff in one call.
+- 📊 **Timeline + JSON status** *(next)* — `cowork.py log` (relay timeline) and
+  `status --json` for dashboards (`watch`-friendly).
+- 🧭 **`claim --check`** *(later)* — advisory, read-only file-overlap collision probe
+  (from the `files:` field), without granting a concurrent work window.
+- 🌿 **`subturn`** *(later)* — record an agent's own sub-agent fan-out under its turn.
+- 🗂️ **Tasks board / block-on** *(maybe)* — an append-only to-do partition; name an
+  external dependency as an explicit `blocked_on` wait reason.
+
+**Non-goals** (they would break a CoWork quality): path-scoped *leases* for concurrent
+disjoint writes (that is the stage-2 degree-2 lock, not today's degree-1 pen); a
+background daemon / watcher / push-notifier; running git, builds or APIs (needs auth +
+network → an orchestrator); third-party deps or a multi-file package; and "smart"
+*derived* memory (dedup / summarize / prune) — the ledger stays a dumb, human-curated
+record.
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
