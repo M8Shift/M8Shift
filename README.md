@@ -151,7 +151,8 @@ Verified by the tests and by multi-agent review:
   hands-off operation needs a **headless** loop (`claude -p`, `codex exec`, cron)
   wrapping `wait → relaunch the agent → claim` — a host integration, not a change to
   the mutex. A system notification/webhook can *signal* a turn but cannot *wake* the AI
-  by itself.
+  by itself. An example runner is provided:
+  [`examples/headless_runner.py`](examples/headless_runner.py).
 - **Cooperative, two-agent, advisory** — see the
   [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, two
   simultaneous agents).
