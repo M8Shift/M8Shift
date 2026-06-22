@@ -1,4 +1,4 @@
-# Specification — CoWork
+# Specification — M8Shift
 
 > **Status**: `Validated` · **Version**: protocol v1 · **Last reviewed**: 2026-06-21
 
@@ -62,7 +62,7 @@ human still nudges each agent to resume between turns — see §8.
 | ENF-8 **Internationalization (i18n)** | Generated files and CLI messages are bilingual (en/fr), **English by default**. `init --lang en\|fr` selects the language of the generated artifacts (recorded in the LOCK `lang` field); `$COWORK_LANG` overrides the runtime message language. |
 | ENF-9 **Zero credentials / any surface** | `cowork.py` makes **no network call** and needs **no API key, token or account**; it relies entirely on the host agents' own auth. It runs on every Claude Code / Codex surface (terminal/CLI, desktop app, IDE/VS Code, web) — interactive UIs need a human nudge between turns, a headless CLI loop automates fully. |
 
-> **i18n authoring (note).** At runtime CoWork stays a **single file**: the `en`/`fr`
+> **i18n authoring (note).** At runtime M8Shift stays a **single file**: the `en`/`fr`
 > catalogs live inline in `cowork.py` (`MESSAGES` + the template dicts), so adding a
 > language is just another dict entry. If you want a *translator-friendly* workflow
 > (editing locale files without touching Python), use a **build step**: author
@@ -113,7 +113,7 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 
 - **Waking an interactive agent UI**: `wait` blocks a *process* until your turn, but it
   does **not** relaunch or wake an agent running in an interactive UI (VS Code, …).
-  Between turns a human nudges each agent (e.g. *"resume CoWork"*). Fully hands-off
+  Between turns a human nudges each agent (e.g. *"resume M8Shift"*). Fully hands-off
   operation needs a **headless** loop (`claude -p`, `codex exec`, cron) wrapping
   `wait → relaunch the agent → claim` — a host integration, not a change to the mutex. A
   notification/webhook can *signal* a turn but cannot *wake* the AI by itself.
@@ -172,9 +172,9 @@ keeps working **for the default `claude,codex` pair**. A *custom* roster, howeve
 requires a roster-aware script — an old script would treat it as `claude,codex` and
 could corrupt it. The markers and the one-`key: value`-per-line format are unchanged.
 
-## 11. Developing CoWork with CoWork (dogfooding)
+## 11. Developing M8Shift with M8Shift (dogfooding)
 
-CoWork can coordinate **its own development** — two agents editing `cowork.py` and the
+M8Shift can coordinate **its own development** — two agents editing `cowork.py` and the
 repo through the relay. One precaution is decisive: here the **tool is also the
 artifact**. Every `cowork.py <cmd>` reloads the file from disk, so a transient syntax
 error in the source under edit would break the relay itself.
@@ -211,16 +211,16 @@ tracks the same branch, so its `cowork.py` changes on edit) — use a frozen cop
 
 ## 12. Planned features & non-goals
 
-Every planned feature stays within CoWork's qualities (single-file, passive,
+Every planned feature stays within M8Shift's qualities (single-file, passive,
 zero-credential, file-based & versioned): it is **append-only or read-only over data
-CoWork already stores** — never a daemon, an integration, or a second source of truth.
+M8Shift already stores** — never a daemon, an integration, or a second source of truth.
 (Vetted by an adversarial design review that rejected anything breaking a quality.)
 
 ### 12.1 Retained (roadmap)
 
 | Feature | Priority | What | Why it preserves the qualities |
 |---------|----------|------|--------------------------------|
-| **Shared memory + recap** | next | `cowork.py remember <agent> --key <slug> --note "…"` appends a `COWORK:MEM` block to a sibling `COWORK.memory.md` (atomic write under `file_lock()`, gated on `WORKING_<agent>`); `cowork.py recap` is a read-only briefing (current LOCK + last N turns + memory headlines). | One append-only block guarded by the SAME pen / `WORKING_<agent>` gate as `append`; recap re-renders markers CoWork already writes. CoWork never reads the ledger back into coordination logic — it still decides only *who writes, when*. |
+| **Shared memory + recap** | next | `cowork.py remember <agent> --key <slug> --note "…"` appends a `COWORK:MEM` block to a sibling `COWORK.memory.md` (atomic write under `file_lock()`, gated on `WORKING_<agent>`); `cowork.py recap` is a read-only briefing (current LOCK + last N turns + memory headlines). | One append-only block guarded by the SAME pen / `WORKING_<agent>` gate as `append`; recap re-renders markers M8Shift already writes. M8Shift never reads the ledger back into coordination logic — it still decides only *who writes, when*. |
 | **Structured handoff + peek** | next | Optional write-only turn fields (`branch` / `commit` / `tests` / `next`, default `-`) + `cowork.py peek <agent>` to read the last handoff's fields (rc 0 your turn, rc 3 otherwise). | Header lines are never parsed back by the engine (only the LOCK block + markers are); peek is read-only over data `append` already wrote. |
 | **Timeline + JSON status** | next | `cowork.py log [--limit N] [--agent X] [--all] [--oneline]` (relay timeline from existing turn markers; `--all` walks the archive) + `status --json`. | Pure read-only formatters over existing data; only stdlib `json` added. |
 | **`claim --check <globs>`** | later | Advisory, read-only file-overlap probe against the other agent's last `files:` field (stdlib `fnmatch`). | Advisory only — grants no path lease and opens no concurrent work window, so it stays degree-1. |
@@ -232,7 +232,7 @@ CoWork already stores** — never a daemon, an integration, or a second source o
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|
 | **Path-scoped *leases*** (concurrent disjoint writes) | degree-1 mutex / minimal | Puts two agents in a working state at once — that is the **stage-2 degree-2** lock, not today's single pen. `claim --check` delivers the safe, advisory 80%. |
-| **Background daemon / watcher / push-notifier** | passive | CoWork has no resident process; the recipient polls on its own next turn. A notification can *signal* a turn, never *wake* the AI. |
-| **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns CoWork into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |
+| **Background daemon / watcher / push-notifier** | passive | M8Shift has no resident process; the recipient polls on its own next turn. A notification can *signal* a turn, never *wake* the AI. |
+| **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns M8Shift into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |
 | **Third-party deps / multi-file package** | single file | Every item is scoped to stdlib (`json`, `fnmatch`, `re`); a DB / queue / server would split the tool — no more `cp cowork.py`. |
-| **"Smart" *derived* memory** (dedup / summarize / search / prune) | minimal / file-based | The ledger is a dumb append-only record; any digest is verbatim agent passthrough. The instant CoWork curates content it owns a knowledge base with policy — a second source of truth. |
+| **"Smart" *derived* memory** (dedup / summarize / search / prune) | minimal / file-based | The ledger is a dumb append-only record; any digest is verbatim agent passthrough. The instant M8Shift curates content it owns a knowledge base with policy — a second source of truth. |

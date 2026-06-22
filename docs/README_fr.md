@@ -13,7 +13,7 @@ _Des agents différents. Des rôles différents. Un seul workflow coordonné._
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#installation)
 [![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](../cowork.py)
 [![sans clé API](https://img.shields.io/badge/cl%C3%A9%20API-non%20requise-success.svg)](#tourne-partout--sans-clé-api)
-[![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](../docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding)
+[![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](../docs/fr/cahier-des-charges.md#11-développer-m8shift-avec-m8shift-dogfooding)
 
 [English](../README.md) | Français
 

@@ -1,6 +1,6 @@
-# Guide — Lancer CoWork sous Windows
+# Guide — Lancer M8Shift sous Windows
 
-CoWork est **du Python 3.8+ pur, bibliothèque standard uniquement** — il n'y a **rien
+M8Shift est **du Python 3.8+ pur, bibliothèque standard uniquement** — il n'y a **rien
 à `pip install`**. Il tourne sous Windows de trois façons : WSL (le plus proche de
 Linux/macOS), Git Bash, ou PowerShell/cmd natif.
 
@@ -9,9 +9,9 @@ Linux/macOS), Git Bash, ou PowerShell/cmd natif.
 - **Python 3.8+** — installe depuis [python.org](https://www.python.org/downloads/)
   (coche *« Add python.exe to PATH »*), ou `winget install Python.Python.3.12`, ou le
   Microsoft Store. Vérifie : `python --version` (ou `py --version`).
-- **Aucune dépendance** — CoWork est stdlib-only, il n'y a rien d'autre à installer.
+- **Aucune dépendance** — M8Shift est stdlib-only, il n'y a rien d'autre à installer.
 - *(Optionnel)* **Git pour Windows** — utile seulement pour le renommage de casse des
-  ancrages via `git mv`. Sans lui, CoWork fonctionne quand même (l'étape Git est
+  ancrages via `git mv`. Sans lui, M8Shift fonctionne quand même (l'étape Git est
   sautée).
 
 ## Option A — WSL (recommandé : au plus proche de Linux/macOS)
@@ -60,7 +60,7 @@ python cowork.py append claude --to codex --ask "..." --done "..."
 
 ## Fins de ligne
 
-CoWork écrit `COWORK.md` en LF (`\n`) ; les marqueurs de tour/verrou sont des
+M8Shift écrit `COWORK.md` en LF (`\n`) ; les marqueurs de tour/verrou sont des
 commentaires HTML et le parseur tolère les sauts de ligne, donc CRLF ne casse pas la
 détection. Si tu committes `cowork.py` depuis Windows, garde du LF (`* text=auto
 eol=lf` dans `.gitattributes`, ou `git config core.autocrlf input`). Dans *ce* dépôt source, `COWORK.md` est gitignoré, donc ses fins de ligne

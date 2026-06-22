@@ -1,6 +1,6 @@
-# Tutorial — Run your first CoWork relay
+# Tutorial — Run your first M8Shift relay
 
-This is a hands-on tutorial. By the end you will have run a complete CoWork
+This is a hands-on tutorial. By the end you will have run a complete M8Shift
 relay from start to finish in a throwaway folder: you will play one turn as
 `claude`, hand off, play one turn as `codex`, watch the strict alternation
 happen, then close the session.
@@ -21,7 +21,7 @@ it. If something looks different, read the **If you see something else** note.
 
 ## Step 1 — Create a toy folder
 
-We will work in a temporary folder so nothing on your machine is touched. CoWork
+We will work in a temporary folder so nothing on your machine is touched. M8Shift
 is a single self-contained file, so a toy project is just an empty directory.
 
 ```bash
@@ -36,7 +36,7 @@ is inside it.
 
 ## Step 2 — Copy `cowork.py` into the folder
 
-CoWork ships as one file. To adopt it in any project you copy that one file in.
+M8Shift ships as one file. To adopt it in any project you copy that one file in.
 
 ```bash
 cp /path/to/cowork.py .
@@ -55,7 +55,7 @@ prints.
 
 ## Step 3 — Initialize the relay with `init`
 
-The `init` command generates everything CoWork needs in this folder: the shared
+The `init` command generates everything M8Shift needs in this folder: the shared
 work file `COWORK.md`, the protocol reference `COWORK.protocol.md`, and the
 anchor files (`CLAUDE.md`, `AGENTS.md`) that let each agent bootstrap itself.
 
@@ -87,7 +87,7 @@ clean with `./cowork.py init --name hello-cowork --force`.
 
 ## Step 4 — Look at the lock inside `COWORK.md`
 
-The heart of CoWork is one block called the **LOCK** at the top of `COWORK.md`.
+The heart of M8Shift is one block called the **LOCK** at the top of `COWORK.md`.
 It is a cooperative mutex: a few `field: value` lines that say who, if anyone,
 holds the pen. Open `COWORK.md` in any editor, or print the top of it:
 
@@ -411,7 +411,7 @@ cd ..
 rm -rf /tmp/cowork-toy
 ```
 
-Congratulations — you ran a complete CoWork relay end to end.
+Congratulations — you ran a complete M8Shift relay end to end.
 
 ---
 
@@ -438,11 +438,11 @@ Now that the mechanics make sense, go deeper:
 
 - **How-to guides** — task-focused recipes (recover a stale lock with
   `claim --force`, write a turn body with `--body`, hand off without a turn
-  using `release`, adopt CoWork in an existing project). See the how-to docs
+  using `release`, adopt M8Shift in an existing project). See the how-to docs
   alongside this file.
 - **Reference** — the full protocol and command reference:
   [`COWORK.protocol.md`](../../COWORK.protocol.md) for the protocol, and the
   reference doc for every command, flag, lock field, and state.
-- **Read the protocol once.** Before you run CoWork with real agents, read
+- **Read the protocol once.** Before you run M8Shift with real agents, read
   `COWORK.protocol.md` §0 (the copy-paste loop) so each agent can operate on its
   own.

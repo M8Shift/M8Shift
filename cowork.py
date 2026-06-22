@@ -8,7 +8,7 @@ delimited by the HTML comments COWORK:LOCK:BEGIN / COWORK:LOCK:END. Turns are
 delimited by COWORK:TURN <n> <agent> BEGIN / END. See COWORK.protocol.md.
 
 No API key, no network, no daemon: a passive local CLI the agents drive with shell
-commands; they bring their own auth, so CoWork adds zero credentials.
+commands; they bring their own auth, so M8Shift adds zero credentials.
 """
 import argparse
 import contextlib
