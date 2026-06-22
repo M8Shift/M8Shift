@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="200" viewBox="0 0 760 200" role="img" aria-label="M8Shift">
+  <title>M8Shift</title>
+  <defs>
+    <linearGradient id="m8grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF7A18"/>
+      <stop offset="0.52" stop-color="#F0509C"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+  </defs>
+
+  <!-- mark: two linked rings = handoff loop / infinity / 8 -->
+  <g fill="none" stroke="url(#m8grad)" stroke-width="17">
+    <circle cx="92" cy="100" r="44"/>
+    <circle cx="168" cy="100" r="44"/>
+  </g>
+
+  <!-- wordmark: M8 in gradient, Shift in night blue -->
+  <text x="244" y="142" font-family="'Helvetica Neue', 'Inter', Helvetica, Arial, sans-serif"
+        font-size="116" font-weight="800" letter-spacing="-3">
+    <tspan fill="url(#m8grad)">M8</tspan><tspan fill="#1E2A44">Shift</tspan>
+  </text>
+</svg>
