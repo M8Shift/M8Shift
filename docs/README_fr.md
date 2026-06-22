@@ -22,11 +22,8 @@ _Des agents différents. Des rôles différents. Un seul workflow coordonné._
 ---
 
 > **Anciennement CoWork.** Le projet a été renommé **M8Shift** (« Mate Shift » — *mate* = coéquipier,
-> *shift* = passage du tour). Les noms canoniques sont désormais `m8shift.py`, `M8SHIFT.md` et les
-> marqueurs `M8SHIFT:*`. **Les projets CoWork existants continuent de fonctionner sans rien changer** :
-> les anciens `COWORK.md` / `.cowork.lock` / `COWORK:*` sont lus **et** écrits en place (aucun fichier
-> orphelin), `cowork.py` reste un shim déprécié, et `m8shift.py migrate-brand` renomme le tout quand tu
-> le décides. Les anciens noms restent pris en charge au moins jusqu'à la prochaine version majeure.
+> *shift* = passage du tour). Depuis la **v3.0.0**, l'outil est **M8Shift-only** : le shim `cowork.py`
+> et la compatibilité des fichiers CoWork (dual-read, `migrate-brand`) ont été retirés.
 
 ## Qu'est-ce que M8Shift ?
 
