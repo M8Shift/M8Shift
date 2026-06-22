@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" role="img" aria-label="M8Shift mark">
+  <title>M8Shift mark</title>
+  <defs>
+    <linearGradient id="m8grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF7A18"/>
+      <stop offset="0.52" stop-color="#F0509C"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+  </defs>
+  <!-- two linked rings = handoff loop / infinity / 8 -->
+  <g fill="none" stroke="url(#m8grad)" stroke-width="22">
+    <circle cx="92" cy="120" r="56"/>
+    <circle cx="148" cy="120" r="56"/>
+  </g>
+</svg>
