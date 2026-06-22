@@ -27,8 +27,8 @@ infrastructure d'entreprise non pertinente ici.
 `cowork` est un **outil de coordination de deux agents IA** (un couple configurable ; par défaut Claude, Codex)
 travaillant sur un même dépôt. Il matérialise un **stylo unique** : un seul agent
 écrit à la fois, l'autre attend son tour. Tout l'état de coordination vit dans un
-seul fichier versionnable `COWORK.md`. L'outil est un **script Python autonome**
-(`cowork.py`) qui s'auto-installe dans n'importe quel projet via `init`.
+seul fichier versionnable `M8SHIFT.md`. L'outil est un **script Python autonome**
+(`m8shift.py`) qui s'auto-installe dans n'importe quel projet via `init`.
 
 **Positionnement dans le SI** : couche de coordination *au-dessus* du dépôt
 hôte ; ne dépend d'aucun service, n'expose aucun port, ne stocke rien hors du
@@ -39,13 +39,13 @@ dépôt. Transverse à tous les projets (livres, code, sites…).
 | Acteur | Type | Rôle |
 |--------|------|------|
 | agent actif ×2 | agents IA | le couple configuré du relais (par défaut `claude`/`codex`) ; chacun lit son propre ancrage (`CLAUDE.md`, `AGENTS.md`, …) et opère le relais de son côté |
-| mainteneur | humain | déploie, arbitre, lit le journal (`COWORK.md`, git) |
+| mainteneur | humain | déploie, arbitre, lit le journal (`M8SHIFT.md`, git) |
 
 ### 1.3 Nature et sensibilité des données
 
 | Processus | Donnée traitée | Classification | C | I | A | T |
 |-----------|----------------|----------------|---|---|---|---|
-| Coordination | État du verrou + journal des tours (`COWORK.md`) | = sensibilité du dépôt hôte | Faible | **Élevée** | Moyenne | **Élevée** |
+| Coordination | État du verrou + journal des tours (`M8SHIFT.md`) | = sensibilité du dépôt hôte | Faible | **Élevée** | Moyenne | **Élevée** |
 
 > C=Confidentialité, I=Intégrité, A=Disponibilité, T=Traçabilité. L'intégrité et
 > la traçabilité priment (le journal fait foi de qui a fait quoi).
@@ -67,10 +67,10 @@ tenue dans le temps.
 
 ```mermaid
 flowchart TB
-    A["Agent A"] -- shell --> CLI["CLI cowork.py"]
+    A["Agent A"] -- shell --> CLI["CLI m8shift.py"]
     B["Agent B"] -- shell --> CLI
-    CLI -- "lecture-modif-écriture (atomique)" --> LK["COWORK.md<br/>LOCK (mutex) + journal des tours"]
-    CLI -- "sérialisé par" --> LF[".cowork.lock (O_EXCL)"]
+    CLI -- "lecture-modif-écriture (atomique)" --> LK["M8SHIFT.md<br/>LOCK (mutex) + journal des tours"]
+    CLI -- "sérialisé par" --> LF[".m8shift.lock (O_EXCL)"]
     CLI -- "injecte à l'init" --> AN["CLAUDE.md / AGENTS.md (strophe)"]
     AN -. "lu au démarrage" .-> A
     AN -. "lu au démarrage" .-> B
@@ -78,7 +78,7 @@ flowchart TB
 
 **Composants** : (a) le bloc `LOCK` = automate d'état ; (b) le journal de tours
 append-only ; (c) les ancrages porteurs de la *strophe* d'auto-instruction ;
-(d) la CLI `cowork.py` (commandes init/status/wait/claim/append/release/done/archive).
+(d) la CLI `m8shift.py` (commandes init/status/wait/claim/append/release/done/archive).
 
 **Automate d'état** (`A`, `B` = les deux agents actifs — par défaut `claude`, `codex`) :
 
@@ -101,7 +101,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant A as Agent A
-    participant F as COWORK.md
+    participant F as M8SHIFT.md
     participant B as Agent B
     A->>F: sondage (wait / status)
     A->>F: claim A (WORKING_A, TTL posé)
@@ -117,9 +117,9 @@ sequenceDiagram
 
 | Source | Destination | Canal | Mode |
 |--------|-------------|-------|------|
-| agent | `COWORK.md` | système de fichiers local | R/W |
-| `cowork.py init` | l'ancrage de chaque agent actif (défaut `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (si présent), `COWORK.protocol.md` | système de fichiers local | W |
-| agent | `COWORK.archive.md` | système de fichiers local | W (append) |
+| agent | `M8SHIFT.md` | système de fichiers local | R/W |
+| `m8shift.py init` | l'ancrage de chaque agent actif (défaut `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (si présent), `M8SHIFT.protocol.md` | système de fichiers local | W |
+| agent | `M8SHIFT.archive.md` | système de fichiers local | W (append) |
 
 ### 1.8 Modèle de concurrence — un mutex, pas un sémaphore
 
@@ -134,7 +134,7 @@ classiques** sur **deux niveaux**.
 
 | Concept classique | Dans M8Shift |
 |-------------------|-------------|
-| **Mutex OS** (bas niveau) | `.cowork.lock` ouvert en `O_CREAT\|O_EXCL` : un vrai verrou OS qui sérialise la **section critique** = le read-modify-write de `COWORK.md`. Le mutex technique *appliqué*. |
+| **Mutex OS** (bas niveau) | `.m8shift.lock` ouvert en `O_CREAT\|O_EXCL` : un vrai verrou OS qui sérialise la **section critique** = le read-modify-write de `M8SHIFT.md`. Le mutex technique *appliqué*. |
 | **Lock applicatif possédé** (haut niveau) | l'état `WORKING_<agent>` du bloc LOCK : un verrou **nommé, avec propriétaire**, tenu pendant toute la **fenêtre de travail** (pas seulement le temps d'une commande). Le mutex *sémantique* qui protège la ressource partagée (le dépôt). |
 | **Bail / TTL** (anti-blocage) | `expires` (TTL 30 min) + jeton de propriété : le pattern des **verrous distribués à bail** (nœuds éphémères ZooKeeper, Redlock). Si le détenteur meurt, le bail expire → `claim --force`. |
 | **Moniteur / variable de condition + témoin** | `wait <agent>` poll jusqu'à `AWAITING_<soi>` (une **attente de condition**) ; la passation explicite `--to <autre>` est du **token-passing** (témoin / anneau à jeton). |
@@ -166,8 +166,8 @@ agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-a
 |---------|-------|
 | Langage | Python **3.8+** |
 | Dépendances | **Aucune dépendance Python** (stdlib : `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`) ; Git optionnel, pour préserver un renommage de casse dans l'index |
-| Distribution | **un seul fichier** `cowork.py` (gabarits embarqués) |
-| Tests | `unittest` stdlib — `tests/test_cowork.py` |
+| Distribution | **un seul fichier** `m8shift.py` (gabarits embarqués) |
+| Tests | `unittest` stdlib — `tests/test_m8shift.py` |
 
 ### 2.2 Patterns notables
 
@@ -175,17 +175,17 @@ agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-a
   puis `os.replace` (atomique POSIX). **Toutes** les écritures passent par là, y
   compris l'archive.
 - **Verrou inter-process** : les commandes qui mutent l'état prennent
-  `.cowork.lock` (`O_CREAT|O_EXCL`) et font le read-modify-write *dedans* → deux
-  `cowork.py` concurrents sont sérialisés (pas de double-démarrage IDLE) ; un
+  `.m8shift.lock` (`O_CREAT|O_EXCL`) et font le read-modify-write *dedans* → deux
+  `m8shift.py` concurrents sont sérialisés (pas de double-démarrage IDLE) ; un
   verrou abandonné est repris après 60 s.
 - **Validation d'entrée** : champs mono-ligne (refus saut de ligne + marqueurs
   réservés) ; corps neutralisé (anti-injection de faux tours).
-- **Source de vérité unique** : protocole, gabarit `COWORK.md` et strophe sont des
-  constantes de `cowork.py` ; `docs/en/protocol.md` et `docs/fr/protocole.md` en sont
+- **Source de vérité unique** : protocole, gabarit `M8SHIFT.md` et strophe sont des
+  constantes de `m8shift.py` ; `docs/en/protocol.md` et `docs/fr/protocole.md` en sont
   une *génération* de `cowork.PROTOCOL[lang]` (test de non-régression octet-à-octet
   `test_protocol_docs_in_sync`).
 - **Injection idempotente et prioritaire** : strophe encadrée par marqueurs
-  `COWORK:STANZA`, déplacée/actualisée en tête sans duplication. Les variantes de
+  `M8SHIFT:STANZA`, déplacée/actualisée en tête sans duplication. Les variantes de
   casse sont normalisées vers le nom canonique sur tout FS (`git mv -f` si Git
   est disponible et le fichier suivi, afin d'actualiser l'index) ;
   `AGENTS.override.md`, prioritaire pour Codex dans le même dossier, est
@@ -215,7 +215,7 @@ robustesse, anti-injection, schéma LOCK). Commande :
 
 Branche `dev/vX.Y.x` par sprint, merge + tag sur `main`. Le **protocole** est
 versionné (v1) : tout changement **cassant** du format `LOCK`/`TURN`/marqueurs
-incrémente la version et préserve la lecture des `COWORK.md` existants. Le champ roster (liste d'agents)
+incrémente la version et préserve la lecture des `M8SHIFT.md` existants. Le champ roster (liste d'agents)
 `agents:` est un ajout **optionnel rétrocompatible** dans la v1 (les anciens lecteurs
 l'ignorent ; sûr pour le couple par défaut `claude,codex` — un roster personnalisé
 exige un script conscient du roster).
@@ -239,20 +239,20 @@ exige un script conscient du roster).
 | ID | Exigence |
 |----|----------|
 | EX-1 | Anti-blocage : un verrou abandonné est récupérable sans intervention (TTL 30 min + `claim --force`). |
-| EX-2 | Tenue dans le temps : `COWORK.md` reste borné (archivage). |
+| EX-2 | Tenue dans le temps : `M8SHIFT.md` reste borné (archivage). |
 | EX-3 | Observabilité sans outil : l'état est lisible par `status` ou `grep`. |
 
 ### 3.3 Solution d'exploitation
 
 #### Démarrage / arrêt
-Pas d'ordre de démarrage : `cowork.py init` déploie, le relais « tourne » par
+Pas d'ordre de démarrage : `m8shift.py init` déploie, le relais « tourne » par
 invocations successives des agents. « Arrêt » = `done <agent>` (état `DONE`).
 
 #### Opérations planifiées & supervision
 - **Poll** : chaque agent inactif appelle `wait <soi>` (boucle ~60 s, `--interval N`)
   ou `wait <soi> --once` (un contrôle, non bloquant, pour une boucle externe).
-- **Supervision** : `cowork.py status` (verrou + dernier tour) ; en black-box,
-  `grep -E '^state:|^holder:' COWORK.md`.
+- **Supervision** : `m8shift.py status` (verrou + dernier tour) ; en black-box,
+  `grep -E '^state:|^holder:' M8SHIFT.md`.
 - **Détection de blocage** : `status` signale un verrou **périmé** (`WORKING_*`
   + `now > expires`) → reprise par `claim <soi> --force`.
 
@@ -262,7 +262,7 @@ de doute, `init --force` réinitialise le verrou à `IDLE` sans perdre l'histori
 archivé.
 
 #### Sauvegarde & restauration
-- **Sauvegarde** : `COWORK.md` et `COWORK.archive.md` sont **versionnés par git**
+- **Sauvegarde** : `M8SHIFT.md` et `M8SHIFT.archive.md` sont **versionnés par git**
   (le dépôt hôte est la sauvegarde ; RPO = dernier commit).
 - **Restauration** : `git checkout` du fichier ; l'archive conserve l'historique
   des tours purgés.
@@ -278,16 +278,16 @@ Les sorties CLI vont sur stdout. Pas de PII au-delà du contenu de tâche saisi.
 | Sinistre | Reprise |
 |----------|---------|
 | Verrou abandonné (agent crashé) | TTL 30 min puis `claim --force` (EX-1) |
-| `COWORK.md` corrompu/perdu | `git checkout` ou `init --force` (repart `IDLE`, archive préservée) |
-| `cowork.py` perdu | recopier le fichier unique depuis ce repo ; `init` régénère le reste |
+| `M8SHIFT.md` corrompu/perdu | `git checkout` ou `init --force` (repart `IDLE`, archive préservée) |
+| `m8shift.py` perdu | recopier le fichier unique depuis ce repo ; `init` régénère le reste |
 
 **RTO** : quelques secondes (commande). **RPO** : dernier commit git.
 
 ### 3.5 Décommissionnement
 
-Supprimer `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md` et la strophe de
+Supprimer `M8SHIFT.md`, `M8SHIFT.protocol.md`, `M8SHIFT.archive.md` et la strophe de
 `CLAUDE.md`, `AGENTS.md` et, le cas échéant, `AGENTS.override.md` (entre marqueurs
-`COWORK:STANZA`). Aucune ressource externe à libérer.
+`M8SHIFT:STANZA`). Aucune ressource externe à libérer.
 
 ### 3.6 Contacts support
 
@@ -309,12 +309,12 @@ Aucune frontière de sécurité forte entre eux ; la protection est procédurale
 - Tours **immuables par convention** : l'outil ne réécrit jamais un tour clôturé
   (rien au niveau du FS ne l'empêche en édition manuelle).
 - Écriture **atomique** (`mkstemp` + `os.replace`) et read-modify-write
-  **sérialisé** par `.cowork.lock` (`O_EXCL`).
+  **sérialisé** par `.m8shift.lock` (`O_EXCL`).
 - Garde-fous : écriture refusée hors-tour ; `--to` ≠ soi ; `release`/`done`
   exigent de tenir le stylo ; **anti-injection** (champs mono-ligne, corps neutralisé).
 
 ### 4.3 Confidentialité
-`COWORK.md` peut contenir du contenu de tâche → **même classification que le
+`M8SHIFT.md` peut contenir du contenu de tâche → **même classification que le
 dépôt hôte**. Pas de secret à y stocker. Aucun chiffrement (hors périmètre).
 
 ### 4.4 Authentification / Autorisation
@@ -340,7 +340,7 @@ Empreinte négligeable ; pas de SAN, pas de base de données.
 
 | Ressource | Ordre de grandeur |
 |-----------|-------------------|
-| Stockage `COWORK.md` | quelques Ko ; **borné** par `archive` (≈ LOCK + N derniers tours) |
+| Stockage `M8SHIFT.md` | quelques Ko ; **borné** par `archive` (≈ LOCK + N derniers tours) |
 | Archive | croît linéairement ; purgeable / compressible hors-ligne |
 | CPU / mémoire | une invocation Python courte ; négligeable |
 | Temps de réponse | commande < ~100 ms (hors `wait` bloquant, volontairement ~60 s/poll) |
@@ -357,6 +357,6 @@ Le seul paramètre de charge est l'intervalle de poll (`wait --interval N`) ;
 |-------|------------|
 | **Stylo / verrou** | Droit exclusif d'écrire, matérialisé par le bloc `LOCK`. |
 | **Tour (`TURN`)** | Une prise de parole d'un agent, encadrée `BEGIN`/`END`, immuable une fois close. |
-| **Stanza** | Bloc d'auto-instruction injecté dans `CLAUDE.md`/`AGENTS.md` entre marqueurs `COWORK:STANZA`. |
+| **Stanza** | Bloc d'auto-instruction injecté dans `CLAUDE.md`/`AGENTS.md` entre marqueurs `M8SHIFT:STANZA`. |
 | **Verrou périmé** | `WORKING_*` dont `expires` est dépassé → reprenable avec `--force`. |
 | **TTL** | Durée de validité d'un verrou en travail (30 min). |

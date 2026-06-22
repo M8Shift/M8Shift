@@ -23,9 +23,9 @@ TTL lease and the turn journal are untouched.
 ## 2. Goals / Non-goals
 
 **Goals**
-- Pick *which two agents* relay, at `init` time: `cowork.py init --agents claude,lechat`.
+- Pick *which two agents* relay, at `init` time: `m8shift.py init --agents claude,lechat`.
 - Default (no `--agents`) = `claude,codex` → **behaviorally identical** to today (the
-  generated `COWORK.md` gains one `agents:` line and the seed turn names the active
+  generated `M8SHIFT.md` gains one `agents:` line and the seed turn names the active
   pair; relay transitions and anchor injection are unchanged).
 - Per-agent **anchor mapping** so each tool auto-loads its own instruction file.
 - Honest handling of agents whose tool **does not auto-load any file** (manual bootstrap).
@@ -53,8 +53,8 @@ a parametric generalization of names that are *already* per-agent
 - Storage: one new LOCK line `agents:   claude,codex` (CSV), next to `lang`.
   Grep-able, versioned, parsed by `get_lock` with a plain `split(",")`.
 - Read: `roster(lk)` → `lk["agents"].split(",")` if present, else `("claude","codex")`
-  (fallback for any pre-RFC `COWORK.md` — **no migration required**).
-- `init` without `--force` on an existing `COWORK.md` **preserves** the in-place
+  (fallback for any pre-RFC `M8SHIFT.md` — **no migration required**).
+- `init` without `--force` on an existing `M8SHIFT.md` **preserves** the in-place
   roster (like the rest of the LOCK).
 
 ## 5. Anchor mapping (the real crux)
@@ -88,7 +88,7 @@ Two hard cases, handled explicitly (not silently):
    the project, or a tool with no project-doc mechanism). M8Shift is **passive**: it
    can provide the stanza but cannot force a read. `init` writes a best-effort
    fallback anchor and **prints a warning**: *"agent `<X>`: no known auto-loaded
-   anchor — bootstrap it manually by pointing it at `COWORK.protocol.md`."* The
+   anchor — bootstrap it manually by pointing it at `M8SHIFT.protocol.md`."* The
    agent stays a full roster member (its `claim`/`append` work); only auto-bootstrap
    is missing. **This is documented as an assumed limit, not a bug.**
 
@@ -132,12 +132,12 @@ Two hard cases, handled explicitly (not silently):
 ## 8. Backward compatibility & migration
 
 - `init` without `--agents` → roster `claude,codex`; all relay transition paths are
-  unchanged. The generated `COWORK.md` does gain one optional `agents:` line (and the
+  unchanged. The generated `M8SHIFT.md` does gain one optional `agents:` line (and the
   seed turn names the active pair), so the *file* is not byte-for-byte identical to the
   pre-roster output. A roster-unaware (pre-RFC) script stays safe **only for the
   default pair**: it ignores `agents:` and would treat a custom roster as
   `claude,codex`, which can corrupt it — a custom roster requires a roster-aware script.
-- A pre-RFC `COWORK.md` with no `agents:` line loads via the `("claude","codex")`
+- A pre-RFC `M8SHIFT.md` with no `agents:` line loads via the `("claude","codex")`
   fallback — no rewrite, no migration tool. `init --force` rewrites the LOCK and adds
   `agents:`.
 - `other()` and `test_other` stay; `stanza_for` keeps the historical 2-agent wording

@@ -21,9 +21,10 @@ import unittest
 from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(REPO, "cowork.py")
+SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool
+SHIM = os.path.join(REPO, "cowork.py")      # deprecated exec-shim (parity test)
 sys.path.insert(0, REPO)
-import cowork  # noqa: E402  (import après ajustement du sys.path)
+import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
 
 
 # ───────────────────────────── unitaires : fonctions pures ──────────────────
@@ -98,20 +99,21 @@ class TestPureFunctions(unittest.TestCase):
 
 class CLIBase(unittest.TestCase):
     def setUp(self):
-        self.d = tempfile.mkdtemp(prefix="cowork-test-")
-        shutil.copy(SCRIPT, os.path.join(self.d, "cowork.py"))
+        self.d = tempfile.mkdtemp(prefix="m8shift-test-")
+        shutil.copy(SCRIPT, os.path.join(self.d, "m8shift.py"))
+        shutil.copy(SHIM, os.path.join(self.d, "cowork.py"))  # legacy shim, for parity
 
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
 
     def cw(self, *args, stdin=None):
         return subprocess.run(
-            [sys.executable, "cowork.py", *args],
+            [sys.executable, "m8shift.py", *args],
             cwd=self.d, capture_output=True, text=True, input=stdin,
         )
 
     def md(self):
-        with open(os.path.join(self.d, "COWORK.md"), encoding="utf-8") as f:
+        with open(os.path.join(self.d, "M8SHIFT.md"), encoding="utf-8") as f:
             return f.read()
 
     def lock(self):
@@ -142,7 +144,7 @@ class CLIBase(unittest.TestCase):
         return self.cw(*args, stdin=body)
 
     def set_expires_past(self):
-        p = os.path.join(self.d, "COWORK.md")
+        p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
             t = f.read()
         t = re.sub(r"expires:\s*.*", "expires:  2020-01-01T00:00:00Z", t, count=1)
@@ -155,7 +157,7 @@ class CLIBase(unittest.TestCase):
 class TestInit(CLIBase):
     def test_init_creates_kit(self):
         r = self.init()
-        for f in ("COWORK.md", "COWORK.protocol.md", "CLAUDE.md", "AGENTS.md"):
+        for f in ("M8SHIFT.md", "M8SHIFT.protocol.md", "CLAUDE.md", "AGENTS.md"):
             self.assertTrue(os.path.exists(os.path.join(self.d, f)), f)
         lk = self.lock()
         self.assertEqual(lk["state"], "IDLE")
@@ -165,7 +167,7 @@ class TestInit(CLIBase):
 
     def test_init_project_name(self):
         self.init("--name", "Mon Super Projet")
-        self.assertIn("# COWORK · Mon Super Projet", self.md())
+        self.assertIn("# M8Shift · Mon Super Projet", self.md())
 
     def test_missing_agents_bridges_existing_claude_instructions(self):
         """Un projet Claude-only devient utilisable par Codex sans action manuelle."""
@@ -207,7 +209,7 @@ class TestInit(CLIBase):
             content = f.read()
         self.assertIn("CONSIGNE-PROJET-UNIQUE", content)
         self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
-        self.assertEqual(self.lock()["turn"], "1")  # COWORK.md préservé
+        self.assertEqual(self.lock()["turn"], "1")  # M8SHIFT.md préservé
 
     def test_anchor_case_insensitive_no_duplicate(self):
         """NR-7 : une variante unique est réutilisée/normalisée sans doublon."""
@@ -303,8 +305,8 @@ class TestInit(CLIBase):
         with open(claude, "w", encoding="utf-8") as f:
             f.write(original)
         self.init()
-        bak = claude + ".cowork.bak"
-        self.assertTrue(os.path.exists(bak), "backup .cowork.bak attendu")
+        bak = claude + ".m8shift.bak"
+        self.assertTrue(os.path.exists(bak), "backup .m8shift.bak attendu")
         with open(bak, encoding="utf-8") as f:
             self.assertEqual(f.read(), original)  # contenu d'origine intact
         with open(claude, encoding="utf-8") as f:
@@ -313,9 +315,9 @@ class TestInit(CLIBase):
         self.assertIn("GARDE-MOI", cur)
 
     def test_fresh_anchor_has_no_backup(self):
-        """Un ancrage CRÉÉ par init (inexistant avant) ne génère pas de .cowork.bak."""
+        """Un ancrage CRÉÉ par init (inexistant avant) ne génère pas de .m8shift.bak."""
         self.init()
-        self.assertFalse(os.path.exists(os.path.join(self.d, "CLAUDE.md.cowork.bak")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "CLAUDE.md.m8shift.bak")))
 
     def test_write_preserves_file_mode(self):
         """NR-C : réécrire un ancrage ne doit pas casser ses permissions (mkstemp=0600)."""
@@ -434,13 +436,13 @@ class TestRobustness(CLIBase):
     def test_body_missing_no_traceback(self):
         """NR-5 : --body fichier inexistant → sortie propre, pas de traceback."""
         self.init()
-        before = self.md().count("COWORK:TURN")
+        before = self.md().count("M8SHIFT:TURN")
         r = self.cw("append", "claude", "--to", "codex", "--ask", "x", "--done", "y",
                     "--body", "/no/such/file.md")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("--body", r.stdout + r.stderr)
-        self.assertEqual(self.md().count("COWORK:TURN"), before)
+        self.assertEqual(self.md().count("M8SHIFT:TURN"), before)
 
     def test_invalid_agent_clean_exit(self):
         self.init()
@@ -455,7 +457,7 @@ class TestRobustness(CLIBase):
 
     def test_malformed_lock_markers_clean_exit(self):
         self.init()
-        p = os.path.join(self.d, "COWORK.md")
+        p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
             t = f.read()
         with open(p, "w", encoding="utf-8") as f:
@@ -468,7 +470,7 @@ class TestRobustness(CLIBase):
     def test_malformed_lock_schema_clean_exit(self):
         """NR-A : valeur LOCK invalide (turn non entier) → sortie propre, pas de traceback."""
         self.init()
-        p = os.path.join(self.d, "COWORK.md")
+        p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
             t = f.read()
         with open(p, "w", encoding="utf-8") as f:
@@ -521,14 +523,14 @@ class TestArchive(CLIBase):
         r = self.cw("archive", "--keep", "1")
         self.assertEqual(r.returncode, 0, r.stderr)
         live = self.md()
-        self.assertIn("COWORK:TURN 0 system", live)
-        self.assertIn("COWORK:TURN 6", live)
-        self.assertNotIn("COWORK:TURN 1 ", live)
+        self.assertIn("M8SHIFT:TURN 0 system", live)
+        self.assertIn("M8SHIFT:TURN 6", live)
+        self.assertNotIn("M8SHIFT:TURN 1 ", live)
         self.assertEqual(self.lock()["turn"], "6")
-        arch = os.path.join(self.d, "COWORK.archive.md")
+        arch = os.path.join(self.d, "M8SHIFT.archive.md")
         self.assertTrue(os.path.exists(arch))
         with open(arch, encoding="utf-8") as f:
-            self.assertIn("COWORK:TURN 1 ", f.read())
+            self.assertIn("M8SHIFT:TURN 1 ", f.read())
 
 
 # ───────────────────────────── wait ────────────────────────────────────────
@@ -559,7 +561,7 @@ class TestConcurrency(CLIBase):
         self.init()
         cmds = ([["claim", "claude"]] * 8) + ([["claim", "codex"]] * 8)
         procs = [
-            subprocess.Popen([sys.executable, "cowork.py", *c], cwd=self.d,
+            subprocess.Popen([sys.executable, "m8shift.py", *c], cwd=self.d,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             for c in cmds
         ]
@@ -595,7 +597,7 @@ class TestI18n(CLIBase):
     def test_init_default_is_english(self):
         self.init()
         self.assertEqual(self.lock().get("lang"), "en")
-        with open(os.path.join(self.d, "COWORK.protocol.md"), encoding="utf-8") as f:
+        with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
             self.assertIn("Single-file relay protocol", f.read())
         r = self.cw("claim", "claude")
         self.assertIn("pen taken", r.stdout)
@@ -603,7 +605,7 @@ class TestI18n(CLIBase):
     def test_init_lang_fr_generates_french(self):
         self.init("--lang", "fr")
         self.assertEqual(self.lock().get("lang"), "fr")
-        with open(os.path.join(self.d, "COWORK.protocol.md"), encoding="utf-8") as f:
+        with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
             self.assertIn("Protocole de relais", f.read())
         r = self.cw("claim", "claude")
         self.assertIn("verrou pris", r.stdout)
@@ -612,7 +614,7 @@ class TestI18n(CLIBase):
         """COWORK_LANG force la langue des messages runtime, même si le LOCK dit en."""
         self.init()  # lang: en
         env = dict(os.environ, COWORK_LANG="fr")
-        r = subprocess.run([sys.executable, "cowork.py", "claim", "claude"],
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
                            cwd=self.d, capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("verrou pris", r.stdout)
@@ -620,7 +622,7 @@ class TestI18n(CLIBase):
     def test_lang_field_in_schema(self):
         """Un champ lang invalide est rejeté proprement (pas de traceback)."""
         self.init()
-        p = os.path.join(self.d, "COWORK.md")
+        p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
             t = f.read()
         with open(p, "w", encoding="utf-8") as f:
@@ -703,7 +705,7 @@ class TestRoster(CLIBase):
         self.assertIn("claude,codex", r.stdout)
 
     def test_reinit_preserves_existing_roster(self):
-        """Sans --force, ré-init préserve le roster du COWORK.md vivant."""
+        """Sans --force, ré-init préserve le roster du M8SHIFT.md vivant."""
         self.init("--agents", "claude,gemini")
         r = self.init()  # ré-init sans --agents ni --force
         self.assertEqual(self.lock().get("agents"), "claude,gemini")
@@ -724,7 +726,7 @@ class TestRoster(CLIBase):
         self.assertEqual(self.lock().get("agents"), "claude,codex")  # inchangé
 
     def test_reinit_force_replaces_roster(self):
-        """--force réécrit COWORK.md avec le nouveau roster."""
+        """--force réécrit M8SHIFT.md avec le nouveau roster."""
         self.init("--agents", "claude,gemini")
         self.init("--agents", "claude,codex", "--force")
         self.assertEqual(self.lock().get("agents"), "claude,codex")
@@ -760,7 +762,7 @@ class TestRoster(CLIBase):
     def test_init_rejects_invalid_stored_roster_without_force(self):
         """init sans --force échoue sur un `agents:` stocké invalide (pas de préservation)."""
         self.init()
-        p = os.path.join(self.d, "COWORK.md")
+        p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
             t = f.read()
         with open(p, "w", encoding="utf-8") as f:
@@ -777,7 +779,7 @@ class TestRoster(CLIBase):
         """Le protocole généré ne fige plus l'identité claude/codex : ouverture, holder,
         états, commentaire TURN et schéma d'amorçage tous génériques."""
         self.init("--agents", "gemini,lechat")
-        with open(os.path.join(self.d, "COWORK.protocol.md"), encoding="utf-8") as f:
+        with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
             proto = f.read()
         # plus aucune affirmation exclusive claude/codex
         self.assertNotIn("either `claude` or `codex`", proto)         # §0 identité
@@ -791,7 +793,7 @@ class TestRoster(CLIBase):
         self.assertIn("an active agent", proto)
         self.assertIn("each active agent's anchor", proto)            # §8 bullet générique
         self.assertIn("WORKING_<X>", proto)
-        # la bannière du COWORK.md généré ne fige plus le couple non plus
+        # la bannière du M8SHIFT.md généré ne fige plus le couple non plus
         md = self.md()
         self.assertNotIn("Claude ⇄ Codex", md)
         self.assertIn("multi-agent relay", md)
@@ -804,12 +806,12 @@ class TestRoster(CLIBase):
         r = self.cw("init", "--agents", "claude,@@,codex")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
-        self.assertFalse(os.path.exists(os.path.join(self.d, "COWORK.md")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
 
     def test_invalid_token_in_lock_rejected(self):
         """NR-token (LOCK) : un roster stocké partiellement invalide est rejeté."""
         self.init()
-        p = os.path.join(self.d, "COWORK.md")
+        p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
             t = f.read()
         with open(p, "w", encoding="utf-8") as f:
@@ -830,9 +832,9 @@ class TestRoster(CLIBase):
         self.assertIn("foo-bar", s.stdout)
         a = self.cw("archive", "--keep", "0")
         self.assertEqual(a.returncode, 0, a.stderr)
-        self.assertNotIn("COWORK:TURN 1 foo-bar", self.md())
-        with open(os.path.join(self.d, "COWORK.archive.md"), encoding="utf-8") as f:
-            self.assertIn("COWORK:TURN 1 foo-bar", f.read())
+        self.assertNotIn("M8SHIFT:TURN 1 foo-bar", self.md())
+        with open(os.path.join(self.d, "M8SHIFT.archive.md"), encoding="utf-8") as f:
+            self.assertIn("M8SHIFT:TURN 1 foo-bar", f.read())
 
     def test_bootstrap_text_uses_active_pair(self):
         """NR-bootstrap : les textes générés nomment le couple actif, pas claude/codex."""
@@ -842,6 +844,154 @@ class TestRoster(CLIBase):
         md = self.md()
         self.assertIn("claim gemini", md)
         self.assertNotIn("claim claude", md)
+
+
+# ───────────────────────── Phase 2 : rename + backward-compat ───────────────
+
+class TestPhase2Compat(CLIBase):
+    """Phase-2 rename (cowork.py→m8shift.py, COWORK.*→M8SHIFT.*): existing CoWork
+    projects keep working (dual-read + brand-preserving writes); `migrate-brand`
+    converts them; `cowork.py` stays a parity shim."""
+
+    def _read(self, name):
+        with open(os.path.join(self.d, name), encoding="utf-8") as f:
+            return f.read()
+
+    def _legacy_living(self, state="IDLE", holder="none", turn="0"):
+        c = cowork
+        body = (
+            "# COWORK · Legacy\n\n> Outil → `./cowork.py status`.\n\n"
+            f"{c.OLD_LOCK_BEGIN}\n"
+            f"holder:   {holder}\nstate:    {state}\nagents:   claude,codex\n"
+            f"lang:     en\nturn:     {turn}\nsince:    -\nexpires:  -\nnote:     -\n"
+            f"{c.OLD_LOCK_END}\n\n"
+            "<!-- COWORK:TURN 0 system BEGIN -->\n- from:    system\n- files:   COWORK.md\n"
+            "<!-- COWORK:TURN 0 system END -->\n"
+        )
+        with open(os.path.join(self.d, "COWORK.md"), "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def _legacy_project(self):
+        self._legacy_living()
+        with open(os.path.join(self.d, "COWORK.protocol.md"), "w", encoding="utf-8") as f:
+            f.write("# COWORK protocol\n\nUse `./cowork.py`. Marker COWORK:LOCK.\n")
+
+    def test_fresh_init_is_pure_m8shift(self):
+        self.init()
+        self.assertTrue(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "COWORK.md")))
+        live = self._read("M8SHIFT.md")
+        self.assertIn("M8SHIFT:LOCK:BEGIN", live)
+        self.assertNotIn("COWORK", live)
+
+    def test_legacy_dual_read_in_place(self):
+        self._legacy_living()
+        self.assertEqual(self.cw("status").returncode, 0)
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.cw("append", "claude", "--to", "codex",
+                                 "--ask", "a", "--done", "b").returncode, 0)
+        live = self._read("COWORK.md")
+        self.assertIn("COWORK:TURN 1 claude", live)      # brand preserved
+        self.assertNotIn("M8SHIFT:", live)               # never silently re-marked
+        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))  # no orphan
+
+    def test_append_brand_matches_file(self):
+        self._legacy_living()
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex", "--ask", "a", "--done", "b")
+        self.assertIn("COWORK:TURN 1", self._read("COWORK.md"))
+        d2 = tempfile.mkdtemp(prefix="m8shift-test-")
+        self.addCleanup(shutil.rmtree, d2, True)
+        shutil.copy(SCRIPT, os.path.join(d2, "m8shift.py"))
+        for c in (["init"], ["claim", "claude"],
+                  ["append", "claude", "--to", "codex", "--ask", "a", "--done", "b"]):
+            subprocess.run([sys.executable, "m8shift.py", *c], cwd=d2, capture_output=True)
+        with open(os.path.join(d2, "M8SHIFT.md"), encoding="utf-8") as f:
+            self.assertIn("M8SHIFT:TURN 1", f.read())
+
+    def test_set_lock_preserves_brand(self):
+        c = cowork
+        for begin, end in ((c.LOCK_BEGIN, c.LOCK_END), (c.OLD_LOCK_BEGIN, c.OLD_LOCK_END)):
+            text = f"x\n{begin}\nholder:   none\nstate:    IDLE\nturn:     0\n{end}\ny\n"
+            out = c.set_lock(text, {"holder": "claude", "state": "WORKING_CLAUDE", "turn": "1"})
+            self.assertIn(begin, out)                    # same brand kept
+            self.assertEqual(c.get_lock(out)["holder"], "claude")
+
+    def test_clean_body_neutralizes_both_brands(self):
+        c = cowork
+        self.assertNotIn("COWORK:TURN", c.clean_body("x COWORK:TURN 9 a BEGIN"))
+        self.assertNotIn("M8SHIFT:TURN", c.clean_body("x M8SHIFT:TURN 9 a BEGIN"))
+
+    def test_both_brand_markers_reserved(self):
+        for marker in ("COWORK:LOCK", "COWORK:TURN", "M8SHIFT:LOCK", "M8SHIFT:TURN"):
+            self.assertIn(marker, cowork.RESERVED)
+
+    def test_shim_parity(self):
+        self.init()
+        a = self.cw("status")
+        b = subprocess.run([sys.executable, "cowork.py", "status"],
+                           cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(a.returncode, b.returncode)
+        self.assertEqual(a.stdout, b.stdout)             # stdout identical
+        self.assertIn("deprecated", b.stderr)            # note on stderr only
+
+    def test_migrate_brand_full(self):
+        self._legacy_project()
+        r = self.cw("migrate-brand")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, "M8SHIFT.protocol.md")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "COWORK.md")))
+        live = self._read("M8SHIFT.md")
+        self.assertIn("M8SHIFT:LOCK", live)
+        self.assertNotIn("COWORK:", live)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "COWORK.md.m8shift.bak")))
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.cw("append", "claude", "--to", "codex",
+                                 "--ask", "a", "--done", "b").returncode, 0)
+        self.assertIn("M8SHIFT:TURN 1", self._read("M8SHIFT.md"))
+
+    def test_migrate_dry_run_then_idempotent(self):
+        self._legacy_project()
+        before = self._read("COWORK.md")
+        self.assertEqual(self.cw("migrate-brand", "--dry-run").returncode, 0)
+        self.assertEqual(self._read("COWORK.md"), before)            # nothing written
+        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+        self.cw("migrate-brand")
+        self.assertIn("nothing to migrate", self.cw("migrate-brand").stdout)
+
+    def test_migrate_refuses_ambiguous(self):
+        self._legacy_project()
+        open(os.path.join(self.d, "M8SHIFT.md"), "w").close()        # both names exist
+        r = self.cw("migrate-brand")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("both", r.stdout + r.stderr)
+
+    def test_migrate_refuses_mid_turn(self):
+        self._legacy_living(state="WORKING_CLAUDE", holder="claude")
+        r = self.cw("migrate-brand")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("mid-turn", r.stdout + r.stderr)
+
+    def test_migrate_uses_git_when_tracked(self):
+        self._legacy_project()
+        subprocess.run(["git", "init", "-q"], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "init"], cwd=self.d, capture_output=True)
+        self.assertEqual(self.cw("migrate-brand").returncode, 0)
+        tracked = subprocess.run(["git", "ls-files"], cwd=self.d,
+                                 capture_output=True, text=True).stdout
+        self.assertIn("M8SHIFT.md", tracked)
+        self.assertNotIn("COWORK.md\n", tracked)
+
+    def test_m8shift_lang_env_primary(self):
+        self.init()
+        env = dict(os.environ, M8SHIFT_LANG="fr")
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertIn("verrou", r.stdout + r.stderr)     # FR runtime message
+
 
 
 if __name__ == "__main__":
