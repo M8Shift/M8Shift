@@ -10,6 +10,7 @@ dossier temporaire isolé et l'exécutent en sous-processus — comme un agent.
 Chaque non-régression cible un bug corrigé (NR-n) ou une garantie du CDC.
 Stdlib uniquement.
 """
+import json
 import os
 import re
 import shutil
@@ -991,6 +992,99 @@ class TestPhase2Compat(CLIBase):
         r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
                            cwd=self.d, capture_output=True, text=True, env=env)
         self.assertIn("verrou", r.stdout + r.stderr)     # FR runtime message
+
+
+
+# ───────────────────────── Stage 2 increment 1 : read commands ──────────────
+
+class TestReadCommands(CLIBase):
+    def _seed(self):
+        self.init()
+        self.turn("claude", "codex", done="did A", files="a.py,b.py")
+        self.turn("codex", "claude", done="did B", files="c.py")  # ends AWAITING_CLAUDE
+
+    def test_status_json(self):
+        self._seed()
+        r = self.cw("status", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(r.stdout)
+        self.assertEqual(d["state"], "AWAITING_CLAUDE")
+        self.assertEqual(d["holder"], "claude")
+        self.assertEqual(d["agents_active"], ["claude", "codex"])
+        self.assertFalse(d["stale"])
+        self.assertEqual(d["last_turn"], {"n": 2, "agent": "codex"})
+
+    def test_status_json_stale(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.set_expires_past()
+        d = json.loads(self.cw("status", "--json").stdout)
+        self.assertTrue(d["stale"])
+
+    def test_recap(self):
+        self._seed()
+        out = self.cw("recap", "--turns", "2").stdout
+        self.assertIn("AWAITING_CLAUDE", out)
+        self.assertIn("did A", out)
+        self.assertIn("did B", out)
+
+    def test_log_timeline(self):
+        self._seed()
+        out = self.cw("log").stdout
+        self.assertIn("#1", out)
+        self.assertIn("#2", out)
+        self.assertIn("claude -> codex", out)
+        limited = self.cw("log", "--limit", "1").stdout
+        self.assertIn("#2", limited)
+        self.assertNotIn("#1", limited)
+        self.assertIn("did B", self.cw("log", "--oneline").stdout)
+
+    def test_peek_my_turn(self):
+        self._seed()  # AWAITING_CLAUDE ; last handoff to claude = turn 2 (from codex)
+        r = self.cw("peek", "claude")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("from=codex", r.stdout)
+        self.assertIn("done=did B", r.stdout)
+
+    def test_peek_not_my_turn(self):
+        self._seed()  # codex is not awaited → rc 3 ; last handoff to codex = turn 1
+        r = self.cw("peek", "codex")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("from=claude", r.stdout)
+
+    def test_parse_turns_preserves_unknown_keys(self):
+        text = ("x\n<!-- M8SHIFT:TURN 5 claude BEGIN -->\n"
+                "- from:    claude\n- to:      codex\n- role:    coordinator\n"
+                "- x_custom: hello world\n\nbody text here\n"
+                "<!-- M8SHIFT:TURN 5 claude END -->\ny\n")
+        turns = cowork.parse_turns(text)
+        self.assertEqual(len(turns), 1)
+        t = turns[0]
+        self.assertEqual((t["n"], t["agent"]), (5, "claude"))
+        self.assertEqual(t["fields"]["role"], "coordinator")       # unknown advisory key kept
+        self.assertEqual(t["fields"]["x_custom"], "hello world")   # open x_ namespace kept
+        self.assertEqual(t["body"], "body text here")
+
+    def test_read_commands_dual_read_legacy(self):
+        # a legacy COWORK.md (old markers) must be readable by log/status --json
+        c = cowork
+        body = (
+            "# COWORK · Legacy\n\n"
+            f"{c.OLD_LOCK_BEGIN}\n"
+            "holder:   claude\nstate:    AWAITING_CLAUDE\nagents:   claude,codex\n"
+            "lang:     en\nturn:     1\nsince:    -\nexpires:  -\nnote:     -\n"
+            f"{c.OLD_LOCK_END}\n\n"
+            "<!-- COWORK:TURN 0 system BEGIN -->\n- from:    system\n- to:      none\n"
+            "<!-- COWORK:TURN 0 system END -->\n\n"
+            "<!-- COWORK:TURN 1 codex BEGIN -->\n- from:    codex\n- to:      claude\n"
+            "- done:    legacy work\n<!-- COWORK:TURN 1 codex END -->\n"
+        )
+        with open(os.path.join(self.d, "COWORK.md"), "w", encoding="utf-8") as f:
+            f.write(body)
+        d = json.loads(self.cw("status", "--json").stdout)
+        self.assertEqual(d["last_turn"], {"n": 1, "agent": "codex"})
+        self.assertIn("legacy work", self.cw("log").stdout)
+        self.assertEqual(self.cw("peek", "claude").returncode, 0)   # AWAITING_CLAUDE
 
 
 

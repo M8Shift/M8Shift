@@ -17,6 +17,7 @@ commands; they bring their own auth, so M8Shift adds zero credentials.
 import argparse
 import contextlib
 import datetime as dt
+import json
 import os
 import re
 import subprocess
@@ -902,6 +903,8 @@ MESSAGES = {
         "archive_none": "nothing to archive ({n} archivable turn(s), keep={keep}).",
         "archive_header": "# M8Shift · turn archive\n\n",
         "archive_ok": "✓ {n} turn(s) archived → {file} (kept: {keep}).",
+        "recap_turns": "── last {n} turn(s) ──────────────────────",
+        "peek_none": "(no handoff addressed to {agent} yet)",
         "migrate_ambiguous": "refused: both {old} and {new} exist — resolve the ambiguity (keep one) before migrating.",
         "migrate_busy": "refused: relay is mid-turn (state={state}) — finish or release the turn first.",
         "migrate_noop": "nothing to migrate — already on the M8Shift names.",
@@ -974,6 +977,8 @@ MESSAGES = {
         "archive_none": "rien a archiver ({n} tour(s) archivable(s), keep={keep}).",
         "archive_header": "# M8Shift · archive des tours\n\n",
         "archive_ok": "✓ {n} tour(s) archive(s) → {file} (gardes: {keep}).",
+        "recap_turns": "── {n} dernier(s) tour(s) ────────────────",
+        "peek_none": "(aucune passation adressée à {agent} pour l'instant)",
         "migrate_ambiguous": "refus : {old} ET {new} existent — lève l'ambiguïté (garde-en un) avant de migrer.",
         "migrate_busy": "refus : relais en cours de tour (state={state}) — termine ou rends la main d'abord.",
         "migrate_noop": "rien à migrer — déjà sur les noms M8Shift.",
@@ -1516,6 +1521,95 @@ def cmd_init(args):
 
 # ---------------------------------------------------------------- relay commands
 
+TURN_RE = re.compile(
+    r"<!-- (?:COWORK|M8SHIFT):TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN -->\n?"
+    r"(.*?)"
+    r"<!-- (?:COWORK|M8SHIFT):TURN \1 \2 END -->",
+    re.DOTALL,
+)
+
+
+def parse_turns(text):
+    """Read-only shared parser for the turn journal → [{n, agent, fields, body}].
+    Leading `- key: value` lines become `fields` (key grammar [a-z_]+; UNKNOWN keys are
+    kept verbatim, never silently dropped); everything after the first non-field line is
+    the free-text `body`. Used by peek/recap/log; never feeds coordination logic."""
+    out = []
+    for m in TURN_RE.finditer(text):
+        lines = m.group(3).splitlines()
+        fields, i = {}, 0
+        while i < len(lines):
+            fm = re.match(r"- ([a-z_]+):\s*(.*)$", lines[i])
+            if not fm:
+                break
+            fields[fm.group(1)] = fm.group(2).rstrip()
+            i += 1
+        out.append({
+            "n": int(m.group(1)), "agent": m.group(2),
+            "fields": fields, "body": "\n".join(lines[i:]).strip(),
+        })
+    return out
+
+
+def cmd_recap(args):
+    """Read-only session-start briefing: current LOCK + the last N turn summaries."""
+    text = load_or_die()
+    lk = get_lock(text)
+    print("── LOCK ───────────────────────────────")
+    for k in ("holder", "state", "agents", "turn", "since", "expires", "note"):
+        v = ",".join(active_pair(lk)) if k == "agents" else lk.get(k, "")
+        print(f"  {k:<8} {v}")
+    turns = parse_turns(text)
+    recent = turns[-args.turns:] if args.turns > 0 else turns
+    if recent:
+        print(tr("recap_turns", n=len(recent)))
+        for t in recent:
+            f = t["fields"]
+            print(f"  #{t['n']} {f.get('from', t['agent'])} -> {f.get('to', '-')}: {f.get('done', '-')}")
+    return 0
+
+
+def cmd_peek(args):
+    """Print the last handoff addressed to <agent> as parse-free key=value (+ body).
+    rc 0 if it is your turn / free / done, rc 3 otherwise (mirrors `wait --once`)."""
+    text = load_or_die()
+    agent = need_agent(args.agent)
+    st = get_lock(text).get("state", "")
+    mine = [t for t in parse_turns(text) if t["fields"].get("to") == agent]
+    if mine:
+        t = mine[-1]
+        for k, v in t["fields"].items():
+            print(f"{k}={v}")
+        if t["body"]:
+            print()
+            print(t["body"])
+    else:
+        print(tr("peek_none", agent=agent))
+    return 0 if st in (f"AWAITING_{agent.upper()}", "IDLE", "DONE") else 3
+
+
+def cmd_log(args):
+    """Read-only relay timeline: one line per turn (chronological)."""
+    text = load_or_die()
+    turns = parse_turns(text)
+    if args.all and os.path.exists(ARCHIVE):
+        turns = parse_turns(read(ARCHIVE)) + turns
+    turns.sort(key=lambda t: t["n"])
+    if args.limit > 0:
+        turns = turns[-args.limit:]
+    for t in turns:
+        f = t["fields"]
+        frm, to = f.get("from", t["agent"]), f.get("to", "-")
+        if args.oneline:
+            print(f"#{t['n']} {frm} -> {to}  {f.get('done', '-')}")
+        else:
+            files = f.get("files", "-")
+            nf = 0 if files in ("-", "") else len([x for x in files.split(",") if x.strip()])
+            print(f"#{t['n']:<3} {frm:>8} -> {to:<8} ({nf} files)  done: {f.get('done', '-')}")
+    return 0
+
+
+
 def cmd_status(args):
     text = load_or_die()
     lk = get_lock(text)
@@ -1525,6 +1619,15 @@ def cmd_status(args):
         and exp is not None
         and now() > exp
     )
+    turns = re.findall(r"(?:COWORK|M8SHIFT):TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN", text)
+    last = {"n": int(turns[-1][0]), "agent": turns[-1][1]} if turns else None
+    if getattr(args, "json", False):
+        out = dict(lk)                       # raw LOCK fields…
+        out["agents_active"] = active_pair(lk)   # …plus computed extras
+        out["stale"] = stale
+        out["last_turn"] = last
+        print(json.dumps(out, ensure_ascii=False, sort_keys=True))
+        return 0
     print("── LOCK ───────────────────────────────")
     for k in ("holder", "state", "lang", "turn", "since", "expires", "note"):
         print(f"  {k:<8} {lk.get(k, '')}")
@@ -1532,10 +1635,8 @@ def cmd_status(args):
             print(f"  {'agents':<8} {','.join(active_pair(lk))}")
     if stale:
         print(tr("status_stale"))
-    turns = re.findall(r"(?:COWORK|M8SHIFT):TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN", text)
-    if turns:
-        n, who = turns[-1]
-        print(tr("last_turn", n=n, who=who))
+    if last:
+        print(tr("last_turn", n=last["n"], who=last["agent"]))
     return 0
 
 
@@ -1851,7 +1952,23 @@ def main():
     i.add_argument("--force", action="store_true", help="also reset the relay file")
     i.set_defaults(fn=cmd_init)
 
-    sub.add_parser("status").set_defaults(fn=cmd_status)
+    st = sub.add_parser("status")
+    st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
+    st.set_defaults(fn=cmd_status)
+
+    rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns")
+    rc.add_argument("--turns", type=int, default=6)
+    rc.set_defaults(fn=cmd_recap)
+
+    pk = sub.add_parser("peek", help="last handoff addressed to <agent> (rc 3 if not your turn)")
+    pk.add_argument("agent")
+    pk.set_defaults(fn=cmd_peek)
+
+    lg = sub.add_parser("log", help="read-only relay timeline")
+    lg.add_argument("--limit", type=int, default=0, help="show only the last N turns")
+    lg.add_argument("--all", action="store_true", help="include archived turns")
+    lg.add_argument("--oneline", action="store_true")
+    lg.set_defaults(fn=cmd_log)
 
     w = sub.add_parser("wait")
     w.add_argument("agent")
