@@ -305,7 +305,8 @@ Read-only, passive, stdlib, no identity exposure:
 
 ## 12. Sequencing (increments) — with review gates
 
-1. **Read commands** — GO (define/drop "memory headlines"; specify `peek` per §10). Lowest risk.
+1. **Read commands** — ✅ **SHIPPED** (`recap`, `peek`, `log`, `status --json`; shared
+   `parse_turns` block parser keeps unknown keys verbatim; dual-read of legacy `COWORK:*`).
 2. **N-agent roster + relay** — GO only after §4a (de-pairing), §5 holder-guard text, the `roles:`
    parser, the hardened `agents` guards, and the §11 migration note. Then small.
 3. **Advisory turn fields** (§5) — GO after 2, with snake_case keys + the open `x_*` namespace.
