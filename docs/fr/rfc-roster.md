@@ -1,4 +1,4 @@
-# RFC — Couple d'agents configurable (roster) pour CoWork
+# RFC — Couple d'agents configurable (roster) pour M8Shift
 
 > **Statut** : `Implémenté (étape 1)` · **Livré dans** : v2.1 · **Auteur** : Claude (synthèse d'un panel de conception à 3 propositions) · **Date** : 2026-06-21
 >
@@ -9,7 +9,7 @@
 
 ## 1. Résumé
 
-Aujourd'hui CoWork câble en dur le couple **claude ⇄ codex**. Ce RFC généralise les
+Aujourd'hui M8Shift câble en dur le couple **claude ⇄ codex**. Ce RFC généralise les
 **participants** à un couple configurable tiré d'un **roster extensible**
 (`claude`, `codex`, `lechat`, `gemini`, …) **sans changer le modèle de
 concurrence** : il reste un **mutex de degré 1** (un stylo unique, alternance stricte
@@ -85,7 +85,7 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
    `--to` valides. Limite honnête : un outil partageant `AGENTS.md` ne *sait* pas
    intrinsèquement quel nom de roster il est — l'identité d'agent reste une convention humaine/de lancement.
 2. **Aucune convention de chargement automatique** (p. ex. Le Chat aujourd'hui, ou tout cron/CI lancé en dehors
-   du projet, ou un outil sans mécanisme de doc projet). CoWork est **passif** : il
+   du projet, ou un outil sans mécanisme de doc projet). M8Shift est **passif** : il
    peut fournir la strophe mais ne peut pas forcer une lecture. `init` écrit une ancre de
    repli au mieux et **affiche un avertissement** : *« agent `<X>` : aucune ancre auto-chargée connue
    — amorce-le manuellement en le pointant vers `COWORK.protocol.md`. »* L'

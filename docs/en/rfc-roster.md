@@ -1,4 +1,4 @@
-# RFC — Configurable agent pair (roster) for CoWork
+# RFC — Configurable agent pair (roster) for M8Shift
 
 > **Status**: `Implemented (stage 1)` · **Shipped in**: v2.1 · **Author**: Claude (synthesized from a 3-proposal design panel) · **Date**: 2026-06-21
 >
@@ -9,7 +9,7 @@
 
 ## 1. Summary
 
-Today CoWork hard-wires the pair **claude ⇄ codex**. This RFC generalizes the
+Today M8Shift hard-wires the pair **claude ⇄ codex**. This RFC generalizes the
 **participants** to a configurable pair drawn from an **extensible roster**
 (`claude`, `codex`, `lechat`, `gemini`, …) **without changing the concurrency
 model**: it stays a **degree-1 mutex** (one pen, strict alternation between the two
@@ -85,7 +85,7 @@ Two hard cases, handled explicitly (not silently):
    `--to` targets. Honest limit: a tool sharing `AGENTS.md` does not intrinsically
    *know* which roster name it is — agent identity remains a human/launch convention.
 2. **No auto-load convention** (e.g. Le Chat today, or any cron/CI launched outside
-   the project, or a tool with no project-doc mechanism). CoWork is **passive**: it
+   the project, or a tool with no project-doc mechanism). M8Shift is **passive**: it
    can provide the stanza but cannot force a read. `init` writes a best-effort
    fallback anchor and **prints a warning**: *"agent `<X>`: no known auto-loaded
    anchor — bootstrap it manually by pointing it at `COWORK.protocol.md`."* The

@@ -1,10 +1,10 @@
 <div align="center">
 
-![CoWork](../CoWork-logo.png)
+![M8Shift](../M8Shift-logo.png)
 
-# CoWork
+# M8Shift
 
-_De rivaux à coéquipiers._
+_Des agents différents. Des rôles différents. Un seul workflow coordonné._
 
 **Un relais en fichier unique qui permet à deux agents IA — un couple configurable depuis un roster (la liste d'agents disponibles : Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte.**
 
@@ -13,7 +13,7 @@ _De rivaux à coéquipiers._
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#installation)
 [![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](../cowork.py)
 [![sans clé API](https://img.shields.io/badge/cl%C3%A9%20API-non%20requise-success.svg)](#tourne-partout--sans-clé-api)
-[![made with CoWork](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20CoWork-ff69b4.svg)](../docs/fr/cahier-des-charges.md#11-développer-cowork-avec-cowork-dogfooding)
+[![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](../docs/fr/cahier-des-charges.md#11-développer-m8shift-avec-m8shift-dogfooding)
 
 [English](../README.md) | Français
 
@@ -21,10 +21,16 @@ _De rivaux à coéquipiers._
 
 ---
 
-## Qu'est-ce que CoWork ?
+> **Anciennement CoWork.** Le projet a été renommé **M8Shift** (« Mate Shift » — *mate* = coéquipier,
+> *shift* = passage du tour). Le CLI (`cowork.py`) et les fichiers générés (`COWORK.md`,
+> `COWORK.protocol.md`, `.cowork.lock`, marqueurs `COWORK:*`) **conservent leurs noms `cowork` pour
+> l'instant** — une migration préservant la compatibilité vers les noms `m8shift` est prévue et **pas
+> encore faite**.
 
-CoWork est un **mutex coopératif** pour agents IA. Quand Claude et Codex travaillent sur le
-même dépôt, ils s'écrasent mutuellement. CoWork introduit un unique **stylo** : à
+## Qu'est-ce que M8Shift ?
+
+M8Shift est un **mutex coopératif** pour agents IA. Quand Claude et Codex travaillent sur le
+même dépôt, ils s'écrasent mutuellement. M8Shift introduit un unique **stylo** : à
 tout instant, exactement un agent est autorisé à écrire ; l'autre attend son tour et
 sait précisément ce qu'on attend de lui.
 
@@ -39,7 +45,7 @@ d'un agent. Voir [Limites](#limites).
 ## Pourquoi
 
 Quand Claude et Codex partagent un dépôt, ils n'ont aucun moyen de prendre les tours :
-les modifications entrent en collision et le travail est perdu. CoWork corrige cela avec un
+les modifications entrent en collision et le travail est perdu. M8Shift corrige cela avec un
 unique verrou exclusif (le **stylo**) et une règle simple — **acquérir le stylo avant de
 travailler** — pour que les deux agents ne modifient jamais le dépôt en même temps. L'état de
 coordination vit dans un fichier versionnable, lisible à l'œil comme par `grep`, et préservé
@@ -48,7 +54,7 @@ Python et les conventions propres des outils hôtes.
 
 ## Tourne partout — sans clé API
 
-CoWork est un **CLI passif** : les agents le pilotent par des commandes shell, donc il
+M8Shift est un **CLI passif** : les agents le pilotent par des commandes shell, donc il
 fonctionne sur toutes les surfaces où tournent Claude Code ou Codex, et il n'ajoute
 **aucun identifiant**.
 
@@ -59,7 +65,7 @@ fonctionne sur toutes les surfaces où tournent Claude Code ou Codex, et il n'aj
 | VS Code / JetBrains (IDE) | ✅ | comme le desktop |
 | Web (claude.ai/code) | ✅ | partout où l'agent peut lancer un shell et lire son ancrage |
 
-**Aucune clé API. Aucun jeton. Aucun compte pour CoWork lui-même.** `cowork.py` ne fait
+**Aucune clé API. Aucun jeton. Aucun compte pour M8Shift lui-même.** `cowork.py` ne fait
 **aucun appel réseau** (stdlib uniquement, fichiers locaux) — les agents utilisent
 l'abonnement ou la connexion que tu as déjà. Rien ne quitte ta machine, aucun coût par
 appel, aucun verrouillage propriétaire.
@@ -89,8 +95,8 @@ supplémentaires sont stockés pour le futur mode N agents).
 **Sous Windows ?** Aucune dépendance (stdlib uniquement) — lancez via WSL, Git Bash,
 ou `python cowork.py <cmd>` dans PowerShell. Voir [Lancer sous Windows](../docs/fr/windows.md).
 
-**Depuis un fork / clone ?** CoWork tient en un fichier — hébergez-le sur n'importe quel
-Git ou GitLab : `git clone https://gitlab.example.com/you/CoWork.git`, puis
+**Depuis un fork / clone ?** M8Shift tient en un fichier — hébergez-le sur n'importe quel
+Git ou GitLab : `git clone https://gitlab.example.com/you/M8Shift.git`, puis
 `cp cowork.py /mon/projet/` et lancez `init` comme ci-dessus.
 
 ## Démarrage rapide
@@ -132,12 +138,12 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 
 ## Comment ça marche
 
-CoWork stocke son état dans le bloc `LOCK` en tête de `COWORK.md`. Pour travailler, un
+M8Shift stocke son état dans le bloc `LOCK` en tête de `COWORK.md`. Pour travailler, un
 agent doit d'abord **prendre le stylo** avec `claim` (état `WORKING_<toi>`), une
 **acquisition exclusive** : si deux agents font `claim` en même temps, un seul gagne. Comme le
 travail n'a lieu que pendant que vous détenez le stylo et que `append` n'est accepté que depuis
 `WORKING_<toi>`, les deux agents n'écrivent jamais le dépôt en concurrence. Cette
-règle **claim-avant-travail** est le cœur de CoWork.
+règle **claim-avant-travail** est le cœur de M8Shift.
 
 ```mermaid
 flowchart LR
@@ -184,7 +190,7 @@ Vérifiées par les tests et par revue multi-agents :
 - **Réveiller l'UI d'un agent interactif.** `wait` bloque un *processus* jusqu'à ton
   tour ; il ne **relance ni ne réveille** un agent tournant dans une UI interactive
   (VS Code, …). Entre les tours, un humain relance quand même chaque agent (p. ex.
-  *« reprends CoWork »*). Une opération entièrement autonome exige une boucle **headless (sans interface)**
+  *« reprends M8Shift »*). Une opération entièrement autonome exige une boucle **headless (sans interface)**
   (`claude -p`, `codex exec`, cron) enveloppant `wait → relancer l'agent → claim` — une
   intégration à l'hôte, pas une modification du mutex. Une notification système/webhook
   peut *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule. Un exemple de
@@ -207,7 +213,7 @@ les ancrages canoniques/override, le roster configurable, l'archive, la robustes
 
 ## Positionnement — ce n'est pas un orchestrateur
 
-CoWork est une **primitive de coordination**, pas une plateforme d'agents. Il fait
+M8Shift est une **primitive de coordination**, pas une plateforme d'agents. Il fait
 volontairement **une seule chose** : garantir que, parmi les agents déjà lancés sur un
 dépôt partagé, un seul écrit à la fois (alternance stricte).
 
@@ -216,18 +222,18 @@ couvrent bien plus — ils *font tourner* les agents : gestion de session, dispa
 d'outils, mémoire, sous-agents, workflows **parallèles et** séquentiels. Eux aussi
 savent alterner ; la vraie différence est le **périmètre et l'empreinte** :
 
-| | Orchestrateur (p. ex. OpenClaw) | CoWork |
+| | Orchestrateur (p. ex. OpenClaw) | M8Shift |
 |---|---------------------------------|--------|
 | Nature | un runtime/gateway qui **pilote** les agents | un **verrou** mono-fichier que les agents interrogent |
 | Installation | une plateforme à déployer + configurer (providers, auth) | `cp cowork.py` — stdlib, ni daemon ni serveur |
-| Identifiants | l'auth des agents (abonnement **ou** clé API) | **aucun** — CoWork ne s'authentifie jamais |
+| Identifiants | l'auth des agents (abonnement **ou** clé API) | **aucun** — M8Shift ne s'authentifie jamais |
 | Périmètre | mémoire, outils, routage, parallèle + séquentiel | seulement *qui écrit, quand* |
 
-**Ce que CoWork apporte qu'un orchestrateur de messages ne donne pas :**
+**Ce que M8Shift apporte qu'un orchestrateur de messages ne donne pas :**
 
 - 🔒 **Un vrai verrou d'écriture sur le dépôt** — exactement un agent écrit à la fois. Un
   orchestrateur route des *tâches et messages* ; il n'empêche pas deux agents d'éditer
-  les mêmes fichiers en parallèle. CoWork, si (c'est tout son rôle).
+  les mêmes fichiers en parallèle. M8Shift, si (c'est tout son rôle).
 - 🪶 **Zéro runtime, zéro identifiant** — `cp cowork.py` et c'est parti. Aucun serveur à
   déployer, aucun provider/auth à configurer, aucune clé API, aucun coût par appel.
 - 🤝 **Pair-à-pair, sans coordinateur** — les agents se passent le bâton eux-mêmes
@@ -235,14 +241,14 @@ savent alterner ; la vraie différence est le **périmètre et l'empreinte** :
 - 📓 **Coordination durable, lisible, versionnée Git** — `COWORK.md` *est* la trace de qui
   a fait quoi et de la suite — à l'œil et au `grep`, committée avec ton code.
 
-Prends un orchestrateur quand tu veux une **équipe d'agents gérée**. Prends CoWork quand
+Prends un orchestrateur quand tu veux une **équipe d'agents gérée**. Prends M8Shift quand
 tu veux juste que deux agents que tu lances déjà (Claude Code, Codex, …) **arrêtent de
 s'écraser** — sans rien installer ni authentifier. Ils sont **complémentaires**, pas
-concurrents (CoWork pourrait même être le verrou au sein d'un montage plus large).
+concurrents (M8Shift pourrait même être le verrou au sein d'un montage plus large).
 
 ## Roadmap
 
-CoWork conserve un **mutex à stylo unique** (un seul écrivain à la fois) par
+M8Shift conserve un **mutex à stylo unique** (un seul écrivain à la fois) par
 conception — voir [architecture §1.8](../docs/fr/architecture.md). Deux étapes :
 
 1. **Couple configurable (livré)** — choisir les deux agents du relais dans un
@@ -253,7 +259,7 @@ conception — voir [architecture §1.8](../docs/fr/architecture.md). Deux étap
    plus lourde, avec son propre RFC futur.
 
 **Fonctionnalités prévues** — chaque item reste mono-fichier, passif et zéro-identifiant
-(append-only ou lecture seule sur des données que CoWork stocke déjà ; jamais un daemon,
+(append-only ou lecture seule sur des données que M8Shift stocke déjà ; jamais un daemon,
 une intégration, ni une seconde source de vérité) :
 
 - 🧠 **Mémoire partagée + recap** *(prochain)* — un `COWORK.memory.md` durable, append-only,
@@ -272,7 +278,7 @@ une intégration, ni une seconde source de vérité) :
 - 🗂️ **Tableau de tâches / block-on** *(peut-être)* — une partition de to-do append-only ;
   nommer une dépendance externe comme raison d'attente `blocked_on` explicite.
 
-**Non-goals** (briseraient une qualité de CoWork) : *baux* par chemin pour des écritures
+**Non-goals** (briseraient une qualité de M8Shift) : *baux* par chemin pour des écritures
 disjointes concurrentes (c'est le verrou degré 2 de l'étape 2, pas le stylo degré 1
 d'aujourd'hui) ; un daemon / watcher / push de notifications en arrière-plan ; lancer git,
 des builds ou des API (auth + réseau → un orchestrateur) ; des dépendances tierces ou un
@@ -285,7 +291,7 @@ Sous licence [Apache License 2.0](../LICENSE).
 
 ## Contribuer
 
-Les issues et pull requests sont les bienvenues. CoWork est un fichier unique par conception
+Les issues et pull requests sont les bienvenues. M8Shift est un fichier unique par conception
 ([`cowork.py`](../cowork.py) est la source de vérité unique — `COWORK.protocol.md` en est
 généré), donc gardez les changements ciblés et couverts par un test dans `tests/`. Lancez
 la suite de tests avant d'ouvrir une PR.

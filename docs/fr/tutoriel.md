@@ -1,6 +1,6 @@
-# Tutoriel — Lancez votre premier relais CoWork
+# Tutoriel — Lancez votre premier relais M8Shift
 
-Ceci est un tutoriel pratique. À la fin, vous aurez exécuté un relais CoWork
+Ceci est un tutoriel pratique. À la fin, vous aurez exécuté un relais M8Shift
 complet du début à la fin dans un dossier jetable : vous jouerez un tour en tant
 que `claude`, vous passerez la main, vous jouerez un tour en tant que `codex`,
 vous verrez l'alternance stricte se produire, puis vous clôturerez la session.
@@ -23,7 +23,7 @@ l'encart **Si X s'affiche à la place**.
 ## Étape 1 — Créer un dossier d'essai
 
 Nous allons travailler dans un dossier temporaire afin que rien sur votre
-machine ne soit touché. CoWork est un fichier unique autonome, donc un projet
+machine ne soit touché. M8Shift est un fichier unique autonome, donc un projet
 d'essai n'est qu'un répertoire vide.
 
 ```bash
@@ -38,7 +38,7 @@ votre terminal est positionné à l'intérieur.
 
 ## Étape 2 — Copier `cowork.py` dans le dossier
 
-CoWork se distribue sous forme d'un seul fichier. Pour l'adopter dans n'importe
+M8Shift se distribue sous forme d'un seul fichier. Pour l'adopter dans n'importe
 quel projet, vous copiez ce fichier unique à l'intérieur.
 
 ```bash
@@ -59,7 +59,7 @@ utilisez le chemin qu'il affiche.
 
 ## Étape 3 — Initialiser le relais avec `init`
 
-La commande `init` génère tout ce dont CoWork a besoin dans ce dossier : le
+La commande `init` génère tout ce dont M8Shift a besoin dans ce dossier : le
 fichier de travail partagé `COWORK.md`, la référence de protocole
 `COWORK.protocol.md`, et les fichiers d'ancrage (`CLAUDE.md`, `AGENTS.md`) qui
 permettent à chaque agent de s'amorcer lui-même.
@@ -93,7 +93,7 @@ tutoriel, repartez de zéro avec
 
 ## Étape 4 — Observer le verrou à l'intérieur de `COWORK.md`
 
-Le cœur de CoWork est un bloc unique appelé **LOCK** en haut de `COWORK.md`.
+Le cœur de M8Shift est un bloc unique appelé **LOCK** en haut de `COWORK.md`.
 C'est un mutex coopératif : quelques lignes `field: value` qui indiquent qui, le
 cas échéant, détient le stylo. Ouvrez `COWORK.md` dans n'importe quel éditeur,
 ou affichez-en le haut :
@@ -434,7 +434,7 @@ cd ..
 rm -rf /tmp/cowork-toy
 ```
 
-Félicitations — vous avez exécuté un relais CoWork complet de bout en bout.
+Félicitations — vous avez exécuté un relais M8Shift complet de bout en bout.
 
 ---
 
@@ -462,11 +462,11 @@ Maintenant que la mécanique a du sens, allez plus loin :
 
 - **Guides pratiques (how-to)** — recettes orientées tâche (récupérer un verrou
   périmé avec `claim --force`, écrire un corps de tour avec `--body`, passer la
-  main sans tour avec `release`, adopter CoWork dans un projet existant).
+  main sans tour avec `release`, adopter M8Shift dans un projet existant).
   Voir les docs how-to à côté de ce fichier.
 - **Référence** — le protocole complet et la référence des commandes :
   [`COWORK.protocol.md`](../../COWORK.protocol.md) pour le protocole, et le doc
   de référence pour chaque commande, flag, champ de verrou et état.
-- **Lisez le protocole une fois.** Avant de lancer CoWork avec de vrais agents,
+- **Lisez le protocole une fois.** Avant de lancer M8Shift avec de vrais agents,
   lisez `COWORK.protocol.md` §0 (la boucle copier-coller) pour que chaque agent
   puisse fonctionner par lui-même.
