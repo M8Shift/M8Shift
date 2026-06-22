@@ -9,12 +9,12 @@ You do not need to understand the whole protocol yet. Just follow the steps in
 order and compare each console output with the **Expected result** block below
 it. If something looks different, read the **If you see something else** note.
 
-> Tip: the `cowork.py` tool prints its own messages in French. That is normal —
+> Tip: the `m8shift.py` tool prints its own messages in French. That is normal —
 > the words you type (commands, flags, states) are the same everywhere, and
 > this tutorial explains every line in English. You are reading the output
 > exactly as a real run produces it.
 
-**What you need:** a terminal, Python 3, and the single file `cowork.py`.
+**What you need:** a terminal, Python 3, and the single file `m8shift.py`.
 **Time:** about 10 minutes.
 
 ---
@@ -34,21 +34,21 @@ is inside it.
 
 ---
 
-## Step 2 — Copy `cowork.py` into the folder
+## Step 2 — Copy `m8shift.py` into the folder
 
 M8Shift ships as one file. To adopt it in any project you copy that one file in.
 
 ```bash
-cp /path/to/cowork.py .
-chmod +x cowork.py
+cp /path/to/m8shift.py .
+chmod +x m8shift.py
 ```
 
-Replace `/path/to/cowork.py` with the real location on your machine.
+Replace `/path/to/m8shift.py` with the real location on your machine.
 
-**Expected result:** no output. `ls` should now show a single `cowork.py`.
+**Expected result:** no output. `ls` should now show a single `m8shift.py`.
 
 **If you see `No such file or directory`:** the source path is wrong. Find the
-file first with `find ~ -name cowork.py 2>/dev/null` and use the path it
+file first with `find ~ -name m8shift.py 2>/dev/null` and use the path it
 prints.
 
 ---
@@ -56,56 +56,56 @@ prints.
 ## Step 3 — Initialize the relay with `init`
 
 The `init` command generates everything M8Shift needs in this folder: the shared
-work file `COWORK.md`, the protocol reference `COWORK.protocol.md`, and the
+work file `M8SHIFT.md`, the protocol reference `M8SHIFT.protocol.md`, and the
 anchor files (`CLAUDE.md`, `AGENTS.md`) that let each agent bootstrap itself.
 
 ```bash
-./cowork.py init --name hello-cowork
+./m8shift.py init --name hello-cowork
 ```
 
 **Expected result:**
 
 ```text
 ✓ cowork init — projet « hello-cowork » dans /tmp/cowork-toy
-  • COWORK.protocol.md: écrit
-  • COWORK.md: écrit (projet « hello-cowork », verrou IDLE)
+  • M8SHIFT.protocol.md: écrit
+  • M8SHIFT.md: écrit (projet « hello-cowork », verrou IDLE)
   • CLAUDE.md: fichier créé
   • AGENTS.md: fichier créé
-Démarrer : ./cowork.py claim claude  (puis travaille, puis ./cowork.py append claude --to codex --ask "…" --done "…")
+Démarrer : ./m8shift.py claim claude  (puis travaille, puis ./m8shift.py append claude --to codex --ask "…" --done "…")
 Amorçage : démarre une nouvelle session/exécution de Claude et Codex pour recharger les ancrages.
 ```
 
-In English: the protocol was written, `COWORK.md` was created with a brand-new
+In English: the protocol was written, `M8SHIFT.md` was created with a brand-new
 lock in state `IDLE`, and the two anchor files were created. The lock starts at
 `IDLE` because nobody holds the pen yet.
 
-**If you see `COWORK.md: préservé`:** you already ran `init` here before, so the
+**If you see `M8SHIFT.md: préservé`:** you already ran `init` here before, so the
 existing relay state was kept (this is on purpose). For this tutorial, start
-clean with `./cowork.py init --name hello-cowork --force`.
+clean with `./m8shift.py init --name hello-cowork --force`.
 
 ---
 
-## Step 4 — Look at the lock inside `COWORK.md`
+## Step 4 — Look at the lock inside `M8SHIFT.md`
 
-The heart of M8Shift is one block called the **LOCK** at the top of `COWORK.md`.
+The heart of M8Shift is one block called the **LOCK** at the top of `M8SHIFT.md`.
 It is a cooperative mutex: a few `field: value` lines that say who, if anyone,
-holds the pen. Open `COWORK.md` in any editor, or print the top of it:
+holds the pen. Open `M8SHIFT.md` in any editor, or print the top of it:
 
 ```bash
-head -20 COWORK.md
+head -20 M8SHIFT.md
 ```
 
 **Expected result (the lock part):**
 
 ```text
-<!-- COWORK:LOCK:BEGIN -->
+<!-- M8SHIFT:LOCK:BEGIN -->
 holder:   none
 state:    IDLE
 turn:     0
 since:    2026-06-21T13:14:37Z
 expires:  -
 note:     session initialisée, aucun tour ouvert
-<!-- COWORK:LOCK:END -->
+<!-- M8SHIFT:LOCK:END -->
 ```
 
 What each field means:
@@ -118,8 +118,8 @@ What each field means:
   `WORKING_*`; otherwise it is `-`.
 - `note` — a short human-readable memo.
 
-You never edit this block by hand — the `cowork.py` commands rewrite it for you.
-The markers `COWORK:LOCK:BEGIN` and `COWORK:LOCK:END` are how the tool finds it.
+You never edit this block by hand — the `m8shift.py` commands rewrite it for you.
+The markers `M8SHIFT:LOCK:BEGIN` and `M8SHIFT:LOCK:END` are how the tool finds it.
 
 ---
 
@@ -129,7 +129,7 @@ The markers `COWORK:LOCK:BEGIN` and `COWORK:LOCK:END` are how the tool finds it.
 blocks and never changes anything, so it is always safe to run.
 
 ```bash
-./cowork.py status
+./m8shift.py status
 ```
 
 **Expected result:**
@@ -157,13 +157,13 @@ Before taking the pen, an agent checks whether it is allowed to. `wait <agent>
 "go ahead"; return code `3` means "not yet".
 
 ```bash
-./cowork.py wait claude --once
+./m8shift.py wait claude --once
 ```
 
 **Expected result:**
 
 ```text
-✓ libre (IDLE) — `./cowork.py claim claude` pour acquérir le stylo.
+✓ libre (IDLE) — `./m8shift.py claim claude` pour acquérir le stylo.
 ```
 
 In English: the relay is free (`IDLE`), so `claude` may now acquire the pen.
@@ -182,7 +182,7 @@ ran `claim` at the same moment, only one would win; the other would be told it
 is not its turn.
 
 ```bash
-./cowork.py claim claude
+./m8shift.py claim claude
 ```
 
 **Expected result:**
@@ -214,13 +214,13 @@ simply: **only work while you hold the pen.**
 
 ## Step 9 — As `claude`, record your turn and hand off with `append`
 
-`append` closes your turn: it writes a numbered turn block into `COWORK.md` and
+`append` closes your turn: it writes a numbered turn block into `M8SHIFT.md` and
 hands the pen to the other agent. `append` is only accepted while you hold the
 pen, which is what guarantees that the work window itself was exclusive — not
 just the journal write.
 
 ```bash
-./cowork.py append claude --to codex \
+./m8shift.py append claude --to codex \
     --ask "review my note" \
     --done "added hello.txt" \
     --files hello.txt
@@ -247,7 +247,7 @@ In English: turn 1 was written by `claude`, and the pen was handed to `codex`.
 Look at the lock again. It should now point at `codex`.
 
 ```bash
-./cowork.py status
+./m8shift.py status
 ```
 
 **Expected result:**
@@ -276,14 +276,14 @@ again until codex hands back.
 Now switch roles and play as `codex`. Same loop: check, then claim.
 
 ```bash
-./cowork.py wait codex --once
-./cowork.py claim codex
+./m8shift.py wait codex --once
+./m8shift.py claim codex
 ```
 
 **Expected result:**
 
 ```text
-✓ à toi (AWAITING_CODEX) — `./cowork.py claim codex` pour acquérir le stylo.
+✓ à toi (AWAITING_CODEX) — `./m8shift.py claim codex` pour acquérir le stylo.
 ✓ verrou pris par codex (expire 2026-06-21T13:44:37Z).
 ```
 
@@ -298,7 +298,7 @@ now holds the pen (state `WORKING_CODEX`).
 pen back to `claude`. When you have nothing to ask, set `--ask "—"`.
 
 ```bash
-./cowork.py append codex --to claude \
+./m8shift.py append codex --to claude \
     --ask "—" \
     --done "reviewed, looks good" \
     --files hello.txt
@@ -320,7 +320,7 @@ You have now seen a full round trip: claude → codex → claude.
 Check the status one more time to confirm the hand-back.
 
 ```bash
-./cowork.py status
+./m8shift.py status
 ```
 
 **Expected result:**
@@ -338,20 +338,20 @@ Check the status one more time to confirm the hand-back.
 
 The state is back to `AWAITING_CLAUDE`: it is claude's turn again. Each hand-off
 incremented `turn` (now `2`), and each turn was recorded as an immutable block
-in `COWORK.md`. Open `COWORK.md` and scroll down — you will see three turn
+in `M8SHIFT.md`. Open `M8SHIFT.md` and scroll down — you will see three turn
 blocks: `#0 system`, `#1 claude`, `#2 codex`, each wrapped between
-`COWORK:TURN <n> <agent> BEGIN` and `END` markers.
+`M8SHIFT:TURN <n> <agent> BEGIN` and `END` markers.
 
 ---
 
-## Step 14 — Try `archive` to keep `COWORK.md` short
+## Step 14 — Try `archive` to keep `M8SHIFT.md` short
 
-Over a long session `COWORK.md` would grow. `archive` moves old, already-closed
-turns out to `COWORK.archive.md`, keeping the most recent ones (and always the
+Over a long session `M8SHIFT.md` would grow. `archive` moves old, already-closed
+turns out to `M8SHIFT.archive.md`, keeping the most recent ones (and always the
 seed turn `#0`) in the live file.
 
 ```bash
-./cowork.py archive --keep 6
+./m8shift.py archive --keep 6
 ```
 
 **Expected result:**
@@ -373,8 +373,8 @@ released and the state becomes `DONE`. You currently hold the pen as `claude`
 (from Step 13), so you can close directly:
 
 ```bash
-./cowork.py claim claude
-./cowork.py done claude
+./m8shift.py claim claude
+./m8shift.py done claude
 ```
 
 **Expected result:**
@@ -387,7 +387,7 @@ released and the state becomes `DONE`. You currently hold the pen as `claude`
 Check the final status:
 
 ```bash
-./cowork.py status
+./m8shift.py status
 ```
 
 **Expected result:**
@@ -428,7 +428,7 @@ Congratulations — you ran a complete M8Shift relay end to end.
 - **States you saw:** `IDLE` (free), `WORKING_CLAUDE` / `WORKING_CODEX` (someone
   is working), `AWAITING_CLAUDE` / `AWAITING_CODEX` (waiting for that agent),
   `DONE` (session closed).
-- **Housekeeping:** `archive` keeps `COWORK.md` short; `done` closes the relay.
+- **Housekeeping:** `archive` keeps `M8SHIFT.md` short; `done` closes the relay.
 
 ---
 
@@ -441,8 +441,8 @@ Now that the mechanics make sense, go deeper:
   using `release`, adopt M8Shift in an existing project). See the how-to docs
   alongside this file.
 - **Reference** — the full protocol and command reference:
-  [`COWORK.protocol.md`](../../COWORK.protocol.md) for the protocol, and the
+  [`M8SHIFT.protocol.md`](../../M8SHIFT.protocol.md) for the protocol, and the
   reference doc for every command, flag, lock field, and state.
 - **Read the protocol once.** Before you run M8Shift with real agents, read
-  `COWORK.protocol.md` §0 (the copy-paste loop) so each agent can operate on its
+  `M8SHIFT.protocol.md` §0 (the copy-paste loop) so each agent can operate on its
   own.
