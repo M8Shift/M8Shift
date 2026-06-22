@@ -669,13 +669,20 @@ class TestRoster(CLIBase):
         self.assertNotEqual(rc.returncode, 0)
         self.assertNotIn("Traceback", rc.stderr)
 
-    def test_extra_agents_only_first_two_active(self):
-        """≥3 noms : tous consignés, mais seuls les 2 premiers relaient (Q1)."""
+    def test_extra_agents_are_active(self):
+        """Stage 2: a 3rd declared agent is ACTIVE — the relay routes the baton to it
+        (claude → lechat → codex). Replaces the Stage-1 'only first two relay' contract."""
         r = self.init("--agents", "claude,codex,lechat")
         self.assertEqual(self.lock().get("agents"), "claude,codex,lechat")
-        self.assertIn("first two", r.stdout)
-        self.assertEqual(self.cw("claim", "claude").returncode, 0)   # actif
-        self.assertNotEqual(self.cw("claim", "lechat").returncode, 0)  # réservé/inactif
+        self.assertNotIn("first two", r.stdout)              # old degree-2 promise is gone
+        self.assertIn("3 agents active", r.stdout)
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.cw("append", "claude", "--to", "lechat",
+                                 "--ask", "x", "--done", "y").returncode, 0)
+        self.assertEqual(self.lock().get("state"), "AWAITING_LECHAT")
+        self.assertEqual(self.cw("claim", "lechat").returncode, 0)   # 3rd agent is active
+        self.assertEqual(self.cw("append", "lechat", "--to", "codex",
+                                 "--ask", "x", "--done", "z").returncode, 0)
 
     def test_agents_field_survives_claim(self):
         """Le champ agents (roster complet) est préservé par un claim (set_lock)."""
@@ -1085,6 +1092,83 @@ class TestReadCommands(CLIBase):
         self.assertEqual(d["last_turn"], {"n": 1, "agent": "codex"})
         self.assertIn("legacy work", self.cw("log").stdout)
         self.assertEqual(self.cw("peek", "claude").returncode, 0)   # AWAITING_CLAUDE
+
+
+
+# ───────────────────────── Stage 2 increment 2 : N-agent relay ──────────────
+
+class TestNAgentRelay(CLIBase):
+    # — stanza byte-compat (top risk: inject_anchor re-injects idempotently) —
+    def test_stanza_pair_mode_byte_identical(self):
+        self.addCleanup(setattr, cowork, "ROSTER", cowork.AGENTS)
+        cowork.ROSTER = ("claude", "codex")
+        s = cowork.stanza_for("claude")
+        self.assertIn("codex", s)               # the single peer, as before
+        self.assertIn("WORKING_CODEX", s)
+        self.assertNotIn("<agent>", s)          # the N>2 placeholder must NOT appear
+        self.assertNotIn("<AGENT>", s)
+
+    def test_stanza_n_agents_uses_placeholder(self):
+        self.addCleanup(setattr, cowork, "ROSTER", cowork.AGENTS)
+        cowork.ROSTER = ("claude", "codex", "gemini")
+        s = cowork.stanza_for("claude")
+        self.assertIn("<agent>", s)             # generic peer placeholder for N>2
+        self.assertIn("WORKING_<AGENT>", s)
+
+    # — cmd_wait self-exclusion (a self-held stale lock must stay silent) —
+    def test_wait_self_stale_is_silent(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.set_expires_past()                 # claude's OWN lock is now stale
+        r = self.cw("wait", "claude", "--once")
+        self.assertEqual(r.returncode, 3)       # not your turn, as before the edit
+        self.assertNotIn("stale", (r.stdout + r.stderr).lower())
+
+    def test_wait_third_agent_stale_detected(self):
+        self.init("--agents", "claude,codex,gemini")
+        self.cw("claim", "gemini")              # 3rd agent holds the pen
+        self.set_expires_past()
+        r = self.cw("wait", "claude", "--once")
+        self.assertEqual(r.returncode, 0)       # a stale non-self lock unblocks me
+        self.assertIn("gemini", r.stdout)       # names the REAL holder, not other()
+
+    def test_wait_peer_stale_unchanged_pair(self):
+        self.init()
+        self.cw("claim", "codex")
+        self.set_expires_past()
+        r = self.cw("wait", "claude", "--once")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("codex", r.stdout)        # pair-mode message names codex, as before
+
+    # — status / recap show the full roster (byte-identical for N=2 elsewhere) —
+    def test_status_recap_show_full_roster(self):
+        self.init("--agents", "claude,codex,gemini")
+        d = json.loads(self.cw("status", "--json").stdout)
+        self.assertEqual(d["agents_active"], ["claude", "codex", "gemini"])
+        self.assertIn("gemini", self.cw("status").stdout)
+        self.assertIn("gemini", self.cw("recap").stdout)
+
+    # — 3rd agent with a unique anchor gets a stanza —
+    def test_third_agent_gets_anchor(self):
+        self.init("--agents", "claude,codex,gemini")
+        p = os.path.join(self.d, "GEMINI.md")
+        self.assertTrue(os.path.exists(p), "GEMINI.md should be created for the 3rd agent")
+        with open(p, encoding="utf-8") as f:
+            self.assertIn(cowork.STANZA_BEGIN, f.read())
+
+    # — the CLAUDE→Codex bridge still fires inside a >2 active set —
+    def test_bridge_survives_three_agents(self):
+        with open(os.path.join(self.d, "CLAUDE.md"), "w", encoding="utf-8") as f:
+            f.write("# Shared\n\nRULE\n")
+        self.init("--agents", "claude,codex,gemini")
+        with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
+            self.assertIn(cowork.BRIDGE["en"].strip(), f.read())
+
+    # — no locale still promises 'only the first two' after activation —
+    def test_no_first_two_promise_after_activation(self):
+        self.assertNotIn("first two", self.init("--agents", "claude,codex,gemini").stdout)
+        r = self.init("--agents", "claude,codex,gemini", "--lang", "fr", "--force")
+        self.assertNotIn("deux premiers", r.stdout)
 
 
 
