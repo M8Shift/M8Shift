@@ -23,9 +23,9 @@ entre les deux agents choisis). C'est un *delta minimal* — le verrou, la séri
 ## 2. Objectifs / Non-objectifs
 
 **Objectifs**
-- Choisir *quels deux agents* font le relais, au moment du `init` : `cowork.py init --agents claude,lechat`.
+- Choisir *quels deux agents* font le relais, au moment du `init` : `m8shift.py init --agents claude,lechat`.
 - Par défaut (sans `--agents`) = `claude,codex` → **identique en comportement** (le
-  `COWORK.md` généré gagne une ligne `agents:` et le tour d'amorçage nomme le couple
+  `M8SHIFT.md` généré gagne une ligne `agents:` et le tour d'amorçage nomme le couple
   actif ; les transitions du relais et l'injection d'ancrage sont inchangées).
 - **Mapping d'ancrage** par agent pour que chaque outil charge automatiquement son propre fichier d'instructions.
 - Gestion honnête des agents dont l'outil **ne charge automatiquement aucun fichier** (amorçage manuel).
@@ -53,8 +53,8 @@ une généralisation paramétrique de noms qui sont *déjà* par agent
 - Stockage : une nouvelle ligne LOCK `agents:   claude,codex` (CSV), à côté de `lang`.
   Grep-able, versionnée, parsée par `get_lock` avec un simple `split(",")`.
 - Lecture : `roster(lk)` → `lk["agents"].split(",")` si présent, sinon `("claude","codex")`
-  (repli pour tout `COWORK.md` pré-RFC — **aucune migration requise**).
-- `init` sans `--force` sur un `COWORK.md` existant **préserve** le roster en place
+  (repli pour tout `M8SHIFT.md` pré-RFC — **aucune migration requise**).
+- `init` sans `--force` sur un `M8SHIFT.md` existant **préserve** le roster en place
   (comme le reste du LOCK).
 
 ## 5. Mapping d'ancrage (le vrai nœud du problème)
@@ -88,7 +88,7 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
    du projet, ou un outil sans mécanisme de doc projet). M8Shift est **passif** : il
    peut fournir la strophe mais ne peut pas forcer une lecture. `init` écrit une ancre de
    repli au mieux et **affiche un avertissement** : *« agent `<X>` : aucune ancre auto-chargée connue
-   — amorce-le manuellement en le pointant vers `COWORK.protocol.md`. »* L'
+   — amorce-le manuellement en le pointant vers `M8SHIFT.protocol.md`. »* L'
    agent reste un membre à part entière du roster (ses `claim`/`append` fonctionnent) ; seul l'amorçage automatique
    manque. **Ceci est documenté comme une limite assumée, pas un bug.**
 
@@ -132,13 +132,13 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
 ## 8. Rétrocompatibilité & migration
 
 - `init` sans `--agents` → roster `claude,codex` ; tous les chemins de transition du
-  relais sont inchangés. Le `COWORK.md` généré gagne en revanche une ligne `agents:`
+  relais sont inchangés. Le `M8SHIFT.md` généré gagne en revanche une ligne `agents:`
   optionnelle (et le tour d'amorçage nomme le couple actif), donc le *fichier* n'est
   pas identique octet pour octet à la sortie pré-roster. Un script « roster-unaware »
   (pré-RFC) reste sûr **uniquement pour le couple par défaut** : il ignore `agents:`
   et traiterait un roster personnalisé comme `claude,codex`, ce qui peut le corrompre —
   un roster personnalisé exige un script conscient du roster.
-- Un `COWORK.md` pré-RFC sans ligne `agents:` se charge via le repli `("claude","codex")`
+- Un `M8SHIFT.md` pré-RFC sans ligne `agents:` se charge via le repli `("claude","codex")`
   — pas de réécriture, pas d'outil de migration. `init --force` réécrit le LOCK et ajoute
   `agents:`.
 - `other()` et `test_other` restent ; `stanza_for` conserve la formulation historique à 2 agents

@@ -1,44 +1,44 @@
-# COWORK · Single-file relay protocol (v1)
+# M8Shift · Single-file relay protocol (v1)
 
 Shared instruction for the **two active agents** (by default **Claude** and
 **Codex**) to cooperate through a single
-`COWORK.md` file, in strict alternation (mutex), with periodic polling. Portable:
-this protocol is identical in every project; only the title of `COWORK.md`
+`M8SHIFT.md` file, in strict alternation (mutex), with periodic polling. Portable:
+this protocol is identical in every project; only the title of `M8SHIFT.md`
 changes.
 
-Read it **once at the start of a session** as soon as you see a `COWORK.md` at
+Read it **once at the start of a session** as soon as you see a `M8SHIFT.md` at
 the root of a project. You are **one of the two active agents** declared in the
-`agents:` field of `COWORK.md` (by default `claude` and `codex`) — identify yourself
+`agents:` field of `M8SHIFT.md` (by default `claude` and `codex`) — identify yourself
 by your anchor file.
 
 ---
 
 ## 0. TL;DR — the self-contained loop
 
-You have just arrived in the project and you see a `COWORK.md`: here is the
+You have just arrived in the project and you see a `M8SHIFT.md`: here is the
 complete, copy-pasteable loop, **no other instruction is required**. `<you>` is your
 own agent name and `<other>` is the other active agent (the pair declared in
 `agents:`; by default `claude` / `codex`, via the `CLAUDE.md` / `AGENTS.md` anchors).
 
 ```bash
 # 1. Am I expected? (NON-blocking commands)
-./cowork.py status                 # read the `state` field
-./cowork.py wait <you> --once      # rc 0 = you may acquire ; rc 3 = not yet
+./m8shift.py status                 # read the `state` field
+./m8shift.py wait <you> --once      # rc 0 = you may acquire ; rc 3 = not yet
 
 # 2. ACQUIRE the pen BEFORE working (EXCLUSIVE acquisition: when two agents
 #    try at the same time, only one succeeds):
-./cowork.py claim <you>           # rc 0 = you hold the pen ; rc != 0 = not your turn
+./m8shift.py claim <you>           # rc 0 = you hold the pen ; rc != 0 = not your turn
 #    • If claim SUCCEEDS: read the `ask:` that <other> left you in the last
 #      turn (at IDLE startup / turn 0, nothing to honour), do the work in the
 #      repository, THEN record your turn and hand off:
-./cowork.py append <you> --to <other> \
+./m8shift.py append <you> --to <other> \
     --ask "what you expect from the other" \
     --done "what you just did" \
     --files file1,file2
 #    • If claim FAILS: it is not (or no longer) your turn → go back to waiting.
 
 # 3. Not your turn: touch NOTHING. Block until your turn, then resume at 2:
-./cowork.py wait <you>             # poll every ~60 s (--interval N)
+./m8shift.py wait <you>             # poll every ~60 s (--interval N)
 ```
 
 Golden rule: **you work and write only if you have acquired the pen via
@@ -54,7 +54,7 @@ pen. Everything else in this document is just the detail of this loop.
 
 ## 1. Mental model
 
-- **A single living file**: `COWORK.md`. The entire work dialogue is there.
+- **A single living file**: `M8SHIFT.md`. The entire work dialogue is there.
 - **A single pen, explicitly acquired**: to work, you **take** the pen via
   `claim` → state `WORKING_<you>`. `claim` is **exclusive** (two agents trying
   at the same time: only one succeeds). You modify the repository **only** while
@@ -63,14 +63,14 @@ pen. Everything else in this document is just the detail of this loop.
   writes the turn and hands off (`AWAITING_<other>`). No `claim` ⇒ no `append`.
 - **Strict alternation**: the two active agents take turns (e.g. `claude` → `codex`
   → `claude` …). Each hand-off is a numbered *turn* (`TURN`), framed by `BEGIN`/`END`.
-- **Poll**: when it is not your turn, you wait (`./cowork.py wait <you>`,
+- **Poll**: when it is not your turn, you wait (`./m8shift.py wait <you>`,
   ~60 s) then you retry `claim`.
 
 ---
 
 ## 2. The LOCK block (the mutex)
 
-Delimited by `<!-- COWORK:LOCK:BEGIN -->` … `<!-- COWORK:LOCK:END -->`.
+Delimited by `<!-- M8SHIFT:LOCK:BEGIN -->` … `<!-- M8SHIFT:LOCK:END -->`.
 Fields (one `key: value` per line, easy to `grep`):
 
 | field     | values | meaning |
@@ -98,7 +98,7 @@ Fields (one `key: value` per line, easy to `grep`):
 ## 3. Format of a turn
 
 ```
-<!-- COWORK:TURN <n> <agent> BEGIN -->
+<!-- M8SHIFT:TURN <n> <agent> BEGIN -->
 - from:    <agent>           # an active agent
 - to:      <agent|none>      # to whom you hand off
 - ask:     <what you expect from the other, precise and actionable>
@@ -107,7 +107,7 @@ Fields (one `key: value` per line, easy to `grep`):
 - handoff: <agent|none>      # = to ; deliberate redundancy, grep-friendly
 <blank line>
 <free body: explanations, questions, code blocks, lists>
-<!-- COWORK:TURN <n> <agent> END -->
+<!-- M8SHIFT:TURN <n> <agent> END -->
 ```
 
 Rules:
@@ -126,11 +126,11 @@ Rules:
 loop:
   1. read LOCK (status / wait)
   2. if state == AWAITING_<me> or IDLE:
-       a. CLAIM  : ./cowork.py claim <me>   → state=WORKING_<ME>, expires=now+30min
+       a. CLAIM  : ./m8shift.py claim <me>   → state=WORKING_<ME>, expires=now+30min
                    EXCLUSIVE: if someone else has taken the pen in the meantime,
                    claim FAILS → go to 3.
        b. WORK in the repository (while you hold the pen, you alone)
-       c. APPEND  : ./cowork.py append <me> --to <other>
+       c. APPEND  : ./m8shift.py append <me> --to <other>
                    writes my turn <turn+1>, state=AWAITING_<OTHER>
   3. else (WORKING_<other> or AWAITING_<other>):
        wait ~60 s (wait), go back to 1
@@ -142,7 +142,7 @@ turn and hands off, `wait` waits for your turn. The explicit acquisition before
 working is what guarantees that a single agent modifies the repository at a time.
 
 > **Concurrency model (two levels)**:
-> 1. **Transitions** serialized by an inter-process lock (`.cowork.lock`,
+> 1. **Transitions** serialized by an inter-process lock (`.m8shift.lock`,
 >    `O_CREAT|O_EXCL`, with an ownership token): each read-modify-write of the
 >    LOCK + atomic write (unique temporary + `os.replace`) is exclusive.
 > 2. **Work window** protected by the persistent state `WORKING_<agent>`:
@@ -151,8 +151,8 @@ working is what guarantees that a single agent modifies the repository at a time
 >    succeeds**; the other must wait. Since we work only after a successful
 >    `claim`, two agents never modify the repository at the same time.
 >
-> An abandoned `.cowork.lock` (killed process) is taken over after 60 s, token
-> verified. *Limits*: the lock is **advisory** (a manual edit of `COWORK.md`
+> An abandoned `.m8shift.lock` (killed process) is taken over after 60 s, token
+> verified. *Limits*: the lock is **advisory** (a manual edit of `M8SHIFT.md`
 > bypasses it); on a network FS (NFS) `O_EXCL`/`rename` are less reliable —
 > cowork targets a repository on local disk. See also §0/§4 (mandatory claim).
 
@@ -164,12 +164,12 @@ If the other agent crashes while holding the pen, the lock would stay stuck.
 Guardrail:
 - on CLAIM, we set `expires = now + 30 min`;
 - if you see `state == WORKING_<other>` **and** `now > expires`, the lock is
-  **stale**: take it over with `./cowork.py claim <you> --force`, then open a
+  **stale**: take it over with `./m8shift.py claim <you> --force`, then open a
   turn noting the takeover (`done: takeover after stale lock from <other>`);
 - **the tool enforces the rule**: `--force` is **refused** on a still-valid
   lock. You therefore cannot steal the pen from an active agent (this is
   intentional);
-- you can **refresh your own** lock before it expires: `./cowork.py claim
+- you can **refresh your own** lock before it expires: `./m8shift.py claim
   <you>` when you already hold it resets `expires` to +30 min;
 - `release` and `done` act only if **you** hold the pen (or if nobody holds it);
   `--force` overrides, reserved for recovery.
@@ -178,29 +178,29 @@ Guardrail:
 
 ## 6. Keeping it bounded over time (bounded length)
 
-`COWORK.md` must not grow indefinitely:
-- keep in `COWORK.md` the `LOCK` block + the **~6 last turns**;
-- `./cowork.py archive --keep 6` moves the older turns (already closed) to
-  `COWORK.archive.md` (append), without ever touching the lock or the last open
+`M8SHIFT.md` must not grow indefinitely:
+- keep in `M8SHIFT.md` the `LOCK` block + the **~6 last turns**;
+- `./m8shift.py archive --keep 6` moves the older turns (already closed) to
+  `M8SHIFT.archive.md` (append), without ever touching the lock or the last open
   turn.
 - The archive can be consulted but is **never** re-read by the loop: only the
-  living part of `COWORK.md` drives the relay.
+  living part of `M8SHIFT.md` drives the relay.
 
 ---
 
-## 7. The `cowork.py` tool
+## 7. The `m8shift.py` tool
 
 ```
-./cowork.py init [--name PROJECT] [--agents a,b] [--lang en|fr] [--force]  # (re)generates the kit here
-./cowork.py status                                # lock + last turn (NON-blocking)
-./cowork.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./cowork.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
+./m8shift.py init [--name PROJECT] [--agents a,b] [--lang en|fr] [--force]  # (re)generates the kit here
+./m8shift.py status                                # lock + last turn (NON-blocking)
+./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
+./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
-./cowork.py append <agent> --to <other> \
+./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # closes your turn + hands off
-./cowork.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
-./cowork.py done <agent> [--force]                 # close the session (state=DONE)
-./cowork.py archive [--keep N]                     # purge old closed turns (never turn #0)
+./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
+./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
+./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)
 ```
 
 - **`claim` first**: you must hold the pen (`WORKING_<you>`) to `append`.
@@ -217,21 +217,21 @@ Guardrail:
 
 ## 8. Adoption by any project (portability)
 
-`cowork.py` is **self-sufficient**: it embeds this protocol, the `COWORK.md`
+`m8shift.py` is **self-sufficient**: it embeds this protocol, the `M8SHIFT.md`
 template and the anchors. To adopt the relay in a project:
 
 ```bash
-cp /path/to/cowork.py .          # copy the only file needed
-./cowork.py init                 # project name = folder name (otherwise --name)
+cp /path/to/m8shift.py .          # copy the only file needed
+./m8shift.py init                 # project name = folder name (otherwise --name)
 ```
 
 `init`:
-- writes `COWORK.protocol.md` (this document) and `COWORK.md` (a fresh IDLE
-  lock); `COWORK.md` is **not** overwritten if it already exists (except with
+- writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE
+  lock); `M8SHIFT.md` is **not** overwritten if it already exists (except with
   `--force`) → the state of the ongoing relay is preserved;
 - injects at the **top** a "Co-work relay" block into **each active agent's anchor**
   (by default `CLAUDE.md` and `AGENTS.md`; created if missing), between
-  `COWORK:STANZA` markers → **idempotent** re-injection (moves/updates the block
+  `M8SHIFT:STANZA` markers → **idempotent** re-injection (moves/updates the block
   without duplicating, existing content preserved; the prior file is backed up to
   `<anchor>.cowork.bak`);
 - if `CLAUDE.md` existed but no Codex instruction (`AGENTS.md` or
@@ -254,9 +254,9 @@ therefore:
 
 ```mermaid
 flowchart LR
-    I["cowork.py init"] --> S["inject the stanza into<br/>each active agent's anchor"]
+    I["m8shift.py init"] --> S["inject the stanza into<br/>each active agent's anchor"]
     S --> R["each agent reads its anchor<br/>at session start"]
-    R --> L["applies COWORK.protocol.md<br/>(the wait / claim / work / append loop)"]
+    R --> L["applies M8SHIFT.protocol.md<br/>(the wait / claim / work / append loop)"]
 ```
 
 - **After `init`**: start a new session/execution of the agent. A session
@@ -273,6 +273,6 @@ flowchart LR
   keeps it in priority (and a file closer to the cwd takes precedence);
   nevertheless keep the anchors **lightweight**.
 - **General limit**: cowork cannot force an AI to read anything. Without a
-  project root/context, point the agent explicitly to `COWORK.protocol.md`.
+  project root/context, point the agent explicitly to `M8SHIFT.protocol.md`.
 
 Codex reference: https://developers.openai.com/codex/guides/agents-md

@@ -22,10 +22,10 @@ wsl --install            # once; reboot if prompted
 Then, inside the WSL shell (Ubuntu, …):
 
 ```bash
-cp cowork.py /your/project/
+cp m8shift.py /your/project/
 cd /your/project
-python3 cowork.py init
-python3 cowork.py status
+python3 m8shift.py init
+python3 m8shift.py status
 ```
 
 WSL gives a true POSIX filesystem (real `O_EXCL`, `chmod`, atomic `rename`), so
@@ -37,39 +37,39 @@ Install **Git for Windows** (ships Git Bash + git). In Git Bash:
 
 ```bash
 cd /c/Users/you/project
-python cowork.py init        # use `python`, not ./cowork.py
-python cowork.py status
+python m8shift.py init        # use `python`, not ./m8shift.py
+python m8shift.py status
 ```
 
-- Call the script as `python cowork.py <cmd>` — Git Bash may not honor the
+- Call the script as `python m8shift.py <cmd>` — Git Bash may not honor the
   `#!/usr/bin/env python3` shebang reliably.
 - `git mv` for anchor canonicalization works because git is present.
 
 ## Option C — Native PowerShell / cmd
 
 ```powershell
-python cowork.py init
-python cowork.py claim claude
-python cowork.py append claude --to codex --ask "..." --done "..."
+python m8shift.py init
+python m8shift.py claim claude
+python m8shift.py append claude --to codex --ask "..." --done "..."
 ```
 
-- Always invoke via `python cowork.py <cmd>` — `./cowork.py` is a Unix idiom and will
+- Always invoke via `python m8shift.py <cmd>` — `./m8shift.py` is a Unix idiom and will
   not run directly.
-- If `python` is not found, use the launcher: `py cowork.py <cmd>`.
+- If `python` is not found, use the launcher: `py m8shift.py <cmd>`.
 
 ## Line endings
 
-M8Shift writes `COWORK.md` with LF (`\n`); the turn/lock markers are HTML comments and
+M8Shift writes `M8SHIFT.md` with LF (`\n`); the turn/lock markers are HTML comments and
 the parser is newline-tolerant, so CRLF will not break detection. If you commit
-`cowork.py` from Windows, keep it LF (`* text=auto eol=lf` in `.gitattributes`, or
-`git config core.autocrlf input`). In *this* source repo `COWORK.md` is gitignored, so its endings never reach a
-commit; a project that just copies `cowork.py` should add `COWORK.md` to its own
+`m8shift.py` from Windows, keep it LF (`* text=auto eol=lf` in `.gitattributes`, or
+`git config core.autocrlf input`). In *this* source repo `M8SHIFT.md` is gitignored, so its endings never reach a
+commit; a project that just copies `m8shift.py` should add `M8SHIFT.md` to its own
 `.gitignore` (or keep it LF) to avoid CRLF noise.
 
 ## What works the same as on Linux/macOS
 
 Empty folder or git repo, paths with spaces/accents, the inter-process lock
-(`.cowork.lock`, `O_EXCL` + ownership token), atomic writes, the full relay loop
+(`.m8shift.lock`, `O_EXCL` + ownership token), atomic writes, the full relay loop
 (`wait → claim → work → append`), the configurable roster (`--agents`), and bilingual
 output (`--lang en|fr`). Codex's `AGENTS.md` discovery / override follow the Codex
 tool's own Windows rules.

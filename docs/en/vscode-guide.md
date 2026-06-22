@@ -1,9 +1,9 @@
 # User guide — operating the M8Shift relay in VS Code
 
 > **Note Claude —** Operational guide: how to actually launch a Claude ⇄ Codex
-> relay from the VS Code extensions. For kit installation (`cp cowork.py` +
+> relay from the VS Code extensions. For kit installation (`cp m8shift.py` +
 > `init`), see the [README](../../README.md); for the protocol itself, see
-> [`COWORK.protocol.md`](../COWORK.protocol.md).
+> [`M8SHIFT.protocol.md`](../M8SHIFT.protocol.md).
 
 In VS Code, **the Claude and Codex panels *are* the agents**. The whole job comes
 down to two gestures: pointing them at the **right project root**, and **starting
@@ -16,8 +16,8 @@ should see before moving on.
 
 ## What you need first
 
-- `cowork.py` deployed at the project root, and `python3 cowork.py init` already
-  run (this generates `COWORK.md`, `COWORK.protocol.md`, `CLAUDE.md`, and
+- `m8shift.py` deployed at the project root, and `python3 m8shift.py init` already
+  run (this generates `M8SHIFT.md`, `M8SHIFT.protocol.md`, `CLAUDE.md`, and
   `AGENTS.md`).
 - Both VS Code extensions installed: **Claude Code** and **Codex**.
 
@@ -44,18 +44,18 @@ To open **Example Project**:
    ```
 
 **Expected result:** a VS Code window whose root is the repository itself, with
-`COWORK.md`, `CLAUDE.md`, and `AGENTS.md` visible at the top level of the
+`M8SHIFT.md`, `CLAUDE.md`, and `AGENTS.md` visible at the top level of the
 Explorer.
 
 Open **a separate window** for each other repository (for example GSE), each on
 its own root. The rule is: one repository = one window.
 
-> **If `COWORK.md` is not at the top of the Explorer, then** you opened a parent
+> **If `M8SHIFT.md` is not at the top of the Explorer, then** you opened a parent
 > folder. Close the window and reopen the folder on the exact repository root.
 
 ---
 
-## Step 2 — Reload after `cowork.py init`
+## Step 2 — Reload after `m8shift.py init`
 
 A session that was already open knows nothing about the anchors that `init` just
 injected. So, right after you run `init`:
@@ -99,7 +99,7 @@ In the **Claude** UI, paste the prompt below, replacing `[MISSION]` with your
 actual task:
 
 ```text
-Read CLAUDE.md and COWORK.protocol.md.
+Read CLAUDE.md and M8SHIFT.protocol.md.
 
 You are the claude agent of the M8Shift relay. Take the pen before making any
 change, and carry out this mission:
@@ -107,7 +107,7 @@ change, and carry out this mission:
 [MISSION]
 
 After your append to codex, do not end the loop: wait for your turn again with
-`python3 cowork.py wait claude`, then keep following the protocol until DONE,
+`python3 m8shift.py wait claude`, then keep following the protocol until DONE,
 or until you hit a blocker that needs my input.
 ```
 
@@ -118,11 +118,11 @@ transcript shows the tool's confirmation line, which reads:
 ✓ verrou pris par claude (...)
 ```
 
-This is the literal output of `cowork.py claim claude`: it confirms Claude now
+This is the literal output of `m8shift.py claim claude`: it confirms Claude now
 holds the pen and the lock state is `WORKING_CLAUDE`.
 
 > **If that confirmation line never appears, then** Claude did not acquire the
-> pen. Check `python3 cowork.py status` in a terminal at the repository root to
+> pen. Check `python3 m8shift.py status` in a terminal at the repository root to
 > see the `holder`, `state`, and `turn`, then re-send the prompt above.
 
 ---
@@ -132,10 +132,10 @@ holds the pen and the lock state is `WORKING_CLAUDE`.
 In a **new Codex conversation**, paste:
 
 ```text
-Read AGENTS.md and COWORK.protocol.md.
+Read AGENTS.md and M8SHIFT.protocol.md.
 
 You are the codex agent of the M8Shift relay. Run
-`python3 cowork.py wait codex`, then take the pen when your turn arrives.
+`python3 m8shift.py wait codex`, then take the pen when your turn arrives.
 Handle the latest ask, hand back to claude, then keep waiting.
 Never modify the repository without a successful claim. Continue until DONE
 or a blocker.
@@ -157,20 +157,20 @@ now running.
 
 ## Limits & troubleshooting
 
-- **A finished UI conversation does not wake itself up** when `COWORK.md`
+- **A finished UI conversation does not wake itself up** when `M8SHIFT.md`
   changes. That is exactly why both prompts (Steps 4 and 5) explicitly tell each
   agent to **stay in the loop** with `wait`.
 
 - **If a panel stops anyway**, just send it:
 
   ```text
-  Resume the M8Shift loop from `python3 cowork.py status`.
+  Resume the M8Shift loop from `python3 m8shift.py status`.
   ```
 
 - **Check the relay state at any time** from a terminal at the repository root:
 
   ```text
-  python3 cowork.py status
+  python3 m8shift.py status
   ```
 
   This is non-blocking and shows who holds the pen (`holder`), the last `turn`,
@@ -178,5 +178,5 @@ now running.
   crashed while holding the pen).
 
 > **If `status` shows a stale lock, then** the previous holder never released it.
-> Recover with `python3 cowork.py claim <agent> --force`, which reclaims only an
+> Recover with `python3 m8shift.py claim <agent> --force`, which reclaims only an
 > expired lock — it cannot steal the pen from an agent whose lock is still valid.

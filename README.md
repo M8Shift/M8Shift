@@ -11,7 +11,7 @@ _Different agents. Different roles. One coordinated workflow._
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#tests)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#install)
-[![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](cowork.py)
+[![single file](https://img.shields.io/badge/single%20file-m8shift.py-orange.svg)](m8shift.py)
 [![no API key](https://img.shields.io/badge/API%20key-not%20required-success.svg)](#runs-anywhere--no-api-key)
 [![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](docs/en/specification.md#11-developing-m8shift-with-m8shift-dogfooding)
 
@@ -22,9 +22,11 @@ English | [Français](docs/README_fr.md)
 ---
 
 > **Formerly CoWork.** The project was renamed to **M8Shift** (“Mate Shift” — *mate* = teammate,
-> *shift* = handing over the turn). The CLI (`cowork.py`) and the generated files (`COWORK.md`,
-> `COWORK.protocol.md`, `.cowork.lock`, `COWORK:*` markers) **keep their `cowork` names for now** —
-> a compatibility-preserving migration to the `m8shift` names is planned and **not yet done**.
+> *shift* = handing over the turn). Canonical names are now `m8shift.py`, `M8SHIFT.md` and the
+> `M8SHIFT:*` markers. **Existing CoWork projects keep working unchanged**: the old `COWORK.md` /
+> `.cowork.lock` / `COWORK:*` are read **and** written in place (no orphan files), `cowork.py` stays
+> a deprecated exec-shim, and `m8shift.py migrate-brand` renames everything when you choose to.
+> Old names are supported until at least the next major version.
 
 ## What is M8Shift?
 
@@ -33,9 +35,9 @@ same repository, they overwrite each other. M8Shift introduces a single **pen**:
 any moment, exactly one agent is allowed to write; the other waits for its turn and
 knows precisely what is expected of it.
 
-The whole kit fits in **one file**: [`cowork.py`](cowork.py). You copy it to the
+The whole kit fits in **one file**: [`m8shift.py`](m8shift.py). You copy it to the
 root of a project, run `init`, and the two agents hand off to each other through a
-shared `COWORK.md` file. The whole procedure is **embedded in the generated files**,
+shared `M8SHIFT.md` file. The whole procedure is **embedded in the generated files**,
 so the agents need **no human explanation**. *Caveat for interactive UIs* (VS Code, …):
 a human still nudges each agent to *resume* between turns — `wait` blocks a process but
 does not wake an agent's chat UI. See [Limitations](#limitations).
@@ -62,7 +64,7 @@ every surface where Claude Code or Codex run, and it adds **zero credentials**.
 | VS Code / JetBrains (IDE) | ✅ | same as desktop |
 | Web (claude.ai/code) | ✅ | anywhere the agent can run a shell and read its anchor |
 
-**No API key. No token. No account for M8Shift itself.** `cowork.py` makes **zero
+**No API key. No token. No account for M8Shift itself.** `m8shift.py` makes **zero
 network calls** (stdlib only, local files) — the agents use whatever subscription or
 login you already have. Nothing leaves your machine, there is no per-call cost, and no
 vendor lock-in.
@@ -70,17 +72,17 @@ vendor lock-in.
 ## Install
 
 ```bash
-cp cowork.py /my/project/          # the ONLY file you need
+cp m8shift.py /my/project/          # the ONLY file you need
 cd /my/project
-python3 cowork.py init             # project name = folder name (or --name "X")
+python3 m8shift.py init             # project name = folder name (or --name "X")
 ```
 
 `init` is idempotent (safe to re-run) and generates:
 
 | generated file              | role |
 |-----------------------------|------|
-| `COWORK.md`                 | **the** living file: the lock (`LOCK`) + the turn journal |
-| `COWORK.protocol.md`        | the full shared instruction (read once by each agent) |
+| `M8SHIFT.md`                 | **the** living file: the lock (`LOCK`) + the turn journal |
+| `M8SHIFT.protocol.md`        | the full shared instruction (read once by each agent) |
 | `CLAUDE.md`, `AGENTS.md`, … | each active agent's canonical anchor (the default pair shown) — a stanza is injected at the top without duplicating or overwriting existing content; the prior file is backed up to `<anchor>.cowork.bak` |
 | `AGENTS.override.md`        | if present, Codex's priority anchor; the stanza is synced there too |
 
@@ -90,10 +92,10 @@ default**). Use `--agents a,b` to choose the relaying pair from the roster (defa
 future N-agent mode).
 
 **On Windows?** No dependencies (stdlib only) — run via WSL, Git Bash, or
-`python cowork.py <cmd>` in PowerShell. See [Running on Windows](docs/en/windows.md).
+`python m8shift.py <cmd>` in PowerShell. See [Running on Windows](docs/en/windows.md).
 
 **From a fork / clone?** M8Shift is one file — host it on any Git or GitLab:
-`git clone https://gitlab.example.com/you/M8Shift.git`, then `cp cowork.py /my/project/`
+`git clone https://gitlab.example.com/you/M8Shift.git`, then `cp m8shift.py /my/project/`
 and run `init` as above.
 
 ## Quickstart
@@ -103,20 +105,20 @@ agent name and `<other>` the other active agent (the examples below use the defa
 pair `claude`/`codex`).
 
 ```bash
-./cowork.py status                # who holds the pen? (non-blocking)
-./cowork.py wait claude --once    # rc 0 = you may acquire; rc 3 = not yet
+./m8shift.py status                # who holds the pen? (non-blocking)
+./m8shift.py wait claude --once    # rc 0 = you may acquire; rc 3 = not yet
 
 # Acquire the pen BEFORE working (exclusive: only one winner):
-./cowork.py claim claude          # rc 0 = you hold the pen; otherwise not your turn
+./m8shift.py claim claude          # rc 0 = you hold the pen; otherwise not your turn
 
 # ...work in the repository, then close your turn and hand off:
-./cowork.py append claude --to codex \
+./m8shift.py append claude --to codex \
     --ask  "what you need from the other" \
     --done "what you just did" \
     --files a,b
 
 # Not your turn? Block until it is, then retry claim:
-./cowork.py wait claude           # polls ~60s (--interval N)
+./m8shift.py wait claude           # polls ~60s (--interval N)
 ```
 
 **Golden rule:** you only work and write **after acquiring the pen via `claim`**
@@ -135,7 +137,7 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 
 ## How it works
 
-M8Shift stores its state in the `LOCK` block at the top of `COWORK.md`. To work, an
+M8Shift stores its state in the `LOCK` block at the top of `M8SHIFT.md`. To work, an
 agent must first **take the pen** with `claim` (state `WORKING_<you>`), an
 **exclusive acquisition**: if two agents claim at once, only one wins. Because work
 happens only while you hold the pen and `append` is accepted only from
@@ -156,7 +158,7 @@ The lock fields — `holder`, `state`, `agents`, `turn`, `since`, `expires`, `no
 `lang` — are one `key: value` per line (easy to `grep`). `holder` is an active agent
 or `none`; `agents` is the relaying pair (the first two declared, default
 `claude,codex`); states are `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE` (`<X>` = an
-active agent, uppercased). Turns are framed by `COWORK:TURN <n> <agent> BEGIN/END`
+active agent, uppercased). Turns are framed by `M8SHIFT:TURN <n> <agent> BEGIN/END`
 HTML comments (invisible in
 Markdown rendering) and are **immutable** once closed.
 
@@ -171,9 +173,9 @@ Verified by the tests and by multi-agent review:
 - **Stale-lock recovery** — `claim --force` reclaims **only a stale lock** (refused
   on an active one); the holder can refresh its own lock.
 - **Guardrails** — `release` / `done` require holding the pen (`--force` = recovery).
-- **Serialized concurrency** — an inter-process lock `.cowork.lock` (`O_EXCL`, with
+- **Serialized concurrency** — an inter-process lock `.m8shift.lock` (`O_EXCL`, with
   an ownership token) plus atomic writes (unique temp file + `os.replace`, mode
-  preserved) ⇒ two concurrent `cowork.py` runs never corrupt the file.
+  preserved) ⇒ two concurrent `m8shift.py` runs never corrupt the file.
 - **Injection-safe** — single-line fields (line breaks and reserved markers
   rejected); turn bodies neutralized against fake markers.
 - **Bounded over time** — `archive` purges old closed turns without touching the
@@ -223,7 +225,7 @@ parallel **and** sequential workflows. They can take turns too; the real differe
 | | Orchestrator (e.g. OpenClaw) | M8Shift |
 |---|------------------------------|--------|
 | What it is | a runtime/gateway that **drives** the agents | a single-file **lock** the agents poll |
-| Install | a platform to deploy + configure (providers, auth) | `cp cowork.py` — stdlib, no daemon, no server |
+| Install | a platform to deploy + configure (providers, auth) | `cp m8shift.py` — stdlib, no daemon, no server |
 | Credentials | the agents' auth (subscription **or** API key) | **none** — M8Shift never authenticates anything |
 | Scope | memory, tools, routing, parallel + sequential | only *who writes, when* |
 
@@ -232,11 +234,11 @@ parallel **and** sequential workflows. They can take turns too; the real differe
 - 🔒 **A real write-lock on the repo** — exactly one agent writes at a time. An
   orchestrator routes *tasks and messages*; it does not stop two agents editing the
   same files in parallel. M8Shift does (its whole job).
-- 🪶 **Zero runtime, zero credentials** — `cp cowork.py` and go. No server to deploy, no
+- 🪶 **Zero runtime, zero credentials** — `cp m8shift.py` and go. No server to deploy, no
   provider/auth to configure, no API key, no per-call cost.
 - 🤝 **Peer-to-peer, no coordinator** — the agents pass the baton themselves
   (`--to <other>`); there is no central "project-manager" agent deciding the turns.
-- 📓 **Durable, readable, git-versioned coordination** — `COWORK.md` *is* the record of
+- 📓 **Durable, readable, git-versioned coordination** — `M8SHIFT.md` *is* the record of
   who did what and what's next — by eye and by `grep`, committed alongside your code.
 
 Reach for an orchestrator when you want a **managed agent team**. Reach for M8Shift when
@@ -250,7 +252,7 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 [architecture §1.8](docs/en/architecture.md). Two staged steps:
 
 1. **Configurable pair (shipped)** — choose the two relaying agents from an
-   **extensible roster** via `cowork.py init --agents a,b`; the first two relay,
+   **extensible roster** via `m8shift.py init --agents a,b`; the first two relay,
    extra names are stored for later. Still **2 simultaneous** (degree-1). See
    [RFC — configurable agent pair](docs/en/rfc-roster.md).
 2. **N simultaneous agents** — true multi-agent (degree > 1); a separate, larger
@@ -260,14 +262,14 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 (append-only or read-only over data M8Shift already stores; never a daemon, an
 integration, or a second source of truth):
 
-- 🧠 **Shared memory + recap** *(next)* — a durable, append-only `COWORK.memory.md` the
-  agents curate by hand (`cowork.py remember`), plus a read-only `cowork.py recap`
+- 🧠 **Shared memory + recap** *(next)* — a durable, append-only `M8SHIFT.memory.md` the
+  agents curate by hand (`m8shift.py remember`), plus a read-only `m8shift.py recap`
   session-start briefing (current LOCK + last turns + memory headlines) so an agent can
   resume across sessions.
 - 📨 **Structured handoff + peek** *(next)* — optional advisory turn fields
-  (`branch` / `commit` / `tests` / `next`, write-only) and `cowork.py peek` to read the
+  (`branch` / `commit` / `tests` / `next`, write-only) and `m8shift.py peek` to read the
   last handoff in one call.
-- 📊 **Timeline + JSON status** *(next)* — `cowork.py log` (relay timeline) and
+- 📊 **Timeline + JSON status** *(next)* — `m8shift.py log` (relay timeline) and
   `status --json` for dashboards (`watch`-friendly).
 - 🧭 **`claim --check`** *(later)* — advisory, read-only file-overlap collision probe
   (from the `files:` field), without granting a concurrent work window.
@@ -289,7 +291,7 @@ Licensed under the [Apache License 2.0](LICENSE).
 ## Contributing
 
 Issues and pull requests are welcome. M8Shift is a single file by design
-([`cowork.py`](cowork.py) is the single source of truth — `COWORK.protocol.md` is
+([`m8shift.py`](m8shift.py) is the single source of truth — `M8SHIFT.protocol.md` is
 generated from it), so keep changes focused and covered by a test in `tests/`. Run
 the test suite before opening a PR.
 
