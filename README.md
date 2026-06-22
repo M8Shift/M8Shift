@@ -13,7 +13,7 @@ _Different agents. Different roles. One coordinated workflow._
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#install)
 [![single file](https://img.shields.io/badge/single%20file-cowork.py-orange.svg)](cowork.py)
 [![no API key](https://img.shields.io/badge/API%20key-not%20required-success.svg)](#runs-anywhere--no-api-key)
-[![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](docs/en/specification.md#11-developing-cowork-with-cowork-dogfooding)
+[![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](docs/en/specification.md#11-developing-m8shift-with-m8shift-dogfooding)
 
 English | [Français](docs/README_fr.md)
 
@@ -295,4 +295,4 @@ the test suite before opening a PR.
 
 > **Made with ❤ & M8Shift.** M8Shift is improved *with M8Shift*: Claude ⇄ Codex
 > coordinate every change through the relay itself — see
-> [Developing M8Shift with M8Shift](docs/en/specification.md#11-developing-cowork-with-cowork-dogfooding).
+> [Developing M8Shift with M8Shift](docs/en/specification.md#11-developing-m8shift-with-m8shift-dogfooding).

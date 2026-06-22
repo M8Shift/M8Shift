@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example headless runner for CoWork — REFERENCE, not part of `cowork.py`.
+"""Example headless runner for M8Shift — REFERENCE, not part of `cowork.py`.
 
 `cowork.py` is a passive coordinator: `wait` blocks a *process*, it cannot wake an
 interactive agent UI (VS Code, …). The only way to a fully hands-off relay is to drive
@@ -59,7 +59,7 @@ def log(msg):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Headless CoWork runner for one agent.")
+    p = argparse.ArgumentParser(description="Headless M8Shift runner for one agent.")
     p.add_argument("agent", help="your agent name (must be in the COWORK.md roster)")
     p.add_argument("--cowork", default="COWORK.md", help="path to COWORK.md")
     p.add_argument("--start-on-idle", action="store_true",

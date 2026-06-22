@@ -29,3 +29,6 @@ __pycache__/
 
 # Build i18n temporaire
 build/
+
+# Répertoires de travail temporaires
+_temp/

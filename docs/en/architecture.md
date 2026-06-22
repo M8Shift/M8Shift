@@ -1,4 +1,4 @@
-# 🏛️ Architecture Document — CoWork
+# 🏛️ Architecture Document — M8Shift
 
 > **Status**: `Approved` · **Version**: protocol v1 · **Review**: 2026-06-21
 
@@ -123,15 +123,15 @@ sequenceDiagram
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
 
-CoWork is, at its core, a **mutex** (mutual exclusion): exactly **one** agent holds
+M8Shift is, at its core, a **mutex** (mutual exclusion): exactly **one** agent holds
 the "pen" at any instant. It is **not a semaphore** — a semaphore would allow *k*
-simultaneous holders (counter); CoWork's degree of concurrency is strictly **1**.
+simultaneous holders (counter); M8Shift's degree of concurrency is strictly **1**.
 This is the central invariant: *one agent modifies the repository at a time.*
 
 It is not a single textbook mutex, though: it **composes four classic primitives**
 on **two levels**.
 
-| Classic concept | In CoWork |
+| Classic concept | In M8Shift |
 |-----------------|-----------|
 | **OS mutex** (low level) | `.cowork.lock` opened with `O_CREAT\|O_EXCL`: a real OS lock that serializes the **critical section** = the read-modify-write of `COWORK.md`. The *enforced* technical mutex. |
 | **Owned application lock** (high level) | the `WORKING_<agent>` state in the LOCK block: a **named, owned** lock held across the whole **work window** (not just during a single command). The *semantic* mutex protecting the shared resource (the repo). |
@@ -142,7 +142,7 @@ Two properties set it apart from a strict in-process mutex:
 
 - **Cooperative / advisory, not enforced.** The OS cannot prevent a third process
   from editing the repository — the real critical section (an agent editing files)
-  is not hardware-lockable. CoWork *enforces* that you cannot **record** a turn
+  is not hardware-lockable. M8Shift *enforces* that you cannot **record** a turn
   without holding the pen (`append` ⇐ `WORKING_<self>`), but the exclusivity of the
   *work itself* relies on the discipline `claim → work → append` (see
   [specification](specification.md) §8).
@@ -292,7 +292,7 @@ from `CLAUDE.md`, `AGENTS.md`, and, where applicable, `AGENTS.override.md`
 | Level | Contact |
 |-------|---------|
 | Maintainer | the repository owner (see the host where you cloned it) |
-| Source | your own Git / GitLab host — fork & clone (e.g. `git clone https://gitlab.example.com/you/CoWork.git`) |
+| Source | your own Git / GitLab host — fork & clone (e.g. `git clone https://gitlab.example.com/you/M8Shift.git`) |
 
 ---
 
