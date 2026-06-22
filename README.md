@@ -22,11 +22,8 @@ English | [Français](docs/README_fr.md)
 ---
 
 > **Formerly CoWork.** The project was renamed to **M8Shift** (“Mate Shift” — *mate* = teammate,
-> *shift* = handing over the turn). Canonical names are now `m8shift.py`, `M8SHIFT.md` and the
-> `M8SHIFT:*` markers. **Existing CoWork projects keep working unchanged**: the old `COWORK.md` /
-> `.cowork.lock` / `COWORK:*` are read **and** written in place (no orphan files), `cowork.py` stays
-> a deprecated exec-shim, and `m8shift.py migrate-brand` renames everything when you choose to.
-> Old names are supported until at least the next major version.
+> *shift* = handing over the turn). As of **v3.0.0** the tool is **M8Shift-only**: the `cowork.py`
+> shim and the CoWork-file compatibility (dual-read, `migrate-brand`) were removed.
 
 ## What is M8Shift?
 

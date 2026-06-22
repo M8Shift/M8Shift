@@ -1,10 +1,7 @@
-# Artefacts d'exécution du relais (générés par `m8shift.py init`) — anciens noms CoWork inclus
+# Artefacts d'exécution du relais (générés par `m8shift.py init`)
 M8SHIFT.md
 M8SHIFT.archive.md
 M8SHIFT.protocol.md
-COWORK.md
-COWORK.archive.md
-COWORK.protocol.md
 CLAUDE.md
 AGENTS.md
 AGENTS.override.md
@@ -13,15 +10,12 @@ AGENTS.override.md
 # Notes de handoff / travail (hors dépôt public)
 ETAT-DES-LIEUX-*.md
 
-# Verrou interne + temporaires d'écriture atomique (nouveaux + anciens noms)
+# Verrou interne + temporaires d'écriture atomique
 .m8shift.lock
 .m8shift-*.tmp
-.cowork.lock
-.cowork-*.tmp
 
-# Sauvegardes des ancrages avant (ré)injection par `init` / `migrate-brand`
+# Sauvegardes des ancrages avant (ré)injection par `init`
 *.m8shift.bak
-*.cowork.bak
 
 # macOS
 .DS_Store
