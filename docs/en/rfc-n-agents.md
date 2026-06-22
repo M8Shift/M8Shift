@@ -4,6 +4,8 @@
 - **Supersedes scope of:** [RFC — configurable agent pair](rfc-roster.md) (Stage 1, shipped)
 - **Prior art:** the `m8shift-vscode-multiagent-kit` (RFC-MA-001/002/003) — this RFC
   *reconciles* that design with M8Shift's single-file / passive / stdlib / degree-1 identity.
+- **Rationale & rejected alternatives:** [stage2-rationale.md](stage2-rationale.md) — why each
+  choice was made and what was discarded.
 
 ## 0. Two tiers (the framing that resolves the identity tension)
 
@@ -13,13 +15,15 @@ Stage 2 is split into two clearly separated tiers:
   *who writes, when* — by reading back **only** the LOCK fields `agents`, `holder`, `state`.
   Every other field it writes is **advisory passthrough**: recorded verbatim, never read back
   to permit or deny a write. The core gains N-agent reach and advisory turn fields.
-- **The opt-in companion** (`m8shift-worktree.py`): an explicitly orchestration-shaped tool
-  that **runs git** and **interprets** task state (READY/deps, integration gating). It is NOT
-  passive and NOT MINIMAL, and is documented as such. It `import m8shift` and reuses the core's
-  lock/parse helpers (one source of truth), adding only the git-running surface.
+- **The opt-in companion tier**: explicitly orchestration-shaped tools (NOT passive, NOT
+  MINIMAL, documented as such) that `import m8shift` and reuse the core's lock/parse helpers
+  (one source of truth), adding only consumer surface over the core's passive primitives. It
+  hosts (a) **worktree orchestration** (`m8shift-worktree.py`) — runs git, interprets task
+  READY/deps + integration gating (§8); and (b) a **liveness supervisor** — a headless loop
+  that re-routes a stalled/dead holder without a human (§8c).
 
-This split is load-bearing: anything that reads recorded payload back to gate work lives in
-the companion, **not** the core.
+This split is load-bearing: anything that reads recorded payload back to gate work — or runs a
+loop/watcher — lives in the companion, **not** the core.
 
 ## 1. Summary
 
@@ -39,7 +43,8 @@ the companion, **not** the core.
 - Carry **advisory** handoff context in the turn, write-only, never read back by the core.
 - Runtime roster/role mutation (`agents …`) without resetting the relay.
 - Read commands (`recap`, `peek`, `log`, `status --json`, `agents`, `tasks`).
-- An **opt-in companion** for isolated-worktree concurrency with serialized integration.
+- An **opt-in companion** for isolated-worktree concurrency with serialized integration (§8).
+- An **opt-in companion** liveness supervisor that re-routes a stalled/dead holder (§8c).
 
 **Non-goals (would break a core quality)**
 - A **degree-N lock** / path-scoped leases on the shared tree (parallelism is worktrees only).
@@ -253,6 +258,22 @@ m8shift-worktree drop      <id>           # remove worktree (confirmation requir
 **Honesty:** worktrees share the same git repo (refs / object store / index); per-worktree
 isolation is **advisory** discipline, not OS-enforced. Integration is serialized because **one
 agent honors the integration pen**, not because the OS forbids the others.
+
+### 8c. Liveness supervisor (companion, optional — never the core)
+
+The core makes a stalled/dead holder **recoverable** but does not act on it: a holder that takes
+the pen and never appends goes stale at `expires` (TTL) and can be reclaimed by `claim --force`;
+an abandoned `.m8shift.lock` is taken over after `LOCK_STALE_S`. *Who* triggers that recovery is
+**not** the core — by design (no daemon, no watcher in the passive core). It is a human, or this
+optional companion: a **headless loop** that polls `status --json`, detects `now > expires` on a
+`WORKING_<X>` with no turn progress, and re-routes — `claim --force` then reassign the task/baton
+to another active agent (or back to the coordinator), recording the reason in a turn.
+
+It is honest about its limits: it detects **liveness** (no progress past TTL), **not** capability
+or output quality (those are the bounce-back + review loop, §9). It adds **no** core surface — it
+is a pure consumer of the core's read commands + `claim --force` + `tasks set`, in the same family
+as [`examples/headless_runner.py`](../../examples/headless_runner.py). Keeping it in the companion
+is what preserves the core's "no background loop" guarantee.
 
 ## 9. Validation = advisory, in the core; enforcement only in a separate tier
 
