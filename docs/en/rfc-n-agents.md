@@ -307,8 +307,11 @@ Read-only, passive, stdlib, no identity exposure:
 
 1. **Read commands** — ✅ **SHIPPED** (`recap`, `peek`, `log`, `status --json`; shared
    `parse_turns` block parser keeps unknown keys verbatim; dual-read of legacy `COWORK:*`).
-2. **N-agent roster + relay** — GO only after §4a (de-pairing), §5 holder-guard text, the `roles:`
-   parser, the hardened `agents` guards, and the §11 migration note. Then small.
+2. **N-agent roster + relay** — ✅ **SHIPPED** (§4a de-pairing: `active_agents()`, `load_or_die`/
+   `valid_states`/holder on the full roster, `cmd_init` anchors+ROSTER+BRIDGE on N, `cmd_wait`
+   self-excluding stale check naming the real holder, `cmd_status`/`recap`/migrate on N; `stanza_for`
+   renders byte-identically for a pair and a generic peer for N>2). `agents …` mutation + `roles:`
+   parser deferred to a follow-up. 104 tests; pair mode (N=2) byte-unchanged.
 3. **Advisory turn fields** (§5) — GO after 2, with snake_case keys + the open `x_*` namespace.
 4. **Tasks board** — split: **4a** = the *journal* (create/locate/brand-derived, `add`/`set`/`list`/
    `show` pure passthrough, `RESERVED += TASK`, READY **not** gating); **4b** = READY evaluator
