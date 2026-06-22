@@ -2,8 +2,8 @@
 
 > **Note Claude —** Guide opérationnel : comment lancer concrètement un relais
 > Claude ⇄ Codex depuis les extensions VS Code. Pour l'installation du kit
-> (`cp cowork.py` + `init`), voir le [README](../README_fr.md) ; pour le
-> protocole lui-même, voir [`COWORK.protocol.md`](../COWORK.protocol.md).
+> (`cp m8shift.py` + `init`), voir le [README](../README_fr.md) ; pour le
+> protocole lui-même, voir [`M8SHIFT.protocol.md`](../M8SHIFT.protocol.md).
 
 Dans VS Code, **les panneaux Claude et Codex *sont* les agents**. Tout le travail
 se résume à deux gestes : les pointer vers la **bonne racine de projet**, et
@@ -16,8 +16,8 @@ indique ce que vous devez voir avant de passer à la suivante.
 
 ## Ce qu'il vous faut d'abord
 
-- `cowork.py` déployé à la racine du projet, et `python3 cowork.py init` déjà
-  exécuté (cela génère `COWORK.md`, `COWORK.protocol.md`, `CLAUDE.md` et
+- `m8shift.py` déployé à la racine du projet, et `python3 m8shift.py init` déjà
+  exécuté (cela génère `M8SHIFT.md`, `M8SHIFT.protocol.md`, `CLAUDE.md` et
   `AGENTS.md`).
 - Les deux extensions VS Code installées : **Claude Code** et **Codex**.
 
@@ -45,19 +45,19 @@ Pour ouvrir **Example Project** :
    ```
 
 **Résultat attendu :** une fenêtre VS Code dont la racine est le dépôt lui-même,
-avec `COWORK.md`, `CLAUDE.md` et `AGENTS.md` visibles au niveau supérieur de
+avec `M8SHIFT.md`, `CLAUDE.md` et `AGENTS.md` visibles au niveau supérieur de
 l'Explorateur.
 
 Ouvrez **une fenêtre distincte** pour chaque autre dépôt (par exemple GSE),
 chacune sur sa propre racine. La règle est : un dépôt = une fenêtre.
 
-> **Si `COWORK.md` n'est pas en haut de l'Explorateur, alors** vous avez ouvert
+> **Si `M8SHIFT.md` n'est pas en haut de l'Explorateur, alors** vous avez ouvert
 > un dossier parent. Fermez la fenêtre et rouvrez le dossier sur la racine exacte
 > du dépôt.
 
 ---
 
-## Étape 2 — Recharger après `cowork.py init`
+## Étape 2 — Recharger après `m8shift.py init`
 
 Une session déjà ouverte ne sait rien des ancrages que `init` vient d'injecter.
 Donc, juste après avoir exécuté `init` :
@@ -104,7 +104,7 @@ Dans l'interface **Claude**, collez le prompt ci-dessous, en remplaçant
 `[MISSION]` par votre tâche réelle :
 
 ```text
-Lis CLAUDE.md et COWORK.protocol.md.
+Lis CLAUDE.md et M8SHIFT.protocol.md.
 
 Tu es l'agent claude du relais M8Shift. Prends le stylo avant toute modification,
 et réalise cette mission :
@@ -112,7 +112,7 @@ et réalise cette mission :
 [MISSION]
 
 Après ton append vers codex, ne termine pas la boucle : attends de nouveau ton
-tour avec `python3 cowork.py wait claude`, puis continue à suivre le protocole
+tour avec `python3 m8shift.py wait claude`, puis continue à suivre le protocole
 jusqu'à DONE, ou jusqu'à ce que tu rencontres un blocage qui nécessite mon
 intervention.
 ```
@@ -124,11 +124,11 @@ sa transcription affiche la ligne de confirmation de l'outil, qui dit :
 ✓ verrou pris par claude (...)
 ```
 
-C'est la sortie littérale de `cowork.py claim claude` : elle confirme que Claude
+C'est la sortie littérale de `m8shift.py claim claude` : elle confirme que Claude
 détient désormais le stylo et que l'état du verrou est `WORKING_CLAUDE`.
 
 > **Si cette ligne de confirmation n'apparaît jamais, alors** Claude n'a pas
-> acquis le stylo. Vérifiez `python3 cowork.py status` dans un terminal à la
+> acquis le stylo. Vérifiez `python3 m8shift.py status` dans un terminal à la
 > racine du dépôt pour voir le `holder`, le `state` et le `turn`, puis renvoyez
 > le prompt ci-dessus.
 
@@ -139,9 +139,9 @@ détient désormais le stylo et que l'état du verrou est `WORKING_CLAUDE`.
 Dans une **nouvelle conversation Codex**, collez :
 
 ```text
-Lis AGENTS.md et COWORK.protocol.md.
+Lis AGENTS.md et M8SHIFT.protocol.md.
 
-Tu es l'agent codex du relais M8Shift. Lance `python3 cowork.py wait codex`,
+Tu es l'agent codex du relais M8Shift. Lance `python3 m8shift.py wait codex`,
 puis prends le stylo quand ton tour arrive. Traite la dernière demande, repasse
 la main à claude, puis continue à attendre. Ne modifie jamais le dépôt sans un
 claim réussi. Continue jusqu'à DONE ou un blocage.
@@ -164,21 +164,21 @@ agents est désormais en marche.
 ## Limites et dépannage
 
 - **Une conversation d'interface terminée ne se réveille pas toute seule** quand
-  `COWORK.md` change. C'est exactement pour cela que les deux prompts (étapes 4
+  `M8SHIFT.md` change. C'est exactement pour cela que les deux prompts (étapes 4
   et 5) demandent explicitement à chaque agent de **rester dans la boucle** avec
   `wait`.
 
 - **Si un panneau s'arrête malgré tout**, envoyez-lui simplement :
 
   ```text
-  Reprends la boucle M8Shift à partir de `python3 cowork.py status`.
+  Reprends la boucle M8Shift à partir de `python3 m8shift.py status`.
   ```
 
 - **Vérifiez l'état du relais à tout moment** depuis un terminal à la racine du
   dépôt :
 
   ```text
-  python3 cowork.py status
+  python3 m8shift.py status
   ```
 
   C'est non bloquant et cela montre qui détient le stylo (`holder`), le dernier
@@ -186,6 +186,6 @@ agents est désormais en marche.
   planté alors qu'il détenait le stylo).
 
 > **Si `status` affiche un verrou périmé, alors** le détenteur précédent ne l'a
-> jamais relâché. Récupérez avec `python3 cowork.py claim <agent> --force`, qui
+> jamais relâché. Récupérez avec `python3 m8shift.py claim <agent> --force`, qui
 > ne réclame qu'un verrou expiré — il ne peut pas voler le stylo à un agent dont
 > le verrou est encore valide.

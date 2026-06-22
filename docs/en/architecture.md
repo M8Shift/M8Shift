@@ -27,8 +27,8 @@ an enterprise infrastructure that is not relevant here.
 `cowork` is a **coordination tool for two AI agents** (a configurable pair; by default Claude, Codex) working on
 the same repository. It materializes a **single pen**: only one agent writes at a
 time, the other waits for its turn. All coordination state lives in a single,
-versionable file `COWORK.md`. The tool is a **self-contained Python script**
-(`cowork.py`) that self-installs into any project via `init`.
+versionable file `M8SHIFT.md`. The tool is a **self-contained Python script**
+(`m8shift.py`) that self-installs into any project via `init`.
 
 **Position in the information system**: a coordination layer *above* the host
 repository; it depends on no service, exposes no port, and stores nothing
@@ -40,13 +40,13 @@ sites, …).
 | Actor | Type | Role |
 |-------|------|------|
 | active agent ×2 | AI agents | the configured relaying pair (default `claude`/`codex`); each reads its own anchor (`CLAUDE.md`, `AGENTS.md`, …) and operates the relay on its side |
-| maintainer | human | deploys, arbitrates, reads the log (`COWORK.md`, git) |
+| maintainer | human | deploys, arbitrates, reads the log (`M8SHIFT.md`, git) |
 
 ### 1.3 Nature and sensitivity of data
 
 | Process | Data handled | Classification | C | I | A | T |
 |---------|--------------|----------------|---|---|---|---|
-| Coordination | Lock state + turn log (`COWORK.md`) | = sensitivity of the host repository | Low | **High** | Medium | **High** |
+| Coordination | Lock state + turn log (`M8SHIFT.md`) | = sensitivity of the host repository | Low | **High** | Medium | **High** |
 
 > C=Confidentiality, I=Integrity, A=Availability, T=Traceability. Integrity and
 > traceability take precedence (the log is the record of who did what).
@@ -67,10 +67,10 @@ mutual exclusion, atomicity, agent autonomy, robustness, durability over time.
 
 ```mermaid
 flowchart TB
-    A["Agent A"] -- shell --> CLI["cowork.py CLI"]
+    A["Agent A"] -- shell --> CLI["m8shift.py CLI"]
     B["Agent B"] -- shell --> CLI
-    CLI -- "read-modify-write (atomic)" --> LK["COWORK.md<br/>LOCK (mutex) + turn journal"]
-    CLI -- "serialized by" --> LF[".cowork.lock (O_EXCL)"]
+    CLI -- "read-modify-write (atomic)" --> LK["M8SHIFT.md<br/>LOCK (mutex) + turn journal"]
+    CLI -- "serialized by" --> LF[".m8shift.lock (O_EXCL)"]
     CLI -- "injects at init" --> AN["CLAUDE.md / AGENTS.md (stanza)"]
     AN -. "read at startup" .-> A
     AN -. "read at startup" .-> B
@@ -78,7 +78,7 @@ flowchart TB
 
 **Components**: (a) the `LOCK` block = state machine; (b) the append-only turn
 log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
-`cowork.py` CLI (commands init/status/wait/claim/append/release/done/archive).
+`m8shift.py` CLI (commands init/status/wait/claim/append/release/done/archive).
 
 **State machine** (`A`, `B` = the two active agents — by default `claude`, `codex`):
 
@@ -101,7 +101,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant A as Agent A
-    participant F as COWORK.md
+    participant F as M8SHIFT.md
     participant B as Agent B
     A->>F: poll (wait / status)
     A->>F: claim A (WORKING_A, TTL set)
@@ -117,9 +117,9 @@ sequenceDiagram
 
 | Source | Destination | Channel | Mode |
 |--------|-------------|---------|------|
-| agent | `COWORK.md` | local file system | R/W |
-| `cowork.py init` | each active agent's anchor (default `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (if present), `COWORK.protocol.md` | local file system | W |
-| agent | `COWORK.archive.md` | local file system | W (append) |
+| agent | `M8SHIFT.md` | local file system | R/W |
+| `m8shift.py init` | each active agent's anchor (default `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (if present), `M8SHIFT.protocol.md` | local file system | W |
+| agent | `M8SHIFT.archive.md` | local file system | W (append) |
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
 
@@ -133,7 +133,7 @@ on **two levels**.
 
 | Classic concept | In M8Shift |
 |-----------------|-----------|
-| **OS mutex** (low level) | `.cowork.lock` opened with `O_CREAT\|O_EXCL`: a real OS lock that serializes the **critical section** = the read-modify-write of `COWORK.md`. The *enforced* technical mutex. |
+| **OS mutex** (low level) | `.m8shift.lock` opened with `O_CREAT\|O_EXCL`: a real OS lock that serializes the **critical section** = the read-modify-write of `M8SHIFT.md`. The *enforced* technical mutex. |
 | **Owned application lock** (high level) | the `WORKING_<agent>` state in the LOCK block: a **named, owned** lock held across the whole **work window** (not just during a single command). The *semantic* mutex protecting the shared resource (the repo). |
 | **Lease / TTL** (anti-deadlock) | `expires` (30-min TTL) + ownership token: the **lease-based distributed-lock** pattern (ZooKeeper ephemeral nodes, Redlock). If the holder dies, the lease expires → `claim --force`. |
 | **Monitor / condition variable + baton** | `wait <agent>` polls until `AWAITING_<self>` (a **condition wait**); the explicit handoff `--to <other>` is **token-passing** (a baton / token ring). |
@@ -165,24 +165,24 @@ would mean *k > 1* agents writing concurrently, which is an explicit non-goal).
 |------|--------|
 | Language | Python **3.8+** |
 | Dependencies | **No Python dependencies** (stdlib: `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`); Git optional, to preserve a case rename in the index |
-| Distribution | **a single file** `cowork.py` (embedded templates) |
-| Tests | stdlib `unittest` — `tests/test_cowork.py` |
+| Distribution | **a single file** `m8shift.py` (embedded templates) |
+| Tests | stdlib `unittest` — `tests/test_m8shift.py` |
 
 ### 2.2 Notable patterns
 
 - **Atomic write**: `write()` → a **single** temporary file (`mkstemp`) then
   `os.replace` (POSIX atomic). **All** writes go through it, including the archive.
-- **Inter-process lock**: commands that mutate state take `.cowork.lock`
+- **Inter-process lock**: commands that mutate state take `.m8shift.lock`
   (`O_CREAT|O_EXCL`) and do the read-modify-write *inside it* → two concurrent
-  `cowork.py` processes are serialized (no double IDLE start); an abandoned lock
+  `m8shift.py` processes are serialized (no double IDLE start); an abandoned lock
   is reclaimed after 60 s.
 - **Input validation**: single-line fields (newlines and reserved markers
   rejected); body neutralized (anti-injection against forged turns).
-- **Single source of truth**: the protocol, the `COWORK.md` template, and the
-  stanza are constants in `cowork.py`; `docs/en/protocol.md` and
+- **Single source of truth**: the protocol, the `M8SHIFT.md` template, and the
+  stanza are constants in `m8shift.py`; `docs/en/protocol.md` and
   `docs/fr/protocole.md` are a *generation* of `cowork.PROTOCOL[lang]` (byte-for-byte
   regression test `test_protocol_docs_in_sync`).
-- **Idempotent, priority injection**: the stanza is delimited by `COWORK:STANZA`
+- **Idempotent, priority injection**: the stanza is delimited by `M8SHIFT:STANZA`
   markers, moved/refreshed at the top without duplication. Case variants are
   normalized to the canonical name on any FS (`git mv -f` if Git is available and
   the file is tracked, in order to update the index); `AGENTS.override.md`, which
@@ -213,7 +213,7 @@ archive, robustness, anti-injection, LOCK schema). Command:
 
 A `dev/vX.Y.x` branch per sprint, merge + tag on `main`. The **protocol** is
 versioned (v1): any **breaking** change to the `LOCK`/`TURN`/marker format increments
-the version and preserves the ability to read existing `COWORK.md` files. The roster
+the version and preserves the ability to read existing `M8SHIFT.md` files. The roster
 `agents:` field is a **backward-compatible optional** addition within v1 (old readers
 ignore it; safe for the default `claude,codex` pair — a custom roster needs a
 roster-aware script).
@@ -237,20 +237,20 @@ roster-aware script).
 | ID | Requirement |
 |----|-------------|
 | EX-1 | Anti-deadlock: an abandoned lock is recoverable without intervention (TTL 30 min + `claim --force`). |
-| EX-2 | Durability over time: `COWORK.md` stays bounded (archiving). |
+| EX-2 | Durability over time: `M8SHIFT.md` stays bounded (archiving). |
 | EX-3 | Tool-free observability: state is readable via `status` or `grep`. |
 
 ### 3.3 Operations solution
 
 #### Startup / shutdown
-No startup order: `cowork.py init` deploys, and the relay "runs" through the
+No startup order: `m8shift.py init` deploys, and the relay "runs" through the
 agents' successive invocations. "Shutdown" = `done <agent>` (state `DONE`).
 
 #### Scheduled operations & monitoring
 - **Poll**: each idle agent calls `wait <self>` (loop ~60 s, `--interval N`) or
   `wait <self> --once` (a single check, non-blocking, for an external loop).
-- **Monitoring**: `cowork.py status` (lock + last turn); in black-box mode,
-  `grep -E '^state:|^holder:' COWORK.md`.
+- **Monitoring**: `m8shift.py status` (lock + last turn); in black-box mode,
+  `grep -E '^state:|^holder:' M8SHIFT.md`.
 - **Deadlock detection**: `status` flags a **stale** lock (`WORKING_*` + `now >
   expires`) → recovery via `claim <self> --force`.
 
@@ -260,7 +260,7 @@ case of doubt, `init --force` resets the lock to `IDLE` without losing the
 archived history.
 
 #### Backup & restore
-- **Backup**: `COWORK.md` and `COWORK.archive.md` are **versioned by git** (the
+- **Backup**: `M8SHIFT.md` and `M8SHIFT.archive.md` are **versioned by git** (the
   host repository is the backup; RPO = last commit).
 - **Restore**: `git checkout` of the file; the archive retains the history of
   purged turns.
@@ -276,16 +276,16 @@ goes to stdout. No PII beyond the task content entered.
 | Disaster | Recovery |
 |----------|----------|
 | Abandoned lock (crashed agent) | TTL 30 min then `claim --force` (EX-1) |
-| `COWORK.md` corrupted/lost | `git checkout` or `init --force` (restarts at `IDLE`, archive preserved) |
-| `cowork.py` lost | copy the single file back from this repo; `init` regenerates the rest |
+| `M8SHIFT.md` corrupted/lost | `git checkout` or `init --force` (restarts at `IDLE`, archive preserved) |
+| `m8shift.py` lost | copy the single file back from this repo; `init` regenerates the rest |
 
 **RTO**: a few seconds (one command). **RPO**: last git commit.
 
 ### 3.5 Decommissioning
 
-Delete `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md`, and the stanza
+Delete `M8SHIFT.md`, `M8SHIFT.protocol.md`, `M8SHIFT.archive.md`, and the stanza
 from `CLAUDE.md`, `AGENTS.md`, and, where applicable, `AGENTS.override.md`
-(between the `COWORK:STANZA` markers). No external resource to release.
+(between the `M8SHIFT:STANZA` markers). No external resource to release.
 
 ### 3.6 Support contacts
 
@@ -308,12 +308,12 @@ procedural.
 - Turns are **immutable by convention**: the tool never rewrites a closed turn
   (nothing at the FS level prevents it under manual editing).
 - **Atomic** write (`mkstemp` + `os.replace`) and read-modify-write
-  **serialized** by `.cowork.lock` (`O_EXCL`).
+  **serialized** by `.m8shift.lock` (`O_EXCL`).
 - Guardrails: write refused out of turn; `--to` ≠ self; `release`/`done` require
   holding the pen; **anti-injection** (single-line fields, neutralized body).
 
 ### 4.3 Confidentiality
-`COWORK.md` may contain task content → **same classification as the host
+`M8SHIFT.md` may contain task content → **same classification as the host
 repository**. No secret to be stored in it. No encryption (out of scope).
 
 ### 4.4 Authentication / Authorization
@@ -337,7 +337,7 @@ Negligible footprint; no SAN, no database.
 
 | Resource | Order of magnitude |
 |----------|--------------------|
-| `COWORK.md` storage | a few KB; **bounded** by `archive` (≈ LOCK + last N turns) |
+| `M8SHIFT.md` storage | a few KB; **bounded** by `archive` (≈ LOCK + last N turns) |
 | Archive | grows linearly; purgeable / compressible offline |
 | CPU / memory | a short Python invocation; negligible |
 | Response time | command < ~100 ms (except the blocking `wait`, intentionally ~60 s/poll) |
@@ -354,6 +354,6 @@ allows monitoring with no wait cost.
 |------|------------|
 | **Pen / lock** | The exclusive right to write, materialized by the `LOCK` block. |
 | **Turn (`TURN`)** | One agent's speaking slot, delimited by `BEGIN`/`END`, immutable once closed. |
-| **Stanza** | Self-instruction block injected into `CLAUDE.md`/`AGENTS.md` between `COWORK:STANZA` markers. |
+| **Stanza** | Self-instruction block injected into `CLAUDE.md`/`AGENTS.md` between `M8SHIFT:STANZA` markers. |
 | **Stale lock** | A `WORKING_*` whose `expires` has passed → reclaimable with `--force`. |
 | **TTL** | Validity duration of a working lock (30 min). |
