@@ -54,7 +54,7 @@ TTL_MIN = 30
 LANGS = ("en", "fr")             # supported languages (catalog keys + CLI choices)
 DEFAULT_LANG = "en"              # default / ultimate fallback language
 AGENTS = ("claude", "codex")     # default active pair (exact backward-compat)
-ROSTER = AGENTS                  # current ACTIVE pair (2 agents) — refined at runtime
+ROSTER = AGENTS                  # current ACTIVE roster (>=2 agents) — refined at runtime
 AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
 # Reserved marker prefixes — BOTH brands: forbidden in fields, neutralized in bodies.
 RESERVED = ("COWORK:TURN", "COWORK:LOCK", "COWORK:STANZA",
@@ -852,7 +852,7 @@ MESSAGES = {
         "bad_roster": "invalid --agents: {raw} — provide at least two distinct agent names (e.g. claude,codex).",
         "anchor_no_map": "{agent}: no known anchor file — bootstrap manually (point {agent} to M8SHIFT.protocol.md).",
         "anchor_collision": "{agent}: anchor {filename} is already used by another active agent — skipped (bootstrap {agent} manually).",
-        "roster_extra": "{n} agents declared; only the first two relay in this version ({pair}). Extra names are reserved for the future N-agent mode.",
+        "roster_extra": "{n} agents active in the relay: {agents}.",
         "roster_conflict": "refused: --agents {requested} differs from the roster {existing} already declared — re-run with --force to reset it, or omit --agents to keep the current roster.",
         "anchor_ambiguous": "ambiguous anchors for {canonical}: {others} — consolidate them before `m8shift.py init`.",
         "anchor_git_fail": "could not rename {actual} via Git to {canonical}: {detail}",
@@ -926,7 +926,7 @@ MESSAGES = {
         "bad_roster": "--agents invalide : {raw} — fournis au moins deux noms d'agents distincts (ex. claude,codex).",
         "anchor_no_map": "{agent} : aucun fichier d'ancrage connu — amorce manuellement (pointe {agent} vers M8SHIFT.protocol.md).",
         "anchor_collision": "{agent} : l'ancrage {filename} est déjà utilisé par un autre agent actif — ignoré (amorce {agent} manuellement).",
-        "roster_extra": "{n} agents déclarés ; seuls les deux premiers font le relais dans cette version ({pair}). Les noms supplémentaires sont réservés au futur mode N agents.",
+        "roster_extra": "{n} agents actifs dans le relais : {agents}.",
         "roster_conflict": "refus : --agents {requested} diffère du roster {existing} déjà déclaré — relance avec --force pour le réinitialiser, ou omets --agents pour conserver le roster courant.",
         "anchor_ambiguous": "ancrages ambigus pour {canonical}: {others} — consolide-les avant `m8shift.py init`.",
         "anchor_git_fail": "impossible de renommer {actual} via Git vers {canonical}: {detail}",
@@ -1112,23 +1112,25 @@ def load_or_die():
         sys.exit(tr("lock_missing", file=os.path.basename(COWORK)))
     lk = get_lock(text)
     globals()["LANG"] = resolve_lang(lk=lk)  # localize the validation errors below
-    pair = active_pair(lk)
+    roster = active_agents(lk)               # ALL active agents (N), not just the first 2
     errs = []
     if "agents" in lk:
         ag_valid, ag_invalid = roster_tokens(lk["agents"])
+        # `< 2` is the degree-1 FLOOR (>=2 agents, one writer), NOT a degree-2 cap —
+        # the cap lived only in active_pair's [:2]. Do not "generalize" this away.
         if ag_invalid or len(ag_valid) < 2:  # reject a partially-invalid stored roster
             errs.append(f"agents={lk.get('agents')!r}")
-    if lk.get("state") not in valid_states(pair):
+    if lk.get("state") not in valid_states(roster):
         errs.append(f"state={lk.get('state')!r}")
     if not re.fullmatch(r"\d+", lk.get("turn", "")):
         errs.append(f"turn={lk.get('turn')!r}")
-    if lk.get("holder") not in set(pair) | {"none"}:
+    if lk.get("holder") not in set(roster) | {"none"}:
         errs.append(f"holder={lk.get('holder')!r}")
     if lk.get("lang") not in (None, *LANGS):
         errs.append(f"lang={lk.get('lang')!r}")
     if errs:
         sys.exit(tr("lock_invalid", file=os.path.basename(COWORK), errs=", ".join(errs)))
-    globals()["ROSTER"] = pair
+    globals()["ROSTER"] = roster
     return text
 
 
@@ -1214,9 +1216,16 @@ def roster_full(lk):
 
 
 def active_pair(lk):
-    """ACTIVE pair for this version = the first 2 of the declared roster.
-    (Names beyond the 2nd are kept but inactive until the N-agent mode.)"""
+    """The first 2 declared agents — kept ONLY for the 2-name init/migrate template
+    fill (__A__/__B__) and positional anchor indexing. NOT the N-agent source: use
+    active_agents() for validation, roster and display."""
     return tuple(roster_full(lk)[:2])
+
+
+def active_agents(lk):
+    """The full ACTIVE roster (all declared agents, >=2) — the N-aware source for
+    load_or_die validation, roster checks, and status/recap display."""
+    return tuple(roster_full(lk))
 
 
 def valid_states(pair):
@@ -1319,10 +1328,15 @@ def ensure_canonical_anchor(canonical, create=True):
 
 
 def stanza_for(me):
-    o = other(me)
+    # Peers from the ACTIVE roster, not other() (a 2-agent helper). For a pair the single
+    # peer reproduces the exact pre-N substitution → the rendered stanza is byte-identical,
+    # so inject_anchor's idempotent re-injection never rewrites existing pair-mode anchors.
+    # For N>2 a generic placeholder fills the (single) {other}/{OTHER} template slots.
+    peers = [a for a in ROSTER if a != me]
+    o, OT = (peers[0], peers[0].upper()) if len(peers) == 1 else ("<agent>", "<AGENT>")
     return STANZA[LANG].format(
         begin=STANZA_BEGIN, end=STANZA_END,
-        me=me, ME=me.upper(), other=o, OTHER=o.upper(),
+        me=me, ME=me.upper(), other=o, OTHER=OT,
     )
 
 
@@ -1421,9 +1435,9 @@ def cmd_init(args):
             full = existing
         else:
             full = list(AGENTS)
-        pair = tuple(full[:2])
+        pair = tuple(full[:2])      # kept ONLY for the 2-name template fill (__A__/__B__)
         extra = full[2:]
-        globals()["ROSTER"] = pair
+        globals()["ROSTER"] = tuple(full)   # ACTIVE roster = ALL declared agents (N)
 
         # Capture the state BEFORE creating the anchors. The CLAUDE → Codex bridge
         # must only be offered when a project genuinely had Claude instructions but
@@ -1451,13 +1465,13 @@ def cmd_init(args):
             write(text, COWORK)
             results.append(tr("cowork_written", file=os.path.basename(COWORK), name=name))
 
-        # Anchors: the stanza is injected for EACH agent of the active pair.
+        # Anchors: the stanza is injected for EACH active agent (the FULL roster, N).
         # claude / codex keep their dedicated handling (CLAUDE → Codex bridge,
         # AGENTS.override.md sync). Any other roster agent gets a best-effort anchor
         # via the ANCHORS table (warning if it is unmapped or if its anchor file is
         # already taken by another active agent).
         injected = set()
-        for ag in pair:
+        for ag in full:
             if ag == "claude":
                 claude_anchor, migration = ensure_canonical_anchor(CLAUDE_ANCHOR)
                 if claude_anchor in injected:
@@ -1478,7 +1492,7 @@ def cmd_init(args):
                 # into both so the stanza survives its later removal.
                 codex_initial_content = (
                     BRIDGE[LANG]
-                    if had_claude_anchor and not had_codex_anchor and "claude" in pair
+                    if had_claude_anchor and not had_codex_anchor and "claude" in full
                     else ""
                 )
                 results.append(inject_anchor(
@@ -1508,8 +1522,8 @@ def cmd_init(args):
                 results.append(inject_anchor(resolved, ag))
                 injected.add(resolved)
 
-        if extra:
-            results.append(tr("roster_extra", n=len(full), pair=",".join(pair)))
+        if extra:  # N>2: announce the full active roster (all relay, not "first two")
+            results.append(tr("roster_extra", n=len(full), agents=",".join(full)))
 
     print(tr("init_header", name=name, here=HERE))
     for r in results:
@@ -1557,7 +1571,7 @@ def cmd_recap(args):
     lk = get_lock(text)
     print("── LOCK ───────────────────────────────")
     for k in ("holder", "state", "agents", "turn", "since", "expires", "note"):
-        v = ",".join(active_pair(lk)) if k == "agents" else lk.get(k, "")
+        v = ",".join(active_agents(lk)) if k == "agents" else lk.get(k, "")
         print(f"  {k:<8} {v}")
     turns = parse_turns(text)
     recent = turns[-args.turns:] if args.turns > 0 else turns
@@ -1623,7 +1637,7 @@ def cmd_status(args):
     last = {"n": int(turns[-1][0]), "agent": turns[-1][1]} if turns else None
     if getattr(args, "json", False):
         out = dict(lk)                       # raw LOCK fields…
-        out["agents_active"] = active_pair(lk)   # …plus computed extras
+        out["agents_active"] = active_agents(lk)  # full active roster (N)
         out["stale"] = stale
         out["last_turn"] = last
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
@@ -1632,7 +1646,7 @@ def cmd_status(args):
     for k in ("holder", "state", "lang", "turn", "since", "expires", "note"):
         print(f"  {k:<8} {lk.get(k, '')}")
         if k == "state":
-            print(f"  {'agents':<8} {','.join(active_pair(lk))}")
+            print(f"  {'agents':<8} {','.join(active_agents(lk))}")
     if stale:
         print(tr("status_stale"))
     if last:
@@ -1657,8 +1671,12 @@ def cmd_wait(args):
             print(tr("wait_done"))
             return 0
         exp = parse_iso(lk.get("expires"))
-        if st == f"WORKING_{other(agent).upper()}" and exp and now() > exp:
-            print(tr("wait_stale", other=other(agent)))
+        # ANY other active agent's lock can be stale (N agents), not just "the other" of
+        # a pair. Self-exclusion keeps pair mode byte-identical (we never report our own
+        # stale lock here) and names the REAL holder, not other()'s first-non-self guess.
+        if (st.startswith("WORKING_") and st != f"WORKING_{agent.upper()}"
+                and exp and now() > exp):
+            print(tr("wait_stale", other=lk.get("holder")))
             return 0
         if args.once:  # single, non-blocking poll: rc=3 = not (yet) your turn
             print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
@@ -1914,12 +1932,13 @@ def cmd_migrate_brand(args):
         living_new = os.path.join(HERE, "M8SHIFT.md")
         if not dry and os.path.exists(living_new):
             lk = get_lock(read(living_new))
-            pair = active_pair(lk)
-            globals()["ROSTER"] = tuple(pair)
+            roster = active_agents(lk)               # re-point ALL active anchors, not 2
+            globals()["ROSTER"] = tuple(roster)
             globals()["LANG"] = resolve_lang(lk=lk)
             seen = set()
-            targets = [(a, ANCHORS.get(a)) for a in pair]
-            targets.append((pair[1] if len(pair) > 1 else pair[0], CODEX_OVERRIDE))
+            targets = [(a, ANCHORS.get(a)) for a in roster]
+            if "codex" in roster:                    # override is Codex's, keyed by name
+                targets.append(("codex", CODEX_OVERRIDE))
             for me, fn in targets:
                 if not fn or fn in seen or not os.path.exists(os.path.join(HERE, fn)):
                     continue
