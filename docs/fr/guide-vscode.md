@@ -1,4 +1,4 @@
-# Guide utilisateur — piloter le relais CoWork dans VS Code
+# Guide utilisateur — piloter le relais M8Shift dans VS Code
 
 > **Note Claude —** Guide opérationnel : comment lancer concrètement un relais
 > Claude ⇄ Codex depuis les extensions VS Code. Pour l'installation du kit
@@ -106,7 +106,7 @@ Dans l'interface **Claude**, collez le prompt ci-dessous, en remplaçant
 ```text
 Lis CLAUDE.md et COWORK.protocol.md.
 
-Tu es l'agent claude du relais CoWork. Prends le stylo avant toute modification,
+Tu es l'agent claude du relais M8Shift. Prends le stylo avant toute modification,
 et réalise cette mission :
 
 [MISSION]
@@ -141,7 +141,7 @@ Dans une **nouvelle conversation Codex**, collez :
 ```text
 Lis AGENTS.md et COWORK.protocol.md.
 
-Tu es l'agent codex du relais CoWork. Lance `python3 cowork.py wait codex`,
+Tu es l'agent codex du relais M8Shift. Lance `python3 cowork.py wait codex`,
 puis prends le stylo quand ton tour arrive. Traite la dernière demande, repasse
 la main à claude, puis continue à attendre. Ne modifie jamais le dépôt sans un
 claim réussi. Continue jusqu'à DONE ou un blocage.
@@ -171,7 +171,7 @@ agents est désormais en marche.
 - **Si un panneau s'arrête malgré tout**, envoyez-lui simplement :
 
   ```text
-  Reprends la boucle CoWork à partir de `python3 cowork.py status`.
+  Reprends la boucle M8Shift à partir de `python3 cowork.py status`.
   ```
 
 - **Vérifiez l'état du relais à tout moment** depuis un terminal à la racine du

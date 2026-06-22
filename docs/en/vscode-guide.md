@@ -1,4 +1,4 @@
-# User guide — operating the CoWork relay in VS Code
+# User guide — operating the M8Shift relay in VS Code
 
 > **Note Claude —** Operational guide: how to actually launch a Claude ⇄ Codex
 > relay from the VS Code extensions. For kit installation (`cp cowork.py` +
@@ -101,7 +101,7 @@ actual task:
 ```text
 Read CLAUDE.md and COWORK.protocol.md.
 
-You are the claude agent of the CoWork relay. Take the pen before making any
+You are the claude agent of the M8Shift relay. Take the pen before making any
 change, and carry out this mission:
 
 [MISSION]
@@ -134,7 +134,7 @@ In a **new Codex conversation**, paste:
 ```text
 Read AGENTS.md and COWORK.protocol.md.
 
-You are the codex agent of the CoWork relay. Run
+You are the codex agent of the M8Shift relay. Run
 `python3 cowork.py wait codex`, then take the pen when your turn arrives.
 Handle the latest ask, hand back to claude, then keep waiting.
 Never modify the repository without a successful claim. Continue until DONE
@@ -164,7 +164,7 @@ now running.
 - **If a panel stops anyway**, just send it:
 
   ```text
-  Resume the CoWork loop from `python3 cowork.py status`.
+  Resume the M8Shift loop from `python3 cowork.py status`.
   ```
 
 - **Check the relay state at any time** from a terminal at the repository root:

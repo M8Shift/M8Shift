@@ -1,4 +1,4 @@
-# Cahier des charges — CoWork
+# Cahier des charges — M8Shift
 
 > **Statut** : `Validé` · **Version** : protocole v1 · **Dernière revue** : 2026-06-21
 
@@ -63,7 +63,7 @@ voir §8.
 | ENF-8 **Internationalisation (i18n)** | Les fichiers générés et les messages de la CLI sont bilingues (en/fr), **anglais par défaut**. `init --lang en\|fr` sélectionne la langue des artefacts générés (consignée dans le champ `lang` du LOCK) ; `$COWORK_LANG` surcharge la langue des messages à l'exécution. |
 | ENF-9 **Zéro identifiant / toute surface** | `cowork.py` ne fait **aucun appel réseau** et ne requiert **aucune clé API, jeton ou compte** ; il s'appuie entièrement sur l'auth propre des agents hôtes. Il tourne sur toutes les surfaces Claude Code / Codex (terminal/CLI, application desktop, IDE/VS Code, web) — les UI interactives demandent un coup de pouce humain entre les tours, une boucle CLI headless automatise entièrement. |
 
-> **Rédaction i18n (note).** À l'exécution, CoWork reste un **fichier unique** : les
+> **Rédaction i18n (note).** À l'exécution, M8Shift reste un **fichier unique** : les
 > catalogues `en`/`fr` vivent dans `cowork.py` (`MESSAGES` + les dictionnaires de
 > gabarits), donc ajouter une langue = une entrée de dictionnaire de plus. Pour un flux
 > **adapté aux traducteurs** (éditer des fichiers de langue sans toucher au Python),
@@ -116,7 +116,7 @@ Codes retour : `0` succès · `1` refus/erreur (état, garde-fou, entrée invali
 - **Réveiller l'UI d'un agent interactif** : `wait` bloque un *processus* jusqu'à ton
   tour, mais il ne **relance ni ne réveille** un agent tournant dans une UI interactive
   (VS Code, …). Entre les tours, un humain relance chaque agent (p. ex. *« reprends
-  CoWork »*). Une opération entièrement autonome exige une boucle **headless (sans interface)**
+  M8Shift »*). Une opération entièrement autonome exige une boucle **headless (sans interface)**
   (`claude -p`, `codex exec`, cron) enveloppant `wait → relancer l'agent → claim` — une
   intégration à l'hôte, pas une modification du mutex. Une notification/webhook peut
   *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule.
@@ -178,9 +178,9 @@ et continue de fonctionner **pour le couple par défaut `claude,codex`**. Un ros
 traiterait comme `claude,codex` et pourrait le corrompre. Les marqueurs et le format
 un `clé : valeur` par ligne sont inchangés.
 
-## 11. Développer CoWork avec CoWork (dogfooding)
+## 11. Développer M8Shift avec M8Shift (dogfooding)
 
-CoWork peut coordonner **son propre développement** — deux agents éditant `cowork.py`
+M8Shift peut coordonner **son propre développement** — deux agents éditant `cowork.py`
 et le dépôt via le relais. Une précaution est décisive : ici, **l'outil est aussi
 l'artefact**. Chaque `cowork.py <cmd>` recharge le fichier depuis le disque ; une
 erreur de syntaxe transitoire dans la source en cours d'édition casserait le relais
@@ -218,9 +218,9 @@ suit la même branche, donc son `cowork.py` change à l'édition) — utiliser u
 
 ## 12. Évolutions prévues & non-goals
 
-Chaque évolution prévue reste dans les qualités de CoWork (mono-fichier, passif,
+Chaque évolution prévue reste dans les qualités de M8Shift (mono-fichier, passif,
 zéro-identifiant, fondé sur fichiers & versionné) : elle est **append-only ou en lecture
-seule sur des données que CoWork stocke déjà** — jamais un daemon, une intégration, ni une
+seule sur des données que M8Shift stocke déjà** — jamais un daemon, une intégration, ni une
 seconde source de vérité. (Vettée par une revue de conception adversariale qui a rejeté
 tout ce qui briserait une qualité.)
 
@@ -228,7 +228,7 @@ tout ce qui briserait une qualité.)
 
 | Évolution | Priorité | Quoi | Pourquoi ça préserve les qualités |
 |-----------|----------|------|-----------------------------------|
-| **Mémoire partagée + recap** | prochain | `cowork.py remember <agent> --key <slug> --note "…"` ajoute un bloc `COWORK:MEM` dans un `COWORK.memory.md` voisin (écriture atomique sous `file_lock()`, gardée par `WORKING_<agent>`) ; `cowork.py recap` est un briefing en lecture seule (LOCK courant + N derniers tours + entêtes mémoire). | Un bloc append-only gardé par le **même** stylo / garde `WORKING_<agent>` que `append` ; recap ne fait que ré-afficher des marqueurs déjà écrits. CoWork ne relit **jamais** le registre dans sa logique — il décide toujours seulement *qui écrit, quand*. |
+| **Mémoire partagée + recap** | prochain | `cowork.py remember <agent> --key <slug> --note "…"` ajoute un bloc `COWORK:MEM` dans un `COWORK.memory.md` voisin (écriture atomique sous `file_lock()`, gardée par `WORKING_<agent>`) ; `cowork.py recap` est un briefing en lecture seule (LOCK courant + N derniers tours + entêtes mémoire). | Un bloc append-only gardé par le **même** stylo / garde `WORKING_<agent>` que `append` ; recap ne fait que ré-afficher des marqueurs déjà écrits. M8Shift ne relit **jamais** le registre dans sa logique — il décide toujours seulement *qui écrit, quand*. |
 | **Handoff structuré + peek** | prochain | Champs de tour optionnels en écriture seule (`branch` / `commit` / `tests` / `next`, défaut `-`) + `cowork.py peek <agent>` pour lire les champs de la dernière passation (rc 0 ton tour, rc 3 sinon). | Les lignes d'en-tête ne sont jamais relues par le moteur (seuls le bloc LOCK + les marqueurs le sont) ; peek est en lecture seule sur des données que `append` a déjà écrites. |
 | **Timeline + status JSON** | prochain | `cowork.py log [--limit N] [--agent X] [--all] [--oneline]` (chronologie depuis les marqueurs de tour existants ; `--all` parcourt l'archive) + `status --json`. | Purs renderers en lecture seule sur des données existantes ; seul le `json` de la stdlib est ajouté. |
 | **`claim --check <globs>`** | plus tard | Sonde consultative, en lecture seule, du chevauchement de fichiers avec le dernier champ `files:` de l'autre agent (`fnmatch` stdlib). | Consultatif seulement — n'accorde aucun bail de chemin, n'ouvre aucune fenêtre de travail concurrente : reste degré 1. |
@@ -240,7 +240,7 @@ tout ce qui briserait une qualité.)
 | Rejeté | Qualité brisée | Pourquoi |
 |--------|----------------|----------|
 | **Baux par chemin** (écritures disjointes concurrentes) | mutex degré 1 / minimal | Met deux agents en état de travail en même temps — c'est le verrou **degré 2 de l'étape 2**, pas le stylo unique d'aujourd'hui. `claim --check` livre les 80 % sûrs, consultatifs. |
-| **Daemon / watcher / push de notifs en arrière-plan** | passif | CoWork n'a aucun process résident ; le destinataire sonde à son propre tour. Une notification *signale* un tour, ne *réveille* jamais l'IA. |
-| **Lancer git / builds / API / exécuter `--next`** | passif + zéro-identifiant | Agir sur un outil demande auth + réseau et transforme CoWork en orchestrateur ; les champs de handoff restent consultatifs en écriture seule, interprétés par l'agent **destinataire** avec sa propre auth. |
+| **Daemon / watcher / push de notifs en arrière-plan** | passif | M8Shift n'a aucun process résident ; le destinataire sonde à son propre tour. Une notification *signale* un tour, ne *réveille* jamais l'IA. |
+| **Lancer git / builds / API / exécuter `--next`** | passif + zéro-identifiant | Agir sur un outil demande auth + réseau et transforme M8Shift en orchestrateur ; les champs de handoff restent consultatifs en écriture seule, interprétés par l'agent **destinataire** avec sa propre auth. |
 | **Deps tierces / paquet multi-fichiers** | mono-fichier | Chaque item est cantonné à la stdlib (`json`, `fnmatch`, `re`) ; une BD / file / serveur découperait l'outil — fini le `cp cowork.py`. |
-| **Mémoire *dérivée* « intelligente »** (dédup / résumé / recherche / purge) | minimal / fondé sur fichiers | Le registre est une trace bête append-only ; tout digest est un passthrough verbatim de l'agent. Dès que CoWork cure le contenu, il possède une base de connaissances avec politique — une seconde source de vérité. |
+| **Mémoire *dérivée* « intelligente »** (dédup / résumé / recherche / purge) | minimal / fondé sur fichiers | Le registre est une trace bête append-only ; tout digest est un passthrough verbatim de l'agent. Dès que M8Shift cure le contenu, il possède une base de connaissances avec politique — une seconde source de vérité. |

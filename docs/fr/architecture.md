@@ -1,4 +1,4 @@
-# 🏛️ Document d'architecture — CoWork
+# 🏛️ Document d'architecture — M8Shift
 
 > **Statut** : `Validé` · **Version** : protocole v1 · **Revue** : 2026-06-21
 
@@ -123,16 +123,16 @@ sequenceDiagram
 
 ### 1.8 Modèle de concurrence — un mutex, pas un sémaphore
 
-CoWork est, à la base, un **mutex** (exclusion mutuelle) : à tout instant, **un
+M8Shift est, à la base, un **mutex** (exclusion mutuelle) : à tout instant, **un
 seul** agent détient le « stylo ». Ce **n'est pas un sémaphore** — un sémaphore
 autoriserait *k* détenteurs simultanés (compteur) ; le degré de concurrence de
-CoWork est strictement **1**. C'est l'invariant central : *un seul agent modifie le
+M8Shift est strictement **1**. C'est l'invariant central : *un seul agent modifie le
 dépôt à la fois.*
 
 Ce n'est pas pour autant un unique mutex de manuel : il **compose quatre primitives
 classiques** sur **deux niveaux**.
 
-| Concept classique | Dans CoWork |
+| Concept classique | Dans M8Shift |
 |-------------------|-------------|
 | **Mutex OS** (bas niveau) | `.cowork.lock` ouvert en `O_CREAT\|O_EXCL` : un vrai verrou OS qui sérialise la **section critique** = le read-modify-write de `COWORK.md`. Le mutex technique *appliqué*. |
 | **Lock applicatif possédé** (haut niveau) | l'état `WORKING_<agent>` du bloc LOCK : un verrou **nommé, avec propriétaire**, tenu pendant toute la **fenêtre de travail** (pas seulement le temps d'une commande). Le mutex *sémantique* qui protège la ressource partagée (le dépôt). |
@@ -143,7 +143,7 @@ Deux propriétés le distinguent d'un mutex in-process strict :
 
 - **Coopératif / consultatif, pas appliqué.** L'OS ne peut pas empêcher un process tiers
   d'éditer le dépôt — la vraie section critique (un agent qui modifie des fichiers)
-  n'est pas verrouillable matériellement. CoWork *garantit* qu'on ne peut pas
+  n'est pas verrouillable matériellement. M8Shift *garantit* qu'on ne peut pas
   **enregistrer** un tour sans tenir le stylo (`append` ⇐ `WORKING_<soi>`), mais
   l'exclusivité du *travail* repose sur la discipline `claim → travail → append`
   (voir [cahier des charges](cahier-des-charges.md) §8).
@@ -294,7 +294,7 @@ Supprimer `COWORK.md`, `COWORK.protocol.md`, `COWORK.archive.md` et la strophe d
 | Niveau | Contact |
 |--------|---------|
 | Mainteneur | le propriétaire du dépôt (voir l'hôte où vous l'avez cloné) |
-| Source | votre propre hôte Git / GitLab — fork & clone (ex. `git clone https://gitlab.example.com/you/CoWork.git`) |
+| Source | votre propre hôte Git / GitLab — fork & clone (ex. `git clone https://gitlab.example.com/you/M8Shift.git`) |
 
 ---
 
