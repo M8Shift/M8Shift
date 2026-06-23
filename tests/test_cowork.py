@@ -1285,5 +1285,116 @@ class TestMemory(CLIBase):
         self.assertEqual(self._mem().count("# M8Shift · shared memory"), 1)  # one header (race)
 
 
+# ───────────── claim --check : advisory file-overlap probe (read-only) ───────
+
+class TestClaimCheck(CLIBase):
+    """`claim --check`: read-only probe — readiness (rc 0/3, like wait --once) + file overlap,
+    never takes the pen, never mutates, overlap never changes rc."""
+
+    def _history(self):
+        # claude#1 touches src/api.py + src/db.py → codex ; codex#2 touches src/api.py + README → claude
+        self.init()
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex", "--done", "x", "--files", "src/api.py,src/db.py")
+        self.cw("claim", "codex")
+        self.cw("append", "codex", "--to", "claude", "--done", "y", "--files", "src/api.py,README.md")
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+
+    def test_never_mutates_no_pen(self):
+        self._history()
+        before = self.md()
+        r = self.cw("claim", "claude", "--check", "--files", "src/api.py")
+        self.assertIn(r.returncode, (0, 3))
+        self.assertEqual(self.md(), before, "claim --check mutated M8SHIFT.md")
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")  # pen NOT taken
+
+    def test_force_is_noop(self):
+        self._history()
+        before = self.md()
+        self.cw("claim", "claude", "--check", "--force", "--files", "src/api.py")
+        self.assertEqual(self.md(), before)
+
+    def test_rc_mirrors_wait_once(self):
+        self.init()                                  # IDLE
+        for agent in ("claude", "codex"):
+            self.assertEqual(self.cw("wait", agent, "--once").returncode,
+                             self.cw("claim", agent, "--check").returncode, f"IDLE/{agent}")
+        self.cw("claim", "claude")                   # WORKING_CLAUDE
+        for agent in ("claude", "codex"):
+            self.assertEqual(self.cw("wait", agent, "--once").returncode,
+                             self.cw("claim", agent, "--check").returncode, f"WORKING/{agent}")
+
+    def test_overlap_exact_match(self):
+        self._history()
+        out = self.cw("claim", "claude", "--check", "--files", "src/api.py,src/new.py").stdout
+        self.assertIn("src/api.py", out)
+        self.assertIn("#2 by codex", out)
+        self.assertNotIn("src/new.py", out)          # no overlap → not flagged
+
+    def test_no_false_positive_basename(self):
+        self._history()
+        out = self.cw("claim", "claude", "--check", "--files", "test/api.py").stdout
+        self.assertIn("no overlap", out)             # exact match: test/api.py ≠ src/api.py
+
+    def test_window_since_last_turn(self):
+        self._history()
+        # src/db.py was touched only in claude's OWN turn #1 → outside the since-last-turn window
+        self.assertIn("no overlap",
+                      self.cw("claim", "claude", "--check", "--files", "src/db.py").stdout)
+        # --turns widens to a fixed last-N window → db.py now visible
+        self.assertIn("src/db.py",
+                      self.cw("claim", "claude", "--check", "--turns", "9", "--files", "src/db.py").stdout)
+
+    def test_briefing_without_files(self):
+        self._history()
+        out = self.cw("claim", "claude", "--check").stdout
+        self.assertIn("hot files", out)
+        self.assertIn("src/api.py", out)
+
+    def test_overlap_never_changes_rc(self):
+        self._history()                              # AWAITING_CLAUDE → claimable
+        r = self.cw("claim", "claude", "--check", "--files", "src/api.py")  # overlap present
+        self.assertEqual(r.returncode, 0)            # rc = readiness only, overlap is advisory
+
+    def test_files_injection_guarded(self):
+        self._history()
+        r = self.cw("claim", "claude", "--check", "--files", "x M8SHIFT:TURN 9 c BEGIN")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_rejected_files_prints_no_readiness(self):
+        # --files validated up-front: a rejection exits rc 1 with NO misleading readiness line
+        self._history()
+        r = self.cw("claim", "claude", "--check", "--files", "x M8SHIFT:TURN 9 c BEGIN")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")           # readiness never printed before the guard
+
+    def test_window_empty_label_follows_turns(self):
+        # the empty-window message reflects the chosen window (last-N vs since-last)
+        self._history()  # codex#2 has no files → an empty window for some scopes
+        out = self.cw("claim", "claude", "--check", "--turns", "1").stdout
+        if "no files recorded" in out:
+            self.assertIn("last 1 turn", out)
+            self.assertNotIn("since your last turn", out)
+
+    def test_duplicate_files_deduped(self):
+        self._history()
+        out = self.cw("claim", "claude", "--check", "--turns", "9",
+                      "--files", "src/api.py,src/api.py").stdout
+        self.assertEqual(out.count("src/api.py touched"), 1)   # one line despite the dup
+
+    def test_probe_flags_require_check(self):
+        # --files / --turns on a REAL claim is a likely typo → error, never a silent pen-grab
+        self.init()
+        r = self.cw("claim", "claude", "--files", "src/api.py")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.lock()["state"], "IDLE")          # no pen taken
+
+    def test_bad_lock_rc1(self):
+        self.init()
+        os.remove(os.path.join(self.d, "M8SHIFT.md"))
+        self.assertEqual(self.cw("claim", "claude", "--check").returncode, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

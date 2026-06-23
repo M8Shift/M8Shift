@@ -532,6 +532,15 @@ MESSAGES = {
         "recap_memory": "── last {n} note(s) ────────────────────",
         "remember_ok": "✓ noted by {agent} → {file} ({n} note(s)).",
         "memory_empty": "refused: --note is empty after trimming — nothing to remember.",
+        "check_overlap": "⚠ overlap (exact token match): {file} touched in #{n} by {who}",
+        "check_no_overlap": "✓ no overlap: none of your {k} file(s) appear in the window{since}.",
+        "check_hot": "🔥 hot files in window{since}: {list}",
+        "check_window_empty": "(no files recorded in window{since})",
+        "check_window_since": " since your last turn (#{n})",
+        "check_window_lastn": " (last {n} turn(s))",
+        "check_flags_need_check": "--files / --turns are read-only probe options — use them with --check.",
+        "check_advisory_footer": "(advisory only — does not block claim; exact token match, "
+                                 "normalize --files to the journal's spelling)",
     },
 }
 
@@ -1212,7 +1221,93 @@ def cmd_wait(args):
         print(tr("wait_poll", st=st, holder=lk.get("holder"), interval=args.interval))
         time.sleep(args.interval)
 
+def _files_in_turn(t):
+    """Journal-side file tokens of a turn: split the files: CSV, trim, drop empty + the —
+    placeholder (so `files: —` and empty fields never match)."""
+    return [tok for tok in (x.strip() for x in t["fields"].get("files", "").split(","))
+            if tok and tok != "—"]
+
+
+def _overlap_window(turns, agent, n):
+    """Advisory scope for the overlap report (NEVER affects readiness): the last `n` turns if
+    n>0, else the turns AFTER your last authored turn (what others touched since you worked);
+    all parsed turns if you have never authored one. Pure list slice — no I/O, no mutation."""
+    if n > 0:
+        return turns[-n:]
+    mine = [t["n"] for t in turns if t["fields"].get("from") == agent]
+    if not mine:
+        return turns
+    last = max(mine)
+    return [t for t in turns if t["n"] > last]
+
+
+def _window_label(turns, agent, n):
+    """The localized ' since your last turn (#k)' / ' (last N turns)' fragment for the report."""
+    if n > 0:
+        return tr("check_window_lastn", n=n)
+    mine = [t["n"] for t in turns if t["fields"].get("from") == agent]
+    return tr("check_window_since", n=max(mine)) if mine else ""
+
+
+def cmd_claim_check(args):
+    """READ-ONLY advisory pre-claim probe (`claim --check`). Takes NO pen and mutates NOTHING:
+    no file_lock, no set_lock, no write — `--force` is a guaranteed no-op here. Prints (1) claim
+    readiness (rc 0/3, identical to `wait --once`) and (2) which of your --files were recently
+    touched by others (the files: field of turns in the window). Overlap is advisory text only —
+    it NEVER changes the rc and NEVER feeds the mutex / routing."""
+    text = load_or_die()                 # read-only; sets ROSTER/LANG, validates the LOCK
+    agent = need_agent(args.agent)
+    # validate --files UP-FRONT (rc 1 on injection) so a rejection never emits a readiness line;
+    # dedup (order-preserving) so a repeated token can't amplify the overlap output.
+    wanted = list(dict.fromkeys(
+        tok for tok in (x.strip() for x in clean_field("--files", args.files).split(","))
+        if tok and tok != "—"))
+    lk = get_lock(text)
+    st = lk.get("state", "")
+    exp = parse_iso(lk.get("expires"))
+    # readiness — mirrors cmd_wait --once exactly (parity asserted by test)
+    if st in (f"AWAITING_{agent.upper()}", "IDLE"):
+        print(tr("wait_your_turn" if st != "IDLE" else "wait_free", st=st, agent=agent))
+        ready = True
+    elif st == "DONE":
+        print(tr("wait_done"))
+        ready = True
+    elif (st.startswith("WORKING_") and st != f"WORKING_{agent.upper()}"
+          and exp and now() > exp):
+        print(tr("wait_stale", other=lk.get("holder")))
+        ready = True
+    else:
+        print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
+        ready = False
+    # overlap report — pure parse_turns read, display only
+    turns = parse_turns(text)
+    window = _overlap_window(turns, agent, args.turns)
+    since = _window_label(turns, agent, args.turns)
+    touched = {}                          # file token -> (turn n, author), most-recent wins
+    for t in window:
+        for tok in _files_in_turn(t):
+            touched[tok] = (t["n"], t["fields"].get("from", t["agent"]))
+    if wanted:
+        hits = [(w, *touched[w]) for w in wanted if w in touched]
+        if hits:
+            for f, n, who in hits:
+                print(tr("check_overlap", file=f, n=n, who=who))
+        else:
+            print(tr("check_no_overlap", k=len(wanted), since=since))
+    elif touched:
+        lst = ", ".join(f"{f} (#{n} {who})" for f, (n, who) in touched.items())
+        print(tr("check_hot", since=since, list=lst))
+    else:
+        print(tr("check_window_empty", since=since))
+    print(tr("check_advisory_footer"))
+    return 0 if ready else 3              # rc = readiness only; NO write/set_lock/file_lock above
+
+
 def cmd_claim(args):
+    if args.check:                       # read-only probe — never reaches the file_lock body below
+        return cmd_claim_check(args)
+    if args.files or args.turns:         # probe-only flags on a real claim = a likely typo, not a no-op
+        sys.exit(tr("check_flags_need_check"))
     with file_lock():
         text = load_or_die()             # sets ROSTER/LANG from the on-disk file…
         agent = need_agent(args.agent)   # …so the agent is validated against it
@@ -1469,6 +1564,11 @@ def main():
     c = sub.add_parser("claim")
     c.add_argument("agent")
     c.add_argument("--force", action="store_true")
+    c.add_argument("--check", action="store_true",
+                   help="read-only advisory pre-claim probe (no pen taken): readiness + file overlap")
+    c.add_argument("--files", default="", help="with --check: files you plan to touch (CSV)")
+    c.add_argument("--turns", type=int, default=0,
+                   help="with --check: overlap window (<=0 = since your last turn; N = last N turns)")
     c.set_defaults(fn=cmd_claim)
 
     a = sub.add_parser("append")  # requires WORKING_<agent>: run `claim` first
