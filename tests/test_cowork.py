@@ -77,15 +77,20 @@ class TestPureFunctions(unittest.TestCase):
         self.assertNotIn("M8SHIFT:TURN", out)
 
     def test_protocol_docs_in_sync(self):
-        """Non-régression doc : docs/en/protocol.md et docs/fr/protocole.md ==
-        cowork.PROTOCOL[lang] (chaque protocole rendu reste fidèle au template)."""
-        for lang, rel in (("en", "docs/en/protocol.md"), ("fr", "docs/fr/protocole.md")):
+        """Doc sync (EN-only core): docs/en == the core EN template; docs/<lang> == the
+        i18n/<lang> pack body byte-for-byte (regenerate with scripts/gen_docs.py)."""
+        cases = [("docs/en/protocol.md", cowork.PROTOCOL["en"])]
+        fr_pack = os.path.join(REPO, "i18n", "fr", "protocol.md")
+        if os.path.exists(fr_pack):
+            with open(fr_pack, encoding="utf-8") as f:
+                cases.append(("docs/fr/protocole.md", f.read()))
+        for rel, expected in cases:
             path = os.path.join(REPO, rel)
             if not os.path.exists(path):
                 self.skipTest(f"{rel} absent")
             with open(path, encoding="utf-8") as f:
-                self.assertEqual(f.read(), cowork.PROTOCOL[lang],
-                                 f"{rel} a divergé de cowork.PROTOCOL['{lang}'] — régénère.")
+                self.assertEqual(f.read(), expected,
+                                 f"{rel} a divergé — régénère (scripts/gen_docs.py).")
 
     def test_ambiguous_anchor_variants_refused(self):
         """Deux variantes sur un FS sensible sont refusées sans choix arbitraire."""
@@ -149,6 +154,32 @@ class CLIBase(unittest.TestCase):
         t = re.sub(r"expires:\s*.*", "expires:  2020-01-01T00:00:00Z", t, count=1)
         with open(p, "w", encoding="utf-8") as f:
             f.write(t)
+
+
+class InjectedFRBase(CLIBase):
+    """CLIBase whose per-test m8shift.py is an en+fr BUILD (via m8shift-i18n.py), so the
+    FR runtime / `--lang fr` / PROTOCOL['fr'] paths exist on the otherwise EN-only core."""
+    _enfr = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls._build_dir = tempfile.mkdtemp(prefix="m8shift-enfr-")
+        r = subprocess.run(
+            [sys.executable, os.path.join(REPO, "m8shift-i18n.py"),
+             "--langs", "fr", "--into", cls._build_dir],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            raise AssertionError("m8shift-i18n.py build failed: " + r.stderr)
+        cls._enfr = os.path.join(cls._build_dir, "m8shift.py")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._build_dir, ignore_errors=True)
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8shift-test-")
+        shutil.copy(self._enfr, os.path.join(self.d, "m8shift.py"))
 
 
 # ───────────────────────────── non-régression : init / portabilité ─────────
@@ -601,23 +632,6 @@ class TestI18n(CLIBase):
         r = self.cw("claim", "claude")
         self.assertIn("pen taken", r.stdout)
 
-    def test_init_lang_fr_generates_french(self):
-        self.init("--lang", "fr")
-        self.assertEqual(self.lock().get("lang"), "fr")
-        with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
-            self.assertIn("Protocole de relais", f.read())
-        r = self.cw("claim", "claude")
-        self.assertIn("verrou pris", r.stdout)
-
-    def test_env_overrides_runtime_lang(self):
-        """$M8SHIFT_LANG force la langue des messages runtime, même si le LOCK dit en."""
-        self.init()  # lang: en
-        env = dict(os.environ, M8SHIFT_LANG="fr")
-        r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
-                           cwd=self.d, capture_output=True, text=True, env=env)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("verrou pris", r.stdout)
-
     def test_lang_field_in_schema(self):
         """Un champ lang invalide est rejeté proprement (pas de traceback)."""
         self.init()
@@ -995,9 +1009,39 @@ class TestNAgentRelay(CLIBase):
 
     # — no locale still promises 'only the first two' after activation —
     def test_no_first_two_promise_after_activation(self):
+        # the Stage-1 "only the first two relay" promise is gone (EN core; FR variant in TestI18nFR)
         self.assertNotIn("first two", self.init("--agents", "claude,codex,gemini").stdout)
-        r = self.init("--agents", "claude,codex,gemini", "--lang", "fr", "--force")
-        self.assertNotIn("deux premiers", r.stdout)
+
+
+
+# ───────────────── i18n FR : sur un build en+fr (injecteur) ─────────────────
+
+class TestI18nFR(InjectedFRBase):
+    def test_init_lang_fr_generates_french(self):
+        self.init("--lang", "fr")
+        self.assertEqual(self.lock().get("lang"), "fr")
+        with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
+            self.assertIn("Protocole de relais", f.read())
+        self.assertIn("verrou pris", self.cw("claim", "claude").stdout)
+
+    def test_env_overrides_runtime_lang(self):
+        """$M8SHIFT_LANG forces the runtime language even if the LOCK says en."""
+        self.init()  # lang: en
+        env = dict(os.environ, M8SHIFT_LANG="fr")
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("verrou pris", r.stdout)
+
+    def test_bare_en_core_refuses_lang_fr(self):
+        """The EN-only repo core (not this build) hard-errors `--lang fr` (argparse choices)."""
+        d = tempfile.mkdtemp(prefix="m8shift-test-")
+        self.addCleanup(shutil.rmtree, d, True)
+        shutil.copy(SCRIPT, os.path.join(d, "m8shift.py"))   # bare EN-only core
+        r = subprocess.run([sys.executable, "m8shift.py", "init", "--lang", "fr"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("invalid choice", r.stderr)
 
 
 
