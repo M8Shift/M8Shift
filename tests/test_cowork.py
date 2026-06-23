@@ -1165,5 +1165,125 @@ class TestAdvisoryFields(CLIBase):
                 self.assertEqual([], [t for t in cowork.parse_turns(self.md()) if t["n"] >= 1])
 
 
+# ───────────── shared memory : remember (pen-free) + recap headlines ─────────
+
+class TestMemory(CLIBase):
+    """`remember` appends durable notes to M8SHIFT.memory.md (no pen); `recap` surfaces them."""
+
+    def _mem(self):
+        p = os.path.join(self.d, "M8SHIFT.memory.md")
+        return open(p, encoding="utf-8").read() if os.path.exists(p) else None
+
+    def test_lazy_create_header_then_append(self):
+        self.init()
+        self.assertIsNone(self._mem())                      # nothing before the first note
+        r = self.cw("remember", "claude", "first note")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("noted by claude", r.stdout)
+        mem = self._mem()
+        self.assertTrue(mem.startswith("# M8Shift · shared memory\n\n"))
+        n = cowork.parse_memory(mem)
+        self.assertEqual((n[0]["agent"], n[0]["note"]), ("claude", "first note"))
+        self.assertRegex(n[0]["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.cw("remember", "codex", "second note")         # append, header stays once, in order
+        n = cowork.parse_memory(self._mem())
+        self.assertEqual([x["note"] for x in n], ["first note", "second note"])
+        self.assertEqual(self._mem().count("# M8Shift · shared memory"), 1)
+
+    def test_pen_free_from_any_state(self):
+        self.init()                                          # IDLE
+        self.assertEqual(0, self.cw("remember", "claude", "from idle").returncode)
+        self.assertEqual(0, self.cw("claim", "claude").returncode)        # WORKING_CLAUDE
+        self.assertEqual(0, self.cw("remember", "codex", "non-holder").returncode)
+        self.assertEqual(0, self.cw("remember", "claude", "holder").returncode)
+        self.assertEqual(0, self.cw("done", "claude").returncode)         # DONE
+        self.assertEqual(0, self.cw("remember", "codex", "from done").returncode)
+
+    def test_remember_never_touches_lock(self):
+        self.init()
+        self.cw("claim", "claude")
+        before, before_lock = self.md(), self.lock()
+        self.cw("remember", "codex", "a note")
+        self.assertEqual(self.md(), before, "remember mutated M8SHIFT.md")
+        self.assertEqual(self.lock(), before_lock)
+
+    def test_need_agent_rejected_writes_nothing(self):
+        self.init()
+        r = self.cw("remember", "bob", "x")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("bob", r.stderr)
+        self.assertIsNone(self._mem())
+
+    def test_guards_reject_and_write_nothing(self):
+        self.init()
+        for note in ("   ", "x M8SHIFT:TURN 9 c BEGIN", "a\nb", "a\u2028b"):
+            with self.subTest(note=note):
+                r = self.cw("remember", "claude", note)
+                self.assertNotEqual(r.returncode, 0, f"{note!r} not rejected")
+                self.assertNotIn("Traceback", r.stderr)
+        self.assertIsNone(self._mem())
+
+    def test_note_with_colon_and_dash_roundtrips(self):
+        self.init()
+        note = "- convention: keys use snake_case: ok"
+        self.cw("remember", "claude", note)
+        self.assertEqual(cowork.parse_memory(self._mem())[-1]["note"], note)
+
+    def test_parse_turns_blind_to_memory(self):
+        self.init()
+        self.cw("remember", "claude", "x")
+        self.assertEqual([], cowork.parse_turns(self._mem()))
+
+    def test_parse_memory_skips_malformed(self):
+        text = ("# header\n\n- 2026-06-23T08:00:00Z claude: good\n"
+                "garbage line\n- bad ts codex: nope\n- 2026-06-23T09:00:00Z codex: good2\n")
+        self.assertEqual([(n["agent"], n["note"]) for n in cowork.parse_memory(text)],
+                         [("claude", "good"), ("codex", "good2")])
+
+    def test_recap_headlines_chronological(self):
+        self.init()
+        self.cw("remember", "claude", "older")
+        self.cw("remember", "codex", "newer")
+        out = self.cw("recap").stdout
+        self.assertIn("note(s)", out)
+        self.assertLess(out.index("older"), out.index("newer"))
+
+    def test_recap_memory_knob(self):
+        self.init()
+        for i in range(4):
+            self.cw("remember", "claude", f"note{i}")
+        out2 = self.cw("recap", "--memory", "2").stdout
+        self.assertEqual(sum(f"note{i}" in out2 for i in range(4)), 2)
+        out_all = self.cw("recap", "--memory", "0").stdout
+        self.assertEqual(sum(f"note{i}" in out_all for i in range(4)), 4)
+
+    def test_recap_no_memory_no_section(self):
+        self.init()
+        self.assertNotIn("note(s)", self.cw("recap").stdout)
+
+    def test_init_does_not_create_memory(self):
+        self.init()
+        self.assertIsNone(self._mem())
+
+    def test_unicode_note_roundtrips(self):
+        self.init()
+        note = "décision: éviter les accents cassés — café"
+        self.cw("remember", "claude", note)
+        self.assertEqual(cowork.parse_memory(self._mem())[-1]["note"], note)
+
+    def test_parallel_remember_no_loss(self):
+        import concurrent.futures
+        self.init()
+
+        def one(i):
+            return subprocess.run([sys.executable, "m8shift.py", "remember", "claude", f"n{i}"],
+                                  cwd=self.d, capture_output=True, text=True).returncode
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            rcs = list(ex.map(one, range(8)))
+        self.assertEqual(rcs, [0] * 8)
+        self.assertEqual(len(cowork.parse_memory(self._mem())), 8)        # none lost
+        self.assertEqual(self._mem().count("# M8Shift · shared memory"), 1)  # one header (race)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
