@@ -1,0 +1,4 @@
+## Instructions communes du projet
+
+Lis et applique intégralement `CLAUDE.md`, qui contient les instructions communes
+du projet pour Claude et Codex.
