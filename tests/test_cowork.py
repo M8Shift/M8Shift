@@ -1100,5 +1100,70 @@ class TestInjector(unittest.TestCase):
         self.assertIn("pluma tomada", claim.stdout)  # es claim_ok
 
 
+# ───────────── §5 : champs de tour avisés (passthrough) ─────────────────────
+
+class TestAdvisoryFields(CLIBase):
+    """§5 advisory turn fields: sugar flags + the open `--field key=value` namespace,
+    written verbatim after the fixed routing block, surfaced by peek, never interpreted."""
+
+    def _claim_append(self, *extra):
+        self.init()
+        self.assertEqual(0, self.cw("claim", "claude").returncode)
+        return self.cw("append", "claude", "--to", "codex", "--ask", "a", "--done", "b", *extra)
+
+    def test_sugar_and_x_fields_written_and_peeked(self):
+        r = self._claim_append("--branch", "feat/x", "--commit", "a1b2", "--tests", "9 pass",
+                               "--next", "claim codex", "--blocked-on", "ci#1",
+                               "--field", "x_jira=PROJ-7", "--field", "relation=review")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        md = self.md()
+        for line in ("- branch: feat/x", "- commit: a1b2", "- tests: 9 pass",
+                     "- next: claim codex", "- blocked_on: ci#1", "- x_jira: PROJ-7",
+                     "- relation: review"):
+            self.assertIn(line, md)
+        peek = self.cw("peek", "codex").stdout
+        self.assertIn("x_jira=PROJ-7", peek)
+        self.assertIn("branch=feat/x", peek)
+
+    def test_absent_by_default_block_unchanged(self):
+        self._claim_append()
+        md = self.md()
+        block = md[md.index("TURN 1 claude BEGIN"):md.index("TURN 1 claude END")]
+        keys = [ln[2:ln.index(":")] for ln in block.splitlines() if ln.startswith("- ")]
+        self.assertEqual(keys, ["from", "to", "ask", "done", "files", "handoff"])
+
+    def test_field_value_keeps_first_equals(self):
+        self._claim_append("--field", "x_url=a=b=c")
+        self.assertIn("- x_url: a=b=c", self.md())
+
+    def test_digit_key_parses(self):
+        self._claim_append("--field", "x_pr2=open")
+        self.assertEqual(cowork.parse_turns(self.md())[-1]["fields"].get("x_pr2"), "open")
+
+    def test_guards_reject_before_writing(self):
+        self.init()
+        self.assertEqual(0, self.cw("claim", "claude").returncode)
+        cases = [
+            (["--field", "handoff=x"], "engine-managed"),         # may not shadow a routing field
+            (["--field", "9bad=x"], "snake_case"),                # bad key grammar
+            (["--field", "9bad="], "snake_case"),                 # empty value STILL validates key
+            (["--field", "x_a=1", "--field", "x_a=2"], "more than once"),  # duplicate
+            (["--field", "nofield"], "KEY=VALUE"),                # missing '='
+            (["--field", "x_a=M8SHIFT:TURN 9 c BEGIN"], "reserved"),       # marker in value
+            (["--branch", "line\nbreak"], None),                  # LF in a value
+            (["--field", "x_a=a\u2028b"], None),                  # U+2028 line separator (forge guard)
+        ]
+        for extra, needle in cases:
+            with self.subTest(extra=extra):
+                r = self.cw("append", "claude", "--to", "codex", "--done", "b", *extra)
+                self.assertNotEqual(r.returncode, 0, f"{extra} not rejected")
+                # the localized error must render — NOT a Python traceback (tr() param collision)
+                self.assertNotIn("Traceback", r.stderr, f"{extra} crashed instead of a clean exit")
+                if needle:
+                    self.assertIn(needle, r.stderr, f"{extra}: wrong/garbled message")
+                # rejected before the lock → no real turn written (only the seed's turn 0)
+                self.assertEqual([], [t for t in cowork.parse_turns(self.md()) if t["n"] >= 1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
