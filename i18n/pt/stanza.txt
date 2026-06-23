@@ -1,0 +1,30 @@
+{begin}
+## Relay de co-trabalho — autossuficiente (nenhuma explicação humana necessária)
+
+Você é **{me}** neste projeto. Assim que um `M8SHIFT.md` estiver presente na raiz,
+ele é sua fonte de coordenação com **{other}**: aplique `M8SHIFT.protocol.md`
+(leia-o uma vez, veja seu §0) ANTES de qualquer outro trabalho. **Você só trabalha e escreve se
+tiver adquirido a caneta via `claim`.**
+
+```bash
+./m8shift.py status                # quem detém a caneta? (não bloqueante)
+./m8shift.py wait {me} --once      # rc 0 = você pode adquirir ; rc 3 = ainda não
+```
+
+- **Adquira primeiro** (`state == AWAITING_{ME}` ou `IDLE`):
+  `./m8shift.py claim {me}` — **exclusivo**: se {other} já tiver tomado a caneta, ele
+  falha → volte a aguardar. Se tiver sucesso, você detém a caneta (`WORKING_{ME}`).
+- **Depois trabalhe e feche seu turno**: leia o `ask:` que {other} deixou para você
+  (no início em IDLE, nada a honrar), faça o trabalho, depois:
+  `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+- **Não é a sua vez**: não toque em nada; `./m8shift.py wait {me}` bloqueia até sua
+  vez (poll ~60 s), depois tente `claim` novamente.
+- **O bloqueio de {other} está obsoleto** (`WORKING_{OTHER}` + `now > expires`):
+  `./m8shift.py claim {me} --force`.
+
+Um turno fechado é imutável: para reagir, abra o próximo turno.
+
+_Nota de UI interativa_: numa UI de chat (VS Code, …) um humano o retoma entre turnos —
+`wait` bloqueia um processo, não desperta sua UI. Relays totalmente autônomos precisam de um
+runner headless.
+{end}

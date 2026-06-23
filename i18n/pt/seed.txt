@@ -1,0 +1,40 @@
+<!-- ╔════════════════════════════════════════════════════════════╗
+     ║  M8Shift · single-file multi-agent relay · protocol v1     ║
+     ║  Read M8SHIFT.protocol.md BEFORE writing here.             ║
+     ╚════════════════════════════════════════════════════════════╝ -->
+
+# M8Shift · __PROJECT__
+
+> Arquivo de trabalho compartilhado. **Apenas um agente escreve por vez.** O bloqueio é o
+> bloco `LOCK` abaixo. Só escreva se `state == AWAITING_<você>`. Detalhes →
+> [M8SHIFT.protocol.md](M8SHIFT.protocol.md). Ferramenta → `./m8shift.py status`.
+
+<!-- M8SHIFT:LOCK:BEGIN -->
+holder:   none
+state:    IDLE
+agents:   __AGENTS__
+lang:     __LANG__
+turn:     0
+since:    __NOW__
+expires:  -
+note:     session initialized, no turn opened
+<!-- M8SHIFT:LOCK:END -->
+
+---
+
+## Registro de turnos
+
+<!-- Turns stack below, from oldest to most recent.                          -->
+<!-- Turn format: see M8SHIFT.protocol.md §3. Never edit a turn that is        -->
+<!-- already closed (END set): add a new turn instead.                        -->
+
+<!-- M8SHIFT:TURN 0 system BEGIN -->
+- from:    system
+- to:      none
+- ask:     —
+- done:    Inicialização do relay. O primeiro agente que iniciar executa
+           `./m8shift.py claim __A__` (ou `__B__`), trabalha, depois
+           `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
+- files:   M8SHIFT.md, M8SHIFT.protocol.md, m8shift.py
+- handoff: none
+<!-- M8SHIFT:TURN 0 system END -->

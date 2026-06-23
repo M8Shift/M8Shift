@@ -1,0 +1,4 @@
+## Instruções compartilhadas do projeto
+
+Leia e aplique integralmente `CLAUDE.md`, que contém as instruções compartilhadas do projeto
+para Claude e Codex.

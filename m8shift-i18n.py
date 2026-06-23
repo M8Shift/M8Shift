@@ -107,8 +107,12 @@ def read_pack(lang, en_keys):
     return out
 
 
+def const_name(prefix, lang):
+    return f"{prefix}_{lang.upper().replace('-', '_')}"
+
+
 def emit_const(prefix, lang, body, raw):
-    name = f"{prefix}_{lang.upper().replace('-', '_')}"
+    name = const_name(prefix, lang)
     q = 'r"""' if raw else '"""'
     return name, f"{name} = {q}{body}\"\"\"\n\n"
 
@@ -132,20 +136,21 @@ def splice_one(src, mark, replacement, *, before=False):
 
 def build(langs, en_keys):
     src = open(CORE, encoding="utf-8").read()
+    # 1. emit every <FAM>_<LANG> template constant (all languages, all families)
     new_consts = ""
     for lang in langs:
         pack = read_pack(lang, en_keys)
-        for dict_name, prefix, fname, raw in FAMILIES:
-            cname, code = emit_const(prefix, lang, pack[fname], raw)
-            new_consts += code
-            # add `, "<lang>": <CONST>` inside the family dict {"en": <EN>...}
-            anchor = f'{dict_name} = {{"en": {prefix}_EN'
-            if dict_name == "COWORK_TPL":
-                anchor = 'COWORK_TPL = {"en": COWORK_EN'
-            src = splice_one(src, anchor + "}", anchor + f', {json.dumps(lang)}: {cname}}}')
-    # insert the new constants just before the first family dict
+        for _, prefix, fname, raw in FAMILIES:
+            new_consts += emit_const(prefix, lang, pack[fname], raw)[1]
     src = splice_one(src, "\nPROTOCOL = {", "\n" + new_consts.rstrip() + "\n\n", before=True)
-    # MESSAGES: append each "<lang>": {...} before the closing of the MESSAGES dict
+    # 2. rewrite each family dict ONCE with all languages (incremental splicing would lose
+    #    its own EN-only anchor after the first language).
+    for dict_name, prefix, _, _ in FAMILIES:
+        en_const = "COWORK_EN" if dict_name == "COWORK_TPL" else f"{prefix}_EN"
+        items = [f'"en": {en_const}'] + [f"{json.dumps(l)}: {const_name(prefix, l)}" for l in langs]
+        src = splice_one(src, f"{dict_name} = {{\"en\": {en_const}}}",
+                         f"{dict_name} = {{{', '.join(items)}}}")
+    # 3. MESSAGES: append each "<lang>": {...} before the closing of the MESSAGES dict
     msg_blocks = "".join(messages_block(l, read_pack(l, en_keys)["messages"], en_keys)
                          for l in langs)
     src = _append_messages(src, msg_blocks)
