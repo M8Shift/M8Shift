@@ -264,18 +264,18 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
    step with its own future RFC.
 
 **Shipped read / handoff surface** — `recap` (session-start briefing: current LOCK + recent
-turns), `peek` (the last handoff addressed to you, parse-free), `log` (relay timeline),
-`status --json` (dashboard-/`watch`-friendly), and **advisory turn fields** on `append`
-(`--branch`/`--commit`/`--tests`/`--next`/`--blocked-on` plus the open `--field key=value`
-`x_*` namespace) — written verbatim, surfaced by `peek`, never interpreted.
+turns + memory headlines), `peek` (the last handoff addressed to you, parse-free), `log`
+(relay timeline), `status --json` (dashboard-/`watch`-friendly), **advisory turn fields** on
+`append` (`--branch`/`--commit`/`--tests`/`--next`/`--blocked-on` plus the open
+`--field key=value` `x_*` namespace, surfaced by `peek`, never interpreted), and **shared
+memory** — `m8shift.py remember <agent> "<note>"` appends to a durable, append-only,
+human-curated `M8SHIFT.memory.md` (no pen needed); its headlines lead `recap`'s briefing so an
+agent resumes across sessions.
 
 **Planned features** — every item stays single-file, passive and zero-credential
 (append-only or read-only over data M8Shift already stores; never a daemon, an
 integration, or a second source of truth):
 
-- 🧠 **Shared memory** *(next)* — a durable, append-only `M8SHIFT.memory.md` the agents
-  curate by hand (`m8shift.py remember`), with its headlines surfaced in `recap`'s briefing
-  so an agent can resume across sessions.
 - 🧭 **`claim --check`** *(later)* — advisory, read-only file-overlap collision probe
   (from the `files:` field), without granting a concurrent work window.
 - 🌿 **`subturn`** *(later)* — record an agent's own sub-agent fan-out under its turn.
