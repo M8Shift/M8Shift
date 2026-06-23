@@ -162,7 +162,7 @@ Fields (one `key: value` per line, easy to `grep`):
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-ownhttps://github.com/openclaw/openclawer)** agent while `AWAITING_*` |
+| `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*` |
 | `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
 | `agents`  | CSV, e.g. `claude,codex` | the active roster (all declared agents, ≥2); default `claude,codex` |
 | `turn`    | integer | number of the last closed turn |
