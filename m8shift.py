@@ -40,8 +40,14 @@ KNOWN_LANGS = ("en", "fr", "es", "it", "de", "pt", "ja", "ru", "zh-cn")
 AGENTS = ("claude", "codex")     # default active pair
 ROSTER = AGENTS                  # current ACTIVE roster (>=2 agents) — refined at runtime
 AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
+FIELD_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")   # advisory turn-field key: snake_case / x_*
+# Turn fields the engine writes itself (routing) — an advisory field may not shadow them.
+ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff"))
 # Reserved marker prefixes: forbidden in fields, neutralized in bodies.
 RESERVED = ("M8SHIFT:TURN", "M8SHIFT:LOCK", "M8SHIFT:STANZA")
+# Every char str.splitlines() treats as a line boundary — a single-line field must contain
+# NONE of them, else a value could forge an extra `- key: value` line that parse_turns reads.
+LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"   # all str.splitlines() boundaries
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
@@ -517,12 +523,18 @@ MESSAGES = {
         "archive_ok": "✓ {n} turn(s) archived → {file} (kept: {keep}).",
         "recap_turns": "── last {n} turn(s) ──────────────────────",
         "peek_none": "(no handoff addressed to {agent} yet)",
+        "field_no_eq": "--field expects KEY=VALUE, got {item!r}.",
+        "field_bad_key": "rejected: advisory field key {key!r} is not snake_case / x_* ([a-z][a-z0-9_]*).",
+        "field_reserved_key": "rejected: {key!r} is an engine-managed turn field — it is set automatically.",
+        "field_dup_key": "rejected: advisory field {key!r} given more than once.",
     },
 }
 
-def tr(key, **kw):
+def tr(msg, **kw):
+    # NB: first param is `msg`, NOT `key` — several messages take a `key=` kwarg (e.g.
+    # field_bad_key), which would collide with a positional named `key`.
     cat = MESSAGES.get(LANG, MESSAGES[DEFAULT_LANG])
-    s = cat.get(key) or MESSAGES[DEFAULT_LANG].get(key, key)
+    s = cat.get(msg) or MESSAGES[DEFAULT_LANG].get(msg, msg)
     return s.format(**kw) if kw else s
 
 def now():
@@ -656,9 +668,12 @@ def load_or_die():
     return text
 
 def clean_field(label, val):
-    """Single-line field: rejects line breaks and reserved markers (injection-safe)."""
+    """Single-line field: rejects line breaks and reserved markers (injection-safe).
+    'Line break' = any char str.splitlines() splits on (parse_turns uses splitlines), so a
+    value can never forge an extra `- key: value` line — not just LF/CR but VT/FF/FS/GS/RS/
+    NEL/LS/PS too."""
     val = (val or "").strip()
-    if "\n" in val or "\r" in val:
+    if any(c in val for c in LINE_BREAKS):
         sys.exit(tr("field_newline", label=label))
     for r in RESERVED:
         if r in val:
@@ -1033,15 +1048,15 @@ TURN_RE = re.compile(
 
 def parse_turns(text):
     """Read-only shared parser for the turn journal → [{n, agent, fields, body}].
-    Leading `- key: value` lines become `fields` (key grammar [a-z_]+; UNKNOWN keys are
-    kept verbatim, never silently dropped); everything after the first non-field line is
+    Leading `- key: value` lines become `fields` (key grammar [a-z][a-z0-9_]*; UNKNOWN keys
+    are kept verbatim, never silently dropped); everything after the first non-field line is
     the free-text `body`. Used by peek/recap/log; never feeds coordination logic."""
     out = []
     for m in TURN_RE.finditer(text):
         lines = m.group(3).splitlines()
         fields, i = {}, 0
         while i < len(lines):
-            fm = re.match(r"- ([a-z_]+):\s*(.*)$", lines[i])
+            fm = re.match(r"- ([a-z][a-z0-9_]*):\s*(.*)$", lines[i])
             if not fm:
                 break
             fields[fm.group(1)] = fm.group(2).rstrip()
@@ -1207,6 +1222,40 @@ def _read_body(spec):
     except OSError as e:
         sys.exit(tr("body_error", e=e))
 
+def collect_advisory_fields(args):
+    """§5 advisory turn fields: sugar flags (branch/commit/tests/next/blocked_on) + the open
+    `--field key=value` namespace (x_* and any other key). Returns an ordered [(key, value)]:
+    values are clean_field-checked, keys must be snake_case/x_* and may not shadow an
+    engine-managed routing field, no key twice. Pure passthrough — never interpreted."""
+    out, seen = [], set()
+
+    def add(key, label, value):
+        # validate the key BEFORE the empty-value short-circuit, so a bad/shadowing/dup key
+        # is reported even when its value happens to be blank
+        if not FIELD_KEY_RE.match(key):
+            sys.exit(tr("field_bad_key", key=key))
+        if key in ENGINE_FIELDS:
+            sys.exit(tr("field_reserved_key", key=key))
+        if key in seen:
+            sys.exit(tr("field_dup_key", key=key))
+        value = clean_field(label, value)
+        if not value:
+            return
+        seen.add(key)
+        out.append((key, value))
+
+    for key, value in (("branch", args.branch), ("commit", args.commit),
+                       ("tests", args.tests), ("next", args.next),
+                       ("blocked_on", args.blocked_on)):
+        add(key, "--" + key.replace("_", "-"), value)
+    for item in args.field:
+        key, sep, value = item.partition("=")
+        if not sep:
+            sys.exit(tr("field_no_eq", item=item))
+        add(key.strip(), "--field", value)
+    return out
+
+
 def cmd_append(args):
     # Field/body reading stays OUTSIDE the critical section (stdin may block); agent
     # validation happens UNDER the lock, against the roster load_or_die reads.
@@ -1214,6 +1263,7 @@ def cmd_append(args):
     done = clean_field("--done", args.done) or "—"
     files = clean_field("--files", args.files) or "—"
     body = clean_body(_read_body(args.body))
+    advisory = collect_advisory_fields(args)  # §5: optional, passthrough, injection-safe
 
     with file_lock():
         text = load_or_die()
@@ -1239,6 +1289,8 @@ def cmd_append(args):
             f"- files:   {files}\n"
             f"- handoff: {to}\n"
         )
+        for key, value in advisory:   # §5: advisory fields follow the fixed routing block
+            block += f"- {key}: {value}\n"
         if body:
             block += "\n" + body + "\n"
         block += f"<!-- {brand}:TURN {n} {agent} END -->\n"
@@ -1374,6 +1426,14 @@ def main():
     a.add_argument("--done", default="")
     a.add_argument("--files", default="")
     a.add_argument("--body", default="")
+    # §5 advisory turn fields (optional, passthrough): sugar flags + open namespace
+    a.add_argument("--branch", default="")
+    a.add_argument("--commit", default="")
+    a.add_argument("--tests", default="")
+    a.add_argument("--next", default="")
+    a.add_argument("--blocked-on", dest="blocked_on", default="")
+    a.add_argument("--field", action="append", default=[], metavar="KEY=VALUE",
+                   help="advisory turn field, repeatable (KEY snake_case or x_*)")
     a.set_defaults(fn=cmd_append)
 
     r = sub.add_parser("release")
