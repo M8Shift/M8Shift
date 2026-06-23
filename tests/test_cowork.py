@@ -1396,5 +1396,117 @@ class TestClaimCheck(CLIBase):
         self.assertEqual(self.cw("claim", "claude", "--check").returncode, 1)
 
 
+# ───────────── tasks board : append-only ledger, pen-free, never feeds routing ─
+
+class TestTasks(CLIBase):
+    """`task` add/done/drop/list/show: append-only event log + last-event-wins fold; pen-free;
+    status/blocked_on never feed the mutex/routing."""
+
+    def _tasks(self):
+        p = os.path.join(self.d, "M8SHIFT.tasks.md")
+        return open(p, encoding="utf-8").read() if os.path.exists(p) else None
+
+    def test_pen_free_and_lazy_header(self):
+        self.init()
+        self.assertIsNone(self._tasks())
+        r = self.cw("task", "add", "claude", "migrate auth")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("#1 added by claude", r.stdout)
+        self.assertTrue(self._tasks().startswith("# M8Shift · tasks\n\n"))
+        self.assertEqual(self.lock()["state"], "IDLE")          # no pen taken
+        self.cw("claim", "claude")                               # other holds the pen
+        self.assertEqual(0, self.cw("task", "add", "codex", "wire endpoints").returncode)
+
+    def test_never_touches_lock(self):
+        self.init()
+        self.cw("claim", "claude")
+        before, before_lock = self.md(), self.lock()
+        self.cw("task", "add", "codex", "a task")
+        self.cw("task", "done", "codex", "1")
+        self.assertEqual(self.md(), before, "task mutated M8SHIFT.md")
+        self.assertEqual(self.lock(), before_lock)
+
+    def test_cmd_task_has_no_set_lock(self):
+        import inspect
+        src = inspect.getsource(cowork.cmd_task) + inspect.getsource(cowork._cmd_task_read)
+        self.assertNotIn("set_lock(", src)   # no CALL to set_lock (docstrings name it, calls have a paren)
+
+    def test_routing_never_reads_tasks(self):
+        self.init()
+        self.cw("task", "add", "claude", "big task", "--blocked-on", "external thing")
+        self.assertIn("pen taken", self.cw("claim", "claude").stdout)   # claim ignores tasks
+        self.assertEqual(0, self.cw("task", "done", "claude", "1").returncode)  # blocked closes
+
+    def test_sequential_ids_and_fold(self):
+        self.init()
+        self.cw("task", "add", "claude", "first")
+        self.cw("task", "add", "claude", "second")
+        self.assertEqual([e["id"] for e in cowork.parse_tasks(self._tasks())], [1, 2])
+        self.cw("task", "done", "claude", "1")
+        fold = cowork.fold_tasks(cowork.parse_tasks(self._tasks()))
+        self.assertEqual(fold[1]["verb"], "done")
+        self.assertEqual(fold[1]["text"], "first")              # identity kept after done
+        self.assertEqual(fold[2]["verb"], "add")
+
+    def test_concurrent_add_unique_ids(self):
+        import concurrent.futures
+        self.init()
+
+        def one(i):
+            return subprocess.run([sys.executable, "m8shift.py", "task", "add", "claude", f"t{i}"],
+                                  cwd=self.d, capture_output=True, text=True).returncode
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            rcs = list(ex.map(one, range(8)))
+        self.assertEqual(rcs, [0] * 8)
+        ids = [e["id"] for e in cowork.parse_tasks(self._tasks())]
+        self.assertEqual(sorted(ids), list(range(1, 9)))        # 8 distinct sequential ids, none lost
+
+    def test_list_open_default_and_show_history(self):
+        self.init()
+        self.cw("task", "add", "claude", "open one")
+        self.cw("task", "add", "claude", "closed one")
+        self.cw("task", "done", "claude", "2")
+        out = self.cw("task", "list").stdout
+        self.assertIn("#1", out)
+        self.assertNotIn("#2", out)                             # done hidden by default
+        self.assertIn("#2", self.cw("task", "list", "--all").stdout)
+        self.assertEqual(self.cw("task", "show", "2").stdout.count("#2"), 2)  # add + done
+
+    def test_guards_reject_and_write_nothing(self):
+        self.init()
+        for args in (["add", "claude", "   "],                       # empty desc
+                     ["add", "claude", "x M8SHIFT:TASK y"],          # reserved marker
+                     ["add", "claude", "d", "--blocked-on", "a\nb"],  # newline in blocked
+                     ["add", "claude", "d", "--for", "ghost"],       # non-roster assignee
+                     ["done", "claude", "999"]):                     # unknown id
+            with self.subTest(args=args):
+                r = self.cw("task", *args)
+                self.assertNotEqual(r.returncode, 0, f"{args} not rejected")
+                self.assertNotIn("Traceback", r.stderr)
+        self.assertIsNone(self._tasks())                            # nothing was written
+
+    def test_done_terminal_refused_no_event(self):
+        self.init()
+        self.cw("task", "add", "claude", "t")
+        self.assertEqual(0, self.cw("task", "done", "claude", "1").returncode)
+        before = self._tasks()
+        self.assertNotEqual(self.cw("task", "done", "claude", "1").returncode, 0)  # already done
+        self.assertEqual(self._tasks(), before)                     # no event appended
+
+    def test_parse_tasks_tolerates_garbage(self):
+        text = ("# header\n\n- #1 2026-06-23T08:00:00Z add claude: good\n"
+                "garbage\n- #abc 2026-06-23T08:00:00Z add claude: bad-id\n"
+                "- #2 2026-06-23T09:00:00Z add codex: good2\n")
+        self.assertEqual([e["id"] for e in cowork.parse_tasks(text)], [1, 2])
+
+    def test_recap_tasks_tail_and_absent(self):
+        self.init()
+        self.assertNotIn("open task", self.cw("recap").stdout)      # absent → no section
+        self.cw("task", "add", "claude", "todo one")
+        out = self.cw("recap").stdout
+        self.assertIn("open task", out)
+        self.assertIn("todo one", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
