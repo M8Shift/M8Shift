@@ -1044,6 +1044,61 @@ class TestI18nFR(InjectedFRBase):
         self.assertIn("invalid choice", r.stderr)
 
 
+# ───────────── injecteur i18n : packs + build multi-langues ─────────────────
+
+class TestInjector(unittest.TestCase):
+    """m8shift-i18n.py — pack validation + multi-language build invariants."""
+    INJ = os.path.join(REPO, "m8shift-i18n.py")
+    I18N = os.path.join(REPO, "i18n")
+
+    def _packs(self):
+        if not os.path.isdir(self.I18N):
+            return []
+        return sorted(d for d in os.listdir(self.I18N)
+                      if os.path.isdir(os.path.join(self.I18N, d)))
+
+    def test_all_repo_packs_pass_check(self):
+        langs = self._packs()
+        self.assertTrue(langs, "aucun pack i18n/")
+        for lang in langs:
+            r = subprocess.run([sys.executable, self.INJ, "--check", lang],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, f"{lang}: {r.stderr}")
+
+    def test_pack_messages_are_format_safe(self):
+        """Each translated message renders with the EN placeholders — an extra/renamed
+        placeholder or a stray brace would raise at runtime (tr() does value.format(**kw))."""
+        en = cowork.MESSAGES["en"]
+        for lang in self._packs():
+            mp = os.path.join(self.I18N, lang, "messages.json")
+            if not os.path.isfile(mp):
+                continue
+            with open(mp, encoding="utf-8") as f:
+                msgs = json.load(f)
+            self.assertTrue(set(msgs) <= set(en), f"{lang}: clés inconnues")
+            for k, v in msgs.items():
+                en_ph = set(re.findall(r"\{(\w+)\}", en[k]))
+                try:
+                    v.format(**{p: "" for p in en_ph})
+                except Exception as e:  # noqa: BLE001
+                    self.fail(f"{lang}/{k} non format-safe: {e!r}")
+
+    def test_multi_language_build_and_run(self):
+        """Build en+fr+es and run a Spanish relay (regression: incremental dict splicing
+        lost its EN-only anchor after the first language → only single-lang builds worked)."""
+        if not all(os.path.isdir(os.path.join(self.I18N, l)) for l in ("fr", "es")):
+            self.skipTest("packs fr/es absents")
+        d = tempfile.mkdtemp(prefix="m8shift-multi-")
+        self.addCleanup(shutil.rmtree, d, True)
+        r = subprocess.run([sys.executable, self.INJ, "--langs", "fr,es", "--into", d],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(0, subprocess.run([sys.executable, "m8shift.py", "init", "--lang", "es"],
+                                           cwd=d, capture_output=True, text=True).returncode)
+        claim = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                               cwd=d, capture_output=True, text=True)
+        self.assertIn("pluma tomada", claim.stdout)  # es claim_ok
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

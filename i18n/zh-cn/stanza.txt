@@ -1,0 +1,28 @@
+{begin}
+## 协作中继 —— 自包含（无需人工解释）
+
+在本项目中你是 **{me}**。一旦根目录下存在 `M8SHIFT.md`，
+它就是你与 **{other}** 的协调来源：在进行任何其他工作之前，先应用 `M8SHIFT.protocol.md`
+（通读一次，参见其 §0）。**只有在你通过 `claim` 取得笔之后，才能工作和写入。**
+
+```bash
+./m8shift.py status                # 谁持有笔？（非阻塞）
+./m8shift.py wait {me} --once      # rc 0 = 你可以获取 ; rc 3 = 还不行
+```
+
+- **先获取**（`state == AWAITING_{ME}` 或 `IDLE`）：
+  `./m8shift.py claim {me}` —— **独占**：如果 {other} 已经取走了笔，则
+  失败 → 回到等待。如果成功，你就持有笔（`WORKING_{ME}`）。
+- **然后工作并关闭你的轮次**：阅读 {other} 留给你的 `ask:`
+  （在 IDLE 启动时，没有需要响应的内容），完成工作，然后：
+  `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+- **还没轮到你**：什么都别碰；`./m8shift.py wait {me}` 会一直阻塞，直到轮到你
+  （约每 60 秒轮询一次），然后重试 `claim`。
+- **{other} 的锁已失效**（`WORKING_{OTHER}` + `now > expires`）：
+  `./m8shift.py claim {me} --force`。
+
+已关闭的轮次是不可变的：若要回应，请开启下一轮。
+
+_交互式 UI 说明_：在聊天 UI（VS Code 等）中，人类会在轮次之间唤醒你 ——
+`wait` 阻塞的是一个进程，它不会唤醒你的 UI。完全无人值守的中继需要无头运行器。
+{end}

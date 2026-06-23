@@ -1,0 +1,30 @@
+{begin}
+## Co-Work-Relais — eigenständig (keine menschliche Erklärung nötig)
+
+Du bist **{me}** in diesem Projekt. Sobald eine `M8SHIFT.md` im Wurzelverzeichnis vorhanden ist,
+ist sie deine Koordinationsquelle mit **{other}**: wende `M8SHIFT.protocol.md` an
+(lies es einmal, siehe §0) BEVOR du irgendeine andere Arbeit beginnst. **Du arbeitest und schreibst nur,
+wenn du den Stift via `claim` übernommen hast.**
+
+```bash
+./m8shift.py status                # wer hält den Stift? (nicht blockierend)
+./m8shift.py wait {me} --once      # rc 0 = du darfst übernehmen ; rc 3 = noch nicht
+```
+
+- **Zuerst übernehmen** (`state == AWAITING_{ME}` oder `IDLE`):
+  `./m8shift.py claim {me}` — **exklusiv**: wenn {other} den Stift bereits genommen hat,
+  schlägt es fehl → zurück ins Warten. Wenn es erfolgreich ist, hältst du den Stift (`WORKING_{ME}`).
+- **Dann arbeiten und deinen Zug abschließen**: lies das `ask:`, das {other} dir hinterlassen hat
+  (beim IDLE-Start gibt es nichts zu berücksichtigen), erledige die Arbeit, dann:
+  `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+- **Du bist nicht dran**: rühre nichts an; `./m8shift.py wait {me}` blockiert bis zu deinem
+  Zug (Abfrage ~60 s), dann `claim` erneut versuchen.
+- **Die Sperre von {other} ist veraltet** (`WORKING_{OTHER}` + `now > expires`):
+  `./m8shift.py claim {me} --force`.
+
+Ein abgeschlossener Zug ist unveränderlich: um zu reagieren, eröffne den nächsten Zug.
+
+_Hinweis zur interaktiven Oberfläche_: in einer Chat-Oberfläche (VS Code, …) setzt ein Mensch dich zwischen Zügen fort —
+`wait` blockiert einen Prozess, es weckt deine Oberfläche nicht. Vollständig autonome Relais brauchen einen
+Headless-Runner.
+{end}

@@ -1,0 +1,30 @@
+{begin}
+## Relevo de co-work — autocontenido (no se necesita explicación humana)
+
+Eres **{me}** en este proyecto. En cuanto haya un `M8SHIFT.md` en la raíz,
+es tu fuente de coordinación con **{other}**: aplica `M8SHIFT.protocol.md`
+(léelo una vez, ver su §0) ANTES de cualquier otro trabajo. **Solo trabajas y escribes si
+has tomado la pluma mediante `claim`.**
+
+```bash
+./m8shift.py status                # ¿quién tiene la pluma? (no bloqueante)
+./m8shift.py wait {me} --once      # rc 0 = puedes tomar ; rc 3 = aún no
+```
+
+- **Toma primero** (`state == AWAITING_{ME}` o `IDLE`):
+  `./m8shift.py claim {me}` — **exclusivo**: si {other} ya ha tomado la pluma,
+  falla → vuelve a esperar. Si tiene éxito, tienes la pluma (`WORKING_{ME}`).
+- **Luego trabaja y cierra tu turno**: lee el `ask:` que {other} te dejó
+  (al arranque IDLE, nada que atender), haz el trabajo, luego:
+  `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+- **No es tu turno**: no toques nada; `./m8shift.py wait {me}` bloquea hasta tu
+  turno (sondeo ~60 s), luego reintenta `claim`.
+- **El bloqueo de {other} está obsoleto** (`WORKING_{OTHER}` + `now > expires`):
+  `./m8shift.py claim {me} --force`.
+
+Un turno cerrado es inmutable: para reaccionar, abre el siguiente turno.
+
+_Nota de UI interactiva_: en una UI de chat (VS Code, …) un humano te reanuda entre turnos —
+`wait` bloquea un proceso, no despierta tu UI. Los relevos totalmente desatendidos necesitan un
+ejecutor headless.
+{end}
