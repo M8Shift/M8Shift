@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Tests cowork — unitaires (fonctions pures) + non-régression (CLI, bord à bord).
+"""Tests M8Shift — unitaires (fonctions pures) + non-régression (CLI, bord à bord).
 
 Lancer :  python3 -m unittest discover -s tests        (depuis la racine du repo)
    ou  :  python3 tests/test_cowork.py
 
 Modèle : `claim` est obligatoire et exclusif avant de travailler ; `append` n'est
-accepté que depuis `WORKING_<agent>`. Les tests CLI copient `cowork.py` dans un
+accepté que depuis `WORKING_<agent>`. Les tests CLI copient `m8shift.py` dans un
 dossier temporaire isolé et l'exécutent en sous-processus — comme un agent.
+(Le fichier garde le nom historique `test_cowork.py` ; il importe `m8shift as cowork`.)
 Chaque non-régression cible un bug corrigé (NR-n) ou une garantie du CDC.
 Stdlib uniquement.
 """
@@ -808,8 +809,10 @@ class TestRoster(CLIBase):
         self.assertNotIn("WORKING_CLAUDE", proto)                     # énum d'états figée
         self.assertNotIn("(Claude) + AGENTS.md (Codex)", proto)       # schéma d'amorçage
         self.assertNotIn("block into `CLAUDE.md` and", proto)         # §8 bullet d'injection
-        # formulations génériques présentes
-        self.assertIn("two active agents", proto)
+        # formulations génériques présentes (N-agent, plus de "two active agents" figé)
+        self.assertNotIn("two active agents", proto)
+        self.assertIn("active agents", proto)
+        self.assertIn("roster", proto)
         self.assertIn("an active agent", proto)
         self.assertIn("each active agent's anchor", proto)            # §8 bullet générique
         self.assertIn("WORKING_<X>", proto)
@@ -1023,6 +1026,13 @@ class TestI18nFR(InjectedFRBase):
         with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
             self.assertIn("Protocole de relais", f.read())
         self.assertIn("verrou pris", self.cw("claim", "claude").stdout)
+
+    def test_localized_seed_turn0_is_well_formed(self):
+        # the single-line done: fix must hold in the localized seed too (all packs)
+        self.init("--lang", "fr")
+        t0 = cowork.parse_turns(self.md())[0]
+        self.assertIn("files", t0["fields"])
+        self.assertIn("handoff", t0["fields"])
 
     def test_env_overrides_runtime_lang(self):
         """$M8SHIFT_LANG forces the runtime language even if the LOCK says en."""
@@ -1288,8 +1298,8 @@ class TestMemory(CLIBase):
 # ───────────── claim --check : advisory file-overlap probe (read-only) ───────
 
 class TestClaimCheck(CLIBase):
-    """`claim --check`: read-only probe — readiness (rc 0/3, like wait --once) + file overlap,
-    never takes the pen, never mutates, overlap never changes rc."""
+    """`claim --check`: read-only probe — readiness (rc 0/3, like wait --once EXCEPT DONE,
+    which is not claimable) + file overlap, never takes the pen/mutates, overlap never changes rc."""
 
     def _history(self):
         # claude#1 touches src/api.py + src/db.py → codex ; codex#2 touches src/api.py + README → claude
@@ -1506,6 +1516,82 @@ class TestTasks(CLIBase):
         out = self.cw("recap").stdout
         self.assertIn("open task", out)
         self.assertIn("todo one", out)
+
+
+# ───────────── régressions du round d'audit Codex (v3.x) ────────────────────
+
+class TestAuditFixes(CLIBase):
+    """Regressions for the Codex audit: claim --check DONE, seed turn-0 format, the headless
+    runner rename, m8shift-i18n.py --check format-safety, and the baton-owner done/release."""
+
+    def test_stanza_wait_wording_not_stale(self):
+        # #1: the injected stanza (what agents read) must not promise "you may acquire" on
+        # wait rc 0 — after claim --check DONE→rc3 we clarified rc 0 can mean DONE = stop.
+        s = cowork.stanza_for("claude")
+        self.assertNotIn("you may acquire", s)
+        self.assertTrue("DONE" in s or "stop" in s)
+
+    def test_done_release_are_baton_owner_ops(self):
+        # #4: in AWAITING_*, `holder` is the baton owner; done/release act for them WITHOUT an
+        # active claim (append, the work write, still needs the pen). A non-holder is refused.
+        self.init("--agents", "claude,codex,lechat")
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "lechat", "--done", "x")   # → AWAITING_LECHAT
+        self.assertEqual(self.lock()["holder"], "lechat")
+        self.assertNotEqual(self.cw("done", "codex").returncode, 0)     # non-holder refused
+        # the baton owner redirects via release WITHOUT claiming…
+        self.assertEqual(self.cw("release", "lechat", "--to", "codex").returncode, 0)
+        self.assertEqual(self.lock()["holder"], "codex")
+        # …and the new baton owner closes via done WITHOUT claiming
+        self.assertEqual(self.cw("done", "codex").returncode, 0)
+        self.assertEqual(self.lock()["state"], "DONE")
+
+    def test_claim_check_done_not_claimable(self):
+        # #3: a real claim refuses DONE, so the pre-claim probe must NOT report ready (was rc 0)
+        self.init()
+        self.cw("claim", "claude")
+        self.cw("done", "claude")
+        r = self.cw("claim", "codex", "--check")
+        self.assertEqual(r.returncode, 3, "claim --check still says DONE is claimable")
+        self.assertIn("DONE", r.stdout)
+        self.assertNotEqual(self.cw("claim", "codex").returncode, 0)   # real claim agrees
+
+    def test_seed_turn0_is_well_formed(self):
+        # #7: the bootstrap turn #0 must satisfy parse_turns (single-line done:)
+        self.init()
+        t0 = cowork.parse_turns(self.md())[0]
+        self.assertEqual(t0["n"], 0)
+        self.assertIn("files", t0["fields"])      # were leaking into the body before
+        self.assertIn("handoff", t0["fields"])
+
+    def test_headless_runner_reads_m8shift_lock(self):
+        # #1: the example runner reads a CURRENT M8SHIFT.md (markers were still COWORK:*)
+        import importlib.util
+        rp = os.path.join(REPO, "examples", "headless_runner.py")
+        spec = importlib.util.spec_from_file_location("headless_runner", rp)
+        hr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hr)
+        self.assertEqual(hr.LOCK_BEGIN, "<!-- M8SHIFT:LOCK:BEGIN -->")
+        self.init()
+        lk = hr.read_lock(os.path.join(self.d, "M8SHIFT.md"))
+        self.assertIsNotNone(lk, "runner cannot read a current M8SHIFT.md")
+        self.assertEqual(lk["state"], "IDLE")
+
+    def test_injector_check_rejects_format_unsafe_pack(self):
+        # #8: --check must reject a pack whose translated message renames/adds a placeholder
+        bad = os.path.join(REPO, "i18n", "_zzbadtest")
+        self.addCleanup(shutil.rmtree, bad, True)
+        shutil.copytree(os.path.join(REPO, "i18n", "fr"), bad)
+        mp = os.path.join(bad, "messages.json")
+        with open(mp, encoding="utf-8") as f:
+            msgs = json.load(f)
+        msgs["remember_ok"] = "{agent} {bogus_placeholder}"   # EN has no {bogus_placeholder}
+        with open(mp, "w", encoding="utf-8") as f:
+            json.dump(msgs, f, ensure_ascii=False)
+        r = subprocess.run([sys.executable, os.path.join(REPO, "m8shift-i18n.py"),
+                            "--check", "_zzbadtest"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("format-safe", r.stderr)
 
 
 if __name__ == "__main__":

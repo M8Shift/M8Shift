@@ -16,6 +16,7 @@ import ast
 import importlib.util
 import json
 import os
+import re
 import sys
 import warnings
 
@@ -70,6 +71,17 @@ def check_pack(lang, en_keys):
         unknown = sorted(set(msgs) - set(en_keys))
         if unknown:
             errs.append(f"unknown message keys (not in EN): {unknown}")
+        # format-safety: a translated value must render with the EN placeholders, else the build
+        # passes but tr(...).format(**kw) raises at runtime for that locale (a renamed/extra
+        # placeholder or a stray brace). Validate here so a bad pack fails --check, not a user.
+        for k, v in msgs.items():
+            if k not in en_keys:
+                continue
+            en_ph = set(re.findall(r"\{(\w+)\}", en_keys[k]))
+            try:
+                v.format(**{p: "" for p in en_ph})
+            except (KeyError, ValueError, IndexError) as e:
+                errs.append(f"message {k!r} is not format-safe: {e!r}")
     for _, _, fname, _ in FAMILIES:
         p = os.path.join(d, fname)
         if not os.path.isfile(p) or not open(p, encoding="utf-8").read().strip():

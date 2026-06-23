@@ -1,6 +1,14 @@
 # 🏛️ Architecture Document — M8Shift
 
-> **Status**: `Approved` · **Version**: protocol v1 · **Review**: 2026-06-21
+> **Status**: `Historical (superseded)` · **Version**: protocol v1 · **Review**: 2026-06-21
+>
+> ⚠️ **Historical / non-authoritative.** This document predates the **N-agent generalization**
+> and the **v3** changes (EN-only core + i18n injector, shared memory, `claim --check`, tasks
+> board). It describes the early **two-agent / configurable-pair** design and cites stale facts
+> (test path/counts, `cowork.PROTOCOL`). **For the current model use [the protocol](protocol.md)
+> and [the specification](specification.md).** The live model is an **active roster of ≥2 agents
+> with one pen** (degree-1); true **degree-2** concurrency (worktrees) is future work
+> ([rfc-n-agents.md](rfc-n-agents.md) §8). Read the body below as a historical design record.
 
 This document follows the multi-view *Architecture Document* template
 (`architecture-document-template`, B. Florat, CC BY-SA 4.0), adapted to a

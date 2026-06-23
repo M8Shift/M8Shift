@@ -32,9 +32,7 @@ note:     session initialized, no turn opened
 - from:    system
 - to:      none
 - ask:     —
-- done:    Inicialização do relay. O primeiro agente que iniciar executa
-           `./m8shift.py claim __A__` (ou `__B__`), trabalha, depois
-           `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
+- done:    Inicialização do relay. O primeiro agente que iniciar executa `./m8shift.py claim __A__` (ou `__B__`), trabalha, depois `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
 - files:   M8SHIFT.md, M8SHIFT.protocol.md, m8shift.py
 - handoff: none
 <!-- M8SHIFT:TURN 0 system END -->
