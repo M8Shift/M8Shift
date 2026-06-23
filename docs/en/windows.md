@@ -70,6 +70,7 @@ commit; a project that just copies `m8shift.py` should add `M8SHIFT.md` to its o
 
 Empty folder or git repo, paths with spaces/accents, the inter-process lock
 (`.m8shift.lock`, `O_EXCL` + ownership token), atomic writes, the full relay loop
-(`wait → claim → work → append`), the configurable roster (`--agents`), and bilingual
-output (`--lang en|fr`). Codex's `AGENTS.md` discovery / override follow the Codex
-tool's own Windows rules.
+(`wait → claim → work → append`), and the configurable active roster (`--agents`).
+The repository core is English-only (`--lang en`); localized single-file variants
+built with `m8shift-i18n.py` can bundle additional `--lang <code>` choices. Codex's
+`AGENTS.md` discovery / override follow the Codex tool's own Windows rules.

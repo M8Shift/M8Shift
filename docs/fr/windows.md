@@ -71,6 +71,8 @@ ajouter `M8SHIFT.md` à son propre `.gitignore` (ou le garder en LF) pour évite
 
 Dossier vide ou dépôt git, chemins avec espaces/accents, le verrou inter-process
 (`.m8shift.lock`, `O_EXCL` + jeton de propriété), les écritures atomiques, la boucle de
-relais complète (`wait → claim → travail → append`), le roster configurable
-(`--agents`) et la sortie bilingue (`--lang en|fr`). La découverte / l'override de
-`AGENTS.md` par Codex suivent les règles Windows propres à l'outil Codex.
+relais complète (`wait → claim → travail → append`) et le roster actif configurable
+(`--agents`). Le cœur du dépôt est anglais uniquement (`--lang en`) ; les variantes
+mono-fichier construites avec `m8shift-i18n.py` peuvent inclure d'autres choix
+`--lang <code>`. La découverte / l'override de `AGENTS.md` par Codex suivent les règles
+Windows propres à l'outil Codex.

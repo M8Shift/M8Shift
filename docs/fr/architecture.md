@@ -1,6 +1,12 @@
 # 🏛️ Document d'architecture — M8Shift
 
-> **Statut** : `Validé` · **Version** : protocole v1 · **Revue** : 2026-06-21
+> **Statut** : `Historique / non-autoritatif` · **Version** : protocole v1 · **Revue** : 2026-06-21
+>
+> ⚠️ **Document historique.** Cette traduction FR précède la généralisation **N-agent** et les
+> changements **v3** ; elle décrit le design *deux agents / paire* et cite des faits périmés
+> (ex. 46 tests). **La référence à jour est la doc anglaise** :
+> [architecture.md](../en/architecture.md), [protocol.md](../en/protocol.md). À lire comme registre
+> de design historique ; à retraduire (review-pending).
 
 Ce document suit le modèle multi-vues *Document d'architecture*
 (`architecture-document-template`, B. Florat, CC BY-SA 4.0), adapté à un

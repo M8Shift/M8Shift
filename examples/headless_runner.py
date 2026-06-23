@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Example headless runner for M8Shift — REFERENCE, not part of `cowork.py`.
+"""Example headless runner for M8Shift — REFERENCE, not part of `m8shift.py`.
 
-`cowork.py` is a passive coordinator: `wait` blocks a *process*, it cannot wake an
+`m8shift.py` is a passive coordinator: `wait` blocks a *process*, it cannot wake an
 interactive agent UI (VS Code, …). The only way to a fully hands-off relay is to drive
 a **headless** agent (e.g. `claude -p "<prompt>"`, `codex exec "<prompt>"`) in a loop.
 This script is that loop, for ONE agent. Run one instance per headless agent; if the
@@ -9,8 +9,8 @@ other side is an interactive UI, a human still resumes it (that side stays manua
 
 Design (the points a naive `while wait; do …` loop gets wrong):
   * It reads the LOCK `state` directly (a stable `key: value`) instead of `wait`'s
-    return code, because `wait` returns rc 0 for BOTH "your turn" and `DONE` — a naive
-    loop would relaunch forever at `DONE`.
+    return code, because `wait --once` returns rc 0 for BOTH "your turn" and `DONE` — a
+    naive loop would relaunch forever at `DONE`.
   * A **designated IDLE starter** (`--start-on-idle`) avoids two agents both starting
     from `IDLE`.
   * **Post-run validation**: if the agent process exits while the pen is still
@@ -19,27 +19,26 @@ Design (the points a naive `while wait; do …` loop gets wrong):
   * **Bounded backoff + retry cap**, and **static argv** (no shell eval).
 
 Usage:
-  examples/headless_runner.py claude --cmd claude -p "Apply COWORK.protocol.md: take your
+  examples/headless_runner.py claude --cmd claude -p "Apply M8SHIFT.protocol.md: take your
       turn (claim, work, append)." [--start-on-idle] [--interval 30] [--max-retries 3]
 
 The agent command (everything after --cmd) is run verbatim as argv; it must, by itself,
-perform exactly one turn against this project's COWORK.md (claim → work → append).
+perform exactly one turn against this project's M8SHIFT.md (claim → work → append).
 """
 import argparse
-import os
 import re
 import subprocess
 import sys
 import time
 
-LOCK_BEGIN = "<!-- COWORK:LOCK:BEGIN -->"
-LOCK_END = "<!-- COWORK:LOCK:END -->"
+LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
+LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
 
 
-def read_lock(cowork_path):
+def read_lock(m8shift_path):
     """Return the LOCK fields as a dict, or None if the file/markers are missing."""
     try:
-        with open(cowork_path, encoding="utf-8") as f:
+        with open(m8shift_path, encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return None
@@ -55,13 +54,13 @@ def read_lock(cowork_path):
 
 
 def log(msg):
-    print(f"[cowork-runner] {msg}", flush=True)
+    print(f"[m8shift-runner] {msg}", flush=True)
 
 
 def main():
     p = argparse.ArgumentParser(description="Headless M8Shift runner for one agent.")
-    p.add_argument("agent", help="your agent name (must be in the COWORK.md roster)")
-    p.add_argument("--cowork", default="COWORK.md", help="path to COWORK.md")
+    p.add_argument("agent", help="your agent name (must be in the M8SHIFT.md roster)")
+    p.add_argument("--m8shift", default="M8SHIFT.md", help="path to M8SHIFT.md")
     p.add_argument("--start-on-idle", action="store_true",
                    help="this agent starts the relay when state is IDLE (designate ONE)")
     p.add_argument("--interval", type=int, default=30, help="poll seconds when waiting")
@@ -80,9 +79,9 @@ def main():
     fails = 0
 
     while True:
-        lk = read_lock(args.cowork)
+        lk = read_lock(args.m8shift)
         if lk is None:
-            log(f"{args.cowork}: not found / invalid LOCK — is the project init'd? waiting.")
+            log(f"{args.m8shift}: not found / invalid LOCK — is the project init'd? waiting.")
             time.sleep(args.interval)
             continue
         state = lk.get("state", "")
@@ -105,7 +104,7 @@ def main():
             return 2
 
         # Post-run validation against the new state.
-        after = read_lock(args.cowork) or {}
+        after = read_lock(args.m8shift) or {}
         progressed = (after.get("turn") != lk.get("turn")
                       or after.get("state") not in (state, me_working))
         if after.get("state") == me_working and after.get("holder") == me:

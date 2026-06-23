@@ -32,9 +32,7 @@ note:     session initialized, no turn opened
 - from:    system
 - to:      none
 - ask:     —
-- done:    Inicialización del relevo. El primer agente que arranca ejecuta
-           `./m8shift.py claim __A__` (o `__B__`), trabaja, luego
-           `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
+- done:    Inicialización del relevo. El primer agente que arranca ejecuta `./m8shift.py claim __A__` (o `__B__`), trabaja, luego `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
 - files:   M8SHIFT.md, M8SHIFT.protocol.md, m8shift.py
 - handoff: none
 <!-- M8SHIFT:TURN 0 system END -->
