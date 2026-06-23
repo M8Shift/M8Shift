@@ -272,15 +272,15 @@ memory** — `m8shift.py remember <agent> "<note>"` appends to a durable, append
 human-curated `M8SHIFT.memory.md` (no pen needed); its headlines lead `recap`'s briefing so an
 agent resumes across sessions; and **`claim <agent> --check [--files …]`** — a read-only
 advisory probe (takes no pen) that reports claim-readiness plus which of your files were touched
-by others since your last turn.
+by others since your last turn; and a **tasks board** — `task add/done/drop/list/show` over a
+durable, append-only `M8SHIFT.tasks.md` (no pen needed; `--for`/`--blocked-on` are advisory free
+text, never enforced), with open-task headlines in `recap`.
 
 **Planned features** — every item stays single-file, passive and zero-credential
 (append-only or read-only over data M8Shift already stores; never a daemon, an
 integration, or a second source of truth):
 
 - 🌿 **`subturn`** *(later)* — record an agent's own sub-agent fan-out under its turn.
-- 🗂️ **Tasks board / block-on** *(maybe)* — an append-only to-do partition; name an
-  external dependency as an explicit `blocked_on` wait reason.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
 disjoint writes (that is the stage-2 degree-2 lock, not today's degree-1 pen); a

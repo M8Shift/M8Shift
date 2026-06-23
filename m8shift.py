@@ -29,6 +29,7 @@ COWORK = os.path.join(HERE, "M8SHIFT.md")            # the living relay file
 ARCHIVE = os.path.join(HERE, "M8SHIFT.archive.md")
 PROTO = os.path.join(HERE, "M8SHIFT.protocol.md")
 MEMORY = os.path.join(HERE, "M8SHIFT.memory.md")     # shared, append-only, human-curated notes
+TASKS = os.path.join(HERE, "M8SHIFT.tasks.md")       # shared, append-only to-do event log
 LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXCL)
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
@@ -45,7 +46,7 @@ FIELD_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")   # advisory turn-field key: sna
 # Turn fields the engine writes itself (routing) — an advisory field may not shadow them.
 ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff"))
 # Reserved marker prefixes: forbidden in fields, neutralized in bodies.
-RESERVED = ("M8SHIFT:TURN", "M8SHIFT:LOCK", "M8SHIFT:STANZA")
+RESERVED = ("M8SHIFT:TURN", "M8SHIFT:LOCK", "M8SHIFT:STANZA", "M8SHIFT:TASK")
 # Every char str.splitlines() treats as a line boundary — a single-line field must contain
 # NONE of them, else a value could forge an extra `- key: value` line that parse_turns reads.
 LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"   # all str.splitlines() boundaries
@@ -541,6 +542,13 @@ MESSAGES = {
         "check_flags_need_check": "--files / --turns are read-only probe options — use them with --check.",
         "check_advisory_footer": "(advisory only — does not block claim; exact token match, "
                                  "normalize --files to the journal's spelling)",
+        "tasks_header": "# M8Shift · tasks\n\n",
+        "task_empty": "refused: the task description is empty after trimming.",
+        "task_add_ok": "✓ #{id} added by {agent} → {file} ({n} open).",
+        "task_event_ok": "✓ #{id} {verb} by {agent} → {file}.",
+        "task_unknown": "refused: no open task #{id}.",
+        "task_none": "(no open tasks)",
+        "recap_tasks": "── {n} open task(s) ─────────────────────",
     },
 }
 
@@ -1099,6 +1107,40 @@ def parse_memory(text):
     return out
 
 
+TASKS_RE = re.compile(r"^- #(\d+) (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) ([a-z][a-z0-9_]*) ("
+                      + AGENT_RE + r"): (.*)$")
+
+
+def parse_tasks(text):
+    """Read-only parser for the task event log → [{id, ts, verb, author, text}] in FILE ORDER.
+    Mirrors parse_memory exactly: anchored per-line match, greedy text, malformed/hand-edited
+    lines silently skipped, never raises. `ts`/`verb` are opaque DISPLAY tokens — never parsed
+    back into logic, never sorted on. The ledger is a dumb, file-ordered record; it NEVER feeds
+    the mutex / routing (claim/append/wait/load_or_die never call this)."""
+    out = []
+    for line in text.splitlines():
+        m = TASKS_RE.match(line)
+        if m:
+            out.append({"id": int(m.group(1)), "ts": m.group(2), "verb": m.group(3),
+                        "author": m.group(4), "text": m.group(5)})
+    return out
+
+
+def fold_tasks(events):
+    """Current view of the task log by a single left-to-right pass: a task's IDENTITY (description,
+    author) is its first (add) event; its STATUS (verb) is its LATEST event — last-event-wins on
+    status, exactly memory's most-recent-wins. ZERO cross-task logic (no dependency resolution,
+    ordering, cycle/priority). Consumed ONLY by task list/show + recap; NEVER called from
+    claim/append/release/wait/load_or_die."""
+    cur = {}
+    for ev in events:
+        if ev["id"] in cur:
+            cur[ev["id"]] = {**cur[ev["id"]], "verb": ev["verb"], "ts": ev["ts"]}
+        else:
+            cur[ev["id"]] = dict(ev)
+    return cur
+
+
 def cmd_recap(args):
     """Read-only session-start briefing: current LOCK + the last N turn summaries."""
     text = load_or_die()
@@ -1122,6 +1164,15 @@ def cmd_recap(args):
             print(tr("recap_memory", n=len(tail)))
             for nt in tail:   # chronological (file order), like the turn recap
                 print(f"  {nt['ts']} {nt['agent']}: {nt['note']}")
+    # open-task headlines — only when the ledger exists (absent ⇒ output unchanged)
+    if os.path.exists(TASKS):
+        opent = [ev for ev in fold_tasks(parse_tasks(read(TASKS))).values() if ev["verb"] == "add"]
+        opent.sort(key=lambda e: e["id"])
+        tail = opent[-args.tasks:] if args.tasks > 0 else opent
+        if tail:
+            print(tr("recap_tasks", n=len(tail)))
+            for ev in tail:
+                print(f"  #{ev['id']} {ev['author']}: {ev['text']}")
     return 0
 
 def cmd_peek(args):
@@ -1493,6 +1544,70 @@ def cmd_remember(args):
     return 0
 
 
+def _cmd_task_read(args):
+    """Read-only task views (no lock): `list` (open by default; --all adds done/drop) and
+    `show <id>` (one id's file-ordered event history)."""
+    text = read(TASKS) if os.path.exists(TASKS) else ""
+    if args.verb == "show":
+        events = [e for e in parse_tasks(text) if e["id"] == args.id]
+        if not events:
+            sys.exit(tr("task_unknown", id=args.id))
+        for e in events:
+            print(f"  #{e['id']} {e['ts']} {e['verb']} {e['author']}: {e['text']}")
+        return 0
+    rows = sorted(fold_tasks(parse_tasks(text)).values(), key=lambda e: e["id"])
+    if not args.all:
+        rows = [e for e in rows if e["verb"] == "add"]   # open = last event is still 'add'
+    if not rows:
+        print(tr("task_none"))
+        return 0
+    for e in rows:
+        mark = {"add": " ", "done": "x"}.get(e["verb"], "-")
+        print(f"  [{mark}] #{e['id']} {e['author']}: {e['text']}")
+    return 0
+
+
+def cmd_task(args):
+    """Append-only shared to-do ledger (M8SHIFT.tasks.md) — passive, pen-free, the dumb twin of
+    `remember`. add/done/drop append ONE event line; list/show are read-only. Current status is a
+    read-time last-event-wins fold (fold_tasks), NEVER a state machine. HARD INVARIANT: cmd_task
+    never calls set_lock and never mutates the LOCK — task state can never feed the mutex /
+    routing (claim/append/wait never read the task file). --for / blocked_on are advisory text,
+    never enforced, never resolved into a dependency."""
+    verb = args.verb
+    if verb in ("list", "show"):
+        return _cmd_task_read(args)
+    desc = blocked = ""                   # clean user values OUTSIDE the lock (like cmd_remember)
+    if verb == "add":
+        desc = clean_field("desc", args.desc)
+        if not desc:
+            sys.exit(tr("task_empty"))
+        if args.blocked_on:
+            blocked = clean_field("--blocked-on", args.blocked_on)
+    with file_lock():
+        load_or_die()                     # ROSTER/LANG + relay precondition (LOCK ignored)
+        author = need_agent(args.agent)
+        prev = read(TASKS) if os.path.exists(TASKS) else tr("tasks_header")
+        if verb == "add":
+            forname = need_agent(args.for_) if args.for_ else ""   # advisory attribution only
+            text = desc + (f" for:{forname}" if forname else "") + (f" blocked_on:{blocked}" if blocked else "")
+            tid = 1 + max((ev["id"] for ev in parse_tasks(prev)), default=0)  # only derived value
+            new = prev + f"- #{tid} {iso(now())} add {author}: {text}\n"
+            write(new, TASKS)
+            n = sum(1 for ev in fold_tasks(parse_tasks(new)).values() if ev["verb"] == "add")
+        else:                             # done / drop <id>
+            cur = fold_tasks(parse_tasks(prev)).get(args.id)
+            if not cur or cur["verb"] != "add":   # unknown or already terminal — refuse a no-op
+                sys.exit(tr("task_unknown", id=args.id))
+            tid = args.id
+            write(prev + f"- #{tid} {iso(now())} {verb} {author}: \n", TASKS)
+    if verb == "add":
+        print(tr("task_add_ok", id=tid, agent=author, file=os.path.basename(TASKS), n=n))
+    else:
+        print(tr("task_event_ok", id=tid, verb=verb, agent=author, file=os.path.basename(TASKS)))
+    return 0
+
+
 def cmd_archive(args):
     pat = re.compile(
         r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN -->.*?<!-- M8SHIFT:TURN \1 \2 END -->\n?",
@@ -1540,9 +1655,10 @@ def main():
     st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
     st.set_defaults(fn=cmd_status)
 
-    rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns + memory headlines")
+    rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns + memory + tasks")
     rc.add_argument("--turns", type=int, default=6)
     rc.add_argument("--memory", type=int, default=5, help="memory headlines to show (<=0 = all)")
+    rc.add_argument("--tasks", type=int, default=5, help="open-task headlines to show (<=0 = all)")
     rc.set_defaults(fn=cmd_recap)
 
     pk = sub.add_parser("peek", help="last handoff addressed to <agent> (rc 3 if not your turn)")
@@ -1593,6 +1709,24 @@ def main():
     rm.add_argument("agent")
     rm.add_argument("note")
     rm.set_defaults(fn=cmd_remember)
+
+    tk = sub.add_parser("task", help="shared append-only to-do ledger (no pen needed)")
+    tk.set_defaults(fn=cmd_task)
+    tk_sub = tk.add_subparsers(dest="verb", required=True)
+    tk_add = tk_sub.add_parser("add", help="append a task")
+    tk_add.add_argument("agent")
+    tk_add.add_argument("desc")
+    tk_add.add_argument("--for", dest="for_", default="", help="advisory assignee (roster name)")
+    tk_add.add_argument("--blocked-on", dest="blocked_on", default="",
+                        help="advisory wait reason (free text — never enforced or resolved)")
+    for v in ("done", "drop"):
+        tp = tk_sub.add_parser(v, help=f"append a {v} event for a task id")
+        tp.add_argument("agent")
+        tp.add_argument("id", type=int)
+    tk_list = tk_sub.add_parser("list", help="open tasks (--all includes done/drop)")
+    tk_list.add_argument("--all", action="store_true")
+    tk_show = tk_sub.add_parser("show", help="event history of one task id")
+    tk_show.add_argument("id", type=int)
 
     r = sub.add_parser("release")
     r.add_argument("agent")
