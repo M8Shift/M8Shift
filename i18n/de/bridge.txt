@@ -1,0 +1,4 @@
+## Gemeinsame Projektanweisungen
+
+Lies und wende `CLAUDE.md` vollständig an; diese Datei enthält die gemeinsamen Projektanweisungen
+für Claude und Codex.

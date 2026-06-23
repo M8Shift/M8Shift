@@ -83,10 +83,18 @@ python3 m8shift.py init             # project name = folder name (or --name "X")
 | `CLAUDE.md`, `AGENTS.md`, … | each active agent's canonical anchor (the default pair shown) — a stanza is injected at the top without duplicating or overwriting existing content; the prior file is backed up to `<anchor>.cowork.bak` |
 | `AGENTS.override.md`        | if present, Codex's priority anchor; the stanza is synced there too |
 
-Use `--lang en|fr` to pick the language of the generated files (**English by
-default**). Use `--agents a,b` to choose the relaying pair from the roster (default
-`claude,codex`; the **first two** names are active, extra names are stored for the
-future N-agent mode).
+The shipped `m8shift.py` is **English-only**. To generate files in another language,
+build a localized single-file variant from the language packs and run that:
+
+```bash
+python3 m8shift-i18n.py --langs fr,es --into ./dist   # build EN + fr + es
+./dist/m8shift.py init --lang fr                       # then --lang / $M8SHIFT_LANG select it
+```
+
+Packs available: **fr, es, it, de, pt, ja, ru, zh-cn** (non-English are machine-translated,
+pending review — see [CONTRIBUTING.md](CONTRIBUTING.md)). Use `--agents a,b` to choose the
+relaying pair from the roster (default `claude,codex`; the **first two** names are active,
+extra names are stored for the N-agent mode).
 
 **On Windows?** No dependencies (stdlib only) — run via WSL, Git Bash, or
 `python m8shift.py <cmd>` in PowerShell. See [Running on Windows](docs/en/windows.md).
@@ -287,7 +295,8 @@ Licensed under the [Apache License 2.0](LICENSE).
 
 ## Contributing
 
-Issues and pull requests are welcome. M8Shift is a single file by design
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (ground
+rules + how to add or improve a language pack). M8Shift is a single file by design
 ([`m8shift.py`](m8shift.py) is the single source of truth — `M8SHIFT.protocol.md` is
 generated from it), so keep changes focused and covered by a test in `tests/`. Run
 the test suite before opening a PR.
