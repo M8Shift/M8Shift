@@ -212,6 +212,30 @@ then handed off to Codex for an adversarial review through a frozen relay in
 `cowork-relay/`. A **git worktree** of the repo would *not* decouple the engine (it
 tracks the same branch, so its `m8shift.py` changes on edit) — use a frozen copy.
 
+### 11.1 Detecting skew & promoting the engine
+
+The frozen relay copy drifts from the repo as the tool evolves — the **coordinator** (the relay's
+engine) and the **subject** (the repo's `m8shift.py` under edit) are two roles of the same file
+and must be kept distinct. The **version stamp** makes the drift visible: `m8shift.py --version`
+reports the script version, `status`/`recap` print `m8shift.py v<VERSION>`, and the generated
+`M8SHIFT.md` banner records the version that wrote it. Compare `--version` across the two locations
+to spot a stale coordinator (and bump `VERSION` on every release so the comparison is meaningful).
+
+**Promotion (refreshing the engine) is deliberate, never automatic:**
+
+1. Edit + **test the repo copy in isolation** (`python3 -m unittest discover -s tests`) — the relay
+   keeps running on the frozen, stable version, so a broken WIP edit never wedges coordination.
+2. Commit / tag the repo when it reaches a stable point.
+3. **Promote** only when you want the relay to dogfood the new behavior: `cp cowork/m8shift.py
+   <relay>/` (after tests pass), then confirm `m8shift.py --version` matches in both locations.
+   - **Backward-compatible change** (docs, messages, new commands, a new *optional* LOCK field):
+     promote any time — the in-flight `M8SHIFT.md` keeps working.
+   - **Format / protocol-breaking change**: promote **and** reset the relay (`init --force`) so the
+     `M8SHIFT.md` is rewritten by the new engine; the prior in-flight file may be incompatible.
+
+So "the tool that coordinates" stays stable and tested while "the tool being developed" is freely
+broken and fixed; the version stamp is the cheap check that the two have not silently diverged.
+
 ## 12. Planned features & non-goals
 
 Every planned feature stays within M8Shift's qualities (single-file, passive,
