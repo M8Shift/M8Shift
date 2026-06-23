@@ -270,14 +270,14 @@ turns + memory headlines), `peek` (the last handoff addressed to you, parse-free
 `--field key=value` `x_*` namespace, surfaced by `peek`, never interpreted), and **shared
 memory** — `m8shift.py remember <agent> "<note>"` appends to a durable, append-only,
 human-curated `M8SHIFT.memory.md` (no pen needed); its headlines lead `recap`'s briefing so an
-agent resumes across sessions.
+agent resumes across sessions; and **`claim <agent> --check [--files …]`** — a read-only
+advisory probe (takes no pen) that reports claim-readiness plus which of your files were touched
+by others since your last turn.
 
 **Planned features** — every item stays single-file, passive and zero-credential
 (append-only or read-only over data M8Shift already stores; never a daemon, an
 integration, or a second source of truth):
 
-- 🧭 **`claim --check`** *(later)* — advisory, read-only file-overlap collision probe
-  (from the `files:` field), without granting a concurrent work window.
 - 🌿 **`subturn`** *(later)* — record an agent's own sub-agent fan-out under its turn.
 - 🗂️ **Tasks board / block-on** *(maybe)* — an append-only to-do partition; name an
   external dependency as an explicit `blocked_on` wait reason.
