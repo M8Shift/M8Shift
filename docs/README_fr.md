@@ -220,12 +220,12 @@ M8Shift est une **primitive de coordination**, pas une plateforme d'agents. Il f
 volontairement **une seule chose** : garantir que, parmi les agents déjà lancés sur un
 dépôt partagé, un seul écrit à la fois (alternance stricte).
 
-Les orchestrateurs/runtimes complets (p. ex. **[OpenClaw](https://docs.openclaw.ai/)**)
+Les orchestrateurs/runtimes complets (frameworks d'agents comme **LangGraph**, **AutoGen**, **CrewAI**)
 couvrent bien plus — ils *font tourner* les agents : gestion de session, dispatch
 d'outils, mémoire, sous-agents, workflows **parallèles et** séquentiels. Eux aussi
 savent alterner ; la vraie différence est le **périmètre et l'empreinte** :
 
-| | Orchestrateur (p. ex. OpenClaw) | M8Shift |
+| | Orchestrateur (p. ex. LangGraph) | M8Shift |
 |---|---------------------------------|--------|
 | Nature | un runtime/gateway qui **pilote** les agents | un **verrou** mono-fichier que les agents interrogent |
 | Installation | une plateforme à déployer + configurer (providers, auth) | `cp m8shift.py` — stdlib, ni daemon ni serveur |
