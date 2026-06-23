@@ -61,10 +61,14 @@ coordination / merge path of the mutex**, not "runs nothing."
 ## 3. The governing decision: turn-header markdown, not YAML
 
 All Stage-2 structured data lives in the LOCK block, turn headers, and task blocks as flat
-`key: value` lines (lists are comma-separated). **Key grammar: `[a-z_]+`** (snake_case; this is
-exactly what `get_lock`'s parser at m8shift.py:1165 accepts — hyphens and digits are **not**
-matched and would be silently dropped). So all field keys are snake_case (`target_role`, not
+`key: value` lines (lists are comma-separated). **Key grammar: `[a-z_]+`** in the LOCK block
+(snake_case; exactly what `get_lock`'s parser accepts — hyphens and digits are **not** matched
+there and would be silently dropped). So all field keys are snake_case (`target_role`, not
 `target-role`); relations, ids and role names are **values**, never keys.
+
+> Note (shipped §5): the **turn-journal** parser (`parse_turns`, used by peek/recap/log) widens
+> turn-field keys to `[a-z][a-z0-9_]*` so the open `x_*` advisory namespace may carry digits
+> (e.g. `x_pr2`). The LOCK-block grammar is unchanged.
 
 Turns and task blocks are **not parsed back today** (only the LOCK block is). `peek`/`recap`/
 `tasks` therefore introduce **one new shared `key: value` block parser** (with a test that an
