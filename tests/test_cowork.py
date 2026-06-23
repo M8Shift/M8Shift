@@ -1531,6 +1531,17 @@ class TestAuditFixes(CLIBase):
         self.assertNotIn("you may acquire", s)
         self.assertTrue("DONE" in s or "stop" in s)
 
+    def test_version_surface(self):
+        # dogfooding skew check: --version, status/recap, M8SHIFT.md banner, status --json carry VERSION
+        v = cowork.VERSION
+        self.assertRegex(v, r"^\d+\.\d+\.\d+")
+        self.assertIn(v, self.cw("--version").stdout)
+        self.init()
+        self.assertIn(f"v{v}", self.cw("status").stdout.splitlines()[0])
+        self.assertIn(f"v{v}", self.cw("recap").stdout.splitlines()[0])
+        self.assertIn(v, self.md())                                   # stamped in the M8SHIFT.md banner
+        self.assertEqual(json.loads(self.cw("status", "--json").stdout)["m8shift_version"], v)
+
     def test_done_release_are_baton_owner_ops(self):
         # #4: in AWAITING_*, `holder` is the baton owner; done/release act for them WITHOUT an
         # active claim (append, the work write, still needs the pen). A non-holder is refused.
