@@ -276,11 +276,11 @@ by others since your last turn; and a **tasks board** — `task add/done/drop/li
 durable, append-only `M8SHIFT.tasks.md` (no pen needed; `--for`/`--blocked-on` are advisory free
 text, never enforced), with open-task headlines in `recap`.
 
-**Planned features** — every item stays single-file, passive and zero-credential
-(append-only or read-only over data M8Shift already stores; never a daemon, an
-integration, or a second source of truth):
-
-- 🌿 **`subturn`** *(later)* — record an agent's own sub-agent fan-out under its turn.
+**Planned features** — the roadmap is complete: every staged feature has shipped (see *Shipped*
+above), and the last candidate, `subturn` (sub-agent fan-out provenance), was deliberately
+**rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn
+durable streaming, so a fourth ledger would be redundant surface
+([rationale](docs/en/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/`.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
 disjoint writes (that is the stage-2 degree-2 lock, not today's degree-1 pen); a
