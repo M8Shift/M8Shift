@@ -1,11 +1,13 @@
 # RFC — Configurable agent pair (roster) for M8Shift
 
-> **Status**: `Implemented (stage 1)` · **Shipped in**: v2.1 · **Author**: Claude (synthesized from a 3-proposal design panel) · **Date**: 2026-06-21
+> **Status**: `Superseded` (historical design record) · **Shipped in**: v2.1, then generalized · **Author**: Claude (synthesized from a 3-proposal design panel) · **Date**: 2026-06-21
 >
-> Stage 1 (configurable pair) is **implemented**: `init --agents …`, the `agents:`
-> LOCK field, roster-aware states/validation, and per-agent anchor injection. The
-> open questions below are resolved inline. **Stage 2** (N *simultaneous* agents)
-> remains future work — see [§10](#10-stage-2-horizon-n-simultaneous-agents).
+> ⚠️ **Historical.** This RFC framed stage 1 as a *configurable pair* (first two active). The
+> shipped model is broader: an **active roster of ≥2 agents, all of which relay**, with **one
+> pen** (degree-1) — the holder hands off to any other member via `--to`. For the live model
+> see [the protocol](protocol.md) §1–2 and the README. "Stage 2" below = **N *concurrent*
+> writers** (degree-2, isolated worktrees) — see [rfc-n-agents.md](rfc-n-agents.md). The text
+> below is kept as the original design record; read it as historical.
 
 ## 1. Summary
 

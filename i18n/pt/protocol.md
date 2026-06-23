@@ -154,7 +154,7 @@ trabalhar é o que garante que um único agente modifica o repositório por vez.
 > Um `.m8shift.lock` abandonado (processo morto) é tomado após 60 s, token
 > verificado. *Limites*: o bloqueio é **consultivo** (uma edição manual de `M8SHIFT.md`
 > o contorna); num FS de rede (NFS) `O_EXCL`/`rename` são menos confiáveis —
-> o cowork visa um repositório em disco local. Veja também §0/§4 (claim obrigatório).
+> o M8Shift visa um repositório em disco local. Veja também §0/§4 (claim obrigatório).
 
 ---
 
@@ -191,7 +191,7 @@ Salvaguarda:
 ## 7. A ferramenta `m8shift.py`
 
 ```
-./m8shift.py init [--name PROJECT] [--agents a,b] [--lang en|fr] [--force]  # (re)gera o kit aqui
+./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)gera o kit aqui
 ./m8shift.py status                                # bloqueio + último turno (NÃO bloqueante)
 ./m8shift.py wait <agent> [--once] [--interval N]  # aguarda sua vez ; --once = 1 verificação (rc 3 se não for sua vez)
 ./m8shift.py claim <agent> [--force]               # ADQUIRE a caneta (exclusivo) — a partir da sua vez /
@@ -233,7 +233,7 @@ cp /path/to/m8shift.py .          # copie o único arquivo necessário
   (por padrão `CLAUDE.md` e `AGENTS.md`; criados se ausentes), entre
   marcadores `M8SHIFT:STANZA` → reinjeção **idempotente** (move/atualiza o bloco
   sem duplicar, conteúdo existente preservado; o arquivo anterior é salvo em
-  `<anchor>.cowork.bak`);
+  `<anchor>.m8shift.bak`);
 - se `CLAUDE.md` existia mas nenhuma instrução do Codex (`AGENTS.md` ou
   `AGENTS.override.md`) existia, cria automaticamente em `AGENTS.md` uma ponte
   pedindo ao Codex que leia as instruções compartilhadas em `CLAUDE.md`. Uma âncora
@@ -247,7 +247,7 @@ cp /path/to/m8shift.py .          # copie o único arquivo necessário
 
 ### Bootstrap / adoção pelos agentes
 
-o cowork é **passivo**: ele nunca "chama" nenhuma IA. Ele se apoia na convenção de cada
+o M8Shift é **passivo**: ele nunca "chama" nenhuma IA. Ele se apoia na convenção de cada
 ferramenta hospedeira — **Claude lê `CLAUDE.md`, Codex lê `AGENTS.md`**, e qualquer outro agente ativo
 lê sua própria âncora — no início da sessão/execução. A cadeia de bootstrap é
 portanto:
@@ -272,7 +272,7 @@ flowchart LR
   transborda para a contagem de bytes restante. Colocar a estrofe no topo assim
   a mantém em prioridade (e um arquivo mais próximo do cwd tem precedência);
   no entanto mantenha as âncoras **leves**.
-- **Limite geral**: o cowork não pode forçar uma IA a ler nada. Sem uma
+- **Limite geral**: o M8Shift não pode forçar uma IA a ler nada. Sem uma
   raiz/contexto de projeto, aponte o agente explicitamente para `M8SHIFT.protocol.md`.
 
 Referência do Codex: https://developers.openai.com/codex/guides/agents-md

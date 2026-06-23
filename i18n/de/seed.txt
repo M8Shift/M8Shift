@@ -32,9 +32,7 @@ note:     Sitzung initialisiert, kein Zug eröffnet
 - from:    system
 - to:      none
 - ask:     —
-- done:    Relais-Initialisierung. Der erste Agent, der startet, führt
-           `./m8shift.py claim __A__` (oder `__B__`) aus, arbeitet, dann
-           `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
+- done:    Relais-Initialisierung. Der erste Agent, der startet, führt `./m8shift.py claim __A__` (oder `__B__`) aus, arbeitet, dann `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
 - files:   M8SHIFT.md, M8SHIFT.protocol.md, m8shift.py
 - handoff: none
 <!-- M8SHIFT:TURN 0 system END -->

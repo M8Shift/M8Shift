@@ -153,7 +153,7 @@ travailler est ce qui garantit qu'un seul agent modifie le dépôt à la fois.
 >
 > Un `.m8shift.lock` abandonné (process tué) est repris après 60 s, jeton vérifié.
 > *Limites* : verrou **conseillé** (une édition manuelle de `M8SHIFT.md` le
-> contourne) ; sur FS réseau (NFS) `O_EXCL`/`rename` sont moins fiables — cowork
+> contourne) ; sur FS réseau (NFS) `O_EXCL`/`rename` sont moins fiables — M8Shift
 > vise un dépôt sur disque local. Voir aussi §0/§4 (claim obligatoire).
 
 ---
@@ -189,7 +189,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ## 7. Outil `m8shift.py`
 
 ```
-./m8shift.py init [--name PROJET] [--agents a,b] [--lang en|fr] [--force]  # (re)génère le kit ici
+./m8shift.py init [--name PROJET] [--agents a,b,c…] [--lang <code>] [--force]  # (re)génère le kit ici
 ./m8shift.py status                                # verrou + dernier tour (NON bloquant)
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
 ./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
@@ -231,7 +231,7 @@ cp /chemin/vers/m8shift.py .      # copier le seul fichier nécessaire
   actif** (par défaut `CLAUDE.md` et `AGENTS.md` ; créés s'ils manquent), entre
   marqueurs `M8SHIFT:STANZA` → ré-injection **idempotente** (déplace/actualise le bloc
   sans dupliquer, contenu existant préservé ; le fichier précédent est sauvegardé dans
-  `<ancrage>.cowork.bak`) ;
+  `<ancrage>.m8shift.bak`) ;
 - si `CLAUDE.md` existait mais qu'aucune instruction Codex (`AGENTS.md` ou
   `AGENTS.override.md`) n'existait, crée automatiquement dans `AGENTS.md` un pont
   demandant à Codex de lire les instructions communes de `CLAUDE.md`. Un ancrage
@@ -246,7 +246,7 @@ cp /chemin/vers/m8shift.py .      # copier le seul fichier nécessaire
 
 ### Amorçage / prise en compte par les agents
 
-cowork est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention de
+M8Shift est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention de
 chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`**, et tout autre
 agent actif lit son propre ancrage — au démarrage de session/exécution. La chaîne
 d'amorçage est donc :
@@ -271,7 +271,7 @@ flowchart LR
   dépasse au nombre d'octets restant. Mettre la strophe en tête la conserve donc en
   priorité (et un fichier plus proche du cwd prime) ; garde néanmoins les ancrages
   **légers**.
-- **Limite générale** : cowork ne peut pas forcer une IA à lire quoi que ce soit.
+- **Limite générale** : M8Shift ne peut pas forcer une IA à lire quoi que ce soit.
   Sans racine/contexte projet, pointe explicitement l'agent vers
   `M8SHIFT.protocol.md`.
 

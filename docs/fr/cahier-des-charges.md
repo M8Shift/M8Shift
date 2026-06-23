@@ -1,6 +1,12 @@
 # Cahier des charges — M8Shift
 
-> **Statut** : `Validé` · **Version** : protocole v1 · **Dernière revue** : 2026-06-21
+> **Statut** : `Obsolète / non-autoritatif` · **Version** : protocole v1 · **Dernière revue** : 2026-06-21
+>
+> ⚠️ **Document obsolète.** Cette traduction FR précède le modèle **N-agent** et les changements
+> **v3** (cœur EN-only + injecteur i18n, mémoire partagée, `claim --check`, tasks board) ; elle
+> cite des faits périmés (74 tests, API `remember --key` / `M8SHIFT:MEM` / `tasks claim` / `fnmatch`).
+> **La référence à jour est la doc anglaise** : [specification.md](../en/specification.md) et
+> [protocol.md](../en/protocol.md). À retraduire (review-pending).
 
 ---
 

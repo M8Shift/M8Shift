@@ -6,10 +6,10 @@
 
 _Different agents. Different roles. One coordinated workflow._
 
-**A single-file relay that lets two AI agents — a configurable pair from a roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation.**
+**A single-file relay that lets two or more AI agents — an active roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation (one writer at a time).**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#tests)
+[![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#tests)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#install)
 [![single file](https://img.shields.io/badge/single%20file-m8shift.py-orange.svg)](m8shift.py)
 [![no API key](https://img.shields.io/badge/API%20key-not%20required-success.svg)](#runs-anywhere--no-api-key)
@@ -29,11 +29,11 @@ English | [Français](docs/README_fr.md)
 
 M8Shift is a **cooperative mutex** for AI agents. When Claude and Codex work on the
 same repository, they overwrite each other. M8Shift introduces a single **pen**: at
-any moment, exactly one agent is allowed to write; the other waits for its turn and
+any moment, exactly one agent is allowed to write; the others wait for their turn and
 knows precisely what is expected of it.
 
 The whole kit fits in **one file**: [`m8shift.py`](m8shift.py). You copy it to the
-root of a project, run `init`, and the two agents hand off to each other through a
+root of a project, run `init`, and the agents hand off to each other (any roster member to any other) through a
 shared `M8SHIFT.md` file. The whole procedure is **embedded in the generated files**,
 so the agents need **no human explanation**. *Caveat for interactive UIs* (VS Code, …):
 a human still nudges each agent to *resume* between turns — `wait` blocks a process but
@@ -43,8 +43,8 @@ does not wake an agent's chat UI. See [Limitations](#limitations).
 
 When Claude and Codex share a repository, they have no way to take turns: edits
 collide and work is lost. M8Shift fixes this with a single exclusive lock (the
-**pen**) and one simple rule — **acquire the pen before working** — so the two
-agents never modify the repository at the same time. The coordination state lives
+**pen**) and one simple rule — **acquire the pen before working** — so no two
+agents ever modify the repository at the same time. The coordination state lives
 in a versionable file, readable both by eye and by `grep`, and preserved over time.
 No daemon, no server, no external dependency — just one Python file and the host
 tools' own conventions.
@@ -80,7 +80,7 @@ python3 m8shift.py init             # project name = folder name (or --name "X")
 |-----------------------------|------|
 | `M8SHIFT.md`                 | **the** living file: the lock (`LOCK`) + the turn journal |
 | `M8SHIFT.protocol.md`        | the full shared instruction (read once by each agent) |
-| `CLAUDE.md`, `AGENTS.md`, … | each active agent's canonical anchor (the default pair shown) — a stanza is injected at the top without duplicating or overwriting existing content; the prior file is backed up to `<anchor>.cowork.bak` |
+| `CLAUDE.md`, `AGENTS.md`, … | each active agent's canonical anchor (the default pair shown) — a stanza is injected at the top without duplicating or overwriting existing content; the prior file is backed up to `<anchor>.m8shift.bak` |
 | `AGENTS.override.md`        | if present, Codex's priority anchor; the stanza is synced there too |
 
 The shipped `m8shift.py` is **English-only**. To generate files in another language,
@@ -92,9 +92,9 @@ python3 m8shift-i18n.py --langs fr,es --into ./dist   # build EN + fr + es
 ```
 
 Packs available: **fr, es, it, de, pt, ja, ru, zh-cn** (non-English are machine-translated,
-pending review — see [CONTRIBUTING.md](CONTRIBUTING.md)). Use `--agents a,b` to choose the
-relaying pair from the roster (default `claude,codex`; the **first two** names are active,
-extra names are stored for the N-agent mode).
+pending review — see [CONTRIBUTING.md](CONTRIBUTING.md)). Use `--agents a,b,c…` to choose the
+**active roster** (default `claude,codex`): **all** declared agents relay — the pen holder
+hands off to any other member via `--to` — still one writer at a time (degree-1).
 
 **On Windows?** No dependencies (stdlib only) — run via WSL, Git Bash, or
 `python m8shift.py <cmd>` in PowerShell. See [Running on Windows](docs/en/windows.md).
@@ -106,12 +106,12 @@ and run `init` as above.
 ## Quickstart
 
 Each agent runs the same loop: `wait → claim → work → append`. `<you>` is your own
-agent name and `<other>` the other active agent (the examples below use the default
+agent name and `<other>` any other roster member you hand to (the examples below use the default
 pair `claude`/`codex`).
 
 ```bash
 ./m8shift.py status                # who holds the pen? (non-blocking)
-./m8shift.py wait claude --once    # rc 0 = you may acquire; rc 3 = not yet
+./m8shift.py wait claude --once    # rc 0 = your turn (or DONE = stop); rc 3 = not yet
 
 # Acquire the pen BEFORE working (exclusive: only one winner):
 ./m8shift.py claim claude          # rc 0 = you hold the pen; otherwise not your turn
@@ -144,9 +144,9 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 
 M8Shift stores its state in the `LOCK` block at the top of `M8SHIFT.md`. To work, an
 agent must first **take the pen** with `claim` (state `WORKING_<you>`), an
-**exclusive acquisition**: if two agents claim at once, only one wins. Because work
+**exclusive acquisition**: if several agents claim at once, only one wins. Because work
 happens only while you hold the pen and `append` is accepted only from
-`WORKING_<you>`, the two agents never write the repository concurrently. This
+`WORKING_<you>`, no two agents ever write the repository concurrently. This
 **claim-before-work** rule is the heart of M8Shift.
 
 ```mermaid
@@ -160,10 +160,10 @@ flowchart LR
 ```
 
 The lock fields — `holder`, `state`, `agents`, `turn`, `since`, `expires`, `note`,
-`lang` — are one `key: value` per line (easy to `grep`). `holder` is an active agent
-or `none`; `agents` is the relaying pair (the first two declared, default
-`claude,codex`); states are `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE` (`<X>` = an
-active agent, uppercased). Turns are framed by `M8SHIFT:TURN <n> <agent> BEGIN/END`
+`lang` — are one `key: value` per line (easy to `grep`). `holder` is the pen holder
+while `WORKING_*` / the awaited (baton-owner) agent while `AWAITING_*`, or `none`;
+`agents` is the active roster (all declared agents, ≥2; default `claude,codex`); states
+are `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE` (`<X>` = an active agent, uppercased). Turns are framed by `M8SHIFT:TURN <n> <agent> BEGIN/END`
 HTML comments (invisible in
 Markdown rendering) and are **immutable** once closed.
 
@@ -173,11 +173,11 @@ Verified by the tests and by multi-agent review:
 
 - **Mutex over the work window** — `claim` is the exclusive acquisition of the pen
   (two simultaneous `claim`s ⇒ a single winner); `append` is accepted only from
-  `WORKING_<you>`. You work only after a successful `claim`, so two agents never
+  `WORKING_<you>`. You work only after a successful `claim`, so no two agents ever
   modify the repository at the same time. `--to` ≠ self (strict alternation).
 - **Stale-lock recovery** — `claim --force` reclaims **only a stale lock** (refused
   on an active one); the holder can refresh its own lock.
-- **Guardrails** — `release` / `done` require holding the pen (`--force` = recovery).
+- **Guardrails** — `release` / `done` are baton-owner ops (the `holder`: pen holder in WORKING / awaited agent in AWAITING); only `append` requires the pen. `--force` = recovery.
 - **Serialized concurrency** — an inter-process lock `.m8shift.lock` (`O_EXCL`, with
   an ownership token) plus atomic writes (unique temp file + `os.replace`, mode
   preserved) ⇒ two concurrent `m8shift.py` runs never corrupt the file.
@@ -199,9 +199,9 @@ Verified by the tests and by multi-agent review:
   the mutex. A system notification/webhook can *signal* a turn but cannot *wake* the AI
   by itself. An example runner is provided:
   [`examples/headless_runner.py`](examples/headless_runner.py).
-- **Cooperative, two-agent, advisory** — see the
-  [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, two
-  simultaneous agents).
+- **Cooperative, N-agent, advisory** — see the
+  [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, one
+  writer at a time).
 
 ## Tests
 
@@ -211,10 +211,10 @@ No external Python dependency (stdlib only):
 python3 -m unittest discover -s tests        # from the repo root
 ```
 
-**74 tests**: unit tests (pure functions) + CLI regression tests (one per fixed
-bug, referenced `NR-n`) covering the claim model, mutex, claude/codex concurrency,
-canonical/override anchors, the configurable roster, archive, robustness, and
-injection safety.
+**Test suite**: unit tests (pure functions) + CLI regression tests (one per fixed
+bug, referenced `NR-n`) covering the claim model, the one-pen mutex, the N-agent relay,
+canonical/override anchors, the configurable roster, advisory turn fields, shared
+memory, `claim --check`, the tasks board, archive, robustness, and injection safety.
 
 ## Positioning — not an orchestrator
 
@@ -256,12 +256,12 @@ competing (M8Shift could even be the lock inside a larger setup).
 M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 [architecture §1.8](docs/en/architecture.md). Two staged steps:
 
-1. **Configurable pair (shipped)** — choose the two relaying agents from an
-   **extensible roster** via `m8shift.py init --agents a,b`; the first two relay,
-   extra names are stored for later. Still **2 simultaneous** (degree-1). See
-   [RFC — configurable agent pair](docs/en/rfc-roster.md).
-2. **N simultaneous agents** — true multi-agent (degree > 1); a separate, larger
-   step with its own future RFC.
+1. **N-agent roster, one pen (shipped)** — declare any roster of ≥2 agents via
+   `m8shift.py init --agents a,b,c…`; **all** of them relay (the holder hands the pen to
+   any other member via `--to`), still **one writer at a time** (degree-1). See
+   [RFC — configurable agent roster](docs/en/rfc-roster.md).
+2. **N concurrent writers** — true degree > 1 (multiple pens / isolated worktrees with
+   serialized integration); a separate, larger step with its own future RFC.
 
 **Shipped read / handoff surface** — `recap` (session-start briefing: current LOCK + recent
 turns + memory headlines), `peek` (the last handoff addressed to you, parse-free), `log`
