@@ -32,8 +32,12 @@ LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXC
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-LANGS = ("en", "fr")             # supported languages (catalog keys + CLI choices)
+LANGS = ("en", "fr")             # languages BUILT INTO this file (catalog keys + CLI choices)
 DEFAULT_LANG = "en"              # default / ultimate fallback language
+# Well-formed language tags M8Shift recognizes — a curated SUPERSET of LANGS. The LOCK `lang`
+# field is validated against THIS (not the build-local LANGS), so a file written by a build that
+# bundles more languages stays loadable here; an unbuilt language just downgrades to DEFAULT_LANG.
+KNOWN_LANGS = ("en", "fr", "es", "it", "de", "pt", "ja", "ru", "zh-cn")
 AGENTS = ("claude", "codex")     # default active pair
 ROSTER = AGENTS                  # current ACTIVE roster (>=2 agents) — refined at runtime
 AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
@@ -1080,7 +1084,9 @@ def load_or_die():
         errs.append(f"turn={lk.get('turn')!r}")
     if lk.get("holder") not in set(roster) | {"none"}:
         errs.append(f"holder={lk.get('holder')!r}")
-    if lk.get("lang") not in (None, *LANGS):
+    # validate against KNOWN_LANGS (a curated superset), NOT the build-local LANGS, so a file
+    # whose lang isn't bundled here is still loadable (resolve_lang downgrades it to en).
+    if lk.get("lang") not in (None, *KNOWN_LANGS):
         errs.append(f"lang={lk.get('lang')!r}")
     if errs:
         sys.exit(tr("lock_invalid", file=os.path.basename(COWORK), errs=", ".join(errs)))

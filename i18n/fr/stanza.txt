@@ -1,0 +1,30 @@
+{begin}
+## Co-work relais — auto-suffisant (aucune explication humaine requise)
+
+Tu es **{me}** dans ce projet. Dès qu'un `M8SHIFT.md` est présent à la racine,
+c'est ta source de coordination avec **{other}** : applique `M8SHIFT.protocol.md`
+(lis-le une fois, voir son §0) AVANT tout autre travail. **Tu ne travailles et
+n'écris que si tu as acquis le stylo via `claim`.**
+
+```bash
+./m8shift.py status                # qui a la main ? (non bloquant)
+./m8shift.py wait {me} --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
+```
+
+- **Acquiers d'abord** (`state == AWAITING_{ME}` ou `IDLE`) :
+  `./m8shift.py claim {me}` — **exclusif** : si {other} a déjà pris le stylo, ça
+  échoue → reviens à l'attente. Si ça réussit, tu tiens le stylo (`WORKING_{ME}`).
+- **Puis travaille et clôts ton tour** : lis le `ask:` que {other} t'a laissé
+  (en démarrage IDLE, rien à honorer), fais le travail, puis :
+  `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+- **Pas ton tour** : ne touche à rien ; `./m8shift.py wait {me}` bloque jusqu'à ton
+  tour (poll ~60 s), puis retente `claim`.
+- **Verrou de {other} périmé** (`WORKING_{OTHER}` + `now > expires`) :
+  `./m8shift.py claim {me} --force`.
+
+Un tour clôturé est immuable : pour réagir, ouvre le tour suivant.
+
+_Note UI interactive_ : dans une UI de chat (VS Code, …) un humain te relance entre les
+tours — `wait` bloque un processus, il ne réveille pas ton UI. Un relais entièrement
+autonome nécessite un lanceur headless (sans interface).
+{end}
