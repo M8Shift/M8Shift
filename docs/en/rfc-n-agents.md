@@ -7,6 +7,11 @@
 - **Rationale & rejected alternatives:** [stage2-rationale.md](stage2-rationale.md) — why each
   choice was made and what was discarded.
 
+> ℹ️ **Status update.** The **degree-1 N-agent relay** designed here (the active roster + read
+> commands `recap`/`peek`/`log`/`status --json`) is **shipped** (v2.3.0–v2.4.0). The remaining
+> **tier-2 / §8** work — the isolated-worktree **companion** for true degree-2 concurrency — is
+> the next step. Any `cowork`/`COWORK` names below are the project's **legacy** name (now M8Shift).
+
 ## 0. Two tiers (the framing that resolves the identity tension)
 
 Stage 2 is split into two clearly separated tiers:

@@ -82,14 +82,14 @@ ANCHORS = {
 
 PROTOCOL_EN = r"""# M8Shift · Single-file relay protocol (v1)
 
-Shared instruction for the **two active agents** (by default **Claude** and
-**Codex**) to cooperate through a single
+Shared instruction for the **active agents** — a roster of two or more (by default
+**Claude** and **Codex**) — to cooperate through a single
 `M8SHIFT.md` file, in strict alternation (mutex), with periodic polling. Portable:
 this protocol is identical in every project; only the title of `M8SHIFT.md`
 changes.
 
 Read it **once at the start of a session** as soon as you see a `M8SHIFT.md` at
-the root of a project. You are **one of the two active agents** declared in the
+the root of a project. You are **one of the active agents** declared in the
 `agents:` field of `M8SHIFT.md` (by default `claude` and `codex`) — identify yourself
 by your anchor file.
 
@@ -99,15 +99,15 @@ by your anchor file.
 
 You have just arrived in the project and you see a `M8SHIFT.md`: here is the
 complete, copy-pasteable loop, **no other instruction is required**. `<you>` is your
-own agent name and `<other>` is the other active agent (the pair declared in
-`agents:`; by default `claude` / `codex`, via the `CLAUDE.md` / `AGENTS.md` anchors).
+own agent name and `<other>` is the agent you hand the pen to — any *other* member of
+the `agents:` roster (with the default `claude`/`codex` pair, simply the other one).
 
 ```bash
 # 1. Am I expected? (NON-blocking commands)
 ./m8shift.py status                 # read the `state` field
-./m8shift.py wait <you> --once      # rc 0 = you may acquire ; rc 3 = not yet
+./m8shift.py wait <you> --once      # rc 0 = your turn (or DONE = stop) ; rc 3 = not yet
 
-# 2. ACQUIRE the pen BEFORE working (EXCLUSIVE acquisition: when two agents
+# 2. ACQUIRE the pen BEFORE working (EXCLUSIVE acquisition: when several agents
 #    try at the same time, only one succeeds):
 ./m8shift.py claim <you>           # rc 0 = you hold the pen ; rc != 0 = not your turn
 #    • If claim SUCCEEDS: read the `ask:` that <other> left you in the last
@@ -138,13 +138,14 @@ pen. Everything else in this document is just the detail of this loop.
 
 - **A single living file**: `M8SHIFT.md`. The entire work dialogue is there.
 - **A single pen, explicitly acquired**: to work, you **take** the pen via
-  `claim` → state `WORKING_<you>`. `claim` is **exclusive** (two agents trying
+  `claim` → state `WORKING_<you>`. `claim` is **exclusive** (several agents trying
   at the same time: only one succeeds). You modify the repository **only** while
   you hold the pen.
 - **`append` closes your turn**: it is accepted only from `WORKING_<you>`,
   writes the turn and hands off (`AWAITING_<other>`). No `claim` ⇒ no `append`.
-- **Strict alternation**: the two active agents take turns (e.g. `claude` → `codex`
-  → `claude` …). Each hand-off is a numbered *turn* (`TURN`), framed by `BEGIN`/`END`.
+- **One pen, explicit recipient**: the active agents take turns — the holder hands the
+  pen to any *other* roster member via `--to` (e.g. `claude` → `codex` → `claude` …; with
+  3+ agents, to whichever you name). Each hand-off is a numbered *turn* (`TURN`).
 - **Poll**: when it is not your turn, you wait (`./m8shift.py wait <you>`,
   ~60 s) then you retry `claim`.
 
@@ -157,9 +158,9 @@ Fields (one `key: value` per line, easy to `grep`):
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | an active agent \| `none` | who holds the pen (default `claude`/`codex`) |
+| `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*` |
 | `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
-| `agents`  | CSV, e.g. `claude,codex` | the relaying pair (the first two declared); default `claude,codex` |
+| `agents`  | CSV, e.g. `claude,codex` | the active roster (all declared agents, ≥2); default `claude,codex` |
 | `turn`    | integer | number of the last closed turn |
 | `since`   | ISO-8601 UTC | since when this state has lasted |
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock takeover deadline (TTL 30 min) |
@@ -170,8 +171,8 @@ Fields (one `key: value` per line, easy to `grep`):
 > `DONE`): nobody holds the pen, so there is no staleness to watch.
 
 **Reading the states** (`<X>` is an active agent — by default `claude`/`codex`):
-- `AWAITING_<X>` → it is `<X>`'s turn to play (the other agent waits).
-- `WORKING_<X>` → `<X>` holds the pen and is working (the other waits, touches nothing).
+- `AWAITING_<X>` → it is `<X>`'s turn to play (the other agents wait).
+- `WORKING_<X>` → `<X>` holds the pen and is working (the others wait, touch nothing).
 - `IDLE` → nobody has the hand, the first who has something to say starts.
 - `DONE` → session closed, no further relay expected.
 
@@ -183,7 +184,7 @@ Fields (one `key: value` per line, easy to `grep`):
 <!-- M8SHIFT:TURN <n> <agent> BEGIN -->
 - from:    <agent>           # an active agent
 - to:      <agent|none>      # to whom you hand off
-- ask:     <what you expect from the other, precise and actionable>
+- ask:     <what you expect from the recipient, precise and actionable>
 - done:    <what you just did>
 - files:   <files touched, comma-separated>
 - handoff: <agent|none>      # = to ; deliberate redundancy, grep-friendly
@@ -195,7 +196,7 @@ Fields (one `key: value` per line, easy to `grep`):
 Rules:
 - A **closed** turn (`END` set) is **immutable**. To react, you open the next
   turn. Never retroactive rewriting.
-- `ask` must be actionable: the other agent must be able to start without asking
+- `ask` must be actionable: the recipient must be able to start without asking
   you again. If you expect nothing (just an FYI), put `ask: —`.
 - Keep a turn **bounded**: if it exceeds ~150 lines or several topics, split it
   into several successive turns (one topic = one turn).
@@ -230,19 +231,19 @@ working is what guarantees that a single agent modifies the repository at a time
 > 2. **Work window** protected by the persistent state `WORKING_<agent>`:
 >    `claim` is the only acquisition, and it fails if someone else holds or has
 >    already taken the pen. Two simultaneous `claim`s from `IDLE` ⇒ **only one
->    succeeds**; the other must wait. Since we work only after a successful
->    `claim`, two agents never modify the repository at the same time.
+>    succeeds**; the others must wait. Since we work only after a successful
+>    `claim`, no two agents ever modify the repository at the same time.
 >
 > An abandoned `.m8shift.lock` (killed process) is taken over after 60 s, token
 > verified. *Limits*: the lock is **advisory** (a manual edit of `M8SHIFT.md`
 > bypasses it); on a network FS (NFS) `O_EXCL`/`rename` are less reliable —
-> cowork targets a repository on local disk. See also §0/§4 (mandatory claim).
+> M8Shift targets a repository on local disk. See also §0/§4 (mandatory claim).
 
 ---
 
 ## 5. Anti-deadlock (stale lock)
 
-If the other agent crashes while holding the pen, the lock would stay stuck.
+If an agent crashes while holding the pen, the lock would stay stuck.
 Guardrail:
 - on CLAIM, we set `expires = now + 30 min`;
 - if you see `state == WORKING_<other>` **and** `now > expires`, the lock is
@@ -253,8 +254,10 @@ Guardrail:
   intentional);
 - you can **refresh your own** lock before it expires: `./m8shift.py claim
   <you>` when you already hold it resets `expires` to +30 min;
-- `release` and `done` act only if **you** hold the pen (or if nobody holds it);
-  `--force` overrides, reserved for recovery.
+- `release` and `done` are **baton-owner** admin ops: they act if you are the `holder`
+  (pen holder while `WORKING_*`, or the awaited agent while `AWAITING_*`) or if nobody
+  holds it — they do **not** require an active `claim`, unlike `append` (the only *work*
+  write, which needs `WORKING_<you>`); `--force` overrides, reserved for recovery.
 
 ---
 
@@ -273,7 +276,7 @@ Guardrail:
 ## 7. The `m8shift.py` tool
 
 ```
-./m8shift.py init [--name PROJECT] [--agents a,b] [--lang en|fr] [--force]  # (re)generates the kit here
+./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py status                                # lock + last turn (NON-blocking)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
@@ -286,11 +289,11 @@ Guardrail:
 ```
 
 - **`claim` first**: you must hold the pen (`WORKING_<you>`) to `append`.
-  `claim` is **exclusive** (a single winner if two agents try together).
+  `claim` is **exclusive** (a single winner if several agents try together).
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header.
-- `--to` must target **the other** agent (self-hand-off refused: strict alternation).
+- `--to` must target **a different active agent** (self-hand-off refused; with 3+ agents, name the recipient).
 - **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
   **without** `--once` blocks until your turn — do not use it if you must return
   control to your loop in the meantime.
@@ -315,7 +318,7 @@ cp /path/to/m8shift.py .          # copy the only file needed
   (by default `CLAUDE.md` and `AGENTS.md`; created if missing), between
   `M8SHIFT:STANZA` markers → **idempotent** re-injection (moves/updates the block
   without duplicating, existing content preserved; the prior file is backed up to
-  `<anchor>.cowork.bak`);
+  `<anchor>.m8shift.bak`);
 - if `CLAUDE.md` existed but no Codex instruction (`AGENTS.md` or
   `AGENTS.override.md`) existed, automatically creates in `AGENTS.md` a bridge
   asking Codex to read the shared instructions in `CLAUDE.md`. A pre-existing
@@ -329,7 +332,7 @@ cp /path/to/m8shift.py .          # copy the only file needed
 
 ### Bootstrap / uptake by the agents
 
-cowork is **passive**: it never "calls" any AI. It relies on the convention of each
+M8Shift is **passive**: it never "calls" any AI. It relies on the convention of each
 host tool — **Claude reads `CLAUDE.md`, Codex reads `AGENTS.md`**, and any other active
 agent reads its own anchor — at session/execution startup. The bootstrap chain is
 therefore:
@@ -354,7 +357,7 @@ flowchart LR
   overflows to the remaining byte count. Putting the stanza at the top thus
   keeps it in priority (and a file closer to the cwd takes precedence);
   nevertheless keep the anchors **lightweight**.
-- **General limit**: cowork cannot force an AI to read anything. Without a
+- **General limit**: M8Shift cannot force an AI to read anything. Without a
   project root/context, point the agent explicitly to `M8SHIFT.protocol.md`.
 
 Codex reference: https://developers.openai.com/codex/guides/agents-md
@@ -370,7 +373,7 @@ you have acquired the pen via `claim`.**
 
 ```bash
 ./m8shift.py status                # who holds the pen? (non-blocking)
-./m8shift.py wait {me} --once      # rc 0 = you may acquire ; rc 3 = not yet
+./m8shift.py wait {me} --once      # rc 0 = your turn (or DONE = stop) ; rc 3 = not yet
 ```
 
 - **Acquire first** (`state == AWAITING_{ME}` or `IDLE`):
@@ -425,9 +428,7 @@ note:     session initialized, no turn opened
 - from:    system
 - to:      none
 - ask:     —
-- done:    Relay initialization. The first agent that starts runs
-           `./m8shift.py claim __A__` (or `__B__`), works, then
-           `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
+- done:    Relay initialization. The first agent runs `./m8shift.py claim __A__` (or `__B__`), works, then `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
 - files:   M8SHIFT.md, M8SHIFT.protocol.md, m8shift.py
 - handoff: none
 <!-- M8SHIFT:TURN 0 system END -->
@@ -509,11 +510,11 @@ MESSAGES = {
         "claim_ok": "✓ pen taken by {agent} (expires {expires}{suffix}).",
         "claim_reclaim_suffix": " — stale lock reclaimed",
         "body_error": "--body: {e}",
-        "to_self_append": "refused: --to must target the other agent (strict alternation, protocol §1).",
+        "to_self_append": "refused: --to must target a different active agent (strict alternation, protocol §1).",
         "append_need_claim": "refused: you do not hold the pen (state={st}) — run `./m8shift.py claim {agent}` first (exclusive acquisition), then append.",
         "note_turn": "turn {n} posted by {agent}, awaiting {to}",
         "append_ok": "✓ turn {n} written by {agent}, handed off to {to}.",
-        "to_self": "refused: --to must target the other agent.",
+        "to_self": "refused: --to must target a different active agent.",
         "not_holder_release": "refused: {holder} holds the pen, not you (--force to override).",
         "note_release": "handed off to {to} by {agent} (no turn)",
         "release_ok": "✓ handed off to {to}.",
@@ -542,6 +543,7 @@ MESSAGES = {
         "check_flags_need_check": "--files / --turns are read-only probe options — use them with --check.",
         "check_advisory_footer": "(advisory only — does not block claim; exact token match, "
                                  "normalize --files to the journal's spelling)",
+        "check_done": "session DONE — not claimable (run `init` to start a new relay).",
         "tasks_header": "# M8Shift · tasks\n\n",
         "task_empty": "refused: the task description is empty after trimming.",
         "task_add_ok": "✓ #{id} added by {agent} → {file} ({n} open).",
@@ -924,16 +926,16 @@ def cmd_init(args):
     name = args.name or os.path.basename(HERE) or "project"
     results = []
 
-    # --- roster (RFC stage 1): validate the requested CSV up front (CLI level).
+    # --- roster: validate the requested active-agent CSV up front (CLI level).
     # An explicit but malformed token is rejected, never silently dropped.
     req_valid, req_invalid = roster_tokens(getattr(args, "agents", "") or "")
     if getattr(args, "agents", "") and (req_invalid or len(req_valid) < 2):
         sys.exit(tr("bad_roster", raw=repr(args.agents)))
 
     with file_lock():
-        # Determine the ACTIVE pair UNDER the lock, so two concurrent inits cannot
-        # compute different rosters before serializing. Pair = the first 2 declared
-        # names; extras are stored but inactive until the N-agent mode.
+        # Determine the ACTIVE roster UNDER the lock, so two concurrent inits cannot
+        # compute different rosters before serializing. ALL declared names are active
+        # members; the first two only seed the __A__/__B__ stanza placeholders.
         cowork_exists = os.path.exists(COWORK)
         existing = None
         if cowork_exists:
@@ -1303,7 +1305,8 @@ def _window_label(turns, agent, n):
 def cmd_claim_check(args):
     """READ-ONLY advisory pre-claim probe (`claim --check`). Takes NO pen and mutates NOTHING:
     no file_lock, no set_lock, no write — `--force` is a guaranteed no-op here. Prints (1) claim
-    readiness (rc 0/3, identical to `wait --once`) and (2) which of your --files were recently
+    readiness (rc 0/3 — the same readiness states as `wait --once` EXCEPT DONE, which this
+    pre-claim probe reports NOT claimable since a real `claim` refuses it) and (2) which of your --files were recently
     touched by others (the files: field of turns in the window). Overlap is advisory text only —
     it NEVER changes the rc and NEVER feeds the mutex / routing."""
     text = load_or_die()                 # read-only; sets ROSTER/LANG, validates the LOCK
@@ -1316,13 +1319,15 @@ def cmd_claim_check(args):
     lk = get_lock(text)
     st = lk.get("state", "")
     exp = parse_iso(lk.get("expires"))
-    # readiness — mirrors cmd_wait --once exactly (parity asserted by test)
+    # readiness — mirrors cmd_wait --once EXCEPT on DONE: this is a pre-claim probe and a real
+    # `claim` refuses a DONE session, so DONE is reported NOT claimable (rc 3), not ready=True
+    # like `wait` (whose rc 0 only means "stop waiting"). See cmd_wait for the wait contract.
     if st in (f"AWAITING_{agent.upper()}", "IDLE"):
         print(tr("wait_your_turn" if st != "IDLE" else "wait_free", st=st, agent=agent))
         ready = True
     elif st == "DONE":
-        print(tr("wait_done"))
-        ready = True
+        print(tr("check_done"))
+        ready = False
     elif (st.startswith("WORKING_") and st != f"WORKING_{agent.upper()}"
           and exp and now() > exp):
         print(tr("wait_stale", other=lk.get("holder")))
@@ -1643,9 +1648,9 @@ def main():
     i = sub.add_parser("init", help="(re)generate the kit in this folder")
     i.add_argument("--name", default="")
     i.add_argument("--agents", default="",
-                   help="comma-separated agent roster; the first two relay "
-                        "(e.g. claude,codex). Extra names are reserved for the "
-                        "future N-agent mode.")
+                   help="comma-separated active roster (>=2, e.g. claude,codex,gemini); ALL "
+                        "members relay — the holder hands the pen to any other via --to, one "
+                        "writer at a time (degree-1).")
     i.add_argument("--lang", choices=LANGS, default="",
                    help="language of generated files (default: en, or $M8SHIFT_LANG)")
     i.add_argument("--force", action="store_true", help="also reset the relay file")

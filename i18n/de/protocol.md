@@ -154,7 +154,7 @@ Arbeiten ist das, was garantiert, dass nur ein einziger Agent das Repository gle
 > Eine verwaiste `.m8shift.lock` (getöteter Prozess) wird nach 60 s übernommen, Token
 > verifiziert. *Grenzen*: die Sperre ist **beratend** (eine manuelle Bearbeitung von `M8SHIFT.md`
 > umgeht sie); auf einem Netzwerk-FS (NFS) sind `O_EXCL`/`rename` weniger zuverlässig —
-> cowork zielt auf ein Repository auf lokaler Festplatte. Siehe auch §0/§4 (verpflichtendes claim).
+> M8Shift zielt auf ein Repository auf lokaler Festplatte. Siehe auch §0/§4 (verpflichtendes claim).
 
 ---
 
@@ -191,7 +191,7 @@ Schutzvorrichtung:
 ## 7. Das Werkzeug `m8shift.py`
 
 ```
-./m8shift.py init [--name PROJECT] [--agents a,b] [--lang en|fr] [--force]  # (re)generiert das Kit hier
+./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generiert das Kit hier
 ./m8shift.py status                                # Sperre + letzter Zug (NICHT-blockierend)
 ./m8shift.py wait <agent> [--once] [--interval N]  # wartet auf deinen Zug ; --once = 1 Prüfung (rc 3 wenn nicht dran)
 ./m8shift.py claim <agent> [--force]               # den Stift ÜBERNEHMEN (exklusiv) — aus deinem Zug /
@@ -233,7 +233,7 @@ cp /path/to/m8shift.py .          # die einzige benötigte Datei kopieren
   (standardmäßig `CLAUDE.md` und `AGENTS.md`; erstellt, falls fehlend), zwischen
   `M8SHIFT:STANZA`-Markern → **idempotente** Re-Injektion (verschiebt/aktualisiert den Block
   ohne Duplizierung, bestehender Inhalt bleibt erhalten; die vorherige Datei wird gesichert nach
-  `<anchor>.cowork.bak`);
+  `<anchor>.m8shift.bak`);
 - wenn `CLAUDE.md` existierte, aber keine Codex-Anweisung (`AGENTS.md` oder
   `AGENTS.override.md`) existierte, erstellt es automatisch in `AGENTS.md` eine Brücke,
   die Codex bittet, die gemeinsamen Anweisungen in `CLAUDE.md` zu lesen. Ein vorbestehender
@@ -247,7 +247,7 @@ cp /path/to/m8shift.py .          # die einzige benötigte Datei kopieren
 
 ### Bootstrap / Aufnahme durch die Agenten
 
-cowork ist **passiv**: es "ruft" niemals eine KI auf. Es verlässt sich auf die Konvention jedes
+M8Shift ist **passiv**: es "ruft" niemals eine KI auf. Es verlässt sich auf die Konvention jedes
 Host-Werkzeugs — **Claude liest `CLAUDE.md`, Codex liest `AGENTS.md`**, und jeder andere aktive
 Agent liest seinen eigenen Anker — beim Start der Sitzung/Ausführung. Die Bootstrap-Kette ist
 daher:
@@ -271,7 +271,7 @@ flowchart LR
   auf die verbleibende Byte-Anzahl. Die Strophe oben zu platzieren, hält sie somit
   vorrangig (und eine Datei näher am cwd hat Vorrang);
   halte die Anker dennoch **leichtgewichtig**.
-- **Allgemeine Grenze**: cowork kann eine KI nicht zwingen, irgendetwas zu lesen. Ohne ein
+- **Allgemeine Grenze**: M8Shift kann eine KI nicht zwingen, irgendetwas zu lesen. Ohne ein
   Projektwurzelverzeichnis/Kontext verweise den Agenten explizit auf `M8SHIFT.protocol.md`.
 
 Codex-Referenz: https://developers.openai.com/codex/guides/agents-md

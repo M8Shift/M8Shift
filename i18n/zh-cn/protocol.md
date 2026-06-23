@@ -152,7 +152,7 @@ loop:
 > 一个被遗弃的 `.m8shift.lock`（进程被杀死）会在 60 秒后被接管，
 > 并验证令牌。*限制*：该锁是 **建议性的**（手动编辑 `M8SHIFT.md`
 > 会绕过它）；在网络文件系统（NFS）上，`O_EXCL`/`rename` 不太可靠 ——
-> cowork 面向本地磁盘上的仓库。另见 §0/§4（强制 claim）。
+> M8Shift 面向本地磁盘上的仓库。另见 §0/§4（强制 claim）。
 
 ---
 
@@ -189,7 +189,7 @@ loop:
 ## 7. `m8shift.py` 工具
 
 ```
-./m8shift.py init [--name PROJECT] [--agents a,b] [--lang en|fr] [--force]  # (re)generates the kit here
+./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generates the kit here
 ./m8shift.py status                                # lock + last turn (NON-blocking)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
@@ -231,7 +231,7 @@ cp /path/to/m8shift.py .          # copy the only file needed
   （默认为 `CLAUDE.md` 和 `AGENTS.md`；缺失时创建），位于
   `M8SHIFT:STANZA` 标记之间 → **幂等** 的重新注入（移动/更新该块
   而不重复，保留现有内容；先前的文件会备份到
-  `<anchor>.cowork.bak`）；
+  `<anchor>.m8shift.bak`）；
 - 如果 `CLAUDE.md` 已存在但不存在 Codex 指令（`AGENTS.md` 或
   `AGENTS.override.md`），则在 `AGENTS.md` 中自动创建一个桥接，
   要求 Codex 阅读 `CLAUDE.md` 中的共享指令。已存在的
@@ -245,7 +245,7 @@ cp /path/to/m8shift.py .          # copy the only file needed
 
 ### 由 agent 引导 / 接管
 
-cowork 是 **被动的**：它绝不“调用”任何 AI。它依赖于每个
+M8Shift 是 **被动的**：它绝不“调用”任何 AI。它依赖于每个
 宿主工具的约定 —— **Claude 读取 `CLAUDE.md`，Codex 读取 `AGENTS.md`**，任何其他活动
 agent 在会话/执行启动时读取它自己的锚文件。因此引导链
 为：
@@ -270,7 +270,7 @@ flowchart LR
   截断到剩余的字节数。因此把段落放在顶部
   能让它保持优先（且更靠近 cwd 的文件优先）；
   尽管如此，请保持锚文件 **轻量**。
-- **总体限制**：cowork 无法强迫 AI 阅读任何内容。在没有
+- **总体限制**：M8Shift 无法强迫 AI 阅读任何内容。在没有
   项目根/上下文的情况下，请明确地将 agent 指向 `M8SHIFT.protocol.md`。
 
 Codex 参考：https://developers.openai.com/codex/guides/agents-md
