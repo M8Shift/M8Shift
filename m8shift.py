@@ -32,8 +32,11 @@ LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXC
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-LANGS = ("en", "fr")             # supported languages (catalog keys + CLI choices)
 DEFAULT_LANG = "en"              # default / ultimate fallback language
+# Well-formed language tags M8Shift recognizes — a curated SUPERSET of LANGS. The LOCK `lang`
+# field is validated against THIS (not the build-local LANGS), so a file written by a build that
+# bundles more languages stays loadable here; an unbuilt language just downgrades to DEFAULT_LANG.
+KNOWN_LANGS = ("en", "fr", "es", "it", "de", "pt", "ja", "ru", "zh-cn")
 AGENTS = ("claude", "codex")     # default active pair
 ROSTER = AGENTS                  # current ACTIVE roster (>=2 agents) — refined at runtime
 AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
@@ -65,371 +68,9 @@ ANCHORS = {
     # in subdirs). Such an agent falls back to a manual-bootstrap warning.
 }
 
-BRIDGE_FR = """## Instructions communes du projet
-
-Lis et applique intégralement `CLAUDE.md`, qui contient les instructions communes
-du projet pour Claude et Codex.
-"""
-
-
 # ----------------------------------------------------------------- templates
 
-COWORK_FR = r"""<!-- ╔════════════════════════════════════════════════════════════╗
-     ║  M8Shift · relais mono-fichier multi-agents · protocole v1 ║
-     ║  Lis M8SHIFT.protocol.md AVANT d'écrire ici.               ║
-     ╚════════════════════════════════════════════════════════════╝ -->
-
-# M8Shift · __PROJECT__
-
-> Fichier de travail partagé. **Un seul agent écrit à la fois.** Le verrou est le
-> bloc `LOCK` ci-dessous. N'écris que si `state == AWAITING_<toi>`. Détails →
-> [M8SHIFT.protocol.md](M8SHIFT.protocol.md). Outil → `./m8shift.py status`.
-
-<!-- M8SHIFT:LOCK:BEGIN -->
-holder:   none
-state:    IDLE
-agents:   __AGENTS__
-lang:     __LANG__
-turn:     0
-since:    __NOW__
-expires:  -
-note:     session initialisée, aucun tour ouvert
-<!-- M8SHIFT:LOCK:END -->
-
----
-
-## Journal des tours
-
-<!-- Les tours s'empilent ci-dessous, du plus ancien au plus récent.        -->
-<!-- Format d'un tour : voir M8SHIFT.protocol.md §3. Ne jamais éditer un tour -->
-<!-- déjà clôturé (END posé) : on ajoute un nouveau tour à la place.         -->
-
-<!-- M8SHIFT:TURN 0 system BEGIN -->
-- from:    system
-- to:      none
-- ask:     —
-- done:    Initialisation du relais. Le premier agent qui démarre fait
-           `./m8shift.py claim __A__` (ou `__B__`), travaille, puis
-           `./m8shift.py append __A__ --to __B__ --ask "..." --done "..."`.
-- files:   M8SHIFT.md, M8SHIFT.protocol.md, m8shift.py
-- handoff: none
-<!-- M8SHIFT:TURN 0 system END -->
-"""
-
-PROTOCOL_FR = r"""# M8Shift · Protocole de relais mono-fichier (v1)
-
-Instruction commune aux **deux agents actifs** (par défaut **Claude** et **Codex**)
-pour coopérer via un seul fichier
-`M8SHIFT.md`, en alternance stricte (mutex), avec poll périodique. Portable : ce
-protocole est identique dans tout projet ; seul le titre de `M8SHIFT.md` change.
-
-À lire **une fois en début de session** dès que tu vois un `M8SHIFT.md` à la
-racine d'un projet. Tu es **l'un des deux agents actifs** déclarés dans le champ
-`agents:` de `M8SHIFT.md` (par défaut `claude` et `codex`) — identifie-toi par ton
-fichier d'ancrage.
-
----
-
-## 0. TL;DR — la boucle auto-suffisante
-
-Tu viens d'arriver dans le projet et tu vois un `M8SHIFT.md` : voici la boucle
-complète, copiable, **aucune autre instruction n'est nécessaire**. `<toi>` est ton
-propre nom d'agent et `<autre>` l'autre agent actif (le couple déclaré dans
-`agents:` ; par défaut `claude` / `codex`, via les ancrages `CLAUDE.md` / `AGENTS.md`).
-
-```bash
-# 1. Suis-je attendu ? (commandes NON bloquantes)
-./m8shift.py status                 # lis le champ `state`
-./m8shift.py wait <toi> --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
-
-# 2. ACQUIERS le stylo AVANT de travailler (acquisition EXCLUSIVE : sur deux agents
-#    qui tentent en même temps, un seul réussit) :
-./m8shift.py claim <toi>            # rc 0 = tu tiens le stylo ; rc != 0 = pas ton tour
-#    • Si claim RÉUSSIT : lis le `ask:` que <autre> t'a laissé dans le dernier
-#      tour (en démarrage IDLE/tour 0, rien à honorer), fais le travail dans le
-#      dépôt, PUIS enregistre ton tour et passe la main :
-./m8shift.py append <toi> --to <autre> \
-    --ask "ce que tu attends de l'autre" \
-    --done "ce que tu viens de faire" \
-    --files fichier1,fichier2
-#    • Si claim ÉCHOUE : ce n'est pas (ou plus) ton tour → reviens à l'attente.
-
-# 3. Pas ton tour : ne touche à RIEN. Bloque jusqu'à ton tour, puis reprends en 2 :
-./m8shift.py wait <toi>             # poll toutes les ~60 s (--interval N)
-```
-
-Règle d'or : **tu ne travailles et n'écris que si tu as acquis le stylo via
-`claim`.** `claim` est exclusif ; `append` n'est accepté que si tu tiens le
-stylo. Tout le reste de ce document n'est que le détail de cette boucle.
-
-> Le protocole te rend auto-suffisant *une fois que tu tournes*. Dans une UI interactive
-> (VS Code, …) un humain te relance quand même entre les tours — `wait` bloque un
-> processus, il ne réveille pas ton UI de chat. Un relais entièrement autonome nécessite
-> un lanceur headless (sans interface), pas une modification de ce protocole.
-
----
-
-## 1. Modèle mental
-
-- **Un seul fichier vivant** : `M8SHIFT.md`. Tout le dialogue de travail y est.
-- **Un seul stylo, acquis explicitement** : pour travailler, tu **prends** le
-  stylo via `claim` → état `WORKING_<toi>`. `claim` est **exclusif** (deux agents
-  qui tentent en même temps : un seul réussit). Tu ne modifies le dépôt **que**
-  pendant que tu tiens le stylo.
-- **`append` clôt ton tour** : il n'est accepté que depuis `WORKING_<toi>`, écrit
-  le tour et passe la main (`AWAITING_<autre>`). Pas de `claim` ⇒ pas d'`append`.
-- **Alternance stricte** : les deux agents actifs alternent (p. ex. `claude` →
-  `codex` → `claude` …). Chaque passage de main est un *tour* (`TURN`) numéroté,
-  encadré `BEGIN`/`END`.
-- **Poll** : quand ce n'est pas ton tour, tu attends (`./m8shift.py wait <toi>`,
-  ~60 s) puis tu retentes `claim`.
-
----
-
-## 2. Le bloc LOCK (le mutex)
-
-Délimité par `<!-- M8SHIFT:LOCK:BEGIN -->` … `<!-- M8SHIFT:LOCK:END -->`.
-Champs (un `clé: valeur` par ligne, faciles à `grep`) :
-
-| champ     | valeurs | sens |
-|-----------|---------|------|
-| `holder`  | un agent actif \| `none` | qui tient le stylo (défaut `claude`/`codex`) |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | état courant (`<X>` = un agent actif, en majuscules) |
-| `agents`  | CSV, ex. `claude,codex` | le couple du relais (les 2 premiers déclarés) ; défaut `claude,codex` |
-| `turn`    | entier | numéro du dernier tour clôturé |
-| `since`   | ISO-8601 UTC | depuis quand cet état dure |
-| `expires` | ISO-8601 UTC \| `-` | échéance de reprise anti-blocage (TTL 30 min) |
-| `note`    | texte court | mémo lisible |
-
-> `expires` ne porte une date **que** pendant `WORKING_*` (un agent travaille,
-> TTL 30 min). Il repasse à `-` dès qu'on attend (`AWAITING_*`, `IDLE`, `DONE`) :
-> personne ne tient le stylo, donc pas de péremption à surveiller.
-
-**Lecture des états** (`<X>` = un agent actif — par défaut `claude`/`codex`) :
-- `AWAITING_<X>` → c'est à `<X>` de jouer (l'autre agent attend).
-- `WORKING_<X>` → `<X>` tient le stylo et travaille (l'autre attend, ne touche à rien).
-- `IDLE` → personne n'a la main, le premier qui a quelque chose à dire démarre.
-- `DONE` → session close, plus de relais attendu.
-
----
-
-## 3. Format d'un tour
-
-```
-<!-- M8SHIFT:TURN <n> <agent> BEGIN -->
-- from:    <agent>           # un agent actif
-- to:      <agent|none>      # à qui tu repasses la main
-- ask:     <ce que tu attends de l'autre, précis et actionnable>
-- done:    <ce que tu viens de faire>
-- files:   <fichiers touchés, séparés par des virgules>
-- handoff: <agent|none>      # = to ; redondance volontaire, grep-friendly
-<ligne vide>
-<corps libre : explications, questions, blocs de code, listes>
-<!-- M8SHIFT:TURN <n> <agent> END -->
-```
-
-Règles :
-- Un tour **clôturé** (`END` posé) est **immuable**. Pour réagir, tu ouvres le
-  tour suivant. Jamais de réécriture rétroactive.
-- `ask` doit être actionnable : l'autre agent doit pouvoir démarrer sans te
-  reposer de question. Si tu n'attends rien (juste un FYI), mets `ask: —`.
-- Garde un tour **borné** : si ça dépasse ~150 lignes ou plusieurs sujets,
-  découpe en plusieurs tours successifs (un sujet = un tour).
-
----
-
-## 4. Cycle de travail (la boucle de chaque agent)
-
-```
-boucle:
-  1. lire LOCK (status / wait)
-  2. si state == AWAITING_<moi> ou IDLE :
-       a. CLAIM  : ./m8shift.py claim <moi>   → state=WORKING_<MOI>, expires=now+30min
-                   EXCLUSIF : si un autre a déjà pris le stylo entre-temps,
-                   claim ÉCHOUE → va en 3.
-       b. TRAVAILLER dans le dépôt (tant que tu tiens le stylo, toi seul)
-       c. APPEND  : ./m8shift.py append <moi> --to <autre>
-                   écrit mon tour <turn+1>, state=AWAITING_<AUTRE>
-  3. sinon (WORKING_<autre> ou AWAITING_<autre>) :
-       attendre ~60 s (wait), retourner en 1
-  4. si state == DONE : sortir
-```
-
-En pratique : `claim` **acquiert** le stylo (exclusif), `append` **clôt** ton tour
-et passe la main, `wait` attend ton tour. L'acquisition explicite avant de
-travailler est ce qui garantit qu'un seul agent modifie le dépôt à la fois.
-
-> **Modèle de concurrence (deux niveaux)** :
-> 1. **Transitions** sérialisées par un verrou inter-process (`.m8shift.lock`,
->    `O_CREAT|O_EXCL`, à jeton de propriété) : chaque read-modify-write du LOCK +
->    écriture atomique (temporaire unique + `os.replace`) est exclusif.
-> 2. **Fenêtre de travail** protégée par l'état persistant `WORKING_<agent>` :
->    `claim` est la seule acquisition, et il échoue si quelqu'un d'autre tient ou
->    a déjà pris le stylo. Deux `claim` simultanés depuis `IDLE` ⇒ **un seul
->    réussit** ; l'autre doit attendre. Comme on ne travaille qu'après un `claim`
->    réussi, deux agents ne modifient jamais le dépôt en même temps.
->
-> Un `.m8shift.lock` abandonné (process tué) est repris après 60 s, jeton vérifié.
-> *Limites* : verrou **conseillé** (une édition manuelle de `M8SHIFT.md` le
-> contourne) ; sur FS réseau (NFS) `O_EXCL`/`rename` sont moins fiables — cowork
-> vise un dépôt sur disque local. Voir aussi §0/§4 (claim obligatoire).
-
----
-
-## 5. Anti-blocage (lock périmé)
-
-Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-fou :
-- au CLAIM, on pose `expires = now + 30 min` ;
-- si tu vois `state == WORKING_<autre>` **et** `now > expires`, le verrou est
-  **périmé** : reprends-le avec `./m8shift.py claim <toi> --force`, puis ouvre un
-  tour notant la reprise (`done: reprise après lock périmé de <autre>`) ;
-- **l'outil applique la règle** : `--force` est **refusé** sur un verrou encore
-  valide. Tu ne peux donc pas voler le stylo d'un agent actif (c'est voulu) ;
-- tu peux **rafraîchir ton propre** verrou avant péremption : `./m8shift.py claim
-  <toi>` quand tu le détiens déjà repose `expires` à +30 min ;
-- `release` et `done` n'agissent que si **tu** tiens le stylo (ou si personne ne
-  le tient) ; `--force` outrepasse, réservé à la récupération.
-
----
-
-## 6. Tenue dans le temps (longueur bornée)
-
-`M8SHIFT.md` ne doit pas gonfler indéfiniment :
-- garde dans `M8SHIFT.md` le bloc `LOCK` + les **~6 derniers tours** ;
-- `./m8shift.py archive --keep 6` déplace les tours plus anciens (déjà clôturés)
-  vers `M8SHIFT.archive.md` (append), sans jamais toucher au verrou ni au dernier
-  tour ouvert.
-- L'archive est consultable mais n'est **jamais** relue par la boucle : seule la
-  partie vivante de `M8SHIFT.md` pilote le relais.
-
----
-
-## 7. Outil `m8shift.py`
-
-```
-./m8shift.py init [--name PROJET] [--agents a,b] [--lang en|fr] [--force]  # (re)génère le kit ici
-./m8shift.py status                                # verrou + dernier tour (NON bloquant)
-./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
-./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
-                                                  #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
-./m8shift.py append <agent> --to <autre> \
-     --ask "..." --done "..." [--files a,b] [--body fichier.md|-]   # clôt ton tour + passe la main
-./m8shift.py release <agent> --to <autre> [--force]  # repasser la main sans corps (ne ré-incrémente PAS turn)
-./m8shift.py done <agent> [--force]                 # clore la session (state=DONE)
-./m8shift.py archive [--keep N]                     # purge les vieux tours clôturés (jamais le tour #0)
-```
-
-- **`claim` d'abord** : tu dois tenir le stylo (`WORKING_<toi>`) pour `append`.
-  `claim` est **exclusif** (un seul gagnant si deux agents tentent ensemble).
-- `append` n'est accepté **que depuis `WORKING_<toi>`** ; il écrit le tour et
-  passe la main. `--body -` lit le corps depuis stdin ; `--body f.md` depuis un
-  fichier ; sans `--body`, le tour n'a que l'en-tête.
-- `--to` doit viser **l'autre** agent (auto-passation refusée : alternance stricte).
-- Inspection **non bloquante** : `status` ou `wait <toi> --once`. `wait <toi>`
-  **sans** `--once` bloque jusqu'à ton tour — ne l'utilise pas si tu dois rendre
-  la main à ta boucle entre-temps.
-
----
-
-## 8. Adoption par tout projet (portabilité)
-
-`m8shift.py` est **auto-suffisant** : il embarque ce protocole, le gabarit de
-`M8SHIFT.md` et les ancrages. Pour adopter le relais dans un projet :
-
-```bash
-cp /chemin/vers/m8shift.py .      # copier le seul fichier nécessaire
-./m8shift.py init                 # nom du projet = nom du dossier (sinon --name)
-```
-
-`init` :
-- écrit `M8SHIFT.protocol.md` (ce document) et `M8SHIFT.md` (verrou IDLE neuf) ;
-  `M8SHIFT.md` n'est **pas** écrasé s'il existe déjà (sauf `--force`) → l'état du
-  relais en cours est préservé ;
-- injecte en **tête** un bloc « Co-work relais » dans **l'ancrage de chaque agent
-  actif** (par défaut `CLAUDE.md` et `AGENTS.md` ; créés s'ils manquent), entre
-  marqueurs `M8SHIFT:STANZA` → ré-injection **idempotente** (déplace/actualise le bloc
-  sans dupliquer, contenu existant préservé ; le fichier précédent est sauvegardé dans
-  `<ancrage>.cowork.bak`) ;
-- si `CLAUDE.md` existait mais qu'aucune instruction Codex (`AGENTS.md` ou
-  `AGENTS.override.md`) n'existait, crée automatiquement dans `AGENTS.md` un pont
-  demandant à Codex de lire les instructions communes de `CLAUDE.md`. Un ancrage
-  Codex préexistant n'est jamais complété ou remplacé automatiquement ;
-- renomme une variante unique `claude.md`/`agents.md` vers le nom canonique
-  auto-chargé, y compris sur un FS insensible à la casse. Plusieurs variantes
-  coexistantes sont refusées plutôt que fusionnées silencieusement. Si Git est
-  disponible et que la variante est suivie, emploie `git mv -f` pour actualiser
-  aussi l'index ;
-- si `AGENTS.override.md` existe, y synchronise aussi la strophe : Codex charge
-  cet override à la place de `AGENTS.md` dans le même dossier.
-
-### Amorçage / prise en compte par les agents
-
-cowork est **passif** : il n'« appelle » aucune IA. Il s'appuie sur la convention de
-chaque outil hôte — **Claude lit `CLAUDE.md`, Codex lit `AGENTS.md`**, et tout autre
-agent actif lit son propre ancrage — au démarrage de session/exécution. La chaîne
-d'amorçage est donc :
-
-```mermaid
-flowchart LR
-    I["m8shift.py init"] --> S["injecte la strophe dans<br/>l'ancrage de chaque agent actif"]
-    S --> R["chaque agent lit son ancrage<br/>au démarrage de session"]
-    R --> L["applique M8SHIFT.protocol.md<br/>(la boucle wait / claim / travail / append)"]
-```
-
-- **Après `init`** : démarre une nouvelle session/exécution de l'agent. Une session
-  déjà ouverte a généralement construit sa chaîne d'instructions avant l'injection.
-- **Codex interactif ou `codex exec`** : `AGENTS.md` est chargé si la commande part
-  de la racine du projet ou d'un de ses sous-dossiers. Le mode *headless* n'est pas
-  en soi une limite ; un cron/CI lancé hors du projet, en revanche, ne découvre pas
-  l'ancrage.
-- **Override Codex** : `AGENTS.override.md` masque `AGENTS.md` dans un même dossier ;
-  `init` injecte donc la strophe dans les deux lorsqu'il est présent.
-- **Taille Codex** : Codex empile les fichiers d'instructions jusqu'à un plafond
-  *combiné* (`project_doc_max_bytes`, 32 Kio par défaut) et tronque le fichier qui
-  dépasse au nombre d'octets restant. Mettre la strophe en tête la conserve donc en
-  priorité (et un fichier plus proche du cwd prime) ; garde néanmoins les ancrages
-  **légers**.
-- **Limite générale** : cowork ne peut pas forcer une IA à lire quoi que ce soit.
-  Sans racine/contexte projet, pointe explicitement l'agent vers
-  `M8SHIFT.protocol.md`.
-
-Référence Codex : https://developers.openai.com/codex/guides/agents-md
-"""
-
-STANZA_FR = """{begin}
-## Co-work relais — auto-suffisant (aucune explication humaine requise)
-
-Tu es **{me}** dans ce projet. Dès qu'un `M8SHIFT.md` est présent à la racine,
-c'est ta source de coordination avec **{other}** : applique `M8SHIFT.protocol.md`
-(lis-le une fois, voir son §0) AVANT tout autre travail. **Tu ne travailles et
-n'écris que si tu as acquis le stylo via `claim`.**
-
-```bash
-./m8shift.py status                # qui a la main ? (non bloquant)
-./m8shift.py wait {me} --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
-```
-
-- **Acquiers d'abord** (`state == AWAITING_{ME}` ou `IDLE`) :
-  `./m8shift.py claim {me}` — **exclusif** : si {other} a déjà pris le stylo, ça
-  échoue → reviens à l'attente. Si ça réussit, tu tiens le stylo (`WORKING_{ME}`).
-- **Puis travaille et clôts ton tour** : lis le `ask:` que {other} t'a laissé
-  (en démarrage IDLE, rien à honorer), fais le travail, puis :
-  `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
-- **Pas ton tour** : ne touche à rien ; `./m8shift.py wait {me}` bloque jusqu'à ton
-  tour (poll ~60 s), puis retente `claim`.
-- **Verrou de {other} périmé** (`WORKING_{OTHER}` + `now > expires`) :
-  `./m8shift.py claim {me} --force`.
-
-Un tour clôturé est immuable : pour réagir, ouvre le tour suivant.
-
-_Note UI interactive_ : dans une UI de chat (VS Code, …) un humain te relance entre les
-tours — `wait` bloque un processus, il ne réveille pas ton UI. Un relais entièrement
-autonome nécessite un lanceur headless (sans interface).
-{end}"""
-
-
 # ------------------------------------------------------------------- helpers
-
 
 PROTOCOL_EN = r"""# M8Shift · Single-file relay protocol (v1)
 
@@ -790,11 +431,11 @@ Read and fully apply `CLAUDE.md`, which contains the shared project instructions
 for Claude and Codex.
 """
 
-PROTOCOL = {"en": PROTOCOL_EN, "fr": PROTOCOL_FR}
-STANZA = {"en": STANZA_EN, "fr": STANZA_FR}
-COWORK_TPL = {"en": COWORK_EN, "fr": COWORK_FR}
-BRIDGE = {"en": BRIDGE_EN, "fr": BRIDGE_FR}
-
+PROTOCOL = {"en": PROTOCOL_EN}
+STANZA = {"en": STANZA_EN}
+COWORK_TPL = {"en": COWORK_EN}
+BRIDGE = {"en": BRIDGE_EN}
+LANGS = tuple(PROTOCOL)   # languages built into THIS file (en + any injected)
 
 # ----------------------------------------------------------------- i18n (en/fr)
 # Resolved language: --lang (init) > $M8SHIFT_LANG > LOCK `lang` field > en.
@@ -808,7 +449,6 @@ def resolve_lang(explicit=None, lk=None):
     if lk and lk.get("lang") in LANGS:
         return lk["lang"]
     return DEFAULT_LANG
-
 
 LANG = resolve_lang()  # baseline (refined by load_or_die / cmd_init)
 
@@ -878,73 +518,7 @@ MESSAGES = {
         "recap_turns": "── last {n} turn(s) ──────────────────────",
         "peek_none": "(no handoff addressed to {agent} yet)",
     },
-    "fr": {
-        "lock_busy": "verrou interne occupé (un autre m8shift.py écrit) — réessaie.",
-        "cowork_missing": "M8SHIFT.md introuvable — lance d'abord `./m8shift.py init`.",
-        "lock_missing": "{file} corrompu : bloc LOCK introuvable — `./m8shift.py init --force` pour réinitialiser le verrou.",
-        "lock_invalid": "{file} corrompu (LOCK invalide : {errs}) — `./m8shift.py init --force` pour réparer.",
-        "field_newline": "refus: {label} ne doit pas contenir de saut de ligne.",
-        "field_reserved": "refus: {label} contient un marqueur réservé ({marker}).",
-        "bad_agent": "agent invalide: {a} (attendu: {agents})",
-        "bad_roster": "--agents invalide : {raw} — fournis au moins deux noms d'agents distincts (ex. claude,codex).",
-        "anchor_no_map": "{agent} : aucun fichier d'ancrage connu — amorce manuellement (pointe {agent} vers M8SHIFT.protocol.md).",
-        "anchor_collision": "{agent} : l'ancrage {filename} est déjà utilisé par un autre agent actif — ignoré (amorce {agent} manuellement).",
-        "roster_extra": "{n} agents actifs dans le relais : {agents}.",
-        "roster_conflict": "refus : --agents {requested} diffère du roster {existing} déjà déclaré — relance avec --force pour le réinitialiser, ou omets --agents pour conserver le roster courant.",
-        "anchor_ambiguous": "ancrages ambigus pour {canonical}: {others} — consolide-les avant `m8shift.py init`.",
-        "anchor_git_fail": "impossible de renommer {actual} via Git vers {canonical}: {detail}",
-        "git_unknown_err": "erreur git inconnue",
-        "migrated_git": "{actual} → {canonical}: renommé via Git pour auto-chargement",
-        "migrated_fs": "{actual} → {canonical}: renommé pour auto-chargement",
-        "stanza_incomplete": "{filename}: stanza M8Shift incomplète — répare les marqueurs avant init.",
-        "stanza_updated": "stanza actualisée en tête",
-        "stanza_added": "stanza ajoutée en tête",
-        "file_created": "fichier créé",
-        "anchor_result": "{filename}: {action}",
-        "proto_written": "{file}: écrit",
-        "proto_uptodate": "{file}: déjà à jour",
-        "cowork_preserved": "{file}: préservé (existe déjà ; --force pour réinitialiser)",
-        "cowork_written": "{file}: écrit (projet « {name} », verrou IDLE)",
-        "bridge_added": "AGENTS.md: pont automatique vers les instructions communes de CLAUDE.md",
-        "override_synced": "{filename}: override Codex actif, stanza synchronisée",
-        "init_header": "✓ m8shift init — projet « {name} » dans {here}",
-        "init_start": "Démarrer : ./m8shift.py claim {a}  (puis travaille, puis ./m8shift.py append {a} --to {b} --ask \"…\" --done \"…\")",
-        "init_bootstrap": "Amorçage : démarre une nouvelle session/exécution de chaque agent pour recharger son ancrage.",
-        "status_stale": "  ⚠ verrou PERIME — reprenable avec: claim <toi> --force",
-        "last_turn": "── dernier tour: #{n} par {who}",
-        "wait_your_turn": "✓ à toi ({st}) — `./m8shift.py claim {agent}` pour acquérir le stylo.",
-        "wait_free": "✓ libre ({st}) — `./m8shift.py claim {agent}` pour acquérir le stylo.",
-        "wait_done": "session DONE — rien a attendre.",
-        "wait_stale": "⚠ verrou de {other} PERIME — claim --force possible.",
-        "wait_not_yet": "… pas ton tour: {st} (holder={holder}).",
-        "wait_poll": "… {st} (holder={holder}), nouvelle verif dans {interval}s",
-        "bad_interval": "--interval doit être un entier >= 1.",
-        "claim_active": "refus: verrou de {holder} encore valide (expire {expires}). --force ne reprend qu'un verrou périmé (protocole §5).",
-        "claim_refused": "refus: state={st}, holder={holder} — ce n'est pas ton tour.",
-        "note_reclaim": "reprise après lock périmé de {holder}",
-        "note_holds": "{agent} tient le stylo",
-        "claim_ok": "✓ verrou pris par {agent} (expire {expires}{suffix}).",
-        "claim_reclaim_suffix": " — reprise lock périmé",
-        "body_error": "--body: {e}",
-        "to_self_append": "refus: --to doit viser l'autre agent (alternance stricte, protocole §1).",
-        "append_need_claim": "refus: tu ne tiens pas le stylo (state={st}) — fais d'abord `./m8shift.py claim {agent}` (acquisition exclusive), puis append.",
-        "note_turn": "tour {n} pose par {agent}, en attente de {to}",
-        "append_ok": "✓ tour {n} ecrit par {agent}, main passee a {to}.",
-        "to_self": "refus: --to doit viser l'autre agent.",
-        "not_holder_release": "refus: {holder} tient le stylo, pas toi (--force pour outrepasser).",
-        "note_release": "main passee a {to} par {agent} (sans tour)",
-        "release_ok": "✓ main passee a {to}.",
-        "not_holder_done": "refus: {holder} tient le stylo, pas toi (--force pour clore quand même).",
-        "note_done": "session close par {agent}",
-        "done_ok": "✓ session DONE.",
-        "archive_none": "rien a archiver ({n} tour(s) archivable(s), keep={keep}).",
-        "archive_header": "# M8Shift · archive des tours\n\n",
-        "archive_ok": "✓ {n} tour(s) archive(s) → {file} (gardes: {keep}).",
-        "recap_turns": "── {n} dernier(s) tour(s) ────────────────",
-        "peek_none": "(aucune passation adressée à {agent} pour l'instant)",
-    },
 }
-
 
 def tr(key, **kw):
     cat = MESSAGES.get(LANG, MESSAGES[DEFAULT_LANG])
@@ -954,10 +528,8 @@ def tr(key, **kw):
 def now():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
-
 def iso(t):
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
-
 
 def parse_iso(s):
     s = (s or "").strip()
@@ -968,17 +540,14 @@ def parse_iso(s):
     except ValueError:
         return None
 
-
 def read(path=COWORK):
     with open(path, encoding="utf-8") as f:
         return f.read()
-
 
 def _current_umask():
     m = os.umask(0)
     os.umask(m)
     return m
-
 
 def write(text, path=COWORK):
     """Atomic write: UNIQUE temporary file + os.replace, preserving the mode of the
@@ -998,7 +567,6 @@ def write(text, path=COWORK):
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
-
 
 @contextlib.contextmanager
 def file_lock(timeout=LOCK_TIMEOUT):
@@ -1049,11 +617,9 @@ def file_lock(timeout=LOCK_TIMEOUT):
         except OSError:
             pass
 
-
 def require_cowork():
     if not os.path.exists(COWORK):
         sys.exit(tr("cowork_missing"))
-
 
 def load_or_die():
     """Read the living relay file while validating the LOCK block (presence AND
@@ -1080,13 +646,14 @@ def load_or_die():
         errs.append(f"turn={lk.get('turn')!r}")
     if lk.get("holder") not in set(roster) | {"none"}:
         errs.append(f"holder={lk.get('holder')!r}")
-    if lk.get("lang") not in (None, *LANGS):
+    # validate against KNOWN_LANGS (a curated superset), NOT the build-local LANGS, so a file
+    # whose lang isn't bundled here is still loadable (resolve_lang downgrades it to en).
+    if lk.get("lang") not in (None, *KNOWN_LANGS):
         errs.append(f"lang={lk.get('lang')!r}")
     if errs:
         sys.exit(tr("lock_invalid", file=os.path.basename(COWORK), errs=", ".join(errs)))
     globals()["ROSTER"] = roster
     return text
-
 
 def clean_field(label, val):
     """Single-line field: rejects line breaks and reserved markers (injection-safe)."""
@@ -1098,12 +665,10 @@ def clean_field(label, val):
             sys.exit(tr("field_reserved", label=label, marker=r))
     return val
 
-
 def clean_body(text):
     """Multi-line body: neutralizes any injected reserved marker (zero-width after the
     brand prefix), for BOTH brands, so it cannot masquerade as a real turn."""
     return text.replace("M8SHIFT:", "M8SHIFT\u200b:")
-
 
 def get_lock(text):
     begin, end = LOCK_BEGIN, LOCK_END
@@ -1117,7 +682,6 @@ def get_lock(text):
             fields[m.group(1)] = m.group(2).strip()
     return fields
 
-
 def set_lock(text, fields):
     begin, end = LOCK_BEGIN, LOCK_END
     i = text.index(begin) + len(begin)
@@ -1127,7 +691,6 @@ def set_lock(text, fields):
         for k, v in fields.items()
     ) + "\n"
     return text[:i] + body + text[j:]
-
 
 def roster_tokens(raw):
     """Split a roster CSV into (valid, invalid). Valid = normalized AGENT_RE names
@@ -1146,17 +709,14 @@ def roster_tokens(raw):
             invalid.append(s)
     return valid, invalid
 
-
 def parse_roster_csv(raw):
     """Valid agents from a CSV (lenient: empty/invalid tokens are ignored)."""
     return roster_tokens(raw)[0]
-
 
 def roster_full(lk):
     """Full declared roster (>=2 names); falls back to the default pair if absent/invalid."""
     names = parse_roster_csv(lk.get("agents", ""))
     return names if len(names) >= 2 else list(AGENTS)
-
 
 def active_pair(lk):
     """The first 2 declared agents — kept ONLY for the 2-name init/migrate template
@@ -1164,12 +724,10 @@ def active_pair(lk):
     active_agents() for validation, roster and display."""
     return tuple(roster_full(lk)[:2])
 
-
 def active_agents(lk):
     """The full ACTIVE roster (all declared agents, >=2) — the N-aware source for
     load_or_die validation, roster checks, and status/recap display."""
     return tuple(roster_full(lk))
-
 
 def valid_states(pair):
     s = {"IDLE", "DONE"}
@@ -1178,19 +736,16 @@ def valid_states(pair):
         s.add(f"AWAITING_{a.upper()}")
     return s
 
-
 def other(agent):
     for a in ROSTER:
         if a != agent:
             return a
     return agent
 
-
 def need_agent(a):
     if a not in ROSTER:
         sys.exit(tr("bad_agent", a=repr(a), agents=" | ".join(ROSTER)))
     return a
-
 
 # ---------------------------------------------------------------- init / anchors
 
@@ -1269,7 +824,6 @@ def ensure_canonical_anchor(canonical, create=True):
         os.replace(actual_path, canonical_path)
     return canonical, tr("migrated_fs", actual=actual, canonical=canonical)
 
-
 def stanza_for(me):
     # Peers from the ACTIVE roster, not other() (a 2-agent helper). For a pair the single
     # peer reproduces the exact pre-N substitution → the rendered stanza is byte-identical,
@@ -1282,7 +836,6 @@ def stanza_for(me):
         me=me, ME=me.upper(), other=o, OTHER=OT,
     )
 
-
 def anchor_exists(canonical):
     """Whether a case variant of an anchor already exists on disk."""
     try:
@@ -1292,7 +845,6 @@ def anchor_exists(canonical):
         )
     except OSError:
         return False
-
 
 def inject_anchor(filename, me, initial_content=""):
     path = os.path.join(HERE, filename)
@@ -1329,7 +881,6 @@ def inject_anchor(filename, me, initial_content=""):
         action = tr("file_created")
     write(new, path)
     return tr("anchor_result", filename=filename, action=action)
-
 
 def cmd_init(args):
     globals()["LANG"] = resolve_lang(explicit=getattr(args, "lang", "") or None)
@@ -1471,7 +1022,6 @@ def cmd_init(args):
     print(tr("init_bootstrap"))
     return 0
 
-
 # ---------------------------------------------------------------- relay commands
 
 TURN_RE = re.compile(
@@ -1480,7 +1030,6 @@ TURN_RE = re.compile(
     r"<!-- M8SHIFT:TURN \1 \2 END -->",
     re.DOTALL,
 )
-
 
 def parse_turns(text):
     """Read-only shared parser for the turn journal → [{n, agent, fields, body}].
@@ -1503,7 +1052,6 @@ def parse_turns(text):
         })
     return out
 
-
 def cmd_recap(args):
     """Read-only session-start briefing: current LOCK + the last N turn summaries."""
     text = load_or_die()
@@ -1520,7 +1068,6 @@ def cmd_recap(args):
             f = t["fields"]
             print(f"  #{t['n']} {f.get('from', t['agent'])} -> {f.get('to', '-')}: {f.get('done', '-')}")
     return 0
-
 
 def cmd_peek(args):
     """Print the last handoff addressed to <agent> as parse-free key=value (+ body).
@@ -1539,7 +1086,6 @@ def cmd_peek(args):
     else:
         print(tr("peek_none", agent=agent))
     return 0 if st in (f"AWAITING_{agent.upper()}", "IDLE", "DONE") else 3
-
 
 def cmd_log(args):
     """Read-only relay timeline: one line per turn (chronological)."""
@@ -1560,8 +1106,6 @@ def cmd_log(args):
             nf = 0 if files in ("-", "") else len([x for x in files.split(",") if x.strip()])
             print(f"#{t['n']:<3} {frm:>8} -> {to:<8} ({nf} files)  done: {f.get('done', '-')}")
     return 0
-
-
 
 def cmd_status(args):
     text = load_or_die()
@@ -1591,7 +1135,6 @@ def cmd_status(args):
     if last:
         print(tr("last_turn", n=last["n"], who=last["agent"]))
     return 0
-
 
 def cmd_wait(args):
     if not args.once and args.interval < 1:
@@ -1623,7 +1166,6 @@ def cmd_wait(args):
         print(tr("wait_poll", st=st, holder=lk.get("holder"), interval=args.interval))
         time.sleep(args.interval)
 
-
 def cmd_claim(args):
     with file_lock():
         text = load_or_die()             # sets ROSTER/LANG from the on-disk file…
@@ -1654,7 +1196,6 @@ def cmd_claim(args):
     print(tr("claim_ok", agent=agent, expires=lk["expires"], suffix=suffix))
     return 0
 
-
 def _read_body(spec):
     if not spec:
         return ""
@@ -1665,7 +1206,6 @@ def _read_body(spec):
             return f.read().rstrip("\n")
     except OSError as e:
         sys.exit(tr("body_error", e=e))
-
 
 def cmd_append(args):
     # Field/body reading stays OUTSIDE the critical section (stdin may block); agent
@@ -1719,7 +1259,6 @@ def cmd_append(args):
     print(tr("append_ok", n=n, agent=agent, to=to))
     return 0
 
-
 def cmd_release(args):
     with file_lock():
         text = load_or_die()
@@ -1741,7 +1280,6 @@ def cmd_release(args):
     print(tr("release_ok", to=to))
     return 0
 
-
 def cmd_done(args):
     with file_lock():
         text = load_or_die()
@@ -1756,7 +1294,6 @@ def cmd_done(args):
         write(set_lock(text, lk))
     print(tr("done_ok"))
     return 0
-
 
 def cmd_archive(args):
     pat = re.compile(
@@ -1782,8 +1319,6 @@ def cmd_archive(args):
         write(text)
     print(tr("archive_ok", n=len(to_move), file=os.path.basename(ARCHIVE), keep=keep))
     return 0
-
-
 
 def main():
     # prog follows the invoked name (m8shift.py).
@@ -1860,7 +1395,6 @@ def main():
     # ROSTER/LANG are resolved per command by load_or_die (and by cmd_init), under
     # the file lock, so agent validation always matches the on-disk roster.
     sys.exit(args.fn(args))
-
 
 if __name__ == "__main__":
     main()
