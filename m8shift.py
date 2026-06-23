@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 COWORK = os.path.join(HERE, "M8SHIFT.md")            # the living relay file
 ARCHIVE = os.path.join(HERE, "M8SHIFT.archive.md")
 PROTO = os.path.join(HERE, "M8SHIFT.protocol.md")
+MEMORY = os.path.join(HERE, "M8SHIFT.memory.md")     # shared, append-only, human-curated notes
 LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXCL)
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
@@ -527,6 +528,10 @@ MESSAGES = {
         "field_bad_key": "rejected: advisory field key {key!r} is not snake_case / x_* ([a-z][a-z0-9_]*).",
         "field_reserved_key": "rejected: {key!r} is an engine-managed turn field — it is set automatically.",
         "field_dup_key": "rejected: advisory field {key!r} given more than once.",
+        "memory_header": "# M8Shift · shared memory\n\n",
+        "recap_memory": "── last {n} note(s) ────────────────────",
+        "remember_ok": "✓ noted by {agent} → {file} ({n} note(s)).",
+        "memory_empty": "refused: --note is empty after trimming — nothing to remember.",
     },
 }
 
@@ -1067,6 +1072,24 @@ def parse_turns(text):
         })
     return out
 
+
+MEMORY_RE = re.compile(r"^- (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) (" + AGENT_RE + r"): (.*)$")
+
+
+def parse_memory(text):
+    """Read-only parser for the shared-memory ledger → [{ts, agent, note}] in FILE ORDER.
+    Mirrors parse_turns' tolerance: anchored per-line match, greedy note (an embedded ': '
+    never re-splits), non-matching lines (header / blanks / hand-edits) silently skipped,
+    never raises. `ts` is an opaque DISPLAY string — never parsed back into logic, never
+    sorted/deduped on (the ledger is a dumb, file-ordered record). Never feeds routing."""
+    out = []
+    for line in text.splitlines():
+        m = MEMORY_RE.match(line)
+        if m:
+            out.append({"ts": m.group(1), "agent": m.group(2), "note": m.group(3)})
+    return out
+
+
 def cmd_recap(args):
     """Read-only session-start briefing: current LOCK + the last N turn summaries."""
     text = load_or_die()
@@ -1082,6 +1105,14 @@ def cmd_recap(args):
         for t in recent:
             f = t["fields"]
             print(f"  #{t['n']} {f.get('from', t['agent'])} -> {f.get('to', '-')}: {f.get('done', '-')}")
+    # shared-memory headlines — only when the ledger exists (absent ⇒ output unchanged)
+    if os.path.exists(MEMORY):
+        notes = parse_memory(read(MEMORY))
+        tail = notes[-args.memory:] if args.memory > 0 else notes
+        if tail:
+            print(tr("recap_memory", n=len(tail)))
+            for nt in tail:   # chronological (file order), like the turn recap
+                print(f"  {nt['ts']} {nt['agent']}: {nt['note']}")
     return 0
 
 def cmd_peek(args):
@@ -1347,6 +1378,26 @@ def cmd_done(args):
     print(tr("done_ok"))
     return 0
 
+def cmd_remember(args):
+    """Append one durable note to M8SHIFT.memory.md — passive, append-only, human-curated.
+    Runs under file_lock (atomic write) but takes NO pen: note-taking is curation, not the
+    exclusive work window, so any roster agent may remember from any state. HARD INVARIANT:
+    this never calls set_lock and never mutates holder/state/turn/… — memory writes a
+    DIFFERENT file and can never feed the mutex / routing."""
+    note = clean_field("--note", args.note)   # single-line, injection-safe; outside the lock
+    if not note:
+        sys.exit(tr("memory_empty"))
+    with file_lock():
+        load_or_die()   # populate ROSTER/LANG + enforce the relay precondition (LOCK ignored)
+        agent = need_agent(args.agent)
+        line = "- " + iso(now()) + " " + agent + ": " + note + "\n"
+        prev = read(MEMORY) if os.path.exists(MEMORY) else tr("memory_header")
+        write(prev + line, MEMORY)   # atomic; lazy header on first note (cmd_archive pattern)
+        n = len(parse_memory(prev + line))
+    print(tr("remember_ok", agent=agent, file=os.path.basename(MEMORY), n=n))
+    return 0
+
+
 def cmd_archive(args):
     pat = re.compile(
         r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN -->.*?<!-- M8SHIFT:TURN \1 \2 END -->\n?",
@@ -1394,8 +1445,9 @@ def main():
     st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
     st.set_defaults(fn=cmd_status)
 
-    rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns")
+    rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns + memory headlines")
     rc.add_argument("--turns", type=int, default=6)
+    rc.add_argument("--memory", type=int, default=5, help="memory headlines to show (<=0 = all)")
     rc.set_defaults(fn=cmd_recap)
 
     pk = sub.add_parser("peek", help="last handoff addressed to <agent> (rc 3 if not your turn)")
@@ -1435,6 +1487,12 @@ def main():
     a.add_argument("--field", action="append", default=[], metavar="KEY=VALUE",
                    help="advisory turn field, repeatable (KEY snake_case or x_*)")
     a.set_defaults(fn=cmd_append)
+
+    rm = sub.add_parser("remember",
+                        help="append one durable note to M8SHIFT.memory.md (no pen needed)")
+    rm.add_argument("agent")
+    rm.add_argument("note")
+    rm.set_defaults(fn=cmd_remember)
 
     r = sub.add_parser("release")
     r.add_argument("agent")
