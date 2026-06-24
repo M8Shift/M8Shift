@@ -224,6 +224,14 @@ flowchart LR
 | [rfc-worktree-companion.md](../en/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
 
+Surface planifiée : [RFC — Contrats et validation Stage 4](rfc-contrats-validation.md)
+spécifie la prochaine étape d'implémentation : contrats de passation typés, décisions
+de revue explicites (`approve`, `revise`, `reject`, `waive`) et commandes de
+validation read-only. Ce n'est pas encore une garantie livrée. La validation pourra
+signaler des avertissements ou erreurs strictes lorsque l'opérateur le demande, mais
+elle ne devra pas router le travail, donner des permissions, lancer des outils ou
+muter le `LOCK`.
+
 Les idées rejetées restent documentées comme non-goals : daemon, notifications push
 dans le cœur, leases par chemin dans l'arbre partagé, mémoire intelligente, auto-merge,
 suppression automatique de worktrees, dépendances tierces.

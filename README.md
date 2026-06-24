@@ -159,6 +159,8 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
   queues, presence, progress, and UI-safe waiting around the passive core.
 - **RFC (runtime patterns)** — [docs/en/rfc-runtime-patterns.md](docs/en/rfc-runtime-patterns.md) —
   what M8Shift keeps, rejects, or defers from runtime/gateway designs.
+- **RFC (contracts and validation)** — [docs/en/rfc-contracts-validation.md](docs/en/rfc-contracts-validation.md) —
+  Stage 4 implementation spec for typed handoffs, review decisions, and read-only validation.
 
 ## How it works
 
