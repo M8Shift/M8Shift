@@ -156,8 +156,9 @@ l'heure locale ; les sorties JSON restent en UTC.
 `M8SHIFT.sessions.jsonl` quand c'est possible : `started` (début de session) et
 `duration` (durée écoulée, ou durée jusqu'à clôture/reset pour une session terminée).
 `status --json` expose les mêmes informations via `session_started_at`,
-`session_duration_seconds` et `session_duration`. Ces métadonnées ne pilotent jamais
-la claimabilité, le TTL ni le routage.
+`session_duration_seconds` et `session_duration` ; les valeurs indisponibles y sont
+sérialisées en `null`. Ces métadonnées ne pilotent jamais la claimabilité, le TTL ni
+le routage.
 
 ## 8. Interface CLI
 

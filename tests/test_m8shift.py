@@ -954,9 +954,9 @@ class TestReadCommands(CLIBase):
         d = json.loads(self.cw("status", "--json").stdout)
         self.assertRegex(status, r"started\s+-")
         self.assertRegex(status, r"duration\s+-")
-        self.assertEqual(d["session_started_at"], "-")
+        self.assertIsNone(d["session_started_at"])
         self.assertIsNone(d["session_duration_seconds"])
-        self.assertEqual(d["session_duration"], "-")
+        self.assertIsNone(d["session_duration"])
 
     def test_status_json_stale(self):
         self.init()

@@ -162,8 +162,9 @@ UTC values only.
 `M8SHIFT.sessions.jsonl` when possible: `started` (session start timestamp) and
 `duration` (elapsed session duration, or duration until close/reset for a finished
 session). The same metadata is exposed by `status --json` as
-`session_started_at`, `session_duration_seconds`, and `session_duration`; it never feeds
-claimability, TTL expiry, or routing.
+`session_started_at`, `session_duration_seconds`, and `session_duration`; unavailable
+values are serialized as `null` in JSON. This metadata never feeds claimability, TTL
+expiry, or routing.
 
 ### 6.2 State machine
 

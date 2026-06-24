@@ -108,7 +108,8 @@ UTC values only.
 `status` also derives two read-only session lines from `M8SHIFT.sessions.jsonl` when
 possible: `started` (session start timestamp) and `duration` (elapsed time since
 that start, or until close/reset for a finished session). These lines are display
-metadata only; they never feed claimability or routing.
+metadata only; they never feed claimability or routing. `status --json` exposes the
+same metadata and serializes unavailable values as `null`.
 
 > `expires` carries a date **only** during `WORKING_*` (an agent is working,
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
