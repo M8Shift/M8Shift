@@ -110,7 +110,8 @@ le jugement du mainteneur.
 | ENF-5 **Tenue dans le temps** | `M8SHIFT.md` reste borné via `archive`; sessions, mémoire et tâches vivent dans des registres append-only. |
 | ENF-6 **Zéro identifiant** | Aucun appel réseau, aucune clé API, aucun compte pour M8Shift lui-même. |
 | ENF-7 **i18n** | Le cœur distribué est anglais ; les variantes localisées sont générées par `m8shift-i18n.py` depuis `i18n/<lang>/`. |
-| ENF-8 **Version visible** | Tous les scripts Python suivis exposent `--version` et restent en lockstep. |
+| ENF-8 **Libre et open source** | M8Shift est libre et open source sous licence Apache 2.0 ; l'état de coordination reste dans des fichiers projet ordinaires et le source peut être audité, copié, modifié et redistribué selon cette licence. |
+| ENF-9 **Version visible** | Tous les scripts Python suivis exposent `--version` et restent en lockstep. |
 
 ## 7. Modèle de données
 

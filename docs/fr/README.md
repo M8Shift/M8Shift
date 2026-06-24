@@ -3,6 +3,9 @@
 Ce document est le point d'entrée de la documentation française. Il recense tous
 les documents Markdown actuellement présents dans `docs/fr/`, hors cet index.
 
+M8Shift est **libre et open source**, publié sous
+[licence Apache 2.0](../../LICENSE).
+
 ## Démarrer
 
 | Document | Objet |

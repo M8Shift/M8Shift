@@ -6,7 +6,7 @@ _Different agents. Different roles. One coordinated workflow._
 
 ![M8Shift](M8Shift-logo.png)
 
-**A single-file relay that lets two or more AI agents — an active roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation (one writer at a time).**
+**A free and open-source single-file relay that lets two or more AI agents — an active roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation (one writer at a time).**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#tests)
@@ -31,6 +31,9 @@ M8Shift is a **cooperative mutex** for AI agents. When Claude and Codex work on 
 same repository, they overwrite each other. M8Shift introduces a single **pen**: at
 any moment, exactly one agent is allowed to write; the others wait for their turn and
 knows precisely what is expected of it.
+
+M8Shift is **free and open source**, released under the
+[Apache License 2.0](LICENSE).
 
 The whole kit fits in **one file**: [`m8shift.py`](m8shift.py). You copy it to the
 root of a project, run `init`, and the agents hand off to each other (any roster member to any other) through a

@@ -6,7 +6,7 @@ _Des agents différents. Des rôles différents. Un seul workflow coordonné._
 
 ![M8Shift](../M8Shift-logo.png)
 
-**Un relais en fichier unique qui permet à deux agents IA ou plus — un roster actif (Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte, avec un seul écrivain à la fois.**
+**Un relais libre et open source en fichier unique qui permet à deux agents IA ou plus — un roster actif (Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte, avec un seul écrivain à la fois.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#tests)
@@ -32,6 +32,9 @@ Claude et Codex travaillent sur le même dépôt, ils s'écrasent mutuellement.
 M8Shift introduit un unique **stylo** : à tout instant, exactement un agent est
 autorisé à écrire ; les autres attendent leur tour et savent précisément ce qu'on
 attend d'eux.
+
+M8Shift est **libre et open source**, publié sous
+[licence Apache 2.0](../LICENSE).
 
 Tout le kit tient dans **un seul fichier** : [`m8shift.py`](../m8shift.py). Vous le copiez à la
 racine d'un projet, lancez `init`, et les agents du roster se passent la main via un
