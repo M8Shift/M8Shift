@@ -345,7 +345,9 @@ invocations successives des agents. « Arrêt » = `done <agent>` (état `DONE`)
 - **Poll** : chaque agent inactif appelle `wait <soi>` (boucle ~60 s, `--interval N`)
   ou `wait <soi> --once` (un contrôle, non bloquant, pour une boucle externe).
 - **Supervision** : `m8shift.py status` (verrou + dernier tour) ; en black-box,
-  `grep -E '^state:|^holder:' M8SHIFT.md`.
+  `grep -E '^state:|^holder:' M8SHIFT.md`. Pour un terminal qui se rafraîchit seul,
+  `m8shift.py watch --for <agent> --interval 5` répète la même vue en lecture seule,
+  sans claim, passation ni réparation.
 - **Détection de blocage** : `status` signale un verrou **périmé** (`WORKING_*`
   + `now > expires`) → reprise par `claim <soi> --force`.
 
@@ -436,11 +438,11 @@ Empreinte négligeable ; pas de SAN, pas de base de données.
 | Stockage `M8SHIFT.md` | quelques Ko ; **borné** par `archive` (≈ LOCK + N derniers tours) |
 | Archive | croît linéairement ; purgeable / compressible hors-ligne |
 | CPU / mémoire | une invocation Python courte ; négligeable |
-| Temps de réponse | commande < ~100 ms (hors `wait` bloquant, volontairement ~60 s/poll) |
+| Temps de réponse | commande < ~100 ms (hors moniteurs bloquants comme `wait` / `watch`, volontairement poll-based) |
 
 ### 5.3 Sizing dynamique
-Le seul paramètre de charge est l'intervalle de poll (`wait --interval N`) ;
-`--once` permet une supervision sans coût d'attente.
+Le seul paramètre de charge est l'intervalle de poll (`wait --interval N`,
+`watch --interval N`) ; `--once` permet une supervision sans coût d'attente.
 
 ---
 

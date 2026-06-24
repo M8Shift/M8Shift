@@ -98,6 +98,7 @@ le jugement du mainteneur.
 | EF-18 | Les sorties humaines affichent UTC + heure locale ; les sorties JSON restent en UTC canonique. |
 | EF-19 | `m8shift-worktree.py` permet le degré 2 optionnel : travail parallèle en worktrees isolés, intégration sérialisée. |
 | EF-20 | Les garde-fous de boucle empêchent les sorties prématurées : `status --for <agent>` indique l'action suivante et `append --wait` reste bloqué après passation jusqu'au prochain tour du même agent ou `DONE`. |
+| EF-21 | `watch [--for agent]` fournit une vue live locale, en lecture seule, de `status` ; elle ne claim pas, ne passe pas la main et ne force aucune récupération. |
 
 ## 6. Exigences non fonctionnelles
 
@@ -156,6 +157,7 @@ l'heure locale ; les sorties JSON restent en UTC.
 ```text
 m8shift.py init [--name X] [--agents a,b,c…] [--lang code] [--force]
 m8shift.py status [--for agent] [--json]
+m8shift.py watch [--for agent] [--interval N] [--clear] [--changes-only]
 m8shift.py doctor [--lint] [--json] [--severity-min info|warning|error]
 m8shift.py recap [--turns N] [--memory N] [--tasks N]
 m8shift.py wait <agent> [--once] [--interval N]

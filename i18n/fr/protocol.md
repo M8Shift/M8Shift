@@ -214,6 +214,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ```
 ./m8shift.py init [--name PROJET] [--agents a,b,c…] [--lang <code>] [--force]  # (re)génère le kit ici
 ./m8shift.py status [--for <agent>]                # verrou + dernier tour + action suivante
+./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # surveillance locale live, lecture seule
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # attend si besoin, puis claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
@@ -234,6 +235,10 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 - Inspection **non bloquante** : `status` ou `wait <toi> --once`. `wait <toi>`
   **sans** `--once` bloque jusqu'à ton tour — ne l'utilise pas si tu dois rendre
   la main à ta boucle entre-temps.
+- **Vue opérateur live** : `watch --for <toi> --interval 5` répète la même vue
+  `status` en lecture seule pour suivre l'évolution du relais sans relancer la
+  commande à la main. C'est une surveillance locale et passive : pas de `claim`,
+  pas de passation, pas de récupération forcée, pas de daemon.
 
 ---
 

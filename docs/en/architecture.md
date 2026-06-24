@@ -339,7 +339,9 @@ agents' successive invocations. "Shutdown" = `done <agent>` (state `DONE`).
 - **Poll**: each idle agent calls `wait <self>` (loop ~60 s, `--interval N`) or
   `wait <self> --once` (a single check, non-blocking, for an external loop).
 - **Monitoring**: `m8shift.py status` (lock + last turn); in black-box mode,
-  `grep -E '^state:|^holder:' M8SHIFT.md`.
+  `grep -E '^state:|^holder:' M8SHIFT.md`. For a terminal that refreshes by itself,
+  `m8shift.py watch --for <agent> --interval 5` repeats the same read-only view
+  without claiming, handing off, or repairing anything.
 - **Deadlock detection**: `status` flags a **stale** lock (`WORKING_*` + `now >
   expires`) → recovery via `claim <self> --force`.
 
@@ -429,11 +431,11 @@ Negligible footprint; no SAN, no database.
 | `M8SHIFT.md` storage | a few KB; **bounded** by `archive` (≈ LOCK + last N turns); session metadata is in append-only `M8SHIFT.sessions.jsonl` |
 | Archive | grows linearly; purgeable / compressible offline |
 | CPU / memory | a short Python invocation; negligible |
-| Response time | command < ~100 ms (except the blocking `wait`, intentionally ~60 s/poll) |
+| Response time | command < ~100 ms (except blocking monitors such as `wait` / `watch`, intentionally poll-based) |
 
 ### 5.3 Dynamic sizing
-The only load parameter is the poll interval (`wait --interval N`); `--once`
-allows monitoring with no wait cost.
+The only load parameter is the poll interval (`wait --interval N`,
+`watch --interval N`); `--once` allows monitoring with no wait cost.
 
 ---
 

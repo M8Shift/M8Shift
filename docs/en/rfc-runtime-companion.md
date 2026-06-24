@@ -189,8 +189,9 @@ Progress does not replace `append --done`. It gives humans a reliable answer to
 
 ### 1. `watch` mode for interactive UIs
 
-The companion cannot wake a VS Code chat by itself. In `watch` mode it does what is
-actually possible:
+The core already has `m8shift.py watch`: a foreground, read-only terminal view that
+repeats `status`. The companion `watch` mode is deliberately broader, but still cannot
+wake a VS Code chat by itself. It does what is actually possible:
 
 1. poll `m8shift.py status --json`;
 2. update `presence.json`;

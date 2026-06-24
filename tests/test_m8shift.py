@@ -27,7 +27,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
 
-VERSION = "3.9.0"
+VERSION = "3.10.0"
 
 
 # ───────────────────────────── unitaires : fonctions pures ──────────────────
@@ -597,6 +597,25 @@ class TestWait(CLIBase):
         self.cw("claim", "claude")
         self.set_expires_past()
         self.assertEqual(self.cw("wait", "codex", "--once").returncode, 0)
+
+
+class TestWatch(CLIBase):
+    def test_watch_once_is_read_only_and_shows_next_action(self):
+        self.init()
+        before = self.md()
+        r = self.cw("watch", "--for", "codex", "--once")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.md(), before)
+        self.assertIn("watch", r.stdout)
+        self.assertIn("m8shift.py v", r.stdout)
+        self.assertIn("next codex", r.stdout)
+
+    def test_watch_interval_invalid_clean_exit(self):
+        self.init()
+        r = self.cw("watch", "--interval", "0", "--once")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("--interval", r.stdout + r.stderr)
 
 
 # ───────────────────────────── concurrence ─────────────────────────────────
