@@ -85,6 +85,7 @@ flowchart LR
 | EF-14 | `history` shows one folded entry per relay session: session id, start/end, state, agents, turn count, agents used and version; `--json` exposes the same data. | `test_init_records_session_and_history`, `test_history_counts_turns_and_done`, `test_force_init_marks_previous_session_reset` |
 | EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time label; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_local_label`, `test_status_and_recap_show_local_time_labels`, `test_status_json`, `test_status_shows_local_time_labels` |
 | EF-16 | Operator-loop guardrails keep agents from stopping mid-relay: `status --for <agent>` prints/serializes the next safe action and `append --wait` blocks after handoff until the caller's next turn or `DONE`. | `test_status_for_prints_and_serializes_next_action`, `test_append_wait_blocks_until_agent_turn_returns` |
+| EF-17 | `watch [--for agent]` is a foreground, read-only live view over `status`: it can refresh a terminal automatically, but never claims, hands off, repairs, or force-recovers. | `test_watch_once_is_read_only_and_shows_next_action`, `test_watch_interval_invalid_clean_exit` |
 
 ## 5. Non-functional requirements
 
@@ -175,7 +176,7 @@ stateDiagram-v2
 
 ## 7. Command-line interface
 
-`init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json]` · `doctor [--lint] [--json] [--severity-min …]` ·
+`init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json]` · `watch [--for agent] [--interval N] [--clear] [--changes-only]` · `doctor [--lint] [--json] [--severity-min …]` ·
 `recap [--turns N] [--memory N] [--tasks N]` ·
 `wait <agent> [--once] [--interval N]` · `next <agent> [--once] [--interval N] [--force]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
 `peek <agent>` · `log [--limit N] [--all] [--oneline]` · `history [--limit N] [--oneline] [--json]` ·
@@ -339,6 +340,7 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [rfc-tasks.md](rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
 | [rfc-session-history.md](rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
 | [rfc-runtime-patterns.md](rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, local-time labels in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| Operator live view | **Passive monitoring** | `watch [--for <agent>] [--interval N] [--clear] [--changes-only]` repeats the status view in a terminal. | Foreground/read-only loop only; no daemon, no notification, no `claim`, no force recovery. |
 | Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |
 | [rfc-worktree-companion.md](rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
@@ -378,7 +380,7 @@ itself stays a pure degree-1 mutex while true concurrency is available when want
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|
 | **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the `m8shift-worktree.py` companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
-| **Background daemon / watcher / push-notifier** | passive | M8Shift has no resident process; the recipient polls on its own next turn. A notification can *signal* a turn, never *wake* the AI. |
+| **Background daemon / autonomous watcher / push-notifier** | passive | M8Shift has no resident process. The shipped `watch` command is only a foreground read-only terminal view; notifications can *signal* a turn, never *wake* the AI. |
 | **Runtime supervision in the core** | passive / single-file | Queues, presence, progress drafts, and operator inboxes are useful host integration concerns, but they belong in an opt-in companion ([rfc-runtime-companion.md](rfc-runtime-companion.md)), not in the mutex. |
 | **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns M8Shift into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |
 | **Third-party deps / multi-file package** | single file | Every item is scoped to stdlib (`json`, `fnmatch`, `re`); a DB / queue / server would split the tool — no more `cp m8shift.py`. |

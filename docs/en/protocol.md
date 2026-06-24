@@ -221,6 +221,7 @@ Guardrail:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py status [--for <agent>]                # lock + last turn + optional next-action hint
+./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json]              # read-only health/lint checks (never repairs or steals the pen)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
@@ -243,6 +244,10 @@ Guardrail:
 - **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
   **without** `--once` blocks until your turn — do not use it if you must return
   control to your loop in the meantime.
+- **Live operator view**: `watch --for <you> --interval 5` repeats the same
+  read-only status view so a terminal can show relay evolution without manually
+  re-running `status`. It is a foreground/passive monitor: no `claim`, no handoff,
+  no force recovery, no daemon.
 
 ---
 

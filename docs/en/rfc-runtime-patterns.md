@@ -65,7 +65,19 @@ interactive UI that is no longer waiting.
 **Boundary:** `doctor` reports by default. Any `--fix` mode must be explicit, narrow, and
 must never auto-steal a non-stale pen.
 
-### 2. Presence / heartbeat — KEEP
+### 2. Foreground status watch — KEEP, NARROW
+
+**Why keep it:** operators need a terminal that evolves without repeatedly typing
+`status`, especially during handoffs between interactive UIs.
+
+**Where it belongs:** the core as `m8shift.py watch`, because it is just a repeated
+read-only status render.
+
+**Boundary:** `watch` is not presence, supervision, notification, or recovery. It does
+not `claim`, hand off, repair, run tools, or wake an agent. Autonomous watchers and
+push-notifiers still belong outside the core.
+
+### 3. Presence / heartbeat — KEEP
 
 **Why keep it:** `status` can say `AWAITING_CODEX` while no Codex UI or process is alive.
 That is the exact class of failure that caused repeated human nudges.
@@ -82,7 +94,7 @@ the last observed core `LOCK` state.
 **Boundary:** stale presence never grants the pen. Core TTL remains the only stale-pen
 recovery rule.
 
-### 3. Per-agent queue / lane — KEEP
+### 4. Per-agent queue / lane — KEEP
 
 **Why keep it:** the core identifies agents by roster name, not by UI instance. Two Codex
 sessions can both treat `claim codex` as a refresh. A lane owner prevents this.
@@ -95,7 +107,7 @@ can read status but must queue or refuse managed actions.
 **Boundary:** this is instance-level runtime safety. It must not change the core identity
 model.
 
-### 4. Operator inbox modes — KEEP
+### 5. Operator inbox modes — KEEP
 
 **Why keep it:** human intervention during a run needs explicit semantics. A raw UI message
 does not tell the relay whether the human means "add this later", "interrupt", or "give me
@@ -118,7 +130,7 @@ status".
 
 **Boundary:** `interrupt` is a request, not a force takeover. The core pen is not stolen.
 
-### 5. Run lifecycle ids — KEEP
+### 6. Run lifecycle ids — KEEP
 
 **Why keep it:** humans need to distinguish "turn 11 in the relay" from "Codex UI session
 that attempted to process turn 11". A `run_id` makes abandoned or retried sessions
@@ -132,7 +144,7 @@ auditable.
 **Boundary:** the core `turn` remains the official relay sequence. `run_id` is runtime
 telemetry.
 
-### 6. Progress drafts / progress log — KEEP
+### 7. Progress drafts / progress log — KEEP
 
 **Why keep it:** long turns currently look identical to dead turns from outside the UI.
 
@@ -147,7 +159,7 @@ telemetry.
 
 **Boundary:** progress does not replace `append --done`; it is not proof of completion.
 
-### 7. Loop / no-progress detection — KEEP
+### 8. Loop / no-progress detection — KEEP
 
 **Why keep it:** the recurring operational failure is not just "someone forgot to wait";
 it is "the same wait/resume/status cycle repeats without advancing the relay".
@@ -165,7 +177,7 @@ it is "the same wait/resume/status cycle repeats without advancing the relay".
 **Boundary:** detection reports or blocks the companion's own loop. It does not auto-force
 the core lock.
 
-### 8. Idempotency keys — KEEP
+### 9. Idempotency keys — KEEP
 
 **Why keep it:** UI retries and human double-clicks can duplicate companion-originated
 actions: notifications, queued operator messages, headless run requests, or integration
@@ -179,7 +191,7 @@ finalization.
 
 **Boundary:** do not deduplicate or rewrite core turns. `M8SHIFT.md` remains append-only.
 
-### 9. Canonical run plan for headless execution — KEEP
+### 10. Canonical run plan for headless execution — KEEP
 
 **Why keep it:** headless mode can become dangerous if the command, cwd, prompt, or agent
 identity changes between preparation and execution.
@@ -204,7 +216,7 @@ Then execute exactly that plan and verify the core state afterward.
 **Boundary:** this is local process hygiene. M8Shift does not become a shell approval
 system.
 
-### 10. Bounded task/run ledgers — KEEP
+### 11. Bounded task/run ledgers — KEEP
 
 **Why keep it:** sidecars can grow forever if the companion is long-running.
 
@@ -214,7 +226,7 @@ system.
 
 **Boundary:** never prune `M8SHIFT.md` outside the existing core `archive` command.
 
-### 11. Safe transcript / recap normalization — KEEP, NARROW
+### 12. Safe transcript / recap normalization — KEEP, NARROW
 
 **Why keep it:** runtime tools may need to show recent UI/session context without dumping
 huge or unsafe raw transcripts.
@@ -226,7 +238,7 @@ token-like values, and report `truncated: true`.
 
 **Boundary:** this is a display filter, not a rewriting pass over the source journal.
 
-### 12. Action-sensitive memory guidance — KEEP, NARROW
+### 13. Action-sensitive memory guidance — KEEP, NARROW
 
 **Why keep it:** some notes in `remember` affect future behavior only under a condition:
 permission, expiry, handoff boundary, or "do not act yet".
@@ -241,7 +253,7 @@ remember codex "Do not run publishing scripts unless the maintainer explicitly a
 
 **Boundary:** no semantic memory, no automatic policy engine, no derived routing.
 
-### 13. Workboard concepts — KEEP ONLY AS A COMPANION IDEA
+### 14. Workboard concepts — KEEP ONLY AS A COMPANION IDEA
 
 **Why keep it:** runtime workboards have useful operational concepts: claim TTL,
 heartbeat, owner token, blocked reason, proof/artifacts.

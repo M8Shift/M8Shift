@@ -64,7 +64,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.9.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.10.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -337,6 +337,7 @@ Guardrail:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py status [--for <agent>]                # lock + last turn + optional next-action hint
+./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json]              # read-only health/lint checks (never repairs or steals the pen)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
@@ -359,6 +360,10 @@ Guardrail:
 - **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
   **without** `--once` blocks until your turn — do not use it if you must return
   control to your loop in the meantime.
+- **Live operator view**: `watch --for <you> --interval 5` repeats the same
+  read-only status view so a terminal can show relay evolution without manually
+  re-running `status`. It is a foreground/passive monitor: no `claim`, no handoff,
+  no force recovery, no daemon.
 
 ---
 
@@ -575,6 +580,9 @@ MESSAGES = {
         "wait_stale": "⚠ {other}'s lock is stale — claim --force possible.",
         "wait_not_yet": "… not your turn: {st} (holder={holder}).",
         "wait_poll": "… {st} (holder={holder}), re-checking in {interval}s",
+        "watch_start": "watching M8Shift every {interval}s (Ctrl-C to stop).",
+        "watch_header": "── watch {ts} ─────────────────────────",
+        "watch_stop": "watch stopped.",
         "bad_interval": "--interval must be an integer >= 1.",
         "claim_active": "refused: {holder}'s lock is still valid (expires {expires}). --force only reclaims a stale lock (protocol §5).",
         "claim_refused": "refused: state={st}, holder={holder} — it is not your turn.",
@@ -1958,8 +1966,8 @@ def next_action_for(lk, agent=None, stale=False):
     return "inspect M8SHIFT.md"
 
 
-def cmd_status(args):
-    text = load_or_die()
+def _status_info(text=None):
+    text = text if text is not None else load_or_die()
     lk = get_lock(text)
     exp = parse_iso(lk.get("expires"))
     stale = (
@@ -1969,6 +1977,50 @@ def cmd_status(args):
     )
     turns = re.findall(r"M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN", text)
     last = {"n": int(turns[-1][0]), "agent": turns[-1][1]} if turns else None
+    return lk, stale, last
+
+
+def _print_status_block(lk, stale, last, for_agent=""):
+    print(f"m8shift.py v{VERSION}")
+    print("── LOCK ───────────────────────────────")
+    for k in ("holder", "state", "lang", "session", "turn", "since", "expires", "note"):
+        print(f"  {k:<8} {display_lock_value(k, lk.get(k, ''))}")
+        if k == "state":
+            print(f"  {'agents':<8} {','.join(active_agents(lk))}")
+    if stale:
+        print(tr("status_stale"))
+    if for_agent:
+        agent = need_agent(for_agent)
+        print(tr("status_next", action=next_action_for(lk, agent=agent, stale=stale)))
+    else:
+        print(tr("status_next", action=next_action_for(lk, stale=stale)))
+    if last:
+        print(tr("last_turn", n=last["n"], who=last["agent"]))
+
+
+def _status_signature(lk, stale, last, for_agent=""):
+    data = {
+        "holder": lk.get("holder", ""),
+        "state": lk.get("state", ""),
+        "agents": ",".join(active_agents(lk)),
+        "session": lk.get("session", ""),
+        "turn": lk.get("turn", ""),
+        "since": lk.get("since", ""),
+        "expires": lk.get("expires", ""),
+        "note": lk.get("note", ""),
+        "integrating": lk.get("integrating", ""),
+        "stale": bool(stale),
+        "last_turn": last or {},
+    }
+    if for_agent:
+        agent = need_agent(for_agent)
+        data["next_action"] = next_action_for(lk, agent=agent, stale=stale)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def cmd_status(args):
+    text = load_or_die()
+    lk, stale, last = _status_info(text)
     if getattr(args, "json", False):
         out = dict(lk)                       # raw LOCK fields…
         out["agents_active"] = active_agents(lk)  # full active roster (N)
@@ -1980,22 +2032,41 @@ def cmd_status(args):
             out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
-    print(f"m8shift.py v{VERSION}")
-    print("── LOCK ───────────────────────────────")
-    for k in ("holder", "state", "lang", "session", "turn", "since", "expires", "note"):
-        print(f"  {k:<8} {display_lock_value(k, lk.get(k, ''))}")
-        if k == "state":
-            print(f"  {'agents':<8} {','.join(active_agents(lk))}")
-    if stale:
-        print(tr("status_stale"))
-    if getattr(args, "for_agent", ""):
-        agent = need_agent(args.for_agent)
-        print(tr("status_next", action=next_action_for(lk, agent=agent, stale=stale)))
-    else:
-        print(tr("status_next", action=next_action_for(lk, stale=stale)))
-    if last:
-        print(tr("last_turn", n=last["n"], who=last["agent"]))
+    _print_status_block(lk, stale, last, getattr(args, "for_agent", ""))
     return 0
+
+
+def cmd_watch(args):
+    """Foreground, read-only status monitor.
+
+    This is intentionally not a daemon and never changes routing. It just saves the operator from
+    re-running `status` by hand while a relay evolves.
+    """
+    if args.interval < 1:
+        sys.exit(tr("bad_interval"))
+    last_sig = None
+    if not args.once:
+        print(tr("watch_start", interval=args.interval), flush=True)
+    try:
+        while True:
+            text = load_or_die()
+            lk, stale, last = _status_info(text)
+            sig = _status_signature(lk, stale, last, args.for_agent)
+            should_print = (sig != last_sig) or not args.changes_only
+            if should_print:
+                if args.clear:
+                    print("\033[2J\033[H", end="")
+                print(tr("watch_header", ts=display_time(iso(now()))))
+                _print_status_block(lk, stale, last, args.for_agent)
+                print("", flush=True)
+            last_sig = sig
+            if args.once:
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\n" + tr("watch_stop"))
+        return 0
+
 
 def cmd_wait(args):
     if not args.once and args.interval < 1:
@@ -2500,6 +2571,19 @@ def main():
     st.add_argument("--for", dest="for_agent", default="",
                     help="show the next safe action for this agent")
     st.set_defaults(fn=cmd_status)
+
+    wt = sub.add_parser("watch", help="continuous read-only status monitor")
+    wt.add_argument("--for", dest="for_agent", default="",
+                    help="show the next safe action for this agent")
+    wt.add_argument("--interval", type=int, default=5,
+                    help="poll interval in seconds (default: 5)")
+    wt.add_argument("--clear", action="store_true",
+                    help="clear the terminal before each rendered snapshot")
+    wt.add_argument("--changes-only", action="store_true",
+                    help="print a snapshot only when the relay state changes")
+    wt.add_argument("--once", action="store_true",
+                    help="render one watch snapshot and exit (for scripts/tests)")
+    wt.set_defaults(fn=cmd_watch)
 
     dr = sub.add_parser("doctor", help="read-only health/lint checks (no repair, no force)")
     dr.add_argument("--json", action="store_true", help="machine-readable findings")

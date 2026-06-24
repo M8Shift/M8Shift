@@ -11,7 +11,7 @@ Every decision is measured against M8Shift's identity invariants. A choice is on
 it keeps **all** of them:
 
 - **Single file**, Python 3.8+, **stdlib only** (no PyYAML, no jsonschema, no deps).
-- **Passive**: no daemon, no watcher, no background loop, no network; agents drive it via shell.
+- **Passive**: no daemon, no autonomous watcher, no network; agents drive it via shell.
 - **Degree-1**: exactly one writer at a time on the shared tree; the pen is the only authority.
 - **MINIMAL**: the engine decides **one** thing — *who writes, when* — and reads back **only** the
   LOCK fields `agents` / `holder` / `state`. Everything else it records but never interprets.
@@ -44,9 +44,10 @@ opt-in companion tier) or **rejected**, rather than allowed to erode the identit
   **opt-in companion tier** (`m8shift-worktree.py` + a liveness supervisor) that `import m8shift`,
   reuse its lock/parse helpers, and add only the orchestration/git surface.
 - **Why.** It gives a clean home for everything that would breach MINIMAL/passive without contaminating
-  the core. Anything that reads recorded payload back to gate work — or runs a watcher — lives in the
-  companion. The core's promise ("who writes, when") stays literally true.
-- **Rejected:** folding tasks-gating / worktree git / a watcher into `m8shift.py` itself. It would make
+  the core. Anything that reads recorded payload back to gate work — or runs an autonomous watcher —
+  lives in the companion. A foreground read-only `watch` view is acceptable because it only repeats
+  `status` and never acts on the result. The core's promise ("who writes, when") stays literally true.
+- **Rejected:** folding tasks-gating / worktree git / an autonomous watcher into `m8shift.py` itself. It would make
   the core an orchestrator and break passive + MINIMAL.
 
 ### D3 — Structured data lives in turn-header markdown, not YAML
@@ -184,7 +185,7 @@ opt-in companion tier) or **rejected**, rather than allowed to erode the identit
 | Integration pen as a per-worktree artifact | Different `HERE` per worktree → two concurrent merges (the blocker, D7) |
 | A second long-lived workspace lock | Use the task block's advisory `state`+`owner`; avoids lock inversion (D7) |
 | Auto-merge / auto agent-selection / auto worktree deletion | Breaks passive / "M8Shift never decides for you" (Codex non-goals, kept) |
-| Background daemon/watcher in the core | Breaks passive; supervision is a companion loop (D8) |
+| Background daemon/autonomous watcher in the core | Breaks passive; supervision is a companion loop (D8). A foreground read-only `watch` view is not a supervisor. |
 | Codex's 12 roles / 11 relations / 11 caps as **engine-enforced schema** | Bloats the engine; kept as documentation convention with `x-` escape |
 | "N-activation needs no engine change" (an early RFC claim) | False — `active_pair` truncates to 2; see RFC §4a |
 | "The core runs no git" (an early RFC claim) | False — `init`/`migrate-brand` already shell `git ls-files`/`git mv` |

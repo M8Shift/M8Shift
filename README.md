@@ -125,6 +125,7 @@ run the CLI, and follow `claim → work → append`.
 
 ```bash
 ./m8shift.py status --for claude   # who holds the pen + what should claude do next?
+./m8shift.py watch --for claude    # live read-only status view in a terminal
 ./m8shift.py next claude           # wait if needed, then claim + show the handoff
 ./m8shift.py wait claude --once    # rc 0 = your turn (or DONE = stop); rc 3 = not yet
 
@@ -146,6 +147,8 @@ run the CLI, and follow `claim → work → append`.
 (`append` is accepted only from `WORKING_<you>`).
 Before stopping, run `status --for <you>`; if the relay is not `DONE`, keep waiting
 or close your own `WORKING_<you>` state with `append`/`done`.
+For a passive live view while agents work, leave `./m8shift.py watch --for <you>
+--interval 5` running in a separate terminal; it never claims or changes the relay.
 
 ## Documentation
 
@@ -335,7 +338,7 @@ durable streaming, so another work-provenance ledger would be redundant surface
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
 disjoint writes inside the shared tree (use the opt-in worktree companion instead); a
-background daemon / watcher / push-notifier; running git, builds or APIs (needs auth +
+background daemon / autonomous watcher / push-notifier; running git, builds or APIs (needs auth +
 network → an orchestrator); third-party deps or a multi-file package; and "smart"
 *derived* memory (dedup / summarize / prune) — the ledger stays a dumb, human-curated
 record.

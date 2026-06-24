@@ -119,6 +119,7 @@ ci-dessous utilisent le couple par défaut `claude`/`codex`).
 
 ```bash
 ./m8shift.py status --for claude   # qui détient le stylo + que doit faire claude ?
+./m8shift.py watch --for claude    # vue live en lecture seule dans un terminal
 ./m8shift.py next claude           # attend si besoin, puis claim + affiche la passation
 ./m8shift.py wait claude --once    # rc 0 = votre tour (ou DONE = stop) ; rc 3 = pas encore
 
@@ -140,6 +141,9 @@ ci-dessous utilisent le couple par défaut `claude`/`codex`).
 (`append` n'est accepté que depuis `WORKING_<toi>`).
 Avant de vous arrêter, lancez `status --for <toi>` ; si le relais n'est pas `DONE`,
 continuez à attendre ou clôturez votre propre état `WORKING_<toi>` avec `append`/`done`.
+Pour suivre le relais sans relancer `status` à la main, laissez
+`./m8shift.py watch --for <toi> --interval 5` tourner dans un terminal séparé ; il
+ne claim pas et ne modifie jamais le relais.
 
 ## Documentation
 
@@ -311,7 +315,7 @@ l'append, et `remember` couvre le streaming durable en cours de tour.
 
 **Non-goals** (briseraient une qualité de M8Shift) : *baux* par chemin pour des écritures
 disjointes concurrentes dans l'arbre partagé (utiliser plutôt le compagnon worktree optionnel) ;
-un daemon / watcher / push de notifications en arrière-plan ; lancer git, des builds
+un daemon / watcher autonome / push de notifications en arrière-plan ; lancer git, des builds
 ou des API (auth + réseau → un orchestrateur) ; des dépendances tierces ou un paquet
 multi-fichiers ; et une mémoire *dérivée* « intelligente » (dédup / résumé / purge) —
 le registre reste une trace bête, curée à la main.
