@@ -10,10 +10,9 @@ les étapes dans l'ordre et comparez chaque sortie console avec le bloc
 **Résultat attendu** qui la suit. Si quelque chose paraît différent, lisez
 l'encart **Si X s'affiche à la place**.
 
-> Astuce : l'outil `m8shift.py` affiche ses propres messages en français. C'est
-> normal — les mots que vous tapez (commandes, flags, états) sont les mêmes
-> partout, et ce tutoriel explique chaque ligne en français. Vous lisez la
-> sortie exactement telle qu'une exécution réelle la produit.
+> Astuce : le `m8shift.py` fourni affiche ses messages runtime en anglais. Les
+> variantes générées avec `m8shift-i18n.py` peuvent afficher une autre langue,
+> mais les commandes, flags, états et champs du verrou restent identiques.
 
 **Ce qu'il vous faut :** un terminal, Python 3, et le fichier unique `m8shift.py`.
 **Durée :** environ 10 minutes.
@@ -27,8 +26,8 @@ machine ne soit touché. M8Shift est un fichier unique autonome, donc un projet
 d'essai n'est qu'un répertoire vide.
 
 ```bash
-mkdir /tmp/cowork-toy
-cd /tmp/cowork-toy
+mkdir /tmp/m8shift-toy
+cd /tmp/m8shift-toy
 ```
 
 **Résultat attendu :** aucune sortie. Vous avez maintenant un dossier vide et
@@ -65,29 +64,29 @@ fichier de travail partagé `M8SHIFT.md`, la référence de protocole
 permettent à chaque agent de s'amorcer lui-même.
 
 ```bash
-./m8shift.py init --name hello-cowork
+./m8shift.py init --name hello-m8shift
 ```
 
 **Résultat attendu :**
 
 ```text
-✓ cowork init — projet « hello-cowork » dans /tmp/cowork-toy
-  • M8SHIFT.protocol.md: écrit
-  • M8SHIFT.md: écrit (projet « hello-cowork », verrou IDLE)
-  • CLAUDE.md: fichier créé
-  • AGENTS.md: fichier créé
-Démarrer : ./m8shift.py claim claude  (puis travaille, puis ./m8shift.py append claude --to codex --ask "…" --done "…")
-Amorçage : démarre une nouvelle session/exécution de Claude et Codex pour recharger les ancrages.
+✓ m8shift init — project “hello-m8shift” in /tmp/m8shift-toy
+  • M8SHIFT.protocol.md: written
+  • M8SHIFT.md: written (project “hello-m8shift”, lock IDLE)
+  • CLAUDE.md: file created
+  • AGENTS.md: file created
+Start: ./m8shift.py claim claude  (then work, then ./m8shift.py append claude --to codex --ask "…" --done "…")
+Bootstrap: start a new session/run of each agent to reload its anchor.
 ```
 
 En clair : le protocole a été écrit, `M8SHIFT.md` a été créé avec un verrou tout
 neuf dans l'état `IDLE`, et les deux fichiers d'ancrage ont été créés. Le verrou
 démarre à `IDLE` parce que personne ne détient encore le stylo.
 
-**Si `M8SHIFT.md: préservé` s'affiche :** vous avez déjà lancé `init` ici
+**Si `M8SHIFT.md: preserved` s'affiche :** vous avez déjà lancé `init` ici
 auparavant, donc l'état de relais existant a été conservé (c'est voulu). Pour ce
 tutoriel, repartez de zéro avec
-`./m8shift.py init --name hello-cowork --force`.
+`./m8shift.py init --name hello-m8shift --force`.
 
 ---
 
@@ -99,7 +98,7 @@ cas échéant, détient le stylo. Ouvrez `M8SHIFT.md` dans n'importe quel édite
 ou affichez-en le haut :
 
 ```bash
-head -20 M8SHIFT.md
+sed -n '/M8SHIFT:LOCK:BEGIN/,/M8SHIFT:LOCK:END/p' M8SHIFT.md
 ```
 
 **Résultat attendu (la partie verrou) :**
@@ -108,10 +107,13 @@ head -20 M8SHIFT.md
 <!-- M8SHIFT:LOCK:BEGIN -->
 holder:   none
 state:    IDLE
+agents:   claude,codex
+lang:     en
+session:  20260624T155219Z-16e3a02d
 turn:     0
-since:    2026-06-21T13:14:37Z
+since:    2026-06-24T15:52:19Z
 expires:  -
-note:     session initialisée, aucun tour ouvert
+note:     session initialized, no turn opened
 <!-- M8SHIFT:LOCK:END -->
 ```
 
@@ -119,6 +121,9 @@ Ce que signifie chaque champ :
 
 - `holder` — qui détient le stylo en ce moment. `none` signifie personne.
 - `state` — l'état courant. `IDLE` signifie que le relais est libre de démarrer.
+- `agents` — le roster actif. Ici, le défaut `claude,codex`.
+- `lang` — la langue générée/runtime.
+- `session` — l'identifiant de session utilisé par `history`.
 - `turn` — le numéro du dernier tour clôturé. `0` est le tour initial.
 - `since` — quand cet état a commencé (ISO-8601 UTC).
 - `expires` — l'échéance du verrou périmé. Il ne porte une date que tant que
@@ -144,14 +149,18 @@ l'exécuter.
 **Résultat attendu :**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   none
   state    IDLE
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     0
-  since    2026-06-21T13:14:37Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     session initialisée, aucun tour ouvert
-── dernier tour: #0 par system
+  note     session initialized, no turn opened
+── last turn: #0 by system
 ```
 
 La dernière ligne confirme que le seul tour pour l'instant est le tour initial
@@ -174,13 +183,13 @@ encore ».
 **Résultat attendu :**
 
 ```text
-✓ libre (IDLE) — `./m8shift.py claim claude` pour acquérir le stylo.
+✓ free (IDLE) — `./m8shift.py claim claude` to acquire the pen.
 ```
 
 En clair : le relais est libre (`IDLE`), donc `claude` peut maintenant acquérir
 le stylo.
 
-**Si `… pas ton tour` s'affiche :** c'est le cas du code de retour 3 — ce n'est
+**Si `… not your turn` s'affiche :** c'est le cas du code de retour 3 — ce n'est
 pas votre tour. À ce stade du tutoriel, cela devrait indiquer `IDLE`. Si ce
 n'est pas le cas, vous avez probablement déjà joué un tour ; relancez
 `init --force` (Étape 3) pour réinitialiser.
@@ -201,7 +210,7 @@ serait signalé que ce n'est pas son tour.
 **Résultat attendu :**
 
 ```text
-✓ verrou pris par claude (expire 2026-06-21T13:44:37Z).
+✓ pen taken by claude (expires 2026-06-24T16:22:19Z).
 ```
 
 En clair : le stylo est désormais détenu par `claude`. Remarquez l'heure
@@ -251,7 +260,7 @@ exclusive — pas seulement l'écriture du journal.
 **Résultat attendu :**
 
 ```text
-✓ tour 1 ecrit par claude, main passee a codex.
+✓ turn 1 written by claude, handed off to codex.
 ```
 
 En clair : le tour 1 a été écrit par `claude`, et le stylo a été passé à
@@ -270,14 +279,18 @@ Regardez à nouveau le verrou. Il devrait maintenant pointer vers `codex`.
 **Résultat attendu :**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   codex
   state    AWAITING_CODEX
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     1
-  since    2026-06-21T13:14:37Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     tour 1 pose par claude, en attente de codex
-── dernier tour: #1 par claude
+  note     turn 1 posted by claude, awaiting codex
+── last turn: #1 by claude
 ```
 
 Ce qui a changé : `holder` est maintenant `codex`, `state` est `AWAITING_CODEX`
@@ -302,8 +315,8 @@ puis claim.
 **Résultat attendu :**
 
 ```text
-✓ à toi (AWAITING_CODEX) — `./m8shift.py claim codex` pour acquérir le stylo.
-✓ verrou pris par codex (expire 2026-06-21T13:44:37Z).
+✓ your turn (AWAITING_CODEX) — `./m8shift.py claim codex` to acquire the pen.
+✓ pen taken by codex (expires 2026-06-24T16:22:19Z).
 ```
 
 En clair : la première ligne indique que c'est le tour de codex ; la seconde
@@ -327,7 +340,7 @@ repasse le stylo à `claude`. Lorsque vous n'avez rien à demander, mettez
 **Résultat attendu :**
 
 ```text
-✓ tour 2 ecrit par codex, main passee a claude.
+✓ turn 2 written by codex, handed off to claude.
 ```
 
 En clair : le tour 2 a été écrit par `codex`, et le stylo est revenu à `claude`.
@@ -346,14 +359,18 @@ Vérifiez l'état une fois de plus pour confirmer le retour de la main.
 **Résultat attendu :**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   claude
   state    AWAITING_CLAUDE
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     2
-  since    2026-06-21T13:14:37Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     tour 2 pose par codex, en attente de claude
-── dernier tour: #2 par codex
+  note     turn 2 posted by codex, awaiting claude
+── last turn: #2 by codex
 ```
 
 L'état est revenu à `AWAITING_CLAUDE` : c'est à nouveau le tour de claude.
@@ -378,7 +395,7 @@ récents (et toujours le tour initial `#0`) dans le fichier vivant.
 **Résultat attendu :**
 
 ```text
-rien a archiver (2 tour(s) archivable(s), keep=6).
+nothing to archive (2 archivable turn(s), keep=6).
 ```
 
 En clair : rien à archiver — vous n'avez que 2 tours archivables et vous avez
@@ -402,7 +419,7 @@ relâché et l'état devient `DONE`. Vous détenez actuellement le stylo en tant
 **Résultat attendu :**
 
 ```text
-✓ verrou pris par claude (expire 2026-06-21T13:44:37Z).
+✓ pen taken by claude (expires 2026-06-24T16:22:19Z).
 ✓ session DONE.
 ```
 
@@ -415,14 +432,18 @@ Vérifiez l'état final :
 **Résultat attendu :**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   none
   state    DONE
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     2
-  since    2026-06-21T13:14:38Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     session close par claude
-── dernier tour: #2 par codex
+  note     session closed by claude
+── last turn: #2 by codex
 ```
 
 Le relais est clôturé. `state` vaut `DONE` et `holder` vaut `none`. Plus aucun
@@ -431,7 +452,7 @@ souhaitez :
 
 ```bash
 cd ..
-rm -rf /tmp/cowork-toy
+rm -rf /tmp/m8shift-toy
 ```
 
 Félicitations — vous avez exécuté un relais M8Shift complet de bout en bout.
@@ -443,7 +464,8 @@ Félicitations — vous avez exécuté un relais M8Shift complet de bout en bout
 - **Le stylo est un mutex coopératif.** Un seul agent le détient à la fois ;
   vous travaillez uniquement tant que vous le détenez.
 - **Le bloc LOCK est l'unique source de vérité.** Ses champs `holder`, `state`,
-  `turn`, `since`, `expires` et `note` vous disent à qui est le tour.
+  `agents`, `lang`, `session`, `turn`, `since`, `expires` et `note` vous disent à
+  qui est le tour et dans quelle session de relais vous êtes.
 - **La boucle de base est `status` → `wait --once` → `claim` → travail →
   `append`.** `claim` prend le stylo de manière exclusive ; `append` enregistre
   votre tour et passe la main.

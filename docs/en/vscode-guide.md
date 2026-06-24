@@ -1,9 +1,9 @@
 # User guide — operating the M8Shift relay in VS Code
 
-> **Note Claude —** Operational guide: how to actually launch a Claude ⇄ Codex
+> **Operational note —** how to actually launch a Claude ⇄ Codex
 > relay from the VS Code extensions. For kit installation (`cp m8shift.py` +
 > `init`), see the [README](../../README.md); for the protocol itself, see
-> [`M8SHIFT.protocol.md`](../M8SHIFT.protocol.md).
+> [`M8SHIFT.protocol.md`](../../M8SHIFT.protocol.md).
 
 In VS Code, **the Claude and Codex panels *are* the agents**. The whole job comes
 down to two gestures: pointing them at the **right project root**, and **starting
@@ -115,7 +115,7 @@ or until you hit a blocker that needs my input.
 transcript shows the tool's confirmation line, which reads:
 
 ```text
-✓ verrou pris par claude (...)
+✓ pen taken by claude (...)
 ```
 
 This is the literal output of `m8shift.py claim claude`: it confirms Claude now

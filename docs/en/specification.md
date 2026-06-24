@@ -1,6 +1,6 @@
 # Specification — M8Shift
 
-> **Status**: `Validated` · **Version**: protocol v1 · **Last reviewed**: 2026-06-21
+> **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-06-24
 
 ---
 
@@ -29,6 +29,40 @@ human still nudges each agent to resume between turns — see §8.
 | **active agent (N≥2)** | the configured active roster (default `claude` → `CLAUDE.md`, `codex` → `AGENTS.md`); each agent reads its own anchor and operates the relay on its side |
 | **maintainer** | Human; deploys the kit, arbitrates, reads the journal |
 
+### 3.1 Product philosophy
+
+M8Shift exists because different AI agents do not converge to the same judgement.
+They evolve at different speeds, have different strengths, and can disagree on
+technical, editorial, legal, or strategic choices. The useful property is not just
+"more agents"; it is a **structured contradictory review** where several competent
+views can challenge each other while the human maintainer keeps the final decision.
+
+The project turns that practice from manual copy/paste between siloed agent UIs into
+a shared workspace: each agent can hand off context, ask for review, and receive the
+other agent's critique without the maintainer becoming a message courier. M8Shift is
+therefore a peer-coordination primitive, not a manager agent: it gives teammates a
+shared baton, a durable record, and a safe alternation rule. See the longer rationale
+in [philosophy.md](philosophy.md).
+
+```mermaid
+flowchart LR
+    H["human maintainer<br/>direction + arbitration"]
+    A["agent A<br/>viewpoint / skill set"]
+    B["agent B<br/>different viewpoint"]
+    N["agent N<br/>optional"]
+    M["M8Shift<br/>shared baton + durable journal"]
+    R["contradictory review<br/>ask / done / evidence"]
+    D["human decision<br/>accept, redirect, intervene"]
+
+    A --> M
+    B --> M
+    N --> M
+    H --> M
+    M --> R
+    R --> D
+    D --> M
+```
+
 ## 4. Functional requirements
 
 | ID | Requirement | Verified by |
@@ -48,6 +82,7 @@ human still nudges each agent to resume between turns — see §8.
 | EF-12 | The stanza is idempotent and placed at the head of the anchors; if `AGENTS.override.md` exists, it is synchronized in the override and in `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
 | EF-13 | If the project had `CLAUDE.md` but no Codex instructions, `init` creates in the new `AGENTS.md` a bridge to the common instructions in `CLAUDE.md`; a pre-existing Codex anchor stays autonomous. | `test_missing_agents_bridges_existing_claude_instructions`, `test_existing_agents_does_not_receive_claude_bridge` |
 | EF-14 | `history` shows one folded entry per relay session: session id, start/end, state, agents, turn count, agents used and version; `--json` exposes the same data. | `test_init_records_session_and_history`, `test_history_counts_turns_and_done`, `test_force_init_marks_previous_session_reset` |
+| EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time label; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_local_label`, `test_status_and_recap_show_local_time_labels`, `test_status_json`, `test_status_shows_local_time_labels` |
 
 ## 5. Non-functional requirements
 
@@ -71,7 +106,33 @@ human still nudges each agent to resume between turns — see §8.
 > (human-authored) + es,it,de,pt,ja,ru,zh-cn (machine-translated, review-pending). Runtime
 > = one file; authoring = the injector. See CONTRIBUTING.md and `docs/en/rfc-*`.
 
-## 6. Data model — the `LOCK` block
+## 6. Data model — files and `LOCK`
+
+M8Shift keeps routing state in `M8SHIFT.md` and keeps every advisory surface in a
+separate append-only or read-only sidecar. Sidecars improve observability and resumption
+without becoming a second routing source.
+
+```mermaid
+flowchart TD
+    CLI["m8shift.py CLI"]
+    Lock["M8SHIFT.md<br/>LOCK + closed turns"]
+    Archive["M8SHIFT.archive.md<br/>bounded old turns"]
+    Memory["M8SHIFT.memory.md<br/>append-only notes"]
+    Tasks["M8SHIFT.tasks.md<br/>append-only task events"]
+    Sessions["M8SHIFT.sessions.jsonl<br/>append-only session events"]
+    Anchors["CLAUDE.md / AGENTS.md / ...<br/>agent auto-load anchors"]
+    Companion["m8shift-worktree.py<br/>optional degree-2 companion"]
+
+    CLI -->|routes only here| Lock
+    CLI -->|archive| Archive
+    CLI -->|remember| Memory
+    CLI -->|task add/done/drop| Tasks
+    CLI -->|init/done/reset events| Sessions
+    CLI -->|init stanza| Anchors
+    Companion -->|serialized integration pen| Lock
+```
+
+### 6.1 The `LOCK` block
 
 At the head of `M8SHIFT.md`, between `<!-- M8SHIFT:LOCK:BEGIN -->` and `:END`:
 
@@ -86,8 +147,16 @@ At the head of `M8SHIFT.md`, between `<!-- M8SHIFT:LOCK:BEGIN -->` and `:END`:
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock TTL; date **only** during `WORKING_*` |
 | `note` | text | readable memo |
 | `lang` | enum \| absent | a KNOWN_LANGS tag (`en`, `fr`, `es`, …) — language of generated files / runtime messages; the EN-only core bundles `en` |
+| `integrating` | optional sentinel | in-flight worktree merge (`<id>@<sha>`), only while `WORKING_<holder>` |
 
-**State machine** (legitimate transitions):
+Timestamps are stored as ISO-8601 UTC with `Z` to keep TTL comparisons stable across
+agents and machines. Human-facing commands (`status`, `recap`, `history`, `task show`,
+and the worktree companion's `status`) also append a local-time label; JSON output keeps
+UTC values only.
+
+### 6.2 State machine
+
+Legitimate transitions:
 
 ```mermaid
 stateDiagram-v2
@@ -245,12 +314,14 @@ test runners) and are kept in lockstep with the core version by tests.
 So "the tool that coordinates" stays stable and tested while "the tool being developed" is freely
 broken and fixed; the version stamp is the cheap check that the two have not silently diverged.
 
-## 12. Planned features & non-goals
+## 12. Implemented RFC surfaces & non-goals
 
-Every planned feature stays within M8Shift's qualities (single-file, passive,
-zero-credential, file-based & versioned): it is **append-only or read-only over data
-M8Shift already stores** — never a daemon, an integration, or a second source of truth.
-(Vetted by an adversarial design review that rejected anything breaking a quality.)
+The latest RFC line is now implemented in the current v3.x surface. Each accepted
+feature stays within M8Shift's qualities (single-file, passive, zero-credential,
+file-based and versioned): it is **append-only or read-only over data M8Shift already
+stores**, or it lives in an opt-in companion that preserves the core's single pen.
+Rejected ideas are kept explicit so future changes do not reopen settled trade-offs
+without a new RFC.
 
 ### 12.1 Shipped surfaces (v3.x)
 
@@ -258,15 +329,15 @@ All the staged read/handoff features have shipped (each via RFC → design panel
 implementation → adversarial review). They keep the qualities by being append-only or
 read-only over data M8Shift already stores, and **never feed the mutex / routing**.
 
-| Feature | Surface | Charter |
-|---------|---------|---------|
-| **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | A dumb, file-ordered ledger; `remember` never calls `set_lock` → memory can never feed the mutex/routing. |
-| **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + the open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the LOCK, not turn fields. |
-| **Read commands** | `recap`, `peek`, `log [--all] [--oneline]`, `history [--json]`, `status --json`. | Pure read-only formatters over existing turn/session data; only stdlib `json`. |
-| **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; `start`/`done`/`reset` events never feed claimability or routing. See [rfc-session-history.md](rfc-session-history.md). |
-| **Doctor / lint** | `doctor [--lint] [--json] [--severity-min info|warning|error]` reports relay health findings: missing/corrupt lock, stale work lock, anchor/stanza drift, protocol drift, stale internal lock, malformed runtime sidecars. | Read-only diagnostics; no repair, no `--force`, never changes the `LOCK`; `--lint` is CI/preflight-friendly. |
-| **`claim --check`** | `claim <agent> --check [--files CSV] [--turns N]` — read-only pre-claim probe: readiness (rc 0/3, except DONE = not claimable) + exact file-overlap with recent turns' `files:`. | Takes no pen, mutates nothing (`--force` is a no-op); overlap never changes rc or feeds routing; exact matching (no glob) avoids false positives. |
-| **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over an append-only `M8SHIFT.tasks.md`; status = read-time last-event-wins fold; `recap` shows open tasks. | Pen-free, dumb event log; `--for`/`blocked_on` are advisory text, never resolved; task state never feeds the mutex/routing. |
+| RFC / source | Feature | Surface | Charter |
+|--------------|---------|---------|---------|
+| [rfc-memory.md](rfc-memory.md) | **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | Dumb, file-ordered ledger; `remember` never calls `set_lock`, so memory can never feed mutex/routing. |
+| [rfc-claim-check.md](rfc-claim-check.md) | **Advisory pre-claim check** | `claim <agent> --check [--files CSV] [--turns N]` reports readiness and exact file overlap with recent turns. | Takes no pen, mutates nothing; overlap never changes rc or feeds routing. |
+| [rfc-tasks.md](rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
+| [rfc-session-history.md](rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
+| [rfc-runtime-patterns.md](rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, local-time labels in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| [rfc-worktree-companion.md](rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
+| Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
 
 `subturn` was **rejected** (see [rfc-subturn.md](rfc-subturn.md)): §5 advisory fields cover
 at-append provenance and `remember` covers mid-turn streaming, so a fourth ledger would be

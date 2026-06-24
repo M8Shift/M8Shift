@@ -1,12 +1,12 @@
 # 🏛️ Document d'architecture — M8Shift
 
-> **Statut** : `Historique / non-autoritatif` · **Version** : protocole v1 · **Revue** : 2026-06-21
+> **Statut** : `Courant` · **Version** : protocole v1 · **Revue** : 2026-06-24
 >
-> ⚠️ **Document historique.** Cette traduction FR précède la généralisation **N-agent** et les
-> changements **v3** ; elle décrit le design *deux agents / paire* et cite des faits périmés
-> (ex. 46 tests). **La référence à jour est la doc anglaise** :
-> [architecture.md](../en/architecture.md), [protocol.md](../en/protocol.md). À lire comme registre
-> de design historique ; à retraduire (review-pending).
+> Cette page reflète le modèle v3 courant : roster actif de ≥2 agents, stylo unique
+> dans le cœur (degré 1), registres append-only/read-only, historique de sessions,
+> packs i18n, et compagnon optionnel `m8shift-worktree.py` pour la concurrence par
+> worktrees isolés (degré 2). Pour les règles commande par commande, voir
+> [protocole.md](protocole.md) et [cahier-des-charges.md](cahier-des-charges.md).
 
 Ce document suit le modèle multi-vues *Document d'architecture*
 (`architecture-document-template`, B. Florat, CC BY-SA 4.0), adapté à un
@@ -30,21 +30,29 @@ infrastructure d'entreprise non pertinente ici.
 
 ### 1.1 Contexte général
 
-`cowork` est un **outil de coordination de deux agents IA** (un couple configurable ; par défaut Claude, Codex)
-travaillant sur un même dépôt. Il matérialise un **stylo unique** : un seul agent
-écrit à la fois, l'autre attend son tour. Tout l'état de coordination vit dans un
-seul fichier versionnable `M8SHIFT.md`. L'outil est un **script Python autonome**
+M8Shift est un **outil de coordination pour un roster actif de deux agents IA ou plus**
+(Claude, Codex, Gemini, Le Chat, …) travaillant sur un même dépôt. Le cœur matérialise
+un **stylo unique** : un seul membre du roster écrit dans l'arbre partagé à la fois,
+les autres attendent leur tour. L'état de coordination vit dans un fichier lisible et
+versionnable `M8SHIFT.md`, avec des registres append-only pour mémoire, tâches et
+sessions. L'outil est un **script Python autonome**
 (`m8shift.py`) qui s'auto-installe dans n'importe quel projet via `init`.
 
 **Positionnement dans le SI** : couche de coordination *au-dessus* du dépôt
 hôte ; ne dépend d'aucun service, n'expose aucun port, ne stocke rien hors du
 dépôt. Transverse à tous les projets (livres, code, sites…).
 
+**Intention produit** : M8Shift a été créé pour rendre exploitable le travail
+contradictoire multi-agents. Des agents différents peuvent produire des jugements
+techniques, éditoriaux, juridiques ou de design différents ; le relais leur permet
+d'échanger et de se challenger directement, pendant que le mainteneur humain garde
+l'arbitrage. Voir [philosophie.md](philosophie.md).
+
 ### 1.2 Acteurs
 
 | Acteur | Type | Rôle |
 |--------|------|------|
-| agent actif ×2 | agents IA | le couple configuré du relais (par défaut `claude`/`codex`) ; chacun lit son propre ancrage (`CLAUDE.md`, `AGENTS.md`, …) et opère le relais de son côté |
+| agent actif ×N | agents IA | le roster actif configuré (défaut `claude,codex`) ; chacun lit son propre ancrage (`CLAUDE.md`, `AGENTS.md`, …) et opère le relais de son côté |
 | mainteneur | humain | déploie, arbitre, lit le journal (`M8SHIFT.md`, git) |
 
 ### 1.3 Nature et sensibilité des données
@@ -61,13 +69,15 @@ dépôt. Transverse à tous les projets (livres, code, sites…).
 - **Un seul fichier d'état** lisible à l'œil et au `grep`, versionnable en clair.
 - **Zéro dépendance** : Python 3.8+ stdlib uniquement ; aucune installation.
 - **Portable** : tout projet, tout FS, chemins à espaces/accents.
-- **Deux agents** par conception (couple configurable ; relais degré 1, défaut claude ⇄ codex).
+- **N agents, un seul écrivain dans le cœur** (`init --agents a,b,c…`) ; le vrai
+  parallélisme d'écriture passe par les worktrees isolés du compagnon optionnel.
 
 ### 1.5 Exigences
 
-Voir [cahier des charges](cahier-des-charges.md) §4–5 (EF-1→11, ENF-1→6). En
-synthèse : exclusion mutuelle, atomicité, autonomie des agents, robustesse,
-tenue dans le temps.
+Voir [cahier des charges](cahier-des-charges.md) §4–5. En synthèse : exclusion
+mutuelle, atomicité, autonomie des agents, robustesse, historique borné,
+observabilité, historique de sessions, affichage local des dates, i18n et
+parallélisme optionnel par worktrees.
 
 ### 1.6 Architecture applicative cible
 
@@ -75,32 +85,61 @@ tenue dans le temps.
 flowchart TB
     A["Agent A"] -- shell --> CLI["CLI m8shift.py"]
     B["Agent B"] -- shell --> CLI
+    N["Agent N"] -- shell --> CLI
     CLI -- "lecture-modif-écriture (atomique)" --> LK["M8SHIFT.md<br/>LOCK (mutex) + journal des tours"]
     CLI -- "sérialisé par" --> LF[".m8shift.lock (O_EXCL)"]
+    CLI -- "append-only" --> MEM["M8SHIFT.memory.md<br/>notes"]
+    CLI -- "append-only" --> TASK["M8SHIFT.tasks.md<br/>événements tâches"]
+    CLI -- "append-only" --> SESS["M8SHIFT.sessions.jsonl<br/>événements sessions"]
+    CLI -- "archive" --> ARC["M8SHIFT.archive.md"]
     CLI -- "injecte à l'init" --> AN["CLAUDE.md / AGENTS.md (strophe)"]
     AN -. "lu au démarrage" .-> A
     AN -. "lu au démarrage" .-> B
+    AN -. "lu au démarrage" .-> N
 ```
 
 **Composants** : (a) le bloc `LOCK` = automate d'état ; (b) le journal de tours
 append-only ; (c) les ancrages porteurs de la *strophe* d'auto-instruction ;
-(d) la CLI `m8shift.py` (commandes init/status/wait/claim/append/release/done/archive).
+(d) la CLI `m8shift.py` ; (e) les registres passifs (`memory`, `tasks`, `sessions`) ;
+(f) le compagnon optionnel `m8shift-worktree.py`.
 
-**Automate d'état** (`A`, `B` = les deux agents actifs — par défaut `claude`, `codex`) :
+**Automate d'état** (`X`, `Y` = deux membres quelconques du roster actif) :
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> WORKING_A: A claim
-    WORKING_A --> AWAITING_B: A append vers B
-    AWAITING_B --> WORKING_B: B claim
-    WORKING_B --> AWAITING_A: B append vers A
-    AWAITING_A --> WORKING_A: A claim
-    WORKING_A --> WORKING_A: A re-claim (TTL)
-    WORKING_A --> WORKING_B: B force-claim (A périmé)
-    WORKING_B --> DONE: done
+    IDLE --> WORKING_X: X claim
+    WORKING_X --> AWAITING_Y: X append vers Y
+    AWAITING_Y --> WORKING_Y: Y claim
+    WORKING_Y --> AWAITING_X: Y append vers X
+    AWAITING_X --> WORKING_X: X claim
+    WORKING_X --> WORKING_X: X re-claim (TTL)
+    WORKING_X --> WORKING_Y: Y force-claim (X périmé)
+    WORKING_X --> DONE: done
     DONE --> [*]
 ```
+
+**Compagnon degré 2 optionnel** :
+
+```mermaid
+flowchart LR
+    subgraph Parallele["travail isolé"]
+      W1["worktree feat-a<br/>agent A"]
+      W2["worktree feat-b<br/>agent B"]
+      WN["worktree feat-n<br/>agent N"]
+    end
+    IP["stylo d'intégration<br/>LOCK canonique"]
+    MAIN["branche cible<br/>main"]
+
+    W1 --> IP
+    W2 --> IP
+    WN --> IP
+    IP -- "un merge à la fois" --> MAIN
+```
+
+Le compagnon garde le travail parallèle dans des worktrees git séparés et sérialise
+le merge-back via le LOCK de la racine canonique. Il ne change pas l'invariant du
+stylo unique dans le cœur.
 
 **Boucle de relais** (un tour) :
 
@@ -126,6 +165,9 @@ sequenceDiagram
 | agent | `M8SHIFT.md` | système de fichiers local | R/W |
 | `m8shift.py init` | l'ancrage de chaque agent actif (défaut `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (si présent), `M8SHIFT.protocol.md` | système de fichiers local | W |
 | agent | `M8SHIFT.archive.md` | système de fichiers local | W (append) |
+| `m8shift.py init` / `done` | `M8SHIFT.sessions.jsonl` | système de fichiers local | W (append) |
+| agent | `M8SHIFT.memory.md`, `M8SHIFT.tasks.md` | système de fichiers local | W (append), R pour recap/list/show |
+| `m8shift-worktree.py` | `.m8shift/worktrees/*`, `M8SHIFT.md` canonique | système de fichiers local + Git | W, intégration sérialisée |
 
 ### 1.8 Modèle de concurrence — un mutex, pas un sémaphore
 
@@ -156,11 +198,10 @@ Deux propriétés le distinguent d'un mutex in-process strict :
 - **Ré-entrant pour le détenteur.** Le titulaire peut re-`claim` pour rafraîchir son
   bail — un verrou récursif côté propriétaire.
 
-**Pourquoi ça compte pour la roadmap.** Généraliser à un **couple configurable**
-d'agents (claude, codex, lechat, …) garde le degré à **1** : le témoin circule entre
-les participants choisis au lieu d'un claude/codex câblé en dur. Cela reste un **mutex
-à jeton** — ça ne devient *pas* un sémaphore compteur (ce qui supposerait *k > 1*
-agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-agent).
+**Pourquoi ça compte.** Généraliser à un roster actif de N agents garde le degré du
+cœur à **1** : le témoin circule entre participants, mais un seul édite l'arbre
+partagé. Le degré 2 existe seulement via un compagnon opt-in qui isole le travail
+concurrent dans des worktrees git séparés et sérialise l'intégration.
 
 ---
 
@@ -173,7 +214,7 @@ agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-a
 | Langage | Python **3.8+** |
 | Dépendances | **Aucune dépendance Python** (stdlib : `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`) ; Git optionnel, pour préserver un renommage de casse dans l'index |
 | Distribution | **un seul fichier** `m8shift.py` (gabarits embarqués) |
-| Tests | `unittest` stdlib — `tests/test_m8shift.py` |
+| Tests | `unittest` stdlib — `tests/test_m8shift.py`, `tests/test_worktree.py` |
 
 ### 2.2 Patterns notables
 
@@ -188,7 +229,7 @@ agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-a
   réservés) ; corps neutralisé (anti-injection de faux tours).
 - **Source de vérité unique** : protocole, gabarit `M8SHIFT.md` et strophe sont des
   constantes de `m8shift.py` ; `docs/en/protocol.md` et `docs/fr/protocole.md` en sont
-  une *génération* de `cowork.PROTOCOL[lang]` (test de non-régression octet-à-octet
+  une *génération* de `m8shift.PROTOCOL[lang]` (test de non-régression octet-à-octet
   `test_protocol_docs_in_sync`).
 - **Injection idempotente et prioritaire** : strophe encadrée par marqueurs
   `M8SHIFT:STANZA`, déplacée/actualisée en tête sans duplication. Les variantes de
@@ -202,19 +243,20 @@ agents écrivant en parallèle ; c'est l'objet de la version *d'après*, multi-a
 
 ### 2.3 Stratégie de test
 
-46 tests, sans dépendance Python externe : unitaires (fonctions pures : `other`,
-`parse_iso`/`iso`, `get_lock`/`set_lock`, `stanza_for`, `clean_body`) +
-non-régression CLI en sous-processus isolé (modèle claim→append, mutex, **concurrence
-claude/codex** avec un seul gagnant, ancrages canoniques/override, archive,
-robustesse, anti-injection, schéma LOCK). Commande :
+180 tests, sans dépendance Python externe : unitaires (fonctions pures et parseurs) +
+non-régression CLI en sous-processus isolé (modèle claim→append, mutex, roster N-agent,
+ancrages canoniques/override, mémoire, tâches, historique de sessions, affichage local
+des dates, archive, doctor, compagnon worktree, robustesse, anti-injection, schéma LOCK).
+Commande :
 `python3 -m unittest discover -s tests`.
 
 ### 2.4 Gestion de configuration, encodage, fuseaux
 
-- **Config** : aucune ; tout est embarqué. `init` prend `--name` / `--agents a,b`
-  (le couple du relais) / `--lang en|fr` / `--force`.
+- **Config** : aucune ; tout est embarqué. `init` prend `--name` / `--agents a,b,c…`
+  (roster actif) / `--lang <langue incluse>` / `--force`.
 - **Encodage** : UTF-8 partout (lecture/écriture explicites).
-- **Fuseaux** : tous les horodatages en **UTC** ISO-8601 (`...Z`).
+- **Fuseaux** : tous les horodatages stockés sont en **UTC** ISO-8601 (`...Z`) ;
+  les commandes humaines affichent aussi l'heure locale, les sorties JSON restent en UTC.
 - **Journalisation** : sortie standard (messages `✓`/`refus`/`…`), pas de fichier de log.
 
 ### 2.5 Politique de branches & versionnement

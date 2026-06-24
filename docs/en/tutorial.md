@@ -9,10 +9,9 @@ You do not need to understand the whole protocol yet. Just follow the steps in
 order and compare each console output with the **Expected result** block below
 it. If something looks different, read the **If you see something else** note.
 
-> Tip: the `m8shift.py` tool prints its own messages in French. That is normal —
-> the words you type (commands, flags, states) are the same everywhere, and
-> this tutorial explains every line in English. You are reading the output
-> exactly as a real run produces it.
+> Tip: the shipped `m8shift.py` prints its runtime messages in English. Localized
+> variants generated with `m8shift-i18n.py` may print another language, but the
+> commands, flags, states, and lock fields stay the same.
 
 **What you need:** a terminal, Python 3, and the single file `m8shift.py`.
 **Time:** about 10 minutes.
@@ -25,8 +24,8 @@ We will work in a temporary folder so nothing on your machine is touched. M8Shif
 is a single self-contained file, so a toy project is just an empty directory.
 
 ```bash
-mkdir /tmp/cowork-toy
-cd /tmp/cowork-toy
+mkdir /tmp/m8shift-toy
+cd /tmp/m8shift-toy
 ```
 
 **Expected result:** no output. You now have an empty folder and your terminal
@@ -60,28 +59,28 @@ work file `M8SHIFT.md`, the protocol reference `M8SHIFT.protocol.md`, and the
 anchor files (`CLAUDE.md`, `AGENTS.md`) that let each agent bootstrap itself.
 
 ```bash
-./m8shift.py init --name hello-cowork
+./m8shift.py init --name hello-m8shift
 ```
 
 **Expected result:**
 
 ```text
-✓ cowork init — projet « hello-cowork » dans /tmp/cowork-toy
-  • M8SHIFT.protocol.md: écrit
-  • M8SHIFT.md: écrit (projet « hello-cowork », verrou IDLE)
-  • CLAUDE.md: fichier créé
-  • AGENTS.md: fichier créé
-Démarrer : ./m8shift.py claim claude  (puis travaille, puis ./m8shift.py append claude --to codex --ask "…" --done "…")
-Amorçage : démarre une nouvelle session/exécution de Claude et Codex pour recharger les ancrages.
+✓ m8shift init — project “hello-m8shift” in /tmp/m8shift-toy
+  • M8SHIFT.protocol.md: written
+  • M8SHIFT.md: written (project “hello-m8shift”, lock IDLE)
+  • CLAUDE.md: file created
+  • AGENTS.md: file created
+Start: ./m8shift.py claim claude  (then work, then ./m8shift.py append claude --to codex --ask "…" --done "…")
+Bootstrap: start a new session/run of each agent to reload its anchor.
 ```
 
 In English: the protocol was written, `M8SHIFT.md` was created with a brand-new
 lock in state `IDLE`, and the two anchor files were created. The lock starts at
 `IDLE` because nobody holds the pen yet.
 
-**If you see `M8SHIFT.md: préservé`:** you already ran `init` here before, so the
+**If you see `M8SHIFT.md: preserved`:** you already ran `init` here before, so the
 existing relay state was kept (this is on purpose). For this tutorial, start
-clean with `./m8shift.py init --name hello-cowork --force`.
+clean with `./m8shift.py init --name hello-m8shift --force`.
 
 ---
 
@@ -92,7 +91,7 @@ It is a cooperative mutex: a few `field: value` lines that say who, if anyone,
 holds the pen. Open `M8SHIFT.md` in any editor, or print the top of it:
 
 ```bash
-head -20 M8SHIFT.md
+sed -n '/M8SHIFT:LOCK:BEGIN/,/M8SHIFT:LOCK:END/p' M8SHIFT.md
 ```
 
 **Expected result (the lock part):**
@@ -101,10 +100,13 @@ head -20 M8SHIFT.md
 <!-- M8SHIFT:LOCK:BEGIN -->
 holder:   none
 state:    IDLE
+agents:   claude,codex
+lang:     en
+session:  20260624T155219Z-16e3a02d
 turn:     0
-since:    2026-06-21T13:14:37Z
+since:    2026-06-24T15:52:19Z
 expires:  -
-note:     session initialisée, aucun tour ouvert
+note:     session initialized, no turn opened
 <!-- M8SHIFT:LOCK:END -->
 ```
 
@@ -112,6 +114,9 @@ What each field means:
 
 - `holder` — who holds the pen right now. `none` means nobody does.
 - `state` — the current state. `IDLE` means the relay is free to start.
+- `agents` — the active roster. Here it is the default `claude,codex`.
+- `lang` — the generated/runtime language tag.
+- `session` — the current relay session id, used by `history`.
 - `turn` — the number of the last closed turn. `0` is the seed turn.
 - `since` — when this state began (ISO-8601 UTC).
 - `expires` — the stale-lock deadline. It only carries a date while someone is
@@ -135,14 +140,18 @@ blocks and never changes anything, so it is always safe to run.
 **Expected result:**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   none
   state    IDLE
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     0
-  since    2026-06-21T13:14:37Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     session initialisée, aucun tour ouvert
-── dernier tour: #0 par system
+  note     session initialized, no turn opened
+── last turn: #0 by system
 ```
 
 The last line confirms the only turn so far is the seed turn `#0`, posted by
@@ -163,12 +172,12 @@ Before taking the pen, an agent checks whether it is allowed to. `wait <agent>
 **Expected result:**
 
 ```text
-✓ libre (IDLE) — `./m8shift.py claim claude` pour acquérir le stylo.
+✓ free (IDLE) — `./m8shift.py claim claude` to acquire the pen.
 ```
 
 In English: the relay is free (`IDLE`), so `claude` may now acquire the pen.
 
-**If you see `… pas ton tour`:** that is the return-code-3 case — it is not your
+**If you see `… not your turn`:** that is the return-code-3 case — it is not your
 turn. At this point in the tutorial it should say `IDLE`. If it does not, you
 probably already played a turn; re-run `init --force` (Step 3) to reset.
 
@@ -188,7 +197,7 @@ is not its turn.
 **Expected result:**
 
 ```text
-✓ verrou pris par claude (expire 2026-06-21T13:44:37Z).
+✓ pen taken by claude (expires 2026-06-24T16:22:19Z).
 ```
 
 In English: the pen is now held by `claude`. Notice the `expires` time — it is
@@ -235,7 +244,7 @@ just the journal write.
 **Expected result:**
 
 ```text
-✓ tour 1 ecrit par claude, main passee a codex.
+✓ turn 1 written by claude, handed off to codex.
 ```
 
 In English: turn 1 was written by `claude`, and the pen was handed to `codex`.
@@ -253,14 +262,18 @@ Look at the lock again. It should now point at `codex`.
 **Expected result:**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   codex
   state    AWAITING_CODEX
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     1
-  since    2026-06-21T13:14:37Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     tour 1 pose par claude, en attente de codex
-── dernier tour: #1 par claude
+  note     turn 1 posted by claude, awaiting codex
+── last turn: #1 by claude
 ```
 
 What changed: `holder` is now `codex`, `state` is `AWAITING_CODEX` (it is
@@ -283,8 +296,8 @@ Now switch roles and play as `codex`. Same loop: check, then claim.
 **Expected result:**
 
 ```text
-✓ à toi (AWAITING_CODEX) — `./m8shift.py claim codex` pour acquérir le stylo.
-✓ verrou pris par codex (expire 2026-06-21T13:44:37Z).
+✓ your turn (AWAITING_CODEX) — `./m8shift.py claim codex` to acquire the pen.
+✓ pen taken by codex (expires 2026-06-24T16:22:19Z).
 ```
 
 In English: the first line says it is codex's turn; the second confirms codex
@@ -307,7 +320,7 @@ pen back to `claude`. When you have nothing to ask, set `--ask "—"`.
 **Expected result:**
 
 ```text
-✓ tour 2 ecrit par codex, main passee a claude.
+✓ turn 2 written by codex, handed off to claude.
 ```
 
 In English: turn 2 was written by `codex`, and the pen went back to `claude`.
@@ -326,14 +339,18 @@ Check the status one more time to confirm the hand-back.
 **Expected result:**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   claude
   state    AWAITING_CLAUDE
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     2
-  since    2026-06-21T13:14:37Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     tour 2 pose par codex, en attente de claude
-── dernier tour: #2 par codex
+  note     turn 2 posted by codex, awaiting claude
+── last turn: #2 by codex
 ```
 
 The state is back to `AWAITING_CLAUDE`: it is claude's turn again. Each hand-off
@@ -357,7 +374,7 @@ seed turn `#0`) in the live file.
 **Expected result:**
 
 ```text
-rien a archiver (2 tour(s) archivable(s), keep=6).
+nothing to archive (2 archivable turn(s), keep=6).
 ```
 
 In English: nothing to archive — you only have 2 archivable turns and you asked
@@ -380,7 +397,7 @@ released and the state becomes `DONE`. You currently hold the pen as `claude`
 **Expected result:**
 
 ```text
-✓ verrou pris par claude (expire 2026-06-21T13:44:37Z).
+✓ pen taken by claude (expires 2026-06-24T16:22:19Z).
 ✓ session DONE.
 ```
 
@@ -393,14 +410,18 @@ Check the final status:
 **Expected result:**
 
 ```text
+m8shift.py v3.8.0
 ── LOCK ───────────────────────────────
   holder   none
   state    DONE
+  agents   claude,codex
+  lang     en
+  session  20260624T155219Z-16e3a02d
   turn     2
-  since    2026-06-21T13:14:38Z
+  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
   expires  -
-  note     session close par claude
-── dernier tour: #2 par codex
+  note     session closed by claude
+── last turn: #2 by codex
 ```
 
 The relay is closed. `state` is `DONE` and `holder` is `none`. No more turns are
@@ -408,7 +429,7 @@ expected. You can delete the toy folder whenever you like:
 
 ```bash
 cd ..
-rm -rf /tmp/cowork-toy
+rm -rf /tmp/m8shift-toy
 ```
 
 Congratulations — you ran a complete M8Shift relay end to end.
@@ -420,7 +441,8 @@ Congratulations — you ran a complete M8Shift relay end to end.
 - **The pen is a cooperative mutex.** Only one agent holds it at a time; you
   work only while you hold it.
 - **The LOCK block is the single source of truth.** Its `holder`, `state`,
-  `turn`, `since`, `expires`, and `note` fields tell you whose turn it is.
+  `agents`, `lang`, `session`, `turn`, `since`, `expires`, and `note` fields tell
+  you whose turn it is and which relay session you are in.
 - **The core loop is `status` → `wait --once` → `claim` → work → `append`.**
   `claim` takes the pen exclusively; `append` records your turn and hands off.
 - **Strict alternation is enforced.** claude → codex → claude …, one numbered

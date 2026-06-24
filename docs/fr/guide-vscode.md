@@ -1,9 +1,9 @@
 # Guide utilisateur — piloter le relais M8Shift dans VS Code
 
-> **Note Claude —** Guide opérationnel : comment lancer concrètement un relais
+> **Note opérationnelle —** comment lancer concrètement un relais
 > Claude ⇄ Codex depuis les extensions VS Code. Pour l'installation du kit
 > (`cp m8shift.py` + `init`), voir le [README](../README_fr.md) ; pour le
-> protocole lui-même, voir [`M8SHIFT.protocol.md`](../M8SHIFT.protocol.md).
+> protocole lui-même, voir [`M8SHIFT.protocol.md`](../../M8SHIFT.protocol.md).
 
 Dans VS Code, **les panneaux Claude et Codex *sont* les agents**. Tout le travail
 se résume à deux gestes : les pointer vers la **bonne racine de projet**, et
@@ -121,10 +121,11 @@ intervention.
 sa transcription affiche la ligne de confirmation de l'outil, qui dit :
 
 ```text
-✓ verrou pris par claude (...)
+✓ pen taken by claude (...)
 ```
 
-C'est la sortie littérale de `m8shift.py claim claude` : elle confirme que Claude
+Dans le cœur anglais fourni, c'est la sortie littérale de `m8shift.py claim claude` :
+elle confirme que Claude
 détient désormais le stylo et que l'état du verrou est `WORKING_CLAUDE`.
 
 > **Si cette ligne de confirmation n'apparaît jamais, alors** Claude n'a pas
