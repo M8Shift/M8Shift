@@ -335,6 +335,9 @@ stores**, or it lives in an opt-in companion that preserves the core's single pe
 Rejected ideas are kept explicit so future changes do not reopen settled trade-offs
 without a new RFC.
 
+RFCs are authored and maintained in English only, under `docs/en/rfc-*.md`. Localized
+documentation links to those canonical RFCs instead of keeping translated copies.
+
 ### 12.1 Shipped surfaces (v3.x)
 
 All the staged read/handoff features have shipped (each via RFC → design panel →

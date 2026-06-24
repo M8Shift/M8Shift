@@ -10,6 +10,9 @@ for normal use — clone, copy `m8shift.py` into a repo, run it. Keep it that wa
 - **English is the source of truth.** The committed `m8shift.py` is **English-only**: it is the
   canonical source for every message key and every template. Other languages live as *packs*
   under `i18n/<lang>/` and are spliced in on demand (see below) — they never live in the core.
+- **RFCs are English-only.** Design proposals and decision records live under
+  `docs/en/rfc-*.md` only. Do not create translated RFC copies under `docs/fr/` or any
+  other localized documentation tree; localized docs may link to the English RFCs.
 - **Tests must stay green.** `python3 -m unittest discover -s tests`.
 
 ## Internationalisation (i18n)

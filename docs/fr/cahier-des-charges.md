@@ -224,6 +224,9 @@ flowchart LR
 
 ## 11. RFC livrées et surfaces correspondantes
 
+Les RFC sont rédigées et maintenues uniquement en anglais sous `docs/en/rfc-*.md`.
+La documentation française les référence sans maintenir de copie traduite.
+
 | Source | Surface livrée | Règle de périmètre |
 |--------|----------------|--------------------|
 | [rfc-memory.md](../en/rfc-memory.md) | `remember` + `M8SHIFT.memory.md` | registre append-only, jamais utilisé pour router |
@@ -235,7 +238,7 @@ flowchart LR
 | [rfc-worktree-companion.md](../en/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
 
-Surface planifiée : [RFC — Contrats et validation Stage 4](rfc-contrats-validation.md)
+Surface planifiée : [RFC — Contrats et validation Stage 4](../en/rfc-contracts-validation.md)
 spécifie la prochaine étape d'implémentation : contrats de passation typés, décisions
 de revue explicites (`approve`, `revise`, `reject`, `waive`) et commandes de
 validation read-only. Ce n'est pas encore une garantie livrée. La validation pourra
@@ -244,11 +247,11 @@ elle ne devra pas router le travail, donner des permissions, lancer des outils o
 muter le `LOCK`.
 
 Surfaces futures documentées :
-[RFC — Plan de contrôle runtime / hébergé](rfc-plan-controle-runtime-heberge.md)
+[RFC — Plan de contrôle runtime / hébergé](../en/rfc-hosted-runtime-control-plane.md)
 pour présence, voies, inbox opérateur, progression et notifications hors cœur ;
-[RFC — Gestion des fournisseurs](rfc-gestion-fournisseurs.md) pour associer les
+[RFC — Gestion des fournisseurs](../en/rfc-provider-management.md) pour associer les
 identités du roster (`claude`, `codex`, `gemini`, `vibe`, …) aux commandes et
-capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](rfc-ecritures-degre-plus-un-arbre-partage.md)
+capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](../en/rfc-shared-tree-degree-gt1.md)
 comme sujet de recherche rejeté pour le cœur, remplacé en pratique par les worktrees isolés.
 
 Les idées rejetées restent documentées comme non-goals : daemon, notifications push

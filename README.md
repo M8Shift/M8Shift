@@ -338,6 +338,8 @@ text, never enforced), with open-task headlines in `recap`.
 **rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn
 durable streaming, so another work-provenance ledger would be redundant surface
 ([rationale](docs/en/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/`.
+RFCs are English-only; localized documentation should link to the canonical English
+RFC instead of maintaining translated copies.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
 disjoint writes inside the shared tree (use the opt-in worktree companion instead); a
