@@ -166,6 +166,12 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
   what M8Shift keeps, rejects, or defers from runtime/gateway designs.
 - **RFC (contracts and validation)** — [docs/en/rfc-contracts-validation.md](docs/en/rfc-contracts-validation.md) —
   Stage 4 implementation spec for typed handoffs, review decisions, and read-only validation.
+- **RFC (future runtime/control plane)** — [docs/en/rfc-hosted-runtime-control-plane.md](docs/en/rfc-hosted-runtime-control-plane.md) —
+  optional hosted/local runtime supervision outside the passive core.
+- **RFC (provider management)** — [docs/en/rfc-provider-management.md](docs/en/rfc-provider-management.md) —
+  future adapter registry for Claude, Codex, Gemini, Vibe, and other cooperative agents.
+- **RFC (shared-tree degree > 1)** — [docs/en/rfc-shared-tree-degree-gt1.md](docs/en/rfc-shared-tree-degree-gt1.md) —
+  research RFC; rejected for the core in favor of isolated worktrees.
 
 ## How it works
 

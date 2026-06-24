@@ -153,6 +153,9 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **RFC (historique de sessions)** — [docs/en/rfc-session-history.md](../docs/en/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
 - **RFC (compagnon worktree)** — [docs/en/rfc-worktree-companion.md](../docs/en/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
 - **RFC (contrats et validation)** — [docs/fr/rfc-contrats-validation.md](../docs/fr/rfc-contrats-validation.md) — spécification Stage 4 pour passations typées, décisions de revue et validation read-only.
+- **RFC (plan de contrôle runtime/hébergé)** — [docs/fr/rfc-plan-controle-runtime-heberge.md](../docs/fr/rfc-plan-controle-runtime-heberge.md) — supervision optionnelle hors cœur.
+- **RFC (gestion des fournisseurs)** — [docs/fr/rfc-gestion-fournisseurs.md](../docs/fr/rfc-gestion-fournisseurs.md) — registre futur d'adaptateurs pour Claude, Codex, Gemini, Vibe et autres agents coopératifs.
+- **RFC (degré > 1 dans un même arbre)** — [docs/fr/rfc-ecritures-degre-plus-un-arbre-partage.md](../docs/fr/rfc-ecritures-degre-plus-un-arbre-partage.md) — sujet de recherche rejeté pour le cœur au profit des worktrees isolés.
 
 ## Comment ça marche
 
