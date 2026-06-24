@@ -116,6 +116,10 @@ latest handoff addressed to you. `<you>` is your own agent name and `<other>` an
 other roster member you hand to (the examples below use the default pair
 `claude`/`codex`).
 
+`claude` and `codex` are example roster names, not a limitation. Replace them with
+`gemini`, `vibe`, or any other cooperative agent that can read its instructions,
+run the CLI, and follow `claim → work → append`.
+
 ```bash
 ./m8shift.py status --for claude   # who holds the pen + what should claude do next?
 ./m8shift.py next claude           # wait if needed, then claim + show the handoff

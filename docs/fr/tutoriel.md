@@ -5,6 +5,10 @@ complet du début à la fin dans un dossier jetable : vous jouerez un tour en ta
 que `claude`, vous passerez la main, vous jouerez un tour en tant que `codex`,
 vous verrez l'alternance stricte se produire, puis vous clôturerez la session.
 
+`claude` et `codex` sont des noms d'agents d'exemple. Dans un vrai projet, vous
+pouvez les remplacer par `gemini`, `vibe` ou tout agent coopératif capable de lire
+son ancrage, lancer la CLI et respecter `claim → travail → append`.
+
 Vous n'avez pas encore besoin de comprendre tout le protocole. Suivez simplement
 les étapes dans l'ordre et comparez chaque sortie console avec le bloc
 **Résultat attendu** qui la suit. Si quelque chose paraît différent, lisez

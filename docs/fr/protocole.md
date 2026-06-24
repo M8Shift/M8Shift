@@ -71,11 +71,16 @@ ou continue à attendre ton prochain tour.
   pendant que tu tiens le stylo.
 - **`append` clôt ton tour** : il n'est accepté que depuis `WORKING_<toi>`, écrit
   le tour et passe la main (`AWAITING_<autre>`). Pas de `claim` ⇒ pas d'`append`.
-- **Alternance stricte** : les deux agents actifs alternent (p. ex. `claude` →
-  `codex` → `claude` …). Chaque passage de main est un *tour* (`TURN`) numéroté,
-  encadré `BEGIN`/`END`.
+- **Un stylo, un destinataire explicite** : les agents actifs alternent — le détenteur
+  passe le stylo à tout *autre* membre du roster via `--to` (p. ex. `claude` →
+  `codex` → `claude` … ; avec 3+ agents, vers celui que tu nommes). Chaque passage
+  de main est un *tour* (`TURN`) numéroté, encadré `BEGIN`/`END`.
 - **Poll** : quand ce n'est pas ton tour, tu attends (`./m8shift.py wait <toi>`,
   ~60 s) puis tu retentes `claim`.
+
+Les exemples utilisent `claude` et `codex` uniquement pour rester lisibles. Le même
+protocole fonctionne avec `gemini`, `vibe` ou tout agent coopératif capable de lire
+son ancrage, lancer la CLI et respecter `claim → travail → append`.
 
 ---
 
