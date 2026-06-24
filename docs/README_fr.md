@@ -195,6 +195,9 @@ Les timestamps sont stockés en UTC (`...Z`) pour stabiliser les comparaisons en
 agents et machines. Les commandes humaines (`status`, `recap`, `history`, `task show`,
 `m8shift-worktree.py status`) affichent aussi l'heure locale utilisateur ; les sorties JSON
 restent en UTC canonique.
+`status` dérive aussi les lignes d'affichage `started` et `duration` depuis le ledger
+de session ; `status --json` les expose via `session_started_at`,
+`session_duration_seconds` et `session_duration`.
 
 ## Garanties
 

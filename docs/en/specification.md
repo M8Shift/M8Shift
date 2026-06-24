@@ -83,7 +83,7 @@ flowchart LR
 | EF-12 | The stanza is idempotent and placed at the head of the anchors; if `AGENTS.override.md` exists, it is synchronized in the override and in `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
 | EF-13 | If the project had `CLAUDE.md` but no Codex instructions, `init` creates in the new `AGENTS.md` a bridge to the common instructions in `CLAUDE.md`; a pre-existing Codex anchor stays autonomous. | `test_missing_agents_bridges_existing_claude_instructions`, `test_existing_agents_does_not_receive_claude_bridge` |
 | EF-14 | `history` shows one folded entry per relay session: session id, start/end, state, agents, turn count, agents used and version; `--json` exposes the same data. | `test_init_records_session_and_history`, `test_history_counts_turns_and_done`, `test_force_init_marks_previous_session_reset` |
-| EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time label; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_local_label`, `test_status_and_recap_show_local_time_labels`, `test_status_json`, `test_status_shows_local_time_labels` |
+| EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time label; `status` also derives read-only session `started`/`duration` metadata from `M8SHIFT.sessions.jsonl`; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_local_label`, `test_display_duration`, `test_status_and_recap_show_local_time_labels`, `test_status_json`, `test_status_shows_local_time_labels` |
 | EF-16 | Operator-loop guardrails keep agents from stopping mid-relay: `status --for <agent>` prints/serializes the next safe action and `append --wait` blocks after handoff until the caller's next turn or `DONE`. | `test_status_for_prints_and_serializes_next_action`, `test_append_wait_blocks_until_agent_turn_returns` |
 | EF-17 | `watch [--for agent]` is a foreground, read-only live view over `status`: it can refresh a terminal automatically, but never claims, hands off, repairs, or force-recovers. | `test_watch_once_is_read_only_and_shows_next_action`, `test_watch_interval_invalid_clean_exit` |
 
@@ -157,6 +157,13 @@ Timestamps are stored as ISO-8601 UTC with `Z` to keep TTL comparisons stable ac
 agents and machines. Human-facing commands (`status`, `recap`, `history`, `task show`,
 and the worktree companion's `status`) also append a local-time label; JSON output keeps
 UTC values only.
+
+`status` additionally derives two display-only session lines from
+`M8SHIFT.sessions.jsonl` when possible: `started` (session start timestamp) and
+`duration` (elapsed session duration, or duration until close/reset for a finished
+session). The same metadata is exposed by `status --json` as
+`session_started_at`, `session_duration_seconds`, and `session_duration`; it never feeds
+claimability, TTL expiry, or routing.
 
 ### 6.2 State machine
 

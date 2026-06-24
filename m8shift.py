@@ -64,7 +64,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.10.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.11.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -220,6 +220,11 @@ M8Shift stores timestamps in UTC (`Z`) to keep comparisons stable across agents 
 machines. Human-facing commands such as `status`, `recap`, `history`, and `task show`
 also print the user's local time next to UTC. Machine-readable JSON keeps canonical
 UTC values only.
+
+`status` also derives two read-only session lines from `M8SHIFT.sessions.jsonl` when
+possible: `started` (session start timestamp) and `duration` (elapsed time since
+that start, or until close/reset for a finished session). These lines are display
+metadata only; they never feed claimability or routing.
 
 > `expires` carries a date **only** during `WORKING_*` (an agent is working,
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
@@ -680,6 +685,18 @@ def display_time(s):
 
 def display_lock_value(key, value):
     return display_time(value) if key in ("since", "expires") else (value or "")
+
+
+def display_duration(seconds):
+    if seconds is None:
+        return "-"
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    base = f"{hours:02d}h {minutes:02d}m {secs:02d}s"
+    return f"{days}d {base}" if days else base
+
 
 def read(path=None):
     with open(path or COWORK, encoding="utf-8") as f:  # path=None → resolve COWORK at CALL time
@@ -1427,6 +1444,38 @@ def public_session_summary(s):
     }
 
 
+def current_session_info(lk, turns=None):
+    """Best-effort, read-only session start/duration metadata for `status`.
+
+    The LOCK records when the current state started (`since`), not necessarily when the session
+    started. The session ledger is therefore the source of truth when present. Old relays or
+    hand-edited ledgers degrade to "-".
+    """
+    sid = lk.get("session")
+    if not sid:
+        return {"started_at": "-", "duration_seconds": None, "duration": "-"}
+    events = [ev for ev in read_session_events() if ev.get("session_id") == sid]
+    start_event = next((ev for ev in events if ev.get("event") == "start"), None)
+    started_at = (start_event or {}).get("started_at") or (start_event or {}).get("at") or "-"
+    start = parse_iso(started_at)
+    if start is None:
+        return {"started_at": started_at or "-", "duration_seconds": None, "duration": "-"}
+    close_event = next(
+        (ev for ev in reversed(events) if ev.get("event") in ("done", "reset")),
+        None,
+    )
+    closed_at = (close_event or {}).get("closed_at") or (close_event or {}).get("at") or "open"
+    end = parse_iso(closed_at) if closed_at not in ("", "-", "open") else None
+    if end is None:
+        end = now()
+    seconds = max(0, int((end - start).total_seconds()))
+    return {
+        "started_at": started_at,
+        "duration_seconds": seconds,
+        "duration": display_duration(seconds),
+    }
+
+
 MEMORY_RE = re.compile(r"^- (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) (" + AGENT_RE + r"): (.*)$")
 
 
@@ -1980,13 +2029,17 @@ def _status_info(text=None):
     return lk, stale, last
 
 
-def _print_status_block(lk, stale, last, for_agent=""):
+def _print_status_block(lk, stale, last, session_info=None, for_agent=""):
+    session_info = session_info or current_session_info(lk)
     print(f"m8shift.py v{VERSION}")
     print("── LOCK ───────────────────────────────")
     for k in ("holder", "state", "lang", "session", "turn", "since", "expires", "note"):
         print(f"  {k:<8} {display_lock_value(k, lk.get(k, ''))}")
         if k == "state":
             print(f"  {'agents':<8} {','.join(active_agents(lk))}")
+        if k == "session":
+            print(f"  {'started':<8} {display_time(session_info.get('started_at', '-'))}")
+            print(f"  {'duration':<8} {session_info.get('duration', '-')}")
     if stale:
         print(tr("status_stale"))
     if for_agent:
@@ -2021,18 +2074,22 @@ def _status_signature(lk, stale, last, for_agent=""):
 def cmd_status(args):
     text = load_or_die()
     lk, stale, last = _status_info(text)
+    session_info = current_session_info(lk, parse_turns(text))
     if getattr(args, "json", False):
         out = dict(lk)                       # raw LOCK fields…
         out["agents_active"] = active_agents(lk)  # full active roster (N)
         out["stale"] = stale
         out["last_turn"] = last
         out["m8shift_version"] = VERSION     # the RUNNING script's version (dogfooding skew check)
+        out["session_started_at"] = session_info["started_at"]
+        out["session_duration_seconds"] = session_info["duration_seconds"]
+        out["session_duration"] = session_info["duration"]
         if getattr(args, "for_agent", ""):
             agent = need_agent(args.for_agent)
             out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
-    _print_status_block(lk, stale, last, getattr(args, "for_agent", ""))
+    _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""))
     return 0
 
 
@@ -2057,7 +2114,8 @@ def cmd_watch(args):
                 if args.clear:
                     print("\033[2J\033[H", end="")
                 print(tr("watch_header", ts=display_time(iso(now()))))
-                _print_status_block(lk, stale, last, args.for_agent)
+                _print_status_block(lk, stale, last, current_session_info(lk, parse_turns(text)),
+                                    args.for_agent)
                 print("", flush=True)
             last_sig = sig
             if args.once:

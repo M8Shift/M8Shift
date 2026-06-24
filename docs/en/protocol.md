@@ -105,6 +105,11 @@ machines. Human-facing commands such as `status`, `recap`, `history`, and `task 
 also print the user's local time next to UTC. Machine-readable JSON keeps canonical
 UTC values only.
 
+`status` also derives two read-only session lines from `M8SHIFT.sessions.jsonl` when
+possible: `started` (session start timestamp) and `duration` (elapsed time since
+that start, or until close/reset for a finished session). These lines are display
+metadata only; they never feed claimability or routing.
+
 > `expires` carries a date **only** during `WORKING_*` (an agent is working,
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
 > `DONE`): nobody holds the pen, so there is no staleness to watch.
