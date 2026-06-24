@@ -108,7 +108,8 @@ restent en UTC canonique.
 `M8SHIFT.sessions.jsonl` lorsque c'est possible : `started` (horodatage du début de
 session) et `duration` (temps écoulé depuis ce début, ou jusqu'à clôture/reset pour
 une session terminée). Ces lignes sont seulement de l'affichage ; elles ne pilotent
-jamais la claimabilité ni le routage.
+jamais la claimabilité ni le routage. `status --json` expose les mêmes métadonnées
+et sérialise les valeurs indisponibles en `null`.
 
 > `expires` ne porte une date **que** pendant `WORKING_*` (un agent travaille,
 > TTL 30 min). Il repasse à `-` dès qu'on attend (`AWAITING_*`, `IDLE`, `DONE`) :

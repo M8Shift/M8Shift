@@ -197,7 +197,7 @@ agents et machines. Les commandes humaines (`status`, `recap`, `history`, `task 
 restent en UTC canonique.
 `status` dérive aussi les lignes d'affichage `started` et `duration` depuis le ledger
 de session ; `status --json` les expose via `session_started_at`,
-`session_duration_seconds` et `session_duration`.
+`session_duration_seconds` et `session_duration` (`null` quand indisponible).
 
 ## Garanties
 
