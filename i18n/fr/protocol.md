@@ -184,7 +184,9 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 - **l'outil applique la règle** : `--force` est **refusé** sur un verrou encore
   valide. Tu ne peux donc pas voler le stylo d'un agent actif (c'est voulu) ;
 - tu peux **rafraîchir ton propre** verrou avant péremption : `./m8shift.py claim
-  <toi>` quand tu le détiens déjà repose `expires` à +30 min ;
+  <toi>` quand tu le détiens déjà repose `expires` à +30 min. Pour un tour long
+  piloté par wrapper/agent, utilise un heartbeat manuel au moins **5 minutes avant**
+  l'expiration (avec le TTL par défaut, rafraîchis après 25 minutes écoulées) ;
 - `release` et `done` n'agissent que si **tu** tiens le stylo (ou si personne ne
   le tient) ; `--force` outrepasse, réservé à la récupération.
 

@@ -188,7 +188,9 @@ Guardrail:
   lock. You therefore cannot steal the pen from an active agent (this is
   intentional);
 - you can **refresh your own** lock before it expires: `./m8shift.py claim
-  <you>` when you already hold it resets `expires` to +30 min;
+  <you>` when you already hold it resets `expires` to +30 min. For a long-running
+  wrapper/agent turn, use a manual heartbeat at least **5 minutes before**
+  expiration (with the default TTL, refresh when 25 minutes have elapsed);
 - `release` and `done` are **baton-owner** admin ops: they act if you are the `holder`
   (pen holder while `WORKING_*`, or the awaited agent while `AWAITING_*`) or if nobody
   holds it — they do **not** require an active `claim`, unlike `append` (the only *work*

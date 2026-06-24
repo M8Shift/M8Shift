@@ -83,7 +83,7 @@ le jugement du mainteneur.
 | EF-4 | `--to` doit cibler un autre membre actif du roster. |
 | EF-5 | `wait <agent>` attend le tour ; `wait --once` retourne `3` si ce n'est pas le tour. |
 | EF-5b | `next <agent>` reprend la boucle sans ambiguïté : attend si besoin, puis claim et affiche le dernier handoff ; `--once` ne mute rien si ce n'est pas le tour. |
-| EF-6 | `claim --force` ne reprend qu'un verrou `WORKING_*` périmé. |
+| EF-6 | `claim --force` ne reprend qu'un verrou `WORKING_*` périmé ; le détenteur peut rafraîchir son propre TTL avec `claim <soi>`, et un wrapper long doit le faire au moins 5 minutes avant expiration. |
 | EF-7 | `release` et `done` sont des opérations de détenteur du bâton (`holder`) ; `append` seul exige un stylo actif. |
 | EF-8 | `archive --keep N` déplace les anciens tours clos vers `M8SHIFT.archive.md` sans toucher au LOCK ni au tour #0. |
 | EF-9 | `init` génère `M8SHIFT.md`, `M8SHIFT.protocol.md` et injecte les ancrages sans dupliquer les strophes. |

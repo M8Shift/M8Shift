@@ -195,7 +195,8 @@ Vérifiées par les tests et par revue multi-agents :
   `WORKING_<toi>`. Vous ne travaillez qu'après un `claim` réussi, donc aucun couple
   d'agents ne modifie le dépôt en même temps. `--to` ≠ soi-même (alternance stricte).
 - **Récupération de verrou périmé** — `claim --force` ne réclame **qu'un verrou périmé** (refusé
-  sur un verrou actif) ; le détenteur peut rafraîchir son propre verrou.
+  sur un verrou actif) ; le détenteur peut rafraîchir son propre verrou. Les wrappers
+  de tours longs devraient rafraîchir au moins 5 minutes avant `expires`.
 - **Garde-fous** — `release` / `done` sont des opérations de détenteur du bâton (`holder` :
   détenteur du stylo en WORKING / agent attendu en AWAITING) ; seul `append` exige
   `WORKING_<toi>`. `--force` = récupération.
