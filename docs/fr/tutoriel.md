@@ -149,7 +149,7 @@ l'exécuter.
 **Résultat attendu :**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   none
   state    IDLE
@@ -279,7 +279,7 @@ Regardez à nouveau le verrou. Il devrait maintenant pointer vers `codex`.
 **Résultat attendu :**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   codex
   state    AWAITING_CODEX
@@ -359,7 +359,7 @@ Vérifiez l'état une fois de plus pour confirmer le retour de la main.
 **Résultat attendu :**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   claude
   state    AWAITING_CLAUDE
@@ -432,7 +432,7 @@ Vérifiez l'état final :
 **Résultat attendu :**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   none
   state    DONE
