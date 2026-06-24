@@ -31,6 +31,33 @@ PROTO = os.path.join(HERE, "M8SHIFT.protocol.md")
 MEMORY = os.path.join(HERE, "M8SHIFT.memory.md")     # shared, append-only, human-curated notes
 TASKS = os.path.join(HERE, "M8SHIFT.tasks.md")       # shared, append-only to-do event log
 LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXCL)
+
+
+def configure_root(root):
+    """Rebase every coordination path onto an absolute repo root. Default is `HERE` (the dir of
+    this file) — UNCHANGED unless opted in via `$M8SHIFT_ROOT` or an explicit call, so the
+    single-tree degree-1 relay is byte-identical. The §8 worktree companion injects the canonical
+    repo root here so an integrator launched from a worktree coordinates against the ONE shared
+    `M8SHIFT.md`/`.m8shift.lock`, never its worktree-local copy. read()/write() resolve `COWORK` at
+    call time (path=None), so a rebase takes effect immediately.
+
+    Scope: this rebases the RUNTIME coordination paths (claim/append/release/wait/status/…). `init`
+    is a one-time bootstrap meant to run *in* the target project dir — its `CLAUDE.md`/`AGENTS.md`
+    anchors are written next to the kit (`HERE`), not rebased — so don't bootstrap a kit through
+    `$M8SHIFT_ROOT`; point it at an already-init'd root."""
+    global COWORK, ARCHIVE, PROTO, MEMORY, TASKS, LOCKFILE
+    root = os.path.abspath(root)
+    COWORK = os.path.join(root, "M8SHIFT.md")
+    ARCHIVE = os.path.join(root, "M8SHIFT.archive.md")
+    PROTO = os.path.join(root, "M8SHIFT.protocol.md")
+    MEMORY = os.path.join(root, "M8SHIFT.memory.md")
+    TASKS = os.path.join(root, "M8SHIFT.tasks.md")
+    LOCKFILE = os.path.join(root, ".m8shift.lock")
+
+
+if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical repo root (§8)
+    configure_root(os.environ["M8SHIFT_ROOT"])
+
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
@@ -526,6 +553,7 @@ MESSAGES = {
         "note_release": "handed off to {to} by {agent} (no turn)",
         "release_ok": "✓ handed off to {to}.",
         "not_holder_done": "refused: {holder} holds the pen, not you (--force to close anyway).",
+        "integrating_locked": "refused: {holder} is integrating ({ref}) — an in-flight merge is NOT a reclaimable lock; wait, or recover via the worktree companion.",
         "note_done": "session closed by {agent}",
         "done_ok": "✓ session DONE.",
         "archive_none": "nothing to archive ({n} archivable turn(s), keep={keep}).",
@@ -583,18 +611,19 @@ def parse_iso(s):
     except ValueError:
         return None
 
-def read(path=COWORK):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
+def read(path=None):
+    with open(path or COWORK, encoding="utf-8") as f:  # path=None → resolve COWORK at CALL time
+        return f.read()                                # (so configure_root() rebasing takes effect)
 
 def _current_umask():
     m = os.umask(0)
     os.umask(m)
     return m
 
-def write(text, path=COWORK):
+def write(text, path=None):
     """Atomic write: UNIQUE temporary file + os.replace, preserving the mode of the
-    existing target file (mkstemp forces 0600 otherwise)."""
+    existing target file (mkstemp forces 0600 otherwise). path=None → COWORK at call time."""
+    path = path or COWORK
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)  # nested anchors (e.g. .github/…) need their parent
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".m8shift-", suffix=".tmp")
@@ -611,6 +640,23 @@ def write(text, path=COWORK):
             os.unlink(tmp)
         raise
 
+class _LockGuard:
+    """Yielded by file_lock(): lets a caller verify it STILL holds the `.m8shift.lock` token after
+    a slow flip (a stale takeover may have fired past LOCK_STALE_S). The §8 worktree companion uses
+    `still_owned()` to refuse committing a transition whose lock was stolen mid-flight."""
+    __slots__ = ("_token",)
+
+    def __init__(self, token):
+        self._token = token
+
+    def still_owned(self):
+        try:
+            with open(LOCKFILE, "rb") as f:
+                return f.read() == self._token
+        except OSError:
+            return False
+
+
 @contextlib.contextmanager
 def file_lock(timeout=LOCK_TIMEOUT):
     """Inter-process lock via exclusive file creation (O_CREAT|O_EXCL).
@@ -622,6 +668,9 @@ def file_lock(timeout=LOCK_TIMEOUT):
     lock.
     """
     token = f"{os.getpid()}:{time.time_ns()}".encode()
+    os.makedirs(os.path.dirname(LOCKFILE) or ".", exist_ok=True)  # mirror write(): a rebased
+    # $M8SHIFT_ROOT whose dir doesn't exist yet must not crash os.open with a raw traceback (no-op
+    # for the default HERE root, so degree-1 stays byte-identical).
     start = time.monotonic()
     while True:
         try:
@@ -649,7 +698,7 @@ def file_lock(timeout=LOCK_TIMEOUT):
                 sys.exit(tr("lock_busy"))
             time.sleep(0.05)
     try:
-        yield
+        yield _LockGuard(token)   # caller may verify it still owns the token after a slow flip
     finally:
         # remove ONLY our own lock (token verified)
         try:
@@ -693,6 +742,13 @@ def load_or_die():
     # whose lang isn't bundled here is still loadable (resolve_lang downgrades it to en).
     if lk.get("lang") not in (None, *KNOWN_LANGS):
         errs.append(f"lang={lk.get('lang')!r}")
+    # §8 integration sentinel: `<id>@<hex-sha>`, valid ONLY while WORKING_<holder> (an in-flight
+    # merge). Malformed or present in any other state ⇒ invalid LOCK (clean refusal, no traceback).
+    ig = lk.get("integrating")
+    if ig is not None and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*@[0-9a-f]{7,64}", ig)
+                           or lk.get("holder") in (None, "none")
+                           or lk.get("state") != f"WORKING_{(lk.get('holder') or '').upper()}"):
+        errs.append(f"integrating={ig!r}")
     if errs:
         sys.exit(tr("lock_invalid", file=os.path.basename(COWORK), errs=", ".join(errs)))
     globals()["ROSTER"] = roster
@@ -1370,6 +1426,20 @@ def cmd_claim_check(args):
     return 0 if ready else 3              # rc = readiness only; NO write/set_lock/file_lock above
 
 
+def _guard_integrating(args, lk, op):
+    """While an integration merge is in flight (LOCK carries a valid `integrating:`), the core locks
+    the pen down (§8): the ONLY permitted op is the integrator's non-forced `claim` (a TTL refresh,
+    sentinel preserved). `append`/`release`/`done` and EVERY `--force` (holder included) are refused
+    — so neither a stray CLI op nor a human/runner can strand the sentinel in a non-WORKING state or
+    let a second integrator steal the merge. The companion finalizes by clearing the sentinel with a
+    low-level write, never through these public ops."""
+    if not lk.get("integrating"):
+        return
+    if op == "claim" and not getattr(args, "force", False):
+        return   # the integrator may keep its own pen alive; the sentinel rides along untouched
+    sys.exit(tr("integrating_locked", holder=lk.get("holder"), ref=lk.get("integrating")))
+
+
 def cmd_claim(args):
     if args.check:                       # read-only probe — never reaches the file_lock body below
         return cmd_claim_check(args)
@@ -1381,6 +1451,7 @@ def cmd_claim(args):
         lk = get_lock(text)
         st = lk.get("state", "")
         holder = lk.get("holder", "none")
+        _guard_integrating(args, lk, "claim")   # §8: refuse --force; allow only holder's TTL refresh
         exp = parse_iso(lk.get("expires"))
         stale = st.startswith("WORKING_") and exp is not None and now() > exp
         # your turn / IDLE / your own lock (TTL refresh); --force ONLY if stale.
@@ -1466,6 +1537,7 @@ def cmd_append(args):
             sys.exit(tr("to_self_append"))
         lk = get_lock(text)
         st = lk.get("state", "")
+        _guard_integrating(args, lk, "append")   # §8: a normal append can't strand the sentinel
         # append is allowed ONLY if you already hold the pen (prior exclusive claim).
         # This is what guarantees exclusivity of the WORK WINDOW, not just of the
         # journal write: you cannot work+append from IDLE.
@@ -1513,6 +1585,7 @@ def cmd_release(args):
             sys.exit(tr("to_self"))
         lk = get_lock(text)
         holder = lk.get("holder", "none")
+        _guard_integrating(args, lk, "release")   # §8: refused while a merge is in flight
         if holder not in (agent, "none") and not args.force:
             sys.exit(tr("not_holder_release", holder=holder))
         t = now()
@@ -1531,6 +1604,7 @@ def cmd_done(args):
         agent = need_agent(args.agent)
         lk = get_lock(text)
         holder = lk.get("holder", "none")
+        _guard_integrating(args, lk, "done")   # §8: refused while a merge is in flight
         if holder not in (agent, "none") and not args.force:
             sys.exit(tr("not_holder_done", holder=holder))
         t = now()

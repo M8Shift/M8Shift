@@ -1605,5 +1605,122 @@ class TestAuditFixes(CLIBase):
         self.assertIn("format-safe", r.stderr)
 
 
+# ───────────── §8 core foundation (degree-2 worktree companion) ──────────────
+
+class TestStage8Core(CLIBase):
+    """Core changes the §8 worktree companion needs: $M8SHIFT_ROOT path rebasing, the integration
+    `integrating:` LOCK field (format/lifecycle validated + pen lockdown), and the file_lock
+    token-ownership API."""
+
+    SENT = "wt1@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"   # <id>@<40-hex sha>, a valid sentinel
+
+    def _inject(self, sentinel=SENT):
+        """Splice an `integrating:` field into the LOCK (what the companion does under file_lock)."""
+        p = os.path.join(self.d, "M8SHIFT.md")
+        with open(p, encoding="utf-8") as f:
+            t = f.read()
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(t.replace("note:", f"integrating: {sentinel}\nnote:", 1))
+
+    def test_root_env_redirects_coordination(self):
+        # $M8SHIFT_ROOT rebases coordination paths to a canonical root, not the script's dir
+        root = tempfile.mkdtemp(prefix="m8root-")
+        self.addCleanup(shutil.rmtree, root, True)
+        env = dict(os.environ, M8SHIFT_ROOT=root)
+        r = subprocess.run([sys.executable, "m8shift.py", "init"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(root, "M8SHIFT.md")))       # canonical root
+        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))    # not the script dir
+        # and without the env, init writes next to the script (degree-1 unchanged)
+        self.init()
+        self.assertTrue(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+
+    def test_root_env_nonexistent_dir_no_traceback(self):
+        # $M8SHIFT_ROOT at a not-yet-existing dir must not crash file_lock with a raw traceback
+        # (file_lock mirrors write()'s makedirs); init then auto-creates the root like a fresh dir.
+        base = tempfile.mkdtemp(prefix="m8ne-")
+        self.addCleanup(shutil.rmtree, base, True)
+        root = os.path.join(base, "deep", "child")     # parents do not exist yet
+        env = dict(os.environ, M8SHIFT_ROOT=root)
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertNotIn("Traceback", r.stderr)        # clean refusal (not init'd), no crash
+        ri = subprocess.run([sys.executable, "m8shift.py", "init"],
+                            cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(ri.returncode, 0, ri.stderr)
+        self.assertTrue(os.path.exists(os.path.join(root, "M8SHIFT.md")))    # auto-created
+
+    def test_integrating_locks_the_pen(self):
+        # an in-flight merge (`integrating:` set) locks the pen: every normal/forced public op is
+        # refused and leaves the LOCK byte-for-byte intact; only the integrator's own TTL refresh passes.
+        self.init()
+        self.cw("claim", "claude")            # WORKING_CLAUDE, holder=claude (the integrator)
+        self._inject()
+        before = self.md()
+        refused = [
+            ("append", "claude", "--to", "codex"),   # holder, normal
+            ("release", "claude", "--to", "codex"),  # holder, normal
+            ("done", "claude"),                      # holder, normal
+            ("claim", "claude", "--force"),          # holder, forced
+            ("claim", "codex", "--force"),           # non-holder, forced
+            ("release", "codex", "--force", "--to", "claude"),
+            ("done", "codex", "--force"),
+        ]
+        for op in refused:
+            self.assertNotEqual(self.cw(*op).returncode, 0, op)
+        self.assertEqual(self.md(), before)   # not one refusal mutated the LOCK
+        # the integrator keeps its own pen alive (TTL refresh) — sentinel rides along
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertIn(self.SENT, self.md())
+
+    def test_integrating_malformed_is_clean_invalid(self):
+        # a malformed sentinel ⇒ clean lock_invalid (no traceback), not a silent accept
+        self.init()
+        self.cw("claim", "claude")            # WORKING_CLAUDE
+        self._inject("not-a-valid-ref")       # no @<hex-sha>
+        r = self.cw("claim", "claude")        # any op routes through load_or_die
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("integrating", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_integrating_only_valid_while_working(self):
+        # a well-formed sentinel in a non-WORKING state ⇒ invalid LOCK (lifecycle enforced)
+        self.init()                            # state IDLE, holder none
+        self._inject()                         # valid format, wrong state
+        r = self.cw("claim", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("integrating", r.stderr)
+
+    def test_integrating_rejects_state_holder_mismatch(self):
+        # the sentinel is valid only while state == WORKING_<holder>; a mismatched pair (holder
+        # claude, state WORKING_CODEX) must be rejected, not silently accepted
+        self.init()
+        self.cw("claim", "claude")             # WORKING_CLAUDE, holder=claude
+        self._inject()                         # valid sentinel
+        p = os.path.join(self.d, "M8SHIFT.md")
+        with open(p, encoding="utf-8") as f:
+            t = f.read()
+        with open(p, "w", encoding="utf-8") as f:   # state→CODEX, holder stays claude
+            f.write(re.sub(r"(?m)^(state:\s*)WORKING_CLAUDE", r"\1WORKING_CODEX", t, count=1))
+        r = self.cw("claim", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("integrating", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_file_lock_token_ownership(self):
+        # file_lock() yields the guard; still_owned() flips False once the .m8shift.lock token changes
+        d = tempfile.mkdtemp(prefix="m8lock-")
+        self.addCleanup(shutil.rmtree, d, True)
+        old = cowork.LOCKFILE
+        cowork.LOCKFILE = os.path.join(d, ".m8shift.lock")
+        self.addCleanup(setattr, cowork, "LOCKFILE", old)
+        with cowork.file_lock() as guard:
+            self.assertTrue(guard.still_owned())
+            with open(cowork.LOCKFILE, "wb") as f:
+                f.write(b"stolen")            # a stale takeover overwrote our token
+            self.assertFalse(guard.still_owned())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
