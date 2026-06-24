@@ -157,6 +157,7 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **Référence (cahier des charges)** — [docs/fr/cahier-des-charges.md](../docs/fr/cahier-des-charges.md) — la spécification complète.
 - **Explication (architecture)** — [docs/fr/architecture.md](../docs/fr/architecture.md) — conception et fonctionnement.
 - **Explication (philosophie)** — [docs/fr/philosophie.md](../docs/fr/philosophie.md) — pourquoi le projet existe.
+- **Audit sécurité** — [docs/en/security-audit.md](../docs/en/security-audit.md) _(en)_ — audit du code, de la coordination et des surfaces prompt.
 - **RFC** — les RFC sont maintenues uniquement en anglais sous `docs/en/rfc-*.md` afin d'éviter une double maintenance ; les liens ci-dessous pointent vers cette source canonique.
 - **RFC (historique de sessions)** — [docs/en/rfc-session-history.md](../docs/en/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
 - **RFC (compagnon worktree)** — [docs/en/rfc-worktree-companion.md](../docs/en/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.

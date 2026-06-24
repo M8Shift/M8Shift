@@ -27,6 +27,7 @@ M8Shift is **free and open source**, released under the
 |----------|---------|
 | [architecture.md](architecture.md) | Architecture views, concurrency model, data stores, and operational boundaries. |
 | [philosophy.md](philosophy.md) | Why M8Shift exists and what collaboration model it supports. |
+| [security-audit.md](security-audit.md) | Security audit of code, coordination, and prompt surfaces. |
 | [stage2-rationale.md](stage2-rationale.md) | Design rationale behind the N-agent relay model. |
 
 ## RFCs and design records
