@@ -232,6 +232,14 @@ signaler des avertissements ou erreurs strictes lorsque l'opérateur le demande,
 elle ne devra pas router le travail, donner des permissions, lancer des outils ou
 muter le `LOCK`.
 
+Surfaces futures documentées :
+[RFC — Plan de contrôle runtime / hébergé](rfc-plan-controle-runtime-heberge.md)
+pour présence, voies, inbox opérateur, progression et notifications hors cœur ;
+[RFC — Gestion des fournisseurs](rfc-gestion-fournisseurs.md) pour associer les
+identités du roster (`claude`, `codex`, `gemini`, `vibe`, …) aux commandes et
+capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](rfc-ecritures-degre-plus-un-arbre-partage.md)
+comme sujet de recherche rejeté pour le cœur, remplacé en pratique par les worktrees isolés.
+
 Les idées rejetées restent documentées comme non-goals : daemon, notifications push
 dans le cœur, leases par chemin dans l'arbre partagé, mémoire intelligente, auto-merge,
 suppression automatique de worktrees, dépendances tierces.

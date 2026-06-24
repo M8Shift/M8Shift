@@ -351,6 +351,19 @@ not part of the shipped guarantee yet. Its boundary is the same as the rest of t
 core: validation may report warnings or strict errors when explicitly requested, but
 it must not route work, grant permissions, run tools, or mutate the `LOCK`.
 
+### 12.3 Future companion / research RFCs
+
+The remaining future topics are now explicit RFCs:
+
+- [RFC — Hosted/runtime control plane](rfc-hosted-runtime-control-plane.md):
+  optional runtime supervision, lanes, operator inboxes, progress, and notifications
+  around the passive core.
+- [RFC — Provider management](rfc-provider-management.md): optional mapping from
+  roster identities (`claude`, `codex`, `gemini`, `vibe`, …) to host provider
+  commands, capabilities, and policies.
+- [RFC — True degree > 1 writes in one shared working tree](rfc-shared-tree-degree-gt1.md):
+  research topic, rejected for the core; use isolated worktrees for real parallelism.
+
 `subturn` was **rejected** (see [rfc-subturn.md](rfc-subturn.md)): §5 advisory fields cover
 at-append provenance and `remember` covers mid-turn streaming, so a fourth ledger would be
 redundant surface.
@@ -359,7 +372,7 @@ redundant surface.
 companion — parallel isolated git worktrees plus a single serialized integration pen — so the core
 itself stays a pure degree-1 mutex while true concurrency is available when wanted.
 
-### 12.3 Non-goals (rejected — they would break a quality)
+### 12.4 Non-goals (rejected — they would break a quality)
 
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|

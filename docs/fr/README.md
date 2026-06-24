@@ -30,6 +30,9 @@ les documents Markdown actuellement présents dans `docs/fr/`, hors cet index.
 | Document | Objet |
 |----------|-------|
 | [rfc-contrats-validation.md](rfc-contrats-validation.md) | Contrats Stage 4, décisions de revue et proposition de validation. |
+| [rfc-ecritures-degre-plus-un-arbre-partage.md](rfc-ecritures-degre-plus-un-arbre-partage.md) | RFC de recherche sur le vrai degré > 1 dans un même working tree ; rejeté pour le cœur. |
+| [rfc-gestion-fournisseurs.md](rfc-gestion-fournisseurs.md) | Gestion future des fournisseurs/adaptateurs hors du cœur. |
+| [rfc-plan-controle-runtime-heberge.md](rfc-plan-controle-runtime-heberge.md) | Futur plan de contrôle runtime/hébergé optionnel. |
 | [rfc-roster.md](rfc-roster.md) | RFC historique sur le roster configurable. |
 
 Les RFC non encore traduites sont indexées dans la documentation anglaise :
