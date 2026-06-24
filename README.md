@@ -144,6 +144,7 @@ or close your own `WORKING_<you>` state with `append`/`done`.
 
 Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 
+- **English documentation index** — [docs/en/README.md](docs/en/README.md) — all English docs in one place.
 - **Tutorial** — [docs/en/tutorial.md](docs/en/tutorial.md) — learn the relay step by step.
 - **How-to (VS Code)** — [docs/en/vscode-guide.md](docs/en/vscode-guide.md) — run the relay with a Claude/Codex-style pair or any active roster.
 - **How-to (Windows)** — [docs/en/windows.md](docs/en/windows.md) — run on Windows (WSL / Git Bash / native).
