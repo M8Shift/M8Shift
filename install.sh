@@ -2,7 +2,7 @@
 # M8Shift local installer.
 #
 # Intended one-liner:
-#   curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
 #
 # This script installs M8Shift into the current project directory by downloading the
 # standalone CLI files, then runs `m8shift.py init`. It does not use sudo, does not
@@ -26,7 +26,7 @@ usage() {
 M8Shift installer
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
   bash install.sh [options]
 
 Options:
