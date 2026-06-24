@@ -1,14 +1,12 @@
 # 🏛️ Architecture Document — M8Shift
 
-> **Status**: `Historical (superseded)` · **Version**: protocol v1 · **Review**: 2026-06-21
+> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-06-24
 >
-> ⚠️ **Historical / non-authoritative.** This document predates the **N-agent generalization**
-> and the **v3** changes (EN-only core + i18n injector, shared memory, `claim --check`, tasks
-> board). It describes the early **two-agent / configurable-pair** design and cites stale facts
-> (test path/counts, `cowork.PROTOCOL`). **For the current model use [the protocol](protocol.md)
-> and [the specification](specification.md).** The live model is an **active roster of ≥2 agents
-> with one pen** (degree-1); true **degree-2** concurrency (worktrees) is future work
-> ([rfc-n-agents.md](rfc-n-agents.md) §8). Read the body below as a historical design record.
+> This architecture reflects the current v3 model: active roster of ≥2 agents, one
+> core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
+> and the opt-in `m8shift-worktree.py` companion for degree-2 isolated worktree
+> concurrency. For command-level rules, see [protocol.md](protocol.md) and
+> [specification.md](specification.md).
 
 This document follows the multi-view *Architecture Document* template
 (`architecture-document-template`, B. Florat, CC BY-SA 4.0), adapted to a
@@ -32,10 +30,12 @@ an enterprise infrastructure that is not relevant here.
 
 ### 1.1 General context
 
-`cowork` is a **coordination tool for two AI agents** (a configurable pair; by default Claude, Codex) working on
-the same repository. It materializes a **single pen**: only one agent writes at a
-time, the other waits for its turn. All coordination state lives in a single,
-versionable file `M8SHIFT.md`. The tool is a **self-contained Python script**
+M8Shift is a **coordination tool for an active roster of two or more AI agents**
+(Claude, Codex, Gemini, Le Chat, …) working on the same repository. The core
+materializes a **single pen**: only one roster member writes to the shared tree at a
+time, the others wait for their turn. Core coordination state lives in a readable,
+versionable file `M8SHIFT.md`, with append-only side ledgers for memory, tasks and
+sessions. The tool is a **self-contained Python script**
 (`m8shift.py`) that self-installs into any project via `init`.
 
 **Position in the information system**: a coordination layer *above* the host
@@ -43,11 +43,16 @@ repository; it depends on no service, exposes no port, and stores nothing
 outside the repository. Cross-cutting across all projects (books, code,
 sites, …).
 
+**Product intent**: M8Shift was created to make contradictory multi-agent work
+usable. Different agents can produce different technical, editorial, legal or
+design judgments; the relay lets them exchange and challenge work directly while
+the human maintainer remains the arbiter. See [philosophy.md](philosophy.md).
+
 ### 1.2 Actors
 
 | Actor | Type | Role |
 |-------|------|------|
-| active agent ×2 | AI agents | the configured relaying pair (default `claude`/`codex`); each reads its own anchor (`CLAUDE.md`, `AGENTS.md`, …) and operates the relay on its side |
+| active agent ×N | AI agents | the configured active roster (default `claude,codex`); each reads its own anchor (`CLAUDE.md`, `AGENTS.md`, …) and operates the relay on its side |
 | maintainer | human | deploys, arbitrates, reads the log (`M8SHIFT.md`, git) |
 
 ### 1.3 Nature and sensitivity of data
@@ -64,12 +69,14 @@ sites, …).
 - **A single state file**, readable by eye and by `grep`, versionable in clear text.
 - **Zero dependencies**: Python 3.8+ stdlib only; no installation.
 - **Portable**: any project, any FS, paths with spaces/accents.
-- **Two agents** by design (a configurable pair; degree-1 relay, default claude ⇄ codex).
+- **N agents, one core writer** by design (`init --agents a,b,c…`); true parallel
+  authoring is opt-in through isolated worktrees, not through the core relay.
 
 ### 1.5 Requirements
 
-See [specification](specification.md) §4–5 (EF-1→11, ENF-1→6). In summary:
-mutual exclusion, atomicity, agent autonomy, robustness, durability over time.
+See [specification](specification.md) §4–5. In summary: mutual exclusion, atomicity,
+agent autonomy, robustness, bounded history, observability, session history, local-time
+display, i18n, and optional worktree-based parallelism.
 
 ### 1.6 Target application architecture
 
@@ -77,32 +84,60 @@ mutual exclusion, atomicity, agent autonomy, robustness, durability over time.
 flowchart TB
     A["Agent A"] -- shell --> CLI["m8shift.py CLI"]
     B["Agent B"] -- shell --> CLI
+    N["Agent N"] -- shell --> CLI
     CLI -- "read-modify-write (atomic)" --> LK["M8SHIFT.md<br/>LOCK (mutex) + turn journal"]
     CLI -- "serialized by" --> LF[".m8shift.lock (O_EXCL)"]
+    CLI -- "append-only" --> MEM["M8SHIFT.memory.md<br/>human-curated notes"]
+    CLI -- "append-only" --> TASK["M8SHIFT.tasks.md<br/>task events"]
+    CLI -- "append-only" --> SESS["M8SHIFT.sessions.jsonl<br/>session events"]
+    CLI -- "move old turns" --> ARC["M8SHIFT.archive.md"]
     CLI -- "injects at init" --> AN["CLAUDE.md / AGENTS.md (stanza)"]
     AN -. "read at startup" .-> A
     AN -. "read at startup" .-> B
+    AN -. "read at startup" .-> N
 ```
 
 **Components**: (a) the `LOCK` block = state machine; (b) the append-only turn
 log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
-`m8shift.py` CLI (commands init/status/wait/claim/append/release/done/archive).
+`m8shift.py` CLI; (e) passive side ledgers (`memory`, `tasks`, `sessions`) used only
+by read-only or append-only commands; (f) the optional `m8shift-worktree.py` companion.
 
-**State machine** (`A`, `B` = the two active agents — by default `claude`, `codex`):
+**State machine** (`X`, `Y` = any two active roster members):
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> WORKING_A: A claims
-    WORKING_A --> AWAITING_B: A appends to B
-    AWAITING_B --> WORKING_B: B claims
-    WORKING_B --> AWAITING_A: B appends to A
-    AWAITING_A --> WORKING_A: A claims
-    WORKING_A --> WORKING_A: A re-claims (refresh TTL)
-    WORKING_A --> WORKING_B: B force-claims (A stale)
-    WORKING_B --> DONE: done
+    IDLE --> WORKING_X: X claims
+    WORKING_X --> AWAITING_Y: X appends to Y
+    AWAITING_Y --> WORKING_Y: Y claims
+    WORKING_Y --> AWAITING_X: Y appends to X
+    AWAITING_X --> WORKING_X: X claims
+    WORKING_X --> WORKING_X: X re-claims (refresh TTL)
+    WORKING_X --> WORKING_Y: Y force-claims (X stale)
+    WORKING_X --> DONE: done
     DONE --> [*]
 ```
+
+**Degree-2 opt-in companion**:
+
+```mermaid
+flowchart LR
+    subgraph Parallel["isolated authoring"]
+      W1["worktree feat-a<br/>agent A"]
+      W2["worktree feat-b<br/>agent B"]
+      WN["worktree feat-n<br/>agent N"]
+    end
+    IP["integration pen<br/>canonical LOCK"]
+    MAIN["target branch<br/>main"]
+
+    W1 --> IP
+    W2 --> IP
+    WN --> IP
+    IP -- "one merge at a time" --> MAIN
+```
+
+The companion keeps parallel work in separate git worktrees and serializes merge-back
+through the canonical root's LOCK. It does not change the core one-pen invariant.
 
 **Relay loop** (one round):
 
@@ -129,6 +164,8 @@ sequenceDiagram
 | `m8shift.py init` | each active agent's anchor (default `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (if present), `M8SHIFT.protocol.md` | local file system | W |
 | agent | `M8SHIFT.archive.md` | local file system | W (append) |
 | `m8shift.py init` / `done` | `M8SHIFT.sessions.jsonl` | local file system | W (append) |
+| agent | `M8SHIFT.memory.md`, `M8SHIFT.tasks.md` | local file system | W (append), R for recap/list/show |
+| `m8shift-worktree.py` | `.m8shift/worktrees/*`, canonical `M8SHIFT.md` | local file system + Git | W, serialized integration |
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
 
@@ -158,11 +195,10 @@ Two properties set it apart from a strict in-process mutex:
 - **Re-entrant for the holder.** The current holder may re-`claim` to refresh its
   lease — a holder-recursive lock.
 
-**Why this matters for the roadmap.** Generalizing to a configurable pair of agents
-(claude, codex, lechat, …) keeps the degree at **1**: the baton is simply passed
-among the chosen participants rather than between a hard-wired claude/codex. It
-stays a **token-passing mutex** — it does *not* become a counting semaphore (that
-would mean *k > 1* agents writing concurrently, which is an explicit non-goal).
+**Why this matters.** Generalizing to an active roster of N agents keeps the core degree
+at **1**: the baton is passed among participants, but only one can edit the shared tree.
+Degree-2 exists only as an opt-in companion that isolates concurrent work in separate
+git worktrees and serializes integration.
 
 ---
 
@@ -175,7 +211,7 @@ would mean *k > 1* agents writing concurrently, which is an explicit non-goal).
 | Language | Python **3.8+** |
 | Dependencies | **No Python dependencies** (stdlib: `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`); Git optional, to preserve a case rename in the index |
 | Distribution | **a single file** `m8shift.py` (embedded templates) |
-| Tests | stdlib `unittest` — `tests/test_m8shift.py` |
+| Tests | stdlib `unittest` — `tests/test_m8shift.py`, `tests/test_worktree.py` |
 
 ### 2.2 Notable patterns
 
@@ -189,7 +225,7 @@ would mean *k > 1* agents writing concurrently, which is an explicit non-goal).
   rejected); body neutralized (anti-injection against forged turns).
 - **Single source of truth**: the protocol, the `M8SHIFT.md` template, and the
   stanza are constants in `m8shift.py`; `docs/en/protocol.md` and
-  `docs/fr/protocole.md` are a *generation* of `cowork.PROTOCOL[lang]` (byte-for-byte
+  `docs/fr/protocole.md` are a *generation* of `m8shift.PROTOCOL[lang]` (byte-for-byte
   regression test `test_protocol_docs_in_sync`).
 - **Idempotent, priority injection**: the stanza is delimited by `M8SHIFT:STANZA`
   markers, moved/refreshed at the top without duplication. Case variants are
@@ -203,19 +239,20 @@ would mean *k > 1* agents writing concurrently, which is an explicit non-goal).
 
 ### 2.3 Test strategy
 
-46 tests, with no external Python dependency: unit tests (pure functions:
-`other`, `parse_iso`/`iso`, `get_lock`/`set_lock`, `stanza_for`, `clean_body`)
-plus CLI regression tests in an isolated subprocess (claim→append model, mutex,
-**claude/codex concurrency** with a single winner, canonical/override anchors,
-archive, robustness, anti-injection, LOCK schema). Command:
+180 tests, with no external Python dependency: unit tests (pure functions and parsers)
+plus CLI regression tests in isolated subprocesses (claim→append model, mutex,
+N-agent concurrency with a single winner, canonical/override anchors, memory, tasks,
+session history, local-time display, archive, doctor, worktree companion, robustness,
+anti-injection, LOCK schema). Command:
 `python3 -m unittest discover -s tests`.
 
 ### 2.4 Configuration management, encoding, time zones
 
-- **Config**: none; everything is embedded. `init` takes `--name` / `--agents a,b`
-  (the relaying pair) / `--lang en|fr` / `--force`.
+- **Config**: none; everything is embedded. `init` takes `--name` / `--agents a,b,c…`
+  (active roster) / `--lang <bundled-code>` / `--force`.
 - **Encoding**: UTF-8 everywhere (explicit on read/write).
-- **Time zones**: all timestamps in **UTC** ISO-8601 (`...Z`).
+- **Time zones**: all stored timestamps are **UTC** ISO-8601 (`...Z`); human-facing
+  commands also display the user's local time next to UTC, while JSON stays UTC-only.
 - **Logging**: standard output (`✓`/`refused`/`…` messages), no log file.
 
 ### 2.5 Branching & versioning policy

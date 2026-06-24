@@ -1,10 +1,10 @@
 <div align="center">
 
-![M8Shift](../M8Shift-logo.png)
-
 # M8Shift
 
 _Des agents différents. Des rôles différents. Un seul workflow coordonné._
+
+![M8Shift](../M8Shift-logo.png)
 
 **Un relais en fichier unique qui permet à deux agents IA ou plus — un roster actif (Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte, avec un seul écrivain à la fois.**
 
@@ -50,6 +50,12 @@ travailler** — pour qu'aucun couple d'agents ne modifie le dépôt en même te
 coordination vit dans un fichier versionnable, lisible à l'œil comme par `grep`, et préservé
 dans le temps. Pas de démon, pas de serveur, pas de dépendance externe — juste un fichier
 Python et les conventions propres des outils hôtes.
+
+Il y a aussi une raison humaine : des agents différents apportent des jugements différents.
+M8Shift a été créé pour rendre ce contradictoire exploitable — Claude, Codex ou un autre
+agent peuvent relire, challenger et se passer le travail sans que le mainteneur devienne
+un simple relais de copier-coller. L'humain garde la décision d'orientation. Voir
+[Philosophie](fr/philosophie.md).
 
 ## Tourne partout — sans clé API
 
@@ -131,11 +137,14 @@ exemples ci-dessous utilisent le couple par défaut `claude`/`codex`).
 La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 
 - **Tutoriel** — [docs/fr/tutoriel.md](../docs/fr/tutoriel.md) — apprenez le relais pas à pas.
-- **Guide (VS Code)** — [docs/fr/guide-vscode.md](../docs/fr/guide-vscode.md) — lancez le relais avec Claude + Codex.
+- **Guide (VS Code)** — [docs/fr/guide-vscode.md](../docs/fr/guide-vscode.md) — lancez le relais avec un duo type Claude/Codex ou n'importe quel roster actif.
 - **Guide (Windows)** — [docs/fr/windows.md](../docs/fr/windows.md) — lancez sous Windows (WSL / Git Bash / natif).
 - **Référence (protocole)** — [docs/fr/protocole.md](../docs/fr/protocole.md) — le protocole partagé, les états et les règles.
 - **Référence (cahier des charges)** — [docs/fr/cahier-des-charges.md](../docs/fr/cahier-des-charges.md) — la spécification complète.
 - **Explication (architecture)** — [docs/fr/architecture.md](../docs/fr/architecture.md) — conception et fonctionnement.
+- **Explication (philosophie)** — [docs/fr/philosophie.md](../docs/fr/philosophie.md) — pourquoi le projet existe.
+- **RFC (historique de sessions)** — [docs/en/rfc-session-history.md](../docs/en/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
+- **RFC (compagnon worktree)** — [docs/en/rfc-worktree-companion.md](../docs/en/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
 
 ## Comment ça marche
 
@@ -156,13 +165,18 @@ flowchart LR
     A --> W
 ```
 
-Les champs du verrou — `holder`, `state`, `agents`, `turn`, `since`, `expires`,
-`note`, `lang` — sont un `key: value` par ligne (faciles à `grep`er). `holder` est le
+Les champs du verrou — `holder`, `state`, `agents`, `lang`, `session`, `turn`,
+`since`, `expires`, `note` — sont un `key: value` par ligne (faciles à `grep`er). `holder` est le
 détenteur du stylo en `WORKING_*`, l'agent attendu en `AWAITING_*`, ou `none` ;
 `agents` est le roster actif complet (≥2, défaut `claude,codex`) ; les états sont `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE`
 (`<X>` = un agent actif, en majuscules). Les tours sont encadrés par des commentaires
 HTML `M8SHIFT:TURN <n> <agent> BEGIN/END` (invisibles dans
 le rendu Markdown) et sont **immuables** une fois clos.
+
+Les timestamps sont stockés en UTC (`...Z`) pour stabiliser les comparaisons entre
+agents et machines. Les commandes humaines (`status`, `recap`, `history`, `task show`,
+`m8shift-worktree.py status`) affichent aussi l'heure locale utilisateur ; les sorties JSON
+restent en UTC canonique.
 
 ## Garanties
 
@@ -265,7 +279,7 @@ conception. Deux étapes :
    un sentinel LOCK `integrating:<id>@<sha>` (qui bloque une reprise TTL en plein merge)
    et une passation `--to` sur tout chemin (jamais bloqué). Le cœur degré 1 reste à un
    écrivain à la fois ; le compagnon ajoute la concurrence par-dessus.
-   Voir [RFC — compagnon worktree](rfc-worktree-companion.md) _(en)_.
+   Voir [RFC — compagnon worktree](en/rfc-worktree-companion.md) _(en)_.
 
 **Surfaces lecture / passation livrées** — `recap`, `peek`, `log`, `history`
 (historique des sessions : agents, tours, état, version), `status --json`,
@@ -275,13 +289,13 @@ champs consultatifs sur `append` (`--branch`/`--commit`/`--tests`/`--next`/
 `task add/done/drop/list/show`. Ces surfaces restent append-only ou read-only sur
 des données déjà stockées par M8Shift ; elles ne pilotent jamais le mutex.
 
-**Fonctionnalités prévues** — la roadmap de degré 1 est complète, **et le degré 2 est livré**
+**État de la roadmap** — la roadmap de degré 1 est complète, **et le degré 2 est livré**
 (compagnon opt-in `m8shift-worktree.py`, étape 2). Le dernier candidat degré 1,
 `subturn`, a été rejeté : les champs consultatifs couvrent la provenance au moment de
 l'append, et `remember` couvre le streaming durable en cours de tour.
 
 **Non-goals** (briseraient une qualité de M8Shift) : *baux* par chemin pour des écritures
-disjointes concurrentes (c'est le verrou degré 2, pas le stylo degré 1 d'aujourd'hui) ;
+disjointes concurrentes dans l'arbre partagé (utiliser plutôt le compagnon worktree optionnel) ;
 un daemon / watcher / push de notifications en arrière-plan ; lancer git, des builds
 ou des API (auth + réseau → un orchestrateur) ; des dépendances tierces ou un paquet
 multi-fichiers ; et une mémoire *dérivée* « intelligente » (dédup / résumé / purge) —

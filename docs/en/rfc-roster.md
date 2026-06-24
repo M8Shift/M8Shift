@@ -169,7 +169,7 @@ Two hard cases, handled explicitly (not silently):
    interpolate the active pair. The `PROTOCOL_EN`/`PROTOCOL_FR` templates were
    genericized and `docs/en/protocol.md` / `docs/fr/protocole.md` regenerated — so the
    snapshot **did change** (it is *not* unchanged) and `test_protocol_docs_in_sync` was
-   re-baselined against `cowork.PROTOCOL[lang]`. The `agents:` field itself stays a
+   re-baselined against `m8shift.PROTOCOL[lang]`. The `agents:` field itself stays a
    backward-compatible **optional** addition within protocol v1 (old readers ignore it).
 5. **`lechat` anchor.** ✅ *Resolved (best-effort).* The convention is unconfirmed, so
    `lechat`/`mistral` map to `AGENTS.md` as a **best-effort** guess; an agent with no

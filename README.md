@@ -1,10 +1,10 @@
 <div align="center">
 
-![M8Shift](M8Shift-logo.png)
-
 # M8Shift
 
 _Different agents. Different roles. One coordinated workflow._
+
+![M8Shift](M8Shift-logo.png)
 
 **A single-file relay that lets two or more AI agents — an active roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation (one writer at a time).**
 
@@ -48,6 +48,11 @@ agents ever modify the repository at the same time. The coordination state lives
 in a versionable file, readable both by eye and by `grep`, and preserved over time.
 No daemon, no server, no external dependency — just one Python file and the host
 tools' own conventions.
+
+There is also a human reason: different agents bring different judgments. M8Shift was
+created to make that contradiction usable — Claude, Codex or another agent can review,
+challenge, and hand off work without the maintainer becoming a copy/paste relay. The
+human still decides the direction. See [Philosophy](docs/en/philosophy.md).
 
 ## Runs anywhere — no API key
 
@@ -134,11 +139,16 @@ pair `claude`/`codex`).
 Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 
 - **Tutorial** — [docs/en/tutorial.md](docs/en/tutorial.md) — learn the relay step by step.
-- **How-to (VS Code)** — [docs/en/vscode-guide.md](docs/en/vscode-guide.md) — run the relay with Claude + Codex.
+- **How-to (VS Code)** — [docs/en/vscode-guide.md](docs/en/vscode-guide.md) — run the relay with a Claude/Codex-style pair or any active roster.
 - **How-to (Windows)** — [docs/en/windows.md](docs/en/windows.md) — run on Windows (WSL / Git Bash / native).
 - **Reference (protocol)** — [docs/en/protocol.md](docs/en/protocol.md) — the shared protocol, states and rules.
 - **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
 - **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
+- **Explanation (philosophy)** — [docs/en/philosophy.md](docs/en/philosophy.md) — why the project exists.
+- **RFC (session history)** — [docs/en/rfc-session-history.md](docs/en/rfc-session-history.md) —
+  session ledger and `history`.
+- **RFC (worktree companion)** — [docs/en/rfc-worktree-companion.md](docs/en/rfc-worktree-companion.md) —
+  opt-in degree-2 concurrency through isolated git worktrees.
 - **RFC (runtime companion)** — [docs/en/rfc-runtime-companion.md](docs/en/rfc-runtime-companion.md) —
   queues, presence, progress, and UI-safe waiting around the passive core.
 - **RFC (runtime patterns)** — [docs/en/rfc-runtime-patterns.md](docs/en/rfc-runtime-patterns.md) —
@@ -163,13 +173,17 @@ flowchart LR
     A --> W
 ```
 
-The lock fields — `holder`, `state`, `agents`, `turn`, `since`, `expires`, `note`,
-`lang` — are one `key: value` per line (easy to `grep`). `holder` is the pen holder
+The lock fields — `holder`, `state`, `agents`, `lang`, `session`, `turn`, `since`,
+`expires`, `note` — are one `key: value` per line (easy to `grep`). `holder` is the pen holder
 while `WORKING_*` / the awaited (baton-owner) agent while `AWAITING_*`, or `none`;
 `agents` is the active roster (all declared agents, ≥2; default `claude,codex`); states
 are `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE` (`<X>` = an active agent, uppercased). Turns are framed by `M8SHIFT:TURN <n> <agent> BEGIN/END`
 HTML comments (invisible in
 Markdown rendering) and are **immutable** once closed.
+
+Timestamps are stored in UTC (`...Z`) for stable cross-agent comparisons. Human-facing
+commands (`status`, `recap`, `history`, `task show`, and `m8shift-worktree.py status`) also
+print the user's local time next to UTC; JSON output stays canonical UTC.
 
 ## Guarantees
 
@@ -289,7 +303,7 @@ by others since your last turn; and a **tasks board** — `task add/done/drop/li
 durable, append-only `M8SHIFT.tasks.md` (no pen needed; `--for`/`--blocked-on` are advisory free
 text, never enforced), with open-task headlines in `recap`.
 
-**Planned features** — the roadmap is complete: every staged degree-1 surface has shipped (see
+**Roadmap status** — the roadmap is complete: every staged degree-1 surface has shipped (see
 *Shipped* above), **and degree-2 has shipped too** as the opt-in `m8shift-worktree.py` companion
 (roadmap step 2). The last degree-1 candidate, `subturn` (sub-agent fan-out provenance), was deliberately
 **rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn
@@ -297,7 +311,7 @@ durable streaming, so another work-provenance ledger would be redundant surface
 ([rationale](docs/en/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/`.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
-disjoint writes (that is the stage-2 degree-2 lock, not today's degree-1 pen); a
+disjoint writes inside the shared tree (use the opt-in worktree companion instead); a
 background daemon / watcher / push-notifier; running git, builds or APIs (needs auth +
 network → an orchestrator); third-party deps or a multi-file package; and "smart"
 *derived* memory (dedup / summarize / prune) — the ledger stays a dumb, human-curated

@@ -1,16 +1,20 @@
 # RFC — M8Shift Stage 2: N-agent relay (single pen)
 
-- **Status:** Proposed (v2 — revised after adversarial review)
+- **Status:** Historical / implemented, now superseded by the current
+  [specification](specification.md) and [architecture](architecture.md)
 - **Supersedes scope of:** [RFC — configurable agent pair](rfc-roster.md) (Stage 1, shipped)
 - **Prior art:** the `m8shift-vscode-multiagent-kit` (RFC-MA-001/002/003) — this RFC
   *reconciles* that design with M8Shift's single-file / passive / stdlib / degree-1 identity.
 - **Rationale & rejected alternatives:** [stage2-rationale.md](stage2-rationale.md) — why each
   choice was made and what was discarded.
 
-> ℹ️ **Status update.** The **degree-1 N-agent relay** designed here (the active roster + read
-> commands `recap`/`peek`/`log`/`status --json`) is **shipped** (v2.3.0–v2.4.0). The remaining
-> **tier-2 / §8** work — the isolated-worktree **companion** for true degree-2 concurrency — is
-> the next step. Any `cowork`/`COWORK` names below are the project's **legacy** name (now M8Shift).
+> ℹ️ **Status update.** The **degree-1 N-agent relay** designed here is shipped:
+> active roster, advisory turn fields, `recap`/`peek`/`log`/`status --json`,
+> `claim --check`, tasks, memory, session history, doctor, and local-time human
+> output are now part of the current v3.x surface. The **tier-2 / §8**
+> isolated-worktree companion for true degree-2 concurrency is also shipped as
+> `m8shift-worktree.py`. Treat the body below as design history; the current
+> normative source is the specification.
 
 ## 0. Two tiers (the framing that resolves the identity tension)
 
@@ -58,9 +62,9 @@ loop/watcher — lives in the companion, **not** the core.
   to permit or deny a write. Such gating, if ever built, lives **only** in the companion tier.
 - Auto-merge, auto agent-selection, auto worktree deletion, any background daemon/watcher.
 
-**Honesty note on git:** the core is *not* git-free today — `init`/`migrate-brand` already shell
-out to `git ls-files` / `git mv` for anchor and file renames (m8shift.py:1273,1282,1734,1746),
-with an `os.replace` fallback when untracked. The companion's distinction is **no git in the
+**Honesty note on git:** the core is *not* git-free today — `init` may shell out to
+`git ls-files` / `git mv` for anchor case-renames, with an `os.replace` fallback when
+untracked. The companion's distinction is **no git in the
 coordination / merge path of the mutex**, not "runs nothing."
 
 ## 3. The governing decision: turn-header markdown, not YAML
@@ -101,20 +105,19 @@ since: / expires: / note: / lang:
 - `append <me> --to <X>` closes the turn and routes the baton to any other active `X`.
 - `release` → `IDLE`. `done` → `DONE`. `--force` recovery unchanged.
 
-### 4a. Validator changes (REQUIRED — N-activation is NOT zero-engine-change)
+### 4a. Validator changes (implemented)
 
-The shipped engine hardcodes degree-2 and **rejects** N>2 today: `active_pair(lk)` returns
-`roster_full(lk)[:2]` (m8shift.py:1211-1214), and `load_or_die` rejects `state ∉ valid_states(pair)`
-(1116) and `holder ∉ set(pair)` (1120). With `agents=claude,codex,gemini`, the first command after
-the baton reaches the 3rd agent exits via `lock_invalid`. Increment 2 MUST:
+Historical context: before the N-agent work, the engine only used the first two
+agents of the roster and would reject a baton that reached a third agent. The
+current implementation uses the full active roster. The required changes were:
 
 1. Add `active_agents(lk)` = full active roster (drop the `[:2]` truncation) and feed it to
    `valid_states()` (already set-based — generalizes for free) and to `load_or_die`'s `state`/
-   `holder`/`agents` checks (m8shift.py:1110,1116,1120).
+   `holder`/`agents` checks.
 2. Replace `other(me)` usage: it is a 2-agent function and cannot name a 3rd agent. The baton
    target comes from the **turn's `to`** / explicit `--to`, not `other()`; `wait`/stale logic
    becomes a holder-string test; `stanza_for` stops baking in a single "other".
-3. Update `cmd_status` (m8shift.py:1532) to print the full active set, not a pair.
+3. Update `cmd_status` to print the full active set, not a pair.
 
 `append` legality is unchanged and is the single-writer guarantee (see §5).
 
@@ -160,7 +163,7 @@ agents choose `--to` accordingly; the core does not enforce it.
 
 **`roles:` sub-grammar:** `agent=role(+role)*` comma-separated. It MUST be parsed by a dedicated
 parser, **never** routed through `roster_tokens` (which fullmatches `AGENT_RE` per token and would
-reject every legal `roles:` value, m8shift.py:1182-1197). Schema rules: every left-hand name ∈
+reject every legal `roles:` value). Schema rules: every left-hand name ∈
 `agents:`; role tokens match `[a-z][a-z0-9_]*`; an unparseable `roles:` is a clean refusal, never a
 traceback. `load_or_die` must NOT pass `roles:` through agent-name validation.
 
@@ -215,8 +218,8 @@ place under the **same** canonical-root `.m8shift.lock`.
 - The **ownership/transition/READY-gating** semantics (claim refuses if owned; integrate refuses if
   deps unmet) are **coordination authority** and live in the **companion** (§8), never the core.
 
-Injection-safety: add `COWORK:TASK` and `M8SHIFT:TASK` to `RESERVED` (m8shift.py:59-60) so
-`clean_field` rejects a forged TASK boundary inside a `note`/`files` value (verified gap:
+Injection-safety: add the `M8SHIFT:TASK` marker to the `RESERVED` tuple so `clean_field`
+rejects a forged TASK boundary inside a `note`/`files` value (verified gap:
 `clean_field` scans only `RESERVED`; `clean_body`'s zero-width neutralization does not cover field
 values). `roles:`/`deps:` values must pass `clean_field` (allowing `=`,`+`,`:` while still rejecting
 RESERVED markers and newlines), with byte-identical `set_lock`/`get_lock` round-trip tests.
@@ -229,11 +232,12 @@ gemini → feat/hero-img → .m8shift/worktrees/assets
                               └─► integrate (deps satisfied) → integration pen → merge 1-by-1 → reviewer → main
 ```
 
-**Canonical-root pinning (REQUIRED, fixes the integration-pen blocker).** Today `HERE =
-dirname(__file__)` and `LOCKFILE`/`COWORK` derive from it (m8shift.py:27,45,49), so an integrator
-launched from a worktree (which contains its own `m8shift.py`) computes a **different** lockfile and
-file than one in the main tree → two concurrent merges into `main`. Fix: resolve all coordination
-paths (`LOCKFILE`, living file, tasks file) to a **discovered canonical repo root** — the parent of
+**Canonical-root pinning (REQUIRED, fixes the integration-pen blocker).** Historically,
+`HERE = dirname(__file__)` and the module-level coordination paths (`COWORK`, `TASKS`,
+`LOCKFILE`) derived from that script location, so an integrator launched from a worktree
+(which contains its own `m8shift.py`) could compute a **different** lockfile and living file
+than one in the main tree → two concurrent merges into `main`. Fix: resolve all coordination
+paths to a **discovered canonical repo root** — the parent of
 `git rev-parse --git-common-dir`, or `$M8SHIFT_ROOT` — never the worktree copy. The **integration
 pen is a normal LOCK transition in the shared `M8SHIFT.md`**, acquired via the existing `claim` path
 — not a per-worktree artifact.

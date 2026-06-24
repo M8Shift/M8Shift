@@ -170,7 +170,7 @@ Deux cas difficiles, gérés explicitement (pas silencieusement) :
    templates `PROTOCOL_EN`/`PROTOCOL_FR` ont été généralisés et `docs/en/protocol.md` /
    `docs/fr/protocole.md` régénérés — le snapshot **a donc changé** (il n'est *pas*
    inchangé) et `test_protocol_docs_in_sync` a été re-référencé sur
-   `cowork.PROTOCOL[lang]`. Le champ `agents:` reste un ajout **optionnel**
+  `m8shift.PROTOCOL[lang]`. Le champ `agents:` reste un ajout **optionnel**
    rétrocompatible dans le protocole v1 (les anciens lecteurs l'ignorent).
 5. **Ancrage `lechat`.** ✅ *Résolu (au mieux).* La convention n'est pas confirmée,
    donc `lechat`/`mistral` pointent vers `AGENTS.md` au mieux ; un agent sans ancrage
