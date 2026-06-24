@@ -83,6 +83,11 @@ Champs (un `clé: valeur` par ligne, faciles à `grep`) :
 | `expires` | ISO-8601 UTC \| `-` | échéance de reprise anti-blocage (TTL 30 min) |
 | `note`    | texte court | mémo lisible |
 
+M8Shift stocke les timestamps en UTC (`Z`) pour garder des comparaisons stables entre
+agents et machines. Les commandes humaines comme `status`, `recap`, `history` et
+`task show` affichent aussi l'heure locale utilisateur à côté de l'UTC. Les sorties JSON
+restent en UTC canonique.
+
 > `expires` ne porte une date **que** pendant `WORKING_*` (un agent travaille,
 > TTL 30 min). Il repasse à `-` dès qu'on attend (`AWAITING_*`, `IDLE`, `DONE`) :
 > personne ne tient le stylo, donc pas de péremption à surveiller.

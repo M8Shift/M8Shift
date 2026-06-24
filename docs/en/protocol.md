@@ -86,6 +86,11 @@ Fields (one `key: value` per line, easy to `grep`):
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock takeover deadline (TTL 30 min) |
 | `note`    | short text | readable memo |
 
+M8Shift stores timestamps in UTC (`Z`) to keep comparisons stable across agents and
+machines. Human-facing commands such as `status`, `recap`, `history`, and `task show`
+also print the user's local time next to UTC. Machine-readable JSON keeps canonical
+UTC values only.
+
 > `expires` carries a date **only** during `WORKING_*` (an agent is working,
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
 > `DONE`): nobody holds the pen, so there is no staleness to watch.

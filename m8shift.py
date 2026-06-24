@@ -64,7 +64,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.7.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.8.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -201,6 +201,11 @@ Fields (one `key: value` per line, easy to `grep`):
 | `since`   | ISO-8601 UTC | since when this state has lasted |
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock takeover deadline (TTL 30 min) |
 | `note`    | short text | readable memo |
+
+M8Shift stores timestamps in UTC (`Z`) to keep comparisons stable across agents and
+machines. Human-facing commands such as `status`, `recap`, `history`, and `task show`
+also print the user's local time next to UTC. Machine-readable JSON keeps canonical
+UTC values only.
 
 > `expires` carries a date **only** during `WORKING_*` (an agent is working,
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
@@ -620,6 +625,26 @@ def parse_iso(s):
         return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     except ValueError:
         return None
+
+def local_time_label(s):
+    """Human-local rendering for an M8Shift UTC timestamp.
+
+    Storage stays canonical UTC (`...Z`). This is display-only and intentionally not
+    used by routing / TTL comparisons.
+    """
+    t = parse_iso(s)
+    if t is None:
+        return ""
+    local = t.astimezone()
+    zone = local.tzname() or local.strftime("%z")
+    return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {zone}".strip()
+
+def display_time(s):
+    label = local_time_label(s)
+    return f"{s}  local {label}" if label else (s or "")
+
+def display_lock_value(key, value):
+    return display_time(value) if key in ("since", "expires") else (value or "")
 
 def read(path=None):
     with open(path or COWORK, encoding="utf-8") as f:  # path=None → resolve COWORK at CALL time
@@ -1761,7 +1786,7 @@ def cmd_recap(args):
     print(f"m8shift.py v{VERSION}")
     print("── LOCK ───────────────────────────────")
     for k in ("holder", "state", "agents", "session", "turn", "since", "expires", "note"):
-        v = ",".join(active_agents(lk)) if k == "agents" else lk.get(k, "")
+        v = ",".join(active_agents(lk)) if k == "agents" else display_lock_value(k, lk.get(k, ""))
         print(f"  {k:<8} {v}")
     turns = parse_turns(text)
     recent = turns[-args.turns:] if args.turns > 0 else turns
@@ -1777,7 +1802,7 @@ def cmd_recap(args):
         if tail:
             print(tr("recap_memory", n=len(tail)))
             for nt in tail:   # chronological (file order), like the turn recap
-                print(f"  {nt['ts']} {nt['agent']}: {nt['note']}")
+                print(f"  {display_time(nt['ts'])} {nt['agent']}: {nt['note']}")
     # open-task headlines — only when the ledger exists (absent ⇒ output unchanged)
     if os.path.exists(TASKS):
         opent = [ev for ev in fold_tasks(parse_tasks(read(TASKS))).values() if ev["verb"] == "add"]
@@ -1845,7 +1870,8 @@ def cmd_history(args):
     if args.oneline:
         for s in sessions:
             print(
-                f"{s['session_id']} {s.get('started_at', '-')} -> {s.get('closed_at', 'open')} "
+                f"{s['session_id']} {display_time(s.get('started_at', '-'))} -> "
+                f"{display_time(s.get('closed_at', 'open'))} "
                 f"{s.get('state', '-')} turns={s.get('turns', 0)} agents={s.get('agents', '-')}"
             )
         return 0
@@ -1853,8 +1879,8 @@ def cmd_history(args):
     print("── session history ────────────────────")
     for idx, s in enumerate(sessions, 1):
         print(
-            f"#{idx} {s['session_id']}  {s.get('started_at', '-')} -> "
-            f"{s.get('closed_at', 'open')}  {s.get('state', '-')}"
+            f"#{idx} {s['session_id']}  {display_time(s.get('started_at', '-'))} -> "
+            f"{display_time(s.get('closed_at', 'open'))}  {s.get('state', '-')}"
         )
         print(f"  agents: {s.get('agents', '-')}")
         print(f"  turns: {s.get('turns', 0)}")
@@ -1887,7 +1913,7 @@ def cmd_status(args):
     print(f"m8shift.py v{VERSION}")
     print("── LOCK ───────────────────────────────")
     for k in ("holder", "state", "lang", "session", "turn", "since", "expires", "note"):
-        print(f"  {k:<8} {lk.get(k, '')}")
+        print(f"  {k:<8} {display_lock_value(k, lk.get(k, ''))}")
         if k == "state":
             print(f"  {'agents':<8} {','.join(active_agents(lk))}")
     if stale:
@@ -2245,7 +2271,7 @@ def _cmd_task_read(args):
         if not events:
             sys.exit(tr("task_unknown", id=args.id))
         for e in events:
-            print(f"  #{e['id']} {e['ts']} {e['verb']} {e['author']}: {e['text']}")
+            print(f"  #{e['id']} {display_time(e['ts'])} {e['verb']} {e['author']}: {e['text']}")
         return 0
     rows = sorted(fold_tasks(parse_tasks(text)).values(), key=lambda e: e["id"])
     if not args.all:
