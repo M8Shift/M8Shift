@@ -36,6 +36,7 @@ M8Shift est **libre et open source**, publié sous
 | [rfc-demande-reprise-cooperative.md](rfc-demande-reprise-cooperative.md) | Proposition de demande coopérative du bâton et de pilotage opérateur pour éviter les blocages entre UI. |
 | [rfc-ecritures-degre-plus-un-arbre-partage.md](rfc-ecritures-degre-plus-un-arbre-partage.md) | RFC de recherche sur le vrai degré > 1 dans un même working tree ; rejeté pour le cœur. |
 | [rfc-gestion-fournisseurs.md](rfc-gestion-fournisseurs.md) | Gestion future des fournisseurs/adaptateurs hors du cœur. |
+| [rfc-integrations-stage6.md](rfc-integrations-stage6.md) | Plan Stage 6 des intégrations : reste à faire, valeur, risques et priorités. |
 | [rfc-plan-controle-runtime-heberge.md](rfc-plan-controle-runtime-heberge.md) | Futur plan de contrôle runtime/hébergé optionnel. |
 | [rfc-roster.md](rfc-roster.md) | RFC historique sur le roster configurable. |
 
