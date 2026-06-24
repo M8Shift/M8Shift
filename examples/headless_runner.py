@@ -33,7 +33,7 @@ import time
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.7.0"
+VERSION = "3.8.0"
 
 
 def read_lock(m8shift_path):

@@ -27,7 +27,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
 
-VERSION = "3.7.0"
+VERSION = "3.8.0"
 
 
 # ───────────────────────────── unitaires : fonctions pures ──────────────────
@@ -45,6 +45,13 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIsNone(cowork.parse_iso("-"))
         self.assertIsNone(cowork.parse_iso(""))
         self.assertIsNone(cowork.parse_iso("pas une date"))
+
+    def test_display_time_keeps_utc_and_adds_local_label(self):
+        out = cowork.display_time("2026-06-24T13:52:46Z")
+        self.assertIn("2026-06-24T13:52:46Z", out)
+        self.assertIn(" local ", out)
+        self.assertEqual(cowork.display_time("-"), "-")
+        self.assertEqual(cowork.display_time("not-a-date"), "not-a-date")
 
     def test_lock_roundtrip(self):
         text = ("avant\n" + cowork.LOCK_BEGIN + "\nholder:   none\nstate:    IDLE\n"
@@ -898,6 +905,15 @@ class TestReadCommands(CLIBase):
         self.assertEqual(d["agents_active"], ["claude", "codex"])
         self.assertFalse(d["stale"])
         self.assertEqual(d["last_turn"], {"n": 2, "agent": "codex"})
+        self.assertNotIn(" local ", r.stdout)  # machine output stays canonical UTC
+
+    def test_status_and_recap_show_local_time_labels(self):
+        self.init()
+        status = self.cw("status").stdout
+        recap = self.cw("recap").stdout
+        self.assertRegex(status, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
+        self.assertRegex(recap, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
+        self.assertIn("expires  -", status)
 
     def test_status_json_stale(self):
         self.init()
@@ -1630,7 +1646,9 @@ class TestHistory(CLIBase):
         self.assertNotIn("turn_end", s)
         self.assertNotIn("project", s)
         self.assertNotIn("lang", s)
-        self.assertIn("DONE turns=2", self.cw("history", "--oneline").stdout)
+        oneline = self.cw("history", "--oneline").stdout
+        self.assertIn("DONE turns=2", oneline)
+        self.assertIn(" local ", oneline)
 
     def test_force_init_marks_previous_session_reset(self):
         self.init()

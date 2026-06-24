@@ -19,7 +19,7 @@ import unittest
 ROOT_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = os.path.join(ROOT_SRC, "m8shift.py")
 COMPANION = os.path.join(ROOT_SRC, "m8shift-worktree.py")
-VERSION = "3.7.0"
+VERSION = "3.8.0"
 
 
 def run(args, cwd, env=None):
@@ -88,6 +88,11 @@ class WTBase(unittest.TestCase):
 
 
 class TestWorktreeHappyPath(WTBase):
+    def test_status_shows_local_time_labels(self):
+        out = self.wt("status").stdout
+        self.assertIn("since=", out)
+        self.assertIn(" local ", out)
+
     def test_claim_creates_worktree_on_branch(self):
         r = self.wt("claim", "feat-a", "claude", "--base", "main")
         self.assertEqual(r.returncode, 0, r.stderr)
