@@ -31,6 +31,9 @@ M8Shift is **free and open source**, released under the
 
 ## RFCs and design records
 
+RFCs are authored and maintained in English only, under `docs/en/rfc-*.md`.
+Localized documentation should link to these canonical RFCs instead of duplicating them.
+
 | Document | Purpose |
 |----------|---------|
 | [rfc-claim-check.md](rfc-claim-check.md) | Advisory pre-claim overlap checks. |
