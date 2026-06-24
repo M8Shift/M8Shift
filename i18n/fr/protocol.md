@@ -104,6 +104,12 @@ agents et machines. Les commandes humaines comme `status`, `recap`, `history` et
 `task show` affichent aussi l'heure locale utilisateur à côté de l'UTC. Les sorties JSON
 restent en UTC canonique.
 
+`status` dérive aussi deux lignes de session en lecture seule depuis
+`M8SHIFT.sessions.jsonl` lorsque c'est possible : `started` (horodatage du début de
+session) et `duration` (temps écoulé depuis ce début, ou jusqu'à clôture/reset pour
+une session terminée). Ces lignes sont seulement de l'affichage ; elles ne pilotent
+jamais la claimabilité ni le routage.
+
 > `expires` ne porte une date **que** pendant `WORKING_*` (un agent travaille,
 > TTL 30 min). Il repasse à `-` dès qu'on attend (`AWAITING_*`, `IDLE`, `DONE`) :
 > personne ne tient le stylo, donc pas de péremption à surveiller.

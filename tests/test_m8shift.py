@@ -27,7 +27,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
 
-VERSION = "3.10.0"
+VERSION = "3.11.0"
 
 
 # ───────────────────────────── unitaires : fonctions pures ──────────────────
@@ -52,6 +52,13 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIn(" local ", out)
         self.assertEqual(cowork.display_time("-"), "-")
         self.assertEqual(cowork.display_time("not-a-date"), "not-a-date")
+
+    def test_display_duration(self):
+        self.assertEqual(cowork.display_duration(None), "-")
+        self.assertEqual(cowork.display_duration(0), "00h 00m 00s")
+        self.assertEqual(cowork.display_duration(3661), "01h 01m 01s")
+        self.assertEqual(cowork.display_duration(90061), "1d 01h 01m 01s")
+        self.assertEqual(cowork.display_duration(-1), "00h 00m 00s")
 
     def test_lock_roundtrip(self):
         text = ("avant\n" + cowork.LOCK_BEGIN + "\nholder:   none\nstate:    IDLE\n"
@@ -924,6 +931,10 @@ class TestReadCommands(CLIBase):
         self.assertEqual(d["agents_active"], ["claude", "codex"])
         self.assertFalse(d["stale"])
         self.assertEqual(d["last_turn"], {"n": 2, "agent": "codex"})
+        self.assertRegex(d["session_started_at"], r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+        self.assertIsInstance(d["session_duration_seconds"], int)
+        self.assertGreaterEqual(d["session_duration_seconds"], 0)
+        self.assertRegex(d["session_duration"], r"(\d+d )?\d\dh \d\dm \d\ds")
         self.assertNotIn(" local ", r.stdout)  # machine output stays canonical UTC
 
     def test_status_and_recap_show_local_time_labels(self):
@@ -931,8 +942,21 @@ class TestReadCommands(CLIBase):
         status = self.cw("status").stdout
         recap = self.cw("recap").stdout
         self.assertRegex(status, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
+        self.assertRegex(status, r"started\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
+        self.assertRegex(status, r"duration\s+(\d+d )?\d\dh \d\dm \d\ds")
         self.assertRegex(recap, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
         self.assertIn("expires  -", status)
+
+    def test_status_session_metadata_degrades_without_ledger(self):
+        self.init()
+        os.remove(os.path.join(self.d, "M8SHIFT.sessions.jsonl"))
+        status = self.cw("status").stdout
+        d = json.loads(self.cw("status", "--json").stdout)
+        self.assertRegex(status, r"started\s+-")
+        self.assertRegex(status, r"duration\s+-")
+        self.assertEqual(d["session_started_at"], "-")
+        self.assertIsNone(d["session_duration_seconds"])
+        self.assertEqual(d["session_duration"], "-")
 
     def test_status_json_stale(self):
         self.init()

@@ -95,7 +95,7 @@ le jugement du mainteneur.
 | EF-15 | `claim --check` sonde les chevauchements de fichiers sans prendre le stylo. |
 | EF-16 | `doctor` signale les dérives de santé sans réparer ni forcer le verrou. |
 | EF-17 | `history` affiche une entrée par session : id, début/fin, état, agents, tours, version. |
-| EF-18 | Les sorties humaines affichent UTC + heure locale ; les sorties JSON restent en UTC canonique. |
+| EF-18 | Les sorties humaines affichent UTC + heure locale ; `status` dérive aussi `started`/`duration` depuis `M8SHIFT.sessions.jsonl` en lecture seule ; les sorties JSON restent en UTC canonique. |
 | EF-19 | `m8shift-worktree.py` permet le degré 2 optionnel : travail parallèle en worktrees isolés, intégration sérialisée. |
 | EF-20 | Les garde-fous de boucle empêchent les sorties prématurées : `status --for <agent>` indique l'action suivante et `append --wait` reste bloqué après passation jusqu'au prochain tour du même agent ou `DONE`. |
 | EF-21 | `watch [--for agent]` fournit une vue live locale, en lecture seule, de `status` ; elle ne claim pas, ne passe pas la main et ne force aucune récupération. |
@@ -151,6 +151,13 @@ Champs principaux du `LOCK` :
 
 Les timestamps sont stockés en UTC (`...Z`). Les commandes humaines affichent aussi
 l'heure locale ; les sorties JSON restent en UTC.
+
+`status` dérive aussi deux lignes de session en lecture seule depuis
+`M8SHIFT.sessions.jsonl` quand c'est possible : `started` (début de session) et
+`duration` (durée écoulée, ou durée jusqu'à clôture/reset pour une session terminée).
+`status --json` expose les mêmes informations via `session_started_at`,
+`session_duration_seconds` et `session_duration`. Ces métadonnées ne pilotent jamais
+la claimabilité, le TTL ni le routage.
 
 ## 8. Interface CLI
 
