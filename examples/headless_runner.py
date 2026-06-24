@@ -33,6 +33,7 @@ import time
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
+VERSION = "3.7.0"
 
 
 def read_lock(m8shift_path):
@@ -59,6 +60,7 @@ def log(msg):
 
 def main():
     p = argparse.ArgumentParser(description="Headless M8Shift runner for one agent.")
+    p.add_argument("--version", action="version", version=f"headless_runner.py {VERSION}")
     p.add_argument("agent", help="your agent name (must be in the M8SHIFT.md roster)")
     p.add_argument("--m8shift", default="M8SHIFT.md", help="path to M8SHIFT.md")
     p.add_argument("--start-on-idle", action="store_true",

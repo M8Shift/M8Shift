@@ -79,6 +79,8 @@ Fields (one `key: value` per line, easy to `grep`):
 | `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*` |
 | `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
 | `agents`  | CSV, e.g. `claude,codex` | the active roster (all declared agents, ≥2); default `claude,codex` |
+| `lang`    | language tag | language of generated files / runtime messages when available |
+| `session` | session id | current session id, also recorded in `M8SHIFT.sessions.jsonl` |
 | `turn`    | integer | number of the last closed turn |
 | `since`   | ISO-8601 UTC | since when this state has lasted |
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock takeover deadline (TTL 30 min) |
@@ -188,6 +190,8 @@ Guardrail:
   turn.
 - The archive can be consulted but is **never** re-read by the loop: only the
   living part of `M8SHIFT.md` drives the relay.
+- Session starts/closes are recorded separately in `M8SHIFT.sessions.jsonl`; this
+  ledger is append-only and is folded by `history`, never by the mutex/routing loop.
 
 ---
 
@@ -196,6 +200,8 @@ Guardrail:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py status                                # lock + last turn (NON-blocking)
+./m8shift.py doctor [--lint] [--json]              # read-only health/lint checks (never repairs or steals the pen)
+./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY

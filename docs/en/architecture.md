@@ -128,6 +128,7 @@ sequenceDiagram
 | agent | `M8SHIFT.md` | local file system | R/W |
 | `m8shift.py init` | each active agent's anchor (default `CLAUDE.md`, `AGENTS.md`), `AGENTS.override.md` (if present), `M8SHIFT.protocol.md` | local file system | W |
 | agent | `M8SHIFT.archive.md` | local file system | W (append) |
+| `m8shift.py init` / `done` | `M8SHIFT.sessions.jsonl` | local file system | W (append) |
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
 
@@ -268,7 +269,7 @@ case of doubt, `init --force` resets the lock to `IDLE` without losing the
 archived history.
 
 #### Backup & restore
-- **Backup**: `M8SHIFT.md` and `M8SHIFT.archive.md` are **versioned by git** (the
+- **Backup**: `M8SHIFT.md`, `M8SHIFT.archive.md`, and `M8SHIFT.sessions.jsonl` are **versioned by git** (the
   host repository is the backup; RPO = last commit).
 - **Restore**: `git checkout` of the file; the archive retains the history of
   purged turns.
@@ -291,7 +292,7 @@ goes to stdout. No PII beyond the task content entered.
 
 ### 3.5 Decommissioning
 
-Delete `M8SHIFT.md`, `M8SHIFT.protocol.md`, `M8SHIFT.archive.md`, and the stanza
+Delete `M8SHIFT.md`, `M8SHIFT.protocol.md`, `M8SHIFT.archive.md`, `M8SHIFT.sessions.jsonl`, and the stanza
 from `CLAUDE.md`, `AGENTS.md`, and, where applicable, `AGENTS.override.md`
 (between the `M8SHIFT:STANZA` markers). No external resource to release.
 
@@ -345,7 +346,7 @@ Negligible footprint; no SAN, no database.
 
 | Resource | Order of magnitude |
 |----------|--------------------|
-| `M8SHIFT.md` storage | a few KB; **bounded** by `archive` (≈ LOCK + last N turns) |
+| `M8SHIFT.md` storage | a few KB; **bounded** by `archive` (≈ LOCK + last N turns); session metadata is in append-only `M8SHIFT.sessions.jsonl` |
 | Archive | grows linearly; purgeable / compressible offline |
 | CPU / memory | a short Python invocation; negligible |
 | Response time | command < ~100 ms (except the blocking `wait`, intentionally ~60 s/poll) |

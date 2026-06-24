@@ -258,17 +258,25 @@ conception. Deux étapes :
    agents via `m8shift.py init --agents a,b,c…` ; tous relaient, et le détenteur passe
    le stylo à n'importe quel autre membre via `--to`, toujours avec un seul écrivain
    à la fois (degré 1).
-2. **N écrivains concurrents** — vrai degré > 1 (plusieurs stylos / worktrees isolés
-   avec intégration sérialisée) ; étape distincte et plus lourde.
+2. **N écrivains concurrents (livré, opt-in)** — vrai degré 2 via le compagnon
+   **`m8shift-worktree.py`** : les agents travaillent en parallèle dans des **worktrees
+   git isolés**, et un unique **stylo d'intégration** sérialisé les fusionne sans risque
+   — `claim`/`done`/`integrate`/`drop`/`status`, avec un `git merge --no-ff --no-commit`,
+   un sentinel LOCK `integrating:<id>@<sha>` (qui bloque une reprise TTL en plein merge)
+   et une passation `--to` sur tout chemin (jamais bloqué). Le cœur degré 1 reste à un
+   écrivain à la fois ; le compagnon ajoute la concurrence par-dessus.
+   Voir [RFC — compagnon worktree](rfc-worktree-companion.md) _(en)_.
 
-**Surfaces lecture / passation livrées** — `recap`, `peek`, `log`, `status --json`,
+**Surfaces lecture / passation livrées** — `recap`, `peek`, `log`, `history`
+(historique des sessions : agents, tours, état, version), `status --json`,
 champs consultatifs sur `append` (`--branch`/`--commit`/`--tests`/`--next`/
 `--blocked-on` + namespace ouvert `--field key=value`), mémoire partagée
 `remember`, sonde consultative `claim --check`, et tableau de tâches
 `task add/done/drop/list/show`. Ces surfaces restent append-only ou read-only sur
 des données déjà stockées par M8Shift ; elles ne pilotent jamais le mutex.
 
-**Fonctionnalités prévues** — la roadmap de degré 1 est complète. Le dernier candidat,
+**Fonctionnalités prévues** — la roadmap de degré 1 est complète, **et le degré 2 est livré**
+(compagnon opt-in `m8shift-worktree.py`, étape 2). Le dernier candidat degré 1,
 `subturn`, a été rejeté : les champs consultatifs couvrent la provenance au moment de
 l'append, et `remember` couvre le streaming durable en cours de tour.
 

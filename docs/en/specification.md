@@ -18,7 +18,7 @@ human still nudges each agent to resume between turns — see §8.
 | Included | Excluded |
 |----------|----------|
 | Single-file lock, turn journal, control CLI | Network / multi-machine orchestration |
-| Idempotent self-install (`init`) into any project | More than one simultaneous writer (degree-2) |
+| Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in `m8shift-worktree.py` companion) |
 | Anti-deadlock via TTL, bounded archiving | Resident daemon, persistent queue |
 | `CLAUDE.md` / `AGENTS.md` anchors | Authentication / encryption of the state file |
 
@@ -47,6 +47,7 @@ human still nudges each agent to resume between turns — see §8.
 | EF-11 | Auto-loadable anchors on a case-sensitive or case-insensitive FS: a unique variant is renamed to `CLAUDE.md`/`AGENTS.md`, including in the index if Git is available and tracks it; ambiguous variants are refused. | `test_anchor_case_insensitive_no_duplicate`, `test_codex_anchor_is_canonical_on_case_sensitive_fs`, `test_tracked_anchor_case_rename_updates_git_index`, `test_ambiguous_anchor_variants_refused` |
 | EF-12 | The stanza is idempotent and placed at the head of the anchors; if `AGENTS.override.md` exists, it is synchronized in the override and in `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
 | EF-13 | If the project had `CLAUDE.md` but no Codex instructions, `init` creates in the new `AGENTS.md` a bridge to the common instructions in `CLAUDE.md`; a pre-existing Codex anchor stays autonomous. | `test_missing_agents_bridges_existing_claude_instructions`, `test_existing_agents_does_not_receive_claude_bridge` |
+| EF-14 | `history` shows one folded entry per relay session: session id, start/end, state, agents, turn count, agents used and version; `--json` exposes the same data. | `test_init_records_session_and_history`, `test_history_counts_turns_and_done`, `test_force_init_marks_previous_session_reset` |
 
 ## 5. Non-functional requirements
 
@@ -56,7 +57,7 @@ human still nudges each agent to resume between turns — see §8.
 | ENF-2 **Atomicity** | Every write (including the archive) goes through a **unique** temporary file + `os.replace`, **preserving the mode** of the target file; serialized by an inter-process lock (`.m8shift.lock`, `O_EXCL`, ownership token). |
 | ENF-3 **Agent autonomy** | The whole procedure is embedded: `M8SHIFT.protocol.md` (§0 quickstart) + the anchors' stanza. No human explanation required. |
 | ENF-4 **Robustness** | Invalid inputs (unknown agent, missing `--body`, missing `M8SHIFT.md`, **LOCK with invalid schema**: `state`/`turn`/`holder`) → clean `sys.exit` exit, never a traceback, never a corrupted state. |
-| ENF-5 **Endurance over time** | `M8SHIFT.md` stays bounded via `archive`; the archive is never re-read by the loop. |
+| ENF-5 **Endurance over time** | `M8SHIFT.md` stays bounded via `archive`; the archive is never re-read by the loop. Session starts/closes live in append-only `M8SHIFT.sessions.jsonl`, folded only by `history`, never by the mutex/routing loop. |
 | ENF-6 **Readability** | State and turns readable by eye and with `grep`; markers in HTML comments invisible in the Markdown rendering; versionable in plain text. |
 | ENF-7 **Bootstrap** | Anchor names follow the auto-loaded conventions; the stanza takes priority in the file and the Codex discovery limits (override, root, size cap, per-session reload) are documented. |
 | ENF-8 **Internationalization (i18n)** | The shipped `m8shift.py` is **English-only**; localized single-file variants are built from `i18n/<lang>/` packs with `m8shift-i18n.py`. `init --lang <code>` selects a bundled language (recorded in the LOCK `lang` field); `$M8SHIFT_LANG` overrides the runtime message language. |
@@ -79,6 +80,7 @@ At the head of `M8SHIFT.md`, between `<!-- M8SHIFT:LOCK:BEGIN -->` and `:END`:
 | `holder` | enum | pen holder (WORKING) \| awaited baton-owner (AWAITING) \| `none` |
 | `state` | enum | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` (one per active agent) |
 | `agents` | CSV \| absent | the active roster (all declared agents, ≥2; default `claude,codex`) |
+| `session` | id \| absent | current session id (`YYYYMMDDTHHMMSSZ-xxxxxxxx`); absent in legacy files |
 | `turn` | integer | number of the last closed turn |
 | `since` | ISO-8601 UTC | how long the state has lasted |
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock TTL; date **only** during `WORKING_*` |
@@ -101,9 +103,10 @@ stateDiagram-v2
 
 ## 7. Command-line interface
 
-`init [--agents a,b,c…] [--lang …]` · `status [--json]` · `recap [--turns N] [--memory N] [--tasks N]` ·
+`init [--agents a,b,c…] [--lang …]` · `status [--json]` · `doctor [--lint] [--json] [--severity-min …]` ·
+`recap [--turns N] [--memory N] [--tasks N]` ·
 `wait <agent> [--once] [--interval N]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
-`peek <agent>` · `log [--limit N] [--all] [--oneline]` ·
+`peek <agent>` · `log [--limit N] [--all] [--oneline]` · `history [--limit N] [--oneline] [--json]` ·
 `append <agent> --to <other> --ask … --done … [--files …] [--body f|-] [--branch/--commit/--tests/--next/--blocked-on …] [--field k=v]` ·
 `release <agent> --to <other> [--force]` · `done <agent> [--force]` · `archive [--keep N]` ·
 `remember <agent> "<note>"` · `task add|done|drop <agent> … | task list|show …`
@@ -121,7 +124,9 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   Between turns a human nudges each agent (e.g. *"resume M8Shift"*). Fully hands-off
   operation needs a **headless** loop (`claude -p`, `codex exec`, cron) wrapping
   `wait → relaunch the agent → claim` — a host integration, not a change to the mutex. A
-  notification/webhook can *signal* a turn but cannot *wake* the AI by itself.
+  notification/webhook can *signal* a turn but cannot *wake* the AI by itself. The
+  proposed host-side answer is a separate runtime companion for queues, presence,
+  progress, and operator inboxes; see [rfc-runtime-companion.md](rfc-runtime-companion.md).
 - **Work-window exclusivity**: guaranteed by `claim` (exclusive acquisition of
   `WORKING_<self>`) + `append` restricted to `WORKING_<self>`. It relies on the
   **discipline** claim→work→append; M8Shift cannot lock the file system, so an
@@ -142,8 +147,9 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 - **N-agent roster, one pen (current)**: an active roster of ≥2 agents relays through a
   single **degree-1 mutex** — any holder hands the pen to any other member via `--to`, one
   writer at a time (`init --agents a,b,c…`; see [RFC — roster](rfc-roster.md), now superseded
-  by this generalized model). **Future**: **N concurrent writers** (degree > 1, isolated
-  worktrees) — a separate step (see [rfc-n-agents.md](rfc-n-agents.md) §8).
+  by this generalized model). **Shipped (off-core)**: **N concurrent writers** via the opt-in
+  [`m8shift-worktree.py`](rfc-worktree-companion.md) companion — isolated git worktrees in parallel
+  plus a single serialized integration pen, layered on this same degree-1 core.
 - **Anchor loading**: it depends on the host tool. Codex builds its instruction
   chain once per execution, gives priority to `AGENTS.override.md` in a folder
   and applies a size cap (32 KiB by default), truncating the last file to the
@@ -153,7 +159,7 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 
 ## 9. Acceptance / validation
 
-- `tests/test_cowork.py` suite (unit + non-regression: claim model, one-pen mutex,
+- `tests/test_m8shift.py` suite (unit + non-regression: claim model, one-pen mutex,
   N-agent relay, canonical/override anchors, configurable roster, advisory turn fields,
   shared memory, `claim --check`, tasks board, archive, robustness, anti-injection),
   `python3 -m unittest discover -s tests`, with no external Python dependency (the
@@ -220,6 +226,9 @@ and must be kept distinct. The **version stamp** makes the drift visible: `m8shi
 reports the script version, `status`/`recap` print `m8shift.py v<VERSION>`, and the generated
 `M8SHIFT.md` banner records the version that wrote it. Compare `--version` across the two locations
 to spot a stale coordinator (and bump `VERSION` on every release so the comparison is meaningful).
+All tracked Python scripts expose their own `--version` too (`m8shift-i18n.py`,
+`m8shift-worktree.py`, `examples/headless_runner.py`, `scripts/gen_docs.py`, and the
+test runners) and are kept in lockstep with the core version by tests.
 
 **Promotion (refreshing the engine) is deliberate, never automatic:**
 
@@ -253,7 +262,9 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 |---------|---------|---------|
 | **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | A dumb, file-ordered ledger; `remember` never calls `set_lock` → memory can never feed the mutex/routing. |
 | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + the open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the LOCK, not turn fields. |
-| **Read commands** | `recap`, `peek`, `log [--all] [--oneline]`, `status --json`. | Pure read-only formatters over existing turn data; only stdlib `json`. |
+| **Read commands** | `recap`, `peek`, `log [--all] [--oneline]`, `history [--json]`, `status --json`. | Pure read-only formatters over existing turn/session data; only stdlib `json`. |
+| **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; `start`/`done`/`reset` events never feed claimability or routing. See [rfc-session-history.md](rfc-session-history.md). |
+| **Doctor / lint** | `doctor [--lint] [--json] [--severity-min info|warning|error]` reports relay health findings: missing/corrupt lock, stale work lock, anchor/stanza drift, protocol drift, stale internal lock, malformed runtime sidecars. | Read-only diagnostics; no repair, no `--force`, never changes the `LOCK`; `--lint` is CI/preflight-friendly. |
 | **`claim --check`** | `claim <agent> --check [--files CSV] [--turns N]` — read-only pre-claim probe: readiness (rc 0/3, except DONE = not claimable) + exact file-overlap with recent turns' `files:`. | Takes no pen, mutates nothing (`--force` is a no-op); overlap never changes rc or feeds routing; exact matching (no glob) avoids false positives. |
 | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over an append-only `M8SHIFT.tasks.md`; status = read-time last-event-wins fold; `recap` shows open tasks. | Pen-free, dumb event log; `--for`/`blocked_on` are advisory text, never resolved; task state never feeds the mutex/routing. |
 
@@ -261,12 +272,17 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 at-append provenance and `remember` covers mid-turn streaming, so a fourth ledger would be
 redundant surface.
 
+**Degree-2 has shipped off-core** as the opt-in [`m8shift-worktree.py`](rfc-worktree-companion.md)
+companion — parallel isolated git worktrees plus a single serialized integration pen — so the core
+itself stays a pure degree-1 mutex while true concurrency is available when wanted.
+
 ### 12.2 Non-goals (rejected — they would break a quality)
 
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|
-| **Path-scoped *leases*** (concurrent disjoint writes) | degree-1 mutex / minimal | Puts two agents in a working state at once — that is the **stage-2 degree-2** lock, not today's single pen. `claim --check` delivers the safe, advisory 80%. |
+| **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the `m8shift-worktree.py` companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
 | **Background daemon / watcher / push-notifier** | passive | M8Shift has no resident process; the recipient polls on its own next turn. A notification can *signal* a turn, never *wake* the AI. |
+| **Runtime supervision in the core** | passive / single-file | Queues, presence, progress drafts, and operator inboxes are useful host integration concerns, but they belong in an opt-in companion ([rfc-runtime-companion.md](rfc-runtime-companion.md)), not in the mutex. |
 | **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns M8Shift into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |
 | **Third-party deps / multi-file package** | single file | Every item is scoped to stdlib (`json`, `fnmatch`, `re`); a DB / queue / server would split the tool — no more `cp m8shift.py`. |
 | **"Smart" *derived* memory** (dedup / summarize / search / prune) | minimal / file-based | The ledger is a dumb append-only record; any digest is verbatim agent passthrough. The instant M8Shift curates content it owns a knowledge base with policy — a second source of truth. |

@@ -19,6 +19,7 @@ import unittest
 ROOT_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = os.path.join(ROOT_SRC, "m8shift.py")
 COMPANION = os.path.join(ROOT_SRC, "m8shift-worktree.py")
+VERSION = "3.7.0"
 
 
 def run(args, cwd, env=None):
@@ -260,4 +261,7 @@ class TestCanonicalRootPinning(WTBase):
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv:
+        print(f"test_worktree.py {VERSION}")
+        sys.exit(0)
     unittest.main(verbosity=2)

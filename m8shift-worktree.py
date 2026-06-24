@@ -32,6 +32,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = None        # canonical repo root (set in main, before any core read/write)
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")   # mirrors the core sentinel id class
+VERSION = "3.7.0"
 
 
 def die(msg):
@@ -259,7 +260,7 @@ def cmd_drop(args):
 
 def cmd_status(args):
     lk = core.get_lock(core.load_or_die())
-    print(f"m8shift.py v{getattr(core, 'VERSION', '?')}   root={ROOT}")
+    print(f"m8shift-worktree.py v{VERSION}   core=m8shift.py v{getattr(core, 'VERSION', '?')}   root={ROOT}")
     print(f"pen: {lk.get('state')}  holder={lk.get('holder')}  turn={lk.get('turn')}")
     if lk.get("integrating"):
         print(f"  ⚠ integrating: {lk['integrating']}  (merge in flight — pen locked)")
@@ -361,6 +362,7 @@ def cmd_integrate(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="m8shift-worktree.py", description=__doc__.splitlines()[0])
+    p.add_argument("--version", action="version", version=f"m8shift-worktree.py {VERSION}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("claim", help="add a feature worktree on a (new) branch")

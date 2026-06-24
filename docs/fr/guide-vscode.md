@@ -32,16 +32,16 @@ fichiers existent.
 Les fichiers d'instructions imbriqués (`CLAUDE.md` / `AGENTS.md`) ne se chargent
 de façon fiable que lorsque la fenêtre est ouverte **exactement sur la racine du
 dépôt**. Une fenêtre ouverte trop haut dans l'arborescence (par exemple
-`/home/user/Documents/Code`) ne garantit **pas** leur chargement.
+`~/code`) ne garantit **pas** leur chargement.
 
-Pour ouvrir **Example Project** :
+Pour ouvrir **mon-projet** :
 
 1. Choisissez `File → New Window`.
 2. Choisissez `File → Open Folder…`.
 3. Ouvrez exactement ce chemin :
 
    ```text
-   /home/user/Documents/Code/example-workspace/Example Project
+   ~/code/mon-projet
    ```
 
 **Résultat attendu :** une fenêtre VS Code dont la racine est le dépôt lui-même,
@@ -82,7 +82,7 @@ conversation que vous ouvrez dans chacun lit son fichier d'ancrage à neuf.
 
 ## Étape 3 — Ouvrir les deux interfaces dans la même fenêtre
 
-Travaillez dans la **même fenêtre** (ici, Example Project) :
+Travaillez dans la **même fenêtre** (ici, mon-projet) :
 
 1. Ouvrez le panneau **Claude Code** (l'icône ✱).
 2. Ouvrez le panneau **Codex**.
