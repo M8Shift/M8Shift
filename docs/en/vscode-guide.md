@@ -106,9 +106,10 @@ change, and carry out this mission:
 
 [MISSION]
 
-After your append to codex, do not end the loop: wait for your turn again with
-`python3 m8shift.py wait claude`, then keep following the protocol until DONE,
-or until you hit a blocker that needs my input.
+Use `python3 m8shift.py next claude` to resume safely. When you append to codex,
+use `--wait` unless you are closing with DONE. Before any final answer to me, run
+`python3 m8shift.py status --for claude`; if the relay is not DONE, keep waiting
+or finish your own WORKING_CLAUDE state with append/done.
 ```
 
 **Expected result:** Claude takes the pen (the seed turn / bootstrap), and its
@@ -135,19 +136,21 @@ In a **new Codex conversation**, paste:
 Read AGENTS.md and M8SHIFT.protocol.md.
 
 You are the codex agent of the M8Shift relay. Run
-`python3 m8shift.py wait codex`, then take the pen when your turn arrives.
-Handle the latest ask, hand back to claude, then keep waiting.
-Never modify the repository without a successful claim. Continue until DONE
-or a blocker.
+`python3 m8shift.py next codex` to wait if needed, take the pen when your turn
+arrives, and print the latest handoff. Handle the latest ask, hand back to claude
+with `append --wait`, then keep following the protocol. Never modify the repository
+without a successful claim. Before any final answer, run
+`python3 m8shift.py status --for codex`; if the relay is not DONE, keep waiting or
+finish your own WORKING_CODEX state with append/done.
 ```
 
 The extension's Agent mode lets Codex read, edit, and run commands inside the
 work window.
 
-**Expected result:** Codex blocks on `wait codex` until the turn passes to it,
-then takes the pen (state `WORKING_CODEX`), processes the ask, hands back to
-`claude`, and returns to waiting. Strict alternation between the two agents is
-now running.
+**Expected result:** Codex blocks inside `next codex` until the turn passes to it,
+then takes the pen (state `WORKING_CODEX`), prints the latest handoff, processes
+the ask, hands back to `claude`, and returns to waiting if `--wait` was used.
+Strict alternation between the two agents is now running.
 
 > **If Codex starts editing without waiting, then** it skipped the `wait`/`claim`
 > sequence. Stop it and re-send the prompt above — it must never touch the
@@ -159,12 +162,12 @@ now running.
 
 - **A finished UI conversation does not wake itself up** when `M8SHIFT.md`
   changes. That is exactly why both prompts (Steps 4 and 5) explicitly tell each
-  agent to **stay in the loop** with `wait`.
+  agent to **stay in the loop** with `next`, `append --wait`, and `status --for`.
 
 - **If a panel stops anyway**, just send it:
 
   ```text
-  Resume the M8Shift loop from `python3 m8shift.py status`.
+  Resume the M8Shift loop with `python3 m8shift.py next <your-agent>`.
   ```
 
 - **Check the relay state at any time** from a terminal at the repository root:

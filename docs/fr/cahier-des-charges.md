@@ -82,6 +82,7 @@ le jugement du mainteneur.
 | EF-3 | `append` n'est accepté que depuis `WORKING_<agent>` ; il clôt le tour, incrémente `turn` et passe la main. |
 | EF-4 | `--to` doit cibler un autre membre actif du roster. |
 | EF-5 | `wait <agent>` attend le tour ; `wait --once` retourne `3` si ce n'est pas le tour. |
+| EF-5b | `next <agent>` reprend la boucle sans ambiguïté : attend si besoin, puis claim et affiche le dernier handoff ; `--once` ne mute rien si ce n'est pas le tour. |
 | EF-6 | `claim --force` ne reprend qu'un verrou `WORKING_*` périmé. |
 | EF-7 | `release` et `done` sont des opérations de détenteur du bâton (`holder`) ; `append` seul exige un stylo actif. |
 | EF-8 | `archive --keep N` déplace les anciens tours clos vers `M8SHIFT.archive.md` sans toucher au LOCK ni au tour #0. |
@@ -96,6 +97,7 @@ le jugement du mainteneur.
 | EF-17 | `history` affiche une entrée par session : id, début/fin, état, agents, tours, version. |
 | EF-18 | Les sorties humaines affichent UTC + heure locale ; les sorties JSON restent en UTC canonique. |
 | EF-19 | `m8shift-worktree.py` permet le degré 2 optionnel : travail parallèle en worktrees isolés, intégration sérialisée. |
+| EF-20 | Les garde-fous de boucle empêchent les sorties prématurées : `status --for <agent>` indique l'action suivante et `append --wait` reste bloqué après passation jusqu'au prochain tour du même agent ou `DONE`. |
 
 ## 6. Exigences non fonctionnelles
 
@@ -152,16 +154,17 @@ l'heure locale ; les sorties JSON restent en UTC.
 
 ```text
 m8shift.py init [--name X] [--agents a,b,c…] [--lang code] [--force]
-m8shift.py status [--json]
+m8shift.py status [--for agent] [--json]
 m8shift.py doctor [--lint] [--json] [--severity-min info|warning|error]
 m8shift.py recap [--turns N] [--memory N] [--tasks N]
 m8shift.py wait <agent> [--once] [--interval N]
+m8shift.py next <agent> [--once] [--interval N] [--force]
 m8shift.py claim <agent> [--force]
 m8shift.py claim <agent> --check [--files CSV] [--turns N]
 m8shift.py peek <agent>
 m8shift.py log [--limit N] [--all] [--oneline]
 m8shift.py history [--limit N] [--oneline] [--json]
-m8shift.py append <agent> --to <autre> --ask … --done … [--files …] [--body f|-]
+m8shift.py append <agent> --to <autre> --ask … --done … [--files …] [--body f|-] [--wait]
 m8shift.py remember <agent> "<note>"
 m8shift.py task add|done|drop|list|show …
 m8shift.py release <agent> --to <autre> [--force]
@@ -217,6 +220,7 @@ flowchart LR
 | [rfc-tasks.md](../en/rfc-tasks.md) | `task add/done/drop/list/show` + `M8SHIFT.tasks.md` | état replié à la lecture, jamais imposé au mutex |
 | [rfc-session-history.md](../en/rfc-session-history.md) | `history` + `M8SHIFT.sessions.jsonl` | observabilité de session, pas de claimabilité |
 | [rfc-runtime-patterns.md](../en/rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine | diagnostics et formatteurs read-only |
+| garde-fou opérateur | `next <agent>`, `status --for <agent>`, `append --wait` | aide à rester dans la boucle ; `next` ne mute qu'en faisant le `claim` normal |
 | [rfc-worktree-companion.md](../en/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
 

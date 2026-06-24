@@ -27,7 +27,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
 
-VERSION = "3.8.0"
+VERSION = "3.9.0"
 
 
 # ───────────────────────────── unitaires : fonctions pures ──────────────────
@@ -1779,6 +1779,63 @@ class TestAuditFixes(CLIBase):
                             "--check", "_zzbadtest"], capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("format-safe", r.stderr)
+
+
+class TestLoopGuardrails(CLIBase):
+    """Regression tests for operator-loop guardrails: next/status hints/append --wait."""
+
+    def test_next_claims_and_prints_handoff_when_ready(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex",
+                "--ask", "review the README", "--done", "edited README", "--files", "README.md")
+        r = self.cw("next", "codex", "--once")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lock()["state"], "WORKING_CODEX")
+        self.assertIn("pen taken by codex", r.stdout)
+        self.assertIn("ask=review the README", r.stdout)
+
+    def test_next_once_not_ready_does_not_mutate(self):
+        self.init()
+        self.cw("claim", "claude")
+        before = self.md()
+        r = self.cw("next", "codex", "--once")
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(self.md(), before)
+        self.assertIn("wait codex", r.stdout)
+
+    def test_status_for_prints_and_serializes_next_action(self):
+        self.init()
+        out = self.cw("status", "--for", "codex").stdout
+        self.assertIn("next", out)
+        self.assertIn("next codex", out)
+        js = json.loads(self.cw("status", "--for", "codex", "--json").stdout)
+        self.assertIn("next_action", js)
+        self.assertIn("next codex", js["next_action"])
+
+    def test_append_wait_blocks_until_agent_turn_returns(self):
+        self.init()
+        self.cw("claim", "claude")
+        p = subprocess.Popen(
+            [sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
+             "--ask", "review", "--done", "drafted", "--wait", "--wait-interval", "1"],
+            cwd=self.d, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if self.lock().get("state") == "AWAITING_CODEX":
+                break
+            time.sleep(0.05)
+        else:
+            out, err = p.communicate(timeout=1)
+            self.fail(f"append --wait did not hand off before waiting\nstdout={out}\nstderr={err}")
+
+        self.cw("claim", "codex")
+        self.cw("append", "codex", "--to", "claude", "--ask", "done", "--done", "reviewed")
+        out, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode, 0, out + err)
+        self.assertIn("waiting for claude's next turn", out)
+        self.assertIn("your turn (AWAITING_CLAUDE)", out)
 
 
 # ───────────── §8 core foundation (degree-2 worktree companion) ──────────────

@@ -20,9 +20,13 @@ propre nom d'agent et `<autre>` l'autre agent actif (le couple déclaré dans
 `agents:` ; par défaut `claude` / `codex`, via les ancrages `CLAUDE.md` / `AGENTS.md`).
 
 ```bash
+# Reprise recommandée en une commande : attend si besoin, puis claim + affiche
+# la dernière passation qui t'est adressée.
+./m8shift.py next <toi>
+
 # 1. Suis-je attendu ? (commandes NON bloquantes)
-./m8shift.py status                 # lis le champ `state`
-./m8shift.py wait <toi> --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
+./m8shift.py status --for <toi>     # lis le champ `state` + ton action suivante
+./m8shift.py wait <toi> --once      # rc 0 = ton tour (ou DONE = stop) ; rc 3 = pas encore
 
 # 2. ACQUIERS le stylo AVANT de travailler (acquisition EXCLUSIVE : sur deux agents
 #    qui tentent en même temps, un seul réussit) :
@@ -34,6 +38,8 @@ propre nom d'agent et `<autre>` l'autre agent actif (le couple déclaré dans
     --ask "ce que tu attends de l'autre" \
     --done "ce que tu viens de faire" \
     --files fichier1,fichier2
+# Garde-fou optionnel : ajoute `--wait` pour rester dans la boucle jusqu'à ton
+# prochain tour ou DONE.
 #    • Si claim ÉCHOUE : ce n'est pas (ou plus) ton tour → reviens à l'attente.
 
 # 3. Pas ton tour : ne touche à RIEN. Bloque jusqu'à ton tour, puis reprends en 2 :
@@ -43,6 +49,11 @@ propre nom d'agent et `<autre>` l'autre agent actif (le couple déclaré dans
 Règle d'or : **tu ne travailles et n'écris que si tu as acquis le stylo via
 `claim`.** `claim` est exclusif ; `append` n'est accepté que si tu tiens le
 stylo. Tout le reste de ce document n'est que le détail de cette boucle.
+
+Garde-fou de boucle : ne t'arrête **pas** tant que le relais est actif. Avant de
+finir ton tour d'agent, lance `status --for <toi>` (ou continue avec `next <toi>`).
+Si l'état n'est pas `DONE`, termine ton propre `WORKING_<toi>` avec `append`/`done`,
+ou continue à attendre ton prochain tour.
 
 > Le protocole te rend auto-suffisant *une fois que tu tournes*. Dans une UI interactive
 > (VS Code, …) un humain te relance quand même entre les tours — `wait` bloque un
@@ -195,12 +206,13 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 
 ```
 ./m8shift.py init [--name PROJET] [--agents a,b,c…] [--lang <code>] [--force]  # (re)génère le kit ici
-./m8shift.py status                                # verrou + dernier tour (NON bloquant)
+./m8shift.py status [--for <agent>]                # verrou + dernier tour + action suivante
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
+./m8shift.py next <agent> [--once] [--interval N] [--force]  # attend si besoin, puis claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
                                                   #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
 ./m8shift.py append <agent> --to <autre> \
-     --ask "..." --done "..." [--files a,b] [--body fichier.md|-]   # clôt ton tour + passe la main
+     --ask "..." --done "..." [--files a,b] [--body fichier.md|-] [--wait]  # clôt ton tour + passe la main
 ./m8shift.py release <agent> --to <autre> [--force]  # repasser la main sans corps (ne ré-incrémente PAS turn)
 ./m8shift.py done <agent> [--force]                 # clore la session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge les vieux tours clôturés (jamais le tour #0)

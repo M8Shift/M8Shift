@@ -73,6 +73,7 @@ flowchart LR
 | EF-3 | A closed turn (`END`) is immutable (by convention: the tool never rewrites it). | (review) |
 | EF-4 | `--to` must target a different roster agent (self-handoff forbidden). | `test_self_handoff_refused` |
 | EF-5 | `wait <agent>` waits for the agent's turn; `--once` performs a single check (rc 0 = its turn, rc 3 otherwise). | `test_wait_once_return_codes` |
+| EF-5b | `next <agent>` is the safe resumption command: it waits if needed, then claims and prints the last handoff; `--once` is non-mutating when not ready, and `--force` only recovers a stale lock. | `test_next_claims_and_prints_handoff_when_ready`, `test_next_once_not_ready_does_not_mutate` |
 | EF-6 | `claim --force` reclaims **only a stale lock**; refused on an active lock. | `test_force_refused_on_fresh_lock`, `test_force_accepted_on_stale_lock` |
 | EF-7 | The holder can reclaim its own lock (refresh the TTL). | `test_reclaim_own_lock_refreshes` |
 | EF-8 | `release` / `done` are baton-owner ops: act if the caller is the `holder` (pen holder in WORKING / awaited agent in AWAITING) or nobody does; `--force` overrides. `append` (the work-write) needs `WORKING_<self>`. | `test_release_done_require_holder`, `test_release_done_force_overrides` |
@@ -83,6 +84,7 @@ flowchart LR
 | EF-13 | If the project had `CLAUDE.md` but no Codex instructions, `init` creates in the new `AGENTS.md` a bridge to the common instructions in `CLAUDE.md`; a pre-existing Codex anchor stays autonomous. | `test_missing_agents_bridges_existing_claude_instructions`, `test_existing_agents_does_not_receive_claude_bridge` |
 | EF-14 | `history` shows one folded entry per relay session: session id, start/end, state, agents, turn count, agents used and version; `--json` exposes the same data. | `test_init_records_session_and_history`, `test_history_counts_turns_and_done`, `test_force_init_marks_previous_session_reset` |
 | EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time label; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_local_label`, `test_status_and_recap_show_local_time_labels`, `test_status_json`, `test_status_shows_local_time_labels` |
+| EF-16 | Operator-loop guardrails keep agents from stopping mid-relay: `status --for <agent>` prints/serializes the next safe action and `append --wait` blocks after handoff until the caller's next turn or `DONE`. | `test_status_for_prints_and_serializes_next_action`, `test_append_wait_blocks_until_agent_turn_returns` |
 
 ## 5. Non-functional requirements
 
@@ -172,11 +174,11 @@ stateDiagram-v2
 
 ## 7. Command-line interface
 
-`init [--agents a,b,c…] [--lang …]` · `status [--json]` · `doctor [--lint] [--json] [--severity-min …]` ·
+`init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json]` · `doctor [--lint] [--json] [--severity-min …]` ·
 `recap [--turns N] [--memory N] [--tasks N]` ·
-`wait <agent> [--once] [--interval N]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
+`wait <agent> [--once] [--interval N]` · `next <agent> [--once] [--interval N] [--force]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
 `peek <agent>` · `log [--limit N] [--all] [--oneline]` · `history [--limit N] [--oneline] [--json]` ·
-`append <agent> --to <other> --ask … --done … [--files …] [--body f|-] [--branch/--commit/--tests/--next/--blocked-on …] [--field k=v]` ·
+`append <agent> --to <other> --ask … --done … [--files …] [--body f|-] [--wait] [--branch/--commit/--tests/--next/--blocked-on …] [--field k=v]` ·
 `release <agent> --to <other> [--force]` · `done <agent> [--force]` · `archive [--keep N]` ·
 `remember <agent> "<note>"` · `task add|done|drop <agent> … | task list|show …`
 
@@ -336,6 +338,7 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [rfc-tasks.md](rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
 | [rfc-session-history.md](rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
 | [rfc-runtime-patterns.md](rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, local-time labels in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |
 | [rfc-worktree-companion.md](rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
 

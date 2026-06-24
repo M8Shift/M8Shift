@@ -108,12 +108,15 @@ Git ou GitLab : `git clone https://gitlab.example.com/you/M8Shift.git`, puis
 
 ## Démarrage rapide
 
-Chaque agent exécute la même boucle : `wait → claim → work → append`. `<toi>` est ton
-propre nom d'agent et `<autre>` l'agent destinataire auquel tu passes le stylo (les
-exemples ci-dessous utilisent le couple par défaut `claude`/`codex`).
+Chaque agent exécute la même boucle : `next → travail → append`. `next` est le
+raccourci protégé pour `wait → claim → peek` : il attend si besoin, puis claim et
+affiche la dernière passation qui vous est adressée. `<toi>` est ton propre nom
+d'agent et `<autre>` l'agent destinataire auquel tu passes le stylo (les exemples
+ci-dessous utilisent le couple par défaut `claude`/`codex`).
 
 ```bash
-./m8shift.py status                # qui détient le stylo ? (non bloquant)
+./m8shift.py status --for claude   # qui détient le stylo + que doit faire claude ?
+./m8shift.py next claude           # attend si besoin, puis claim + affiche la passation
 ./m8shift.py wait claude --once    # rc 0 = votre tour (ou DONE = stop) ; rc 3 = pas encore
 
 # Acquérir le stylo AVANT de travailler (exclusif : un seul gagnant) :
@@ -123,7 +126,8 @@ exemples ci-dessous utilisent le couple par défaut `claude`/`codex`).
 ./m8shift.py append claude --to codex \
     --ask  "ce dont vous avez besoin du destinataire" \
     --done "ce que vous venez de faire" \
-    --files a,b
+    --files a,b \
+    --wait                         # optionnel : attendre le prochain tour de claude ou DONE
 
 # Pas votre tour ? Bloquez jusqu'à ce qu'il arrive, puis relancez claim :
 ./m8shift.py wait claude           # interroge ~60s (--interval N)
@@ -131,6 +135,8 @@ exemples ci-dessous utilisent le couple par défaut `claude`/`codex`).
 
 **Règle d'or :** vous ne travaillez et n'écrivez **qu'après avoir acquis le stylo via `claim`**
 (`append` n'est accepté que depuis `WORKING_<toi>`).
+Avant de vous arrêter, lancez `status --for <toi>` ; si le relais n'est pas `DONE`,
+continuez à attendre ou clôturez votre propre état `WORKING_<toi>` avec `append`/`done`.
 
 ## Documentation
 

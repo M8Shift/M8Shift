@@ -21,8 +21,12 @@ own agent name and `<other>` is the agent you hand the pen to — any *other* me
 the `agents:` roster (with the default `claude`/`codex` pair, simply the other one).
 
 ```bash
+# Recommended single-step resumption: waits if needed, then claims + prints the
+# latest handoff addressed to you.
+./m8shift.py next <you>
+
 # 1. Am I expected? (NON-blocking commands)
-./m8shift.py status                 # read the `state` field
+./m8shift.py status --for <you>     # read the `state` field + your next action
 ./m8shift.py wait <you> --once      # rc 0 = your turn (or DONE = stop) ; rc 3 = not yet
 
 # 2. ACQUIRE the pen BEFORE working (EXCLUSIVE acquisition: when several agents
@@ -35,6 +39,7 @@ the `agents:` roster (with the default `claude`/`codex` pair, simply the other o
     --ask "what you expect from the other" \
     --done "what you just did" \
     --files file1,file2
+# Optional guardrail: add `--wait` to stay in the loop until your next turn or DONE.
 #    • If claim FAILS: it is not (or no longer) your turn → go back to waiting.
 
 # 3. Not your turn: touch NOTHING. Block until your turn, then resume at 2:
@@ -44,6 +49,11 @@ the `agents:` roster (with the default `claude`/`codex` pair, simply the other o
 Golden rule: **you work and write only if you have acquired the pen via
 `claim`.** `claim` is exclusive; `append` is accepted only if you hold the
 pen. Everything else in this document is just the detail of this loop.
+
+Loop guardrail: do **not** stop with the relay still active. Before ending your
+agent turn, run `status --for <you>` (or keep using `next <you>`). If the state is
+not `DONE`, either finish your own `WORKING_<you>` state with `append`/`done`, or
+keep waiting for your next turn.
 
 > The protocol makes you self-sufficient *once you are running*. In an interactive UI
 > (VS Code, …) a human still resumes you between turns — `wait` blocks a process, it
@@ -204,14 +214,15 @@ Guardrail:
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
-./m8shift.py status                                # lock + last turn (NON-blocking)
+./m8shift.py status [--for <agent>]                # lock + last turn + optional next-action hint
 ./m8shift.py doctor [--lint] [--json]              # read-only health/lint checks (never repairs or steals the pen)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
+./m8shift.py next <agent> [--once] [--interval N] [--force]  # wait if needed, then claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
-     --ask "..." --done "..." [--files a,b] [--body file.md|-]   # closes your turn + hands off
+     --ask "..." --done "..." [--files a,b] [--body file.md|-] [--wait]  # closes your turn + hands off
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
 ./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)
