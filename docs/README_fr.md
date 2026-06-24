@@ -151,6 +151,7 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **Explication (philosophie)** — [docs/fr/philosophie.md](../docs/fr/philosophie.md) — pourquoi le projet existe.
 - **RFC (historique de sessions)** — [docs/en/rfc-session-history.md](../docs/en/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
 - **RFC (compagnon worktree)** — [docs/en/rfc-worktree-companion.md](../docs/en/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
+- **RFC (contrats et validation)** — [docs/fr/rfc-contrats-validation.md](../docs/fr/rfc-contrats-validation.md) — spécification Stage 4 pour passations typées, décisions de revue et validation read-only.
 
 ## Comment ça marche
 

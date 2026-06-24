@@ -203,6 +203,50 @@ cœur à **1** : le témoin circule entre participants, mais un seul édite l'ar
 partagé. Le degré 2 existe seulement via un compagnon opt-in qui isole le travail
 concurrent dans des worktrees git séparés et sérialise l'intégration.
 
+### 1.9 Contrats et validation Stage 4 — extension planifiée
+
+Le Stage 4 est spécifié comme une extension, pas comme une garantie runtime déjà
+livrée. Le moteur actuel stocke déjà les champs de passation obligatoires (`ask`,
+`done`, `files`), les métadonnées consultatives (`branch`, `commit`, `tests`,
+`next`, `blocked_on`, `x_*`) et les diagnostics read-only (`peek`, `recap`,
+`history`, `doctor`). Le Stage 4 formalise ces métadonnées en contrats typés de
+passation et en décisions de revue.
+
+```mermaid
+flowchart LR
+    P["Agent producteur"] --> T["Tour append-only<br/>ask/done/files + champs contrat"]
+    T --> V["Validateur contrat<br/>schéma + livrables requis"]
+    V --> R["Agent relecteur"]
+    R --> D{"Décision"}
+    D -->|approve| C["Continuer / intégrer"]
+    D -->|revise| P
+    D -->|reject| H["Arbitrage humain"]
+    D -->|waive| W["Dérogation enregistrée"]
+
+    classDef agent fill:#e0f2fe,stroke:#0284c7,color:#0f172a;
+    classDef data fill:#fef3c7,stroke:#d97706,color:#0f172a;
+    classDef check fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+    classDef decision fill:#fae8ff,stroke:#a855f7,color:#0f172a;
+    classDef stop fill:#fee2e2,stroke:#dc2626,color:#0f172a;
+    class P,R agent;
+    class T data;
+    class V check;
+    class D decision;
+    class C,W check;
+    class H stop;
+```
+
+Légende : bleu = agents, jaune = données persistées, vert = validation ou
+continuation acceptée, violet = décision explicite, rouge = arbitrage humain.
+
+La frontière architecturale est volontaire : la validation lit l'historique
+append-only et peut signaler des avertissements ou des erreurs strictes, mais elle
+ne route pas le travail, ne donne aucune permission, ne lance aucun outil et ne
+mute pas le `LOCK`. L'enforcement des permissions par l'hôte ou l'UI peut être
+ajouté autour de M8Shift, tandis que le cœur reste un relais mono-fichier passif.
+Le contrat d'implémentation est suivi dans
+[RFC — Contrats et validation Stage 4](rfc-contrats-validation.md).
+
 ---
 
 ## 2. 🛠️ Vue Développement

@@ -200,6 +200,48 @@ at **1**: the baton is passed among participants, but only one can edit the shar
 Degree-2 exists only as an opt-in companion that isolates concurrent work in separate
 git worktrees and serializes integration.
 
+### 1.9 Stage 4 contracts and validation — planned extension
+
+Stage 4 is specified as an extension, not as a shipped runtime guarantee yet. The
+existing engine already stores required handoff fields (`ask`, `done`, `files`),
+advisory metadata (`branch`, `commit`, `tests`, `next`, `blocked_on`, `x_*`), and
+read-only diagnostics (`peek`, `recap`, `history`, `doctor`). Stage 4 formalizes
+that metadata into typed handoff contracts and review decisions.
+
+```mermaid
+flowchart LR
+    P["Producer agent"] --> T["Append-only turn<br/>ask/done/files + contract fields"]
+    T --> V["Contract validator<br/>schema + required outputs"]
+    V --> R["Reviewer agent"]
+    R --> D{"Decision"}
+    D -->|approve| C["Continue / integrate"]
+    D -->|revise| P
+    D -->|reject| H["Human arbitration"]
+    D -->|waive| W["Waiver recorded"]
+
+    classDef agent fill:#e0f2fe,stroke:#0284c7,color:#0f172a;
+    classDef data fill:#fef3c7,stroke:#d97706,color:#0f172a;
+    classDef check fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+    classDef decision fill:#fae8ff,stroke:#a855f7,color:#0f172a;
+    classDef stop fill:#fee2e2,stroke:#dc2626,color:#0f172a;
+    class P,R agent;
+    class T data;
+    class V check;
+    class D decision;
+    class C,W check;
+    class H stop;
+```
+
+Legend: blue = agents, yellow = persisted turn data, green = validation or accepted
+continuation, purple = explicit decision, red = human escalation.
+
+The architectural boundary is deliberate: validation reads the append-only turn
+history and can report warnings or strict errors, but it does not route work, grant
+permissions, run tools, or mutate the `LOCK`. Host/UI permission enforcement can be
+layered around M8Shift, while the core remains a passive single-file relay. The
+implementation contract is tracked in
+[RFC — Stage 4 contracts and validation](rfc-contracts-validation.md).
+
 ---
 
 ## 2. 🛠️ Development View

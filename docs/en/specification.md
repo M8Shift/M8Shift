@@ -342,6 +342,15 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [rfc-worktree-companion.md](rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
 
+### 12.2 Planned contract surface
+
+[RFC — Stage 4 contracts and validation](rfc-contracts-validation.md) specifies the
+next implementation step: typed handoff contracts, explicit review decisions
+(`approve`, `revise`, `reject`, `waive`), and read-only validation commands. This is
+not part of the shipped guarantee yet. Its boundary is the same as the rest of the
+core: validation may report warnings or strict errors when explicitly requested, but
+it must not route work, grant permissions, run tools, or mutate the `LOCK`.
+
 `subturn` was **rejected** (see [rfc-subturn.md](rfc-subturn.md)): §5 advisory fields cover
 at-append provenance and `remember` covers mid-turn streaming, so a fourth ledger would be
 redundant surface.
@@ -350,7 +359,7 @@ redundant surface.
 companion — parallel isolated git worktrees plus a single serialized integration pen — so the core
 itself stays a pure degree-1 mutex while true concurrency is available when wanted.
 
-### 12.2 Non-goals (rejected — they would break a quality)
+### 12.3 Non-goals (rejected — they would break a quality)
 
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|
