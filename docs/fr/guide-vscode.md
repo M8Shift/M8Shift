@@ -9,6 +9,10 @@ Dans VS Code, **les panneaux Claude et Codex *sont* les agents**. Tout le travai
 se résume à deux gestes : les pointer vers la **bonne racine de projet**, et
 **démarrer des conversations neuves** après `init`.
 
+Claude et Codex sont le couple d'exemple concret de ce guide. La même boucle
+fonctionne avec Gemini, Vibe ou toute autre UI d'agent coopératif capable de lire
+un ancrage, lancer des commandes shell et respecter `claim → travail → append`.
+
 Ce guide est orienté tâches. Effectuez les étapes dans l'ordre ; chacune vous
 indique ce que vous devez voir avant de passer à la suivante.
 

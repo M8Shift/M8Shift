@@ -53,6 +53,9 @@ python m8shift.py claim claude
 python m8shift.py append claude --to codex --ask "..." --done "..."
 ```
 
+`claude` and `codex` are example roster names. Replace them with `gemini`, `vibe`,
+or any cooperative agent that follows the relay protocol.
+
 - Always invoke via `python m8shift.py <cmd>` — `./m8shift.py` is a Unix idiom and will
   not run directly.
 - If `python` is not found, use the launcher: `py m8shift.py <cmd>`.

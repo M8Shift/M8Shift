@@ -6,6 +6,8 @@ interactive agent UI (VS Code, …). The only way to a fully hands-off relay is 
 a **headless** agent (e.g. `claude -p "<prompt>"`, `codex exec "<prompt>"`) in a loop.
 This script is that loop, for ONE agent. Run one instance per headless agent; if the
 other side is an interactive UI, a human still resumes it (that side stays manual).
+`claude` and `codex` are only examples: the same wrapper pattern works with Gemini,
+Vibe, or any cooperative agent CLI that can perform one M8Shift turn.
 
 Design (the points a naive `while wait; do …` loop gets wrong):
   * It reads the LOCK `state` directly (a stable `key: value`) instead of `wait`'s

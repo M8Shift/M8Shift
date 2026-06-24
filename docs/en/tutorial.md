@@ -5,6 +5,10 @@ relay from start to finish in a throwaway folder: you will play one turn as
 `claude`, hand off, play one turn as `codex`, watch the strict alternation
 happen, then close the session.
 
+`claude` and `codex` are example agent names. In real projects, you can replace
+them with `gemini`, `vibe`, or any cooperative agent that can read its anchor,
+run the CLI, and follow `claim → work → append`.
+
 You do not need to understand the whole protocol yet. Just follow the steps in
 order and compare each console output with the **Expected result** block below
 it. If something looks different, read the **If you see something else** note.

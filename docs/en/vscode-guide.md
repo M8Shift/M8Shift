@@ -9,6 +9,10 @@ In VS Code, **the Claude and Codex panels *are* the agents**. The whole job come
 down to two gestures: pointing them at the **right project root**, and **starting
 fresh conversations** after `init`.
 
+Claude and Codex are the concrete example pair in this guide. The same loop works
+with Gemini, Vibe, or any other cooperative agent UI that can read an anchor, run
+shell commands, and respect `claim → work → append`.
+
 This guide is task-first. Do the steps in order; each one tells you what you
 should see before moving on.
 

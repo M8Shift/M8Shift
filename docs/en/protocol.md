@@ -77,6 +77,10 @@ keep waiting for your next turn.
 - **Poll**: when it is not your turn, you wait (`./m8shift.py wait <you>`,
   ~60 s) then you retry `claim`.
 
+Examples use `claude` and `codex` for readability only. The same protocol works with
+`gemini`, `vibe`, or any cooperative agent that can read its anchor, run the CLI, and
+respect `claim → work → append`.
+
 ---
 
 ## 2. The LOCK block (the mutex)
