@@ -3,6 +3,9 @@
 This document is the entry point for the English documentation set. It lists every
 Markdown document currently present in `docs/en/`, excluding this index.
 
+M8Shift is **free and open source**, released under the
+[Apache License 2.0](../../LICENSE).
+
 ## Start here
 
 | Document | Purpose |
