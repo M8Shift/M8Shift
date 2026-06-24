@@ -26,7 +26,9 @@ The remaining risks are mostly **local/cooperative-model risks**, not remote exp
 bugs: prompt-injection boundaries could be stated more explicitly to agents, `--force`
 administrative paths are powerful, environment/path options can redirect coordination
 state, and some inputs are intentionally unbounded because M8Shift is optimized for local
-plain-text operation.
+plain-text operation. The code review also found three concrete hardening gaps worth
+tracking: `init --name` can inject a fake lock block, deeply nested session JSON can crash
+read-only observers, and stale-lock takeover has a path-unlink race.
 
 ## Existing protections worth preserving
 
@@ -72,15 +74,16 @@ plain-text operation.
 
 ### SEC-2 — `release --force` and `done --force` are powerful active-lock overrides
 
-- **Severity:** Medium
+- **Severity:** Low
 - **Area:** authorization / coordination integrity
 - **Evidence:** `claim --force` is stale-only (`m8shift.py:2321-2328`), but `release` and
   `done` bypass a different holder whenever `--force` is supplied (`m8shift.py:2464`,
   `m8shift.py:2484`). The design documents acknowledge this cooperative limitation
   (`docs/en/specification.md:220-221`).
 - **Impact:** an operator or prompt-injected agent can redirect or close the relay while
-  another active agent still legitimately holds the baton. This does not grant a valid
-  `append`, but it can corrupt coordination flow.
+  another active agent still legitimately holds the baton. This is an explicitly documented
+  cooperative limitation and does not grant a valid `append`, but it can corrupt
+  coordination flow.
 - **Recommendation:** keep the emergency path but make it harder to trigger accidentally:
   - require `--force --reason TEXT` for `release` and `done`;
   - optionally refuse force against a non-stale `WORKING_*` lock unless a second flag such
@@ -90,7 +93,7 @@ plain-text operation.
 
 ### SEC-3 — `M8SHIFT_ROOT` can redirect relay writes to an arbitrary path
 
-- **Severity:** Medium
+- **Severity:** Low / Medium
 - **Area:** filesystem / environment hardening
 - **Evidence:** `m8shift.py` honors `$M8SHIFT_ROOT` at import time (`m8shift.py:61-62`),
   rebasing all runtime paths with `os.path.abspath` (`m8shift.py:38-58`). `write()` and
@@ -110,7 +113,7 @@ plain-text operation.
 
 ### SEC-4 — i18n builder writes arbitrary output names and executes generated code
 
-- **Severity:** Medium
+- **Severity:** Low / Medium
 - **Area:** local build tooling
 - **Evidence:** `m8shift-i18n.py` accepts `--into` and `--name` directly
   (`m8shift-i18n.py:192-198`), joins them into an output path (`m8shift-i18n.py:239-243`),
@@ -120,15 +123,72 @@ plain-text operation.
   odd trailing backslashes, markers, and format placeholders (`m8shift-i18n.py:56-111`).
 - **Impact:** trusted in-repo packs are fine. But if a user builds from a malicious or
   unreviewed language pack, the builder is not a sandbox. `--name ../x` can also write
-  outside the chosen output directory.
+  outside the chosen output directory. `--name /absolute/path` is more direct: Python
+  discards the `--into` prefix when joining an absolute second path, so the builder can
+  write anywhere the user can write, then chmod the generated file to `0755`.
 - **Recommendation:**
-  - enforce `--name` as a basename with no path separator;
+  - enforce `--name` as a basename with no path separator and no absolute path;
   - compare `os.path.commonpath([real_into, real_out]) == real_into` before writing;
   - document language packs as trusted source code, not untrusted translation data;
   - run generated-code validation in a subprocess with a minimal environment if the builder
     is ever expected to process third-party packs.
 
-### SEC-5 — Free-form body and ledger files are unbounded local DoS surfaces
+### SEC-5 — `init --name` can inject a fake lock block
+
+- **Severity:** Low / Medium
+- **Area:** relay integrity / prompt-adjacent input validation
+- **Evidence:** `init` interpolates the project name into the document template
+  (`m8shift.py:1159-1161`). The template title sits before the real lock block
+  (`m8shift.py:481`, `m8shift.py:490`). `get_lock()` reads the first
+  `M8SHIFT:LOCK:BEGIN` marker it finds (`m8shift.py:865-870`). The normal body/header
+  marker neutralization applies to turn fields (`m8shift.py:847-864`), not to
+  `init --name`.
+- **Impact:** a name containing a fake `M8SHIFT:LOCK:BEGIN` / `M8SHIFT:LOCK:END` block can
+  shadow the real lock. Later readers can route against attacker-controlled lock fields
+  such as a fake holder or state. This requires local/operator-controlled initialization,
+  but it creates a malformed relay that looks legitimate to normal commands.
+- **Recommendation:**
+  - reject line breaks and any `M8SHIFT:` marker in `init --name`;
+  - prefer a strict printable title policy for generated Markdown headings;
+  - add regression tests proving `init --name` cannot create additional lock markers.
+
+### SEC-6 — Deeply nested session JSON can crash read-only observers
+
+- **Severity:** Low
+- **Area:** robustness / local denial of service
+- **Evidence:** `parse_session_events()` is documented as a read-only observer that must not
+  brick the relay (`m8shift.py:1304-1306`), but its per-line parser catches only
+  `json.JSONDecodeError` (`m8shift.py:1314-1315`). Deeply nested JSON can raise
+  `RecursionError` instead. `doctor` has the same narrow catch around session-event parsing
+  (`m8shift.py:1728-1729`).
+- **Impact:** a malformed `M8SHIFT.sessions.jsonl` line can make `status`, `history`, or
+  `doctor` exit with a traceback instead of degrading gracefully. This is a local DoS
+  against observability, not data loss.
+- **Recommendation:**
+  - catch `RecursionError` and `ValueError` in session-event parsing paths;
+  - skip malformed session lines while preserving a warning count;
+  - add tests with deeply nested JSON and invalid non-JSON lines.
+
+### SEC-7 — Stale-lock takeover can unlink a fresh successor lock
+
+- **Severity:** Low / Medium
+- **Area:** mutual exclusion / race safety
+- **Evidence:** stale-lock takeover reads a victim token, re-reads the lock file, then
+  unlinks `.m8shift.lock` by path (`m8shift.py:771-782`). `still_owned()` exists
+  (`m8shift.py:740-745`) and the worktree companion uses an ownership check before merge
+  writes (`m8shift-worktree.py:156`, `m8shift-worktree.py:181`), but the core lock takeover
+  does not use the same post-acquisition ownership check.
+- **Impact:** in a narrow race, process A can remove a stale lock and create a fresh lock;
+  process B, already past its stale-token checks, can then unlink the path and remove A's
+  fresh lock. Both processes may subsequently believe they acquired exclusivity, breaking
+  the single-writer guarantee and potentially losing a lock transition.
+- **Recommendation:**
+  - stamp a unique token after `O_EXCL` acquisition and re-check ownership before every
+    critical relay write;
+  - reuse `still_owned()` or an equivalent core helper in mutating commands;
+  - consider a lock directory or rename-based takeover protocol instead of path unlinking.
+
+### SEC-8 — Free-form body and ledger files are unbounded local DoS surfaces
 
 - **Severity:** Medium
 - **Area:** robustness / local denial of service
@@ -145,7 +205,7 @@ plain-text operation.
     configurable size thresholds;
   - make `recap` and `log` degrade gracefully when bodies or ledgers are oversized.
 
-### SEC-6 — Worktree branch/ref inputs are mostly Git-validated, but not policy-validated
+### SEC-9 — Worktree branch/ref inputs are mostly Git-validated, but not policy-validated
 
 - **Severity:** Low / Medium
 - **Area:** Git safety / operational integrity
@@ -163,7 +223,7 @@ plain-text operation.
   - use `--end-of-options` where supported for ref parsing commands;
   - add tests for rejected branch/ref edge cases.
 
-### SEC-7 — Current source checkout has stale local relay artifacts
+### SEC-10 — Current source checkout has stale local relay artifacts
 
 - **Severity:** Low / Medium
 - **Area:** operational hygiene / prompt confusion
@@ -179,7 +239,7 @@ plain-text operation.
   - add a maintainer note identifying the canonical dogfooding relay path;
   - include `doctor --lint` in release checks, at least for packaged/demo relay files.
 
-### SEC-8 — Lock-file hardening could be stricter against local filesystem tricks
+### SEC-11 — Lock-file hardening could be stricter against local filesystem tricks
 
 - **Severity:** Low
 - **Area:** filesystem hardening
@@ -221,9 +281,12 @@ plain-text operation.
 
 | Priority | Change | Risk | Value |
 |----------|--------|------|-------|
+| P1 | Sanitize `init --name` against line breaks and `M8SHIFT:` markers | Low | High; prevents malformed relays at creation time. |
+| P1 | Close stale-lock takeover TOCTOU with post-acquisition ownership checks | Low / Medium | High; protects the single-writer invariant. |
+| P1 | Make session-event parsing catch `RecursionError` / `ValueError` and warn | Low | Medium; keeps read-only commands reliable. |
 | P1 | Prompt-boundary wording in stanza/protocol + tests | Low | High; directly reduces agent misuse. |
 | P1 | `doctor --security` checks for stale protocol, stale local relay, oversized files, and effective root | Low / Medium | High; surfaces misconfiguration early. |
-| P2 | Harden `release/done --force` with reason and active-holder confirmation | Medium | High; protects coordination integrity. |
+| P2 | Harden `release/done --force` with reason and active-holder confirmation | Low | Medium; protects coordination integrity without removing the emergency path. |
 | P2 | Validate `m8shift-i18n.py --name` and output path containment | Low | Medium; removes path footgun. |
 | P2 | Add body/ledger size thresholds | Medium | Medium; prevents local DoS. |
 | P3 | Worktree branch/ref policy validation | Low / Medium | Medium; improves predictability. |
