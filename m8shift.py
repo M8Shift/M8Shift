@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Persistent file names (M8Shift-only; the living-file path keeps the internal name COWORK).
@@ -30,6 +31,7 @@ ARCHIVE = os.path.join(HERE, "M8SHIFT.archive.md")
 PROTO = os.path.join(HERE, "M8SHIFT.protocol.md")
 MEMORY = os.path.join(HERE, "M8SHIFT.memory.md")     # shared, append-only, human-curated notes
 TASKS = os.path.join(HERE, "M8SHIFT.tasks.md")       # shared, append-only to-do event log
+SESSIONS = os.path.join(HERE, "M8SHIFT.sessions.jsonl")  # append-only session ledger
 LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXCL)
 
 
@@ -45,13 +47,14 @@ def configure_root(root):
     is a one-time bootstrap meant to run *in* the target project dir — its `CLAUDE.md`/`AGENTS.md`
     anchors are written next to the kit (`HERE`), not rebased — so don't bootstrap a kit through
     `$M8SHIFT_ROOT`; point it at an already-init'd root."""
-    global COWORK, ARCHIVE, PROTO, MEMORY, TASKS, LOCKFILE
+    global COWORK, ARCHIVE, PROTO, MEMORY, TASKS, SESSIONS, LOCKFILE
     root = os.path.abspath(root)
     COWORK = os.path.join(root, "M8SHIFT.md")
     ARCHIVE = os.path.join(root, "M8SHIFT.archive.md")
     PROTO = os.path.join(root, "M8SHIFT.protocol.md")
     MEMORY = os.path.join(root, "M8SHIFT.memory.md")
     TASKS = os.path.join(root, "M8SHIFT.tasks.md")
+    SESSIONS = os.path.join(root, "M8SHIFT.sessions.jsonl")
     LOCKFILE = os.path.join(root, ".m8shift.lock")
 
 
@@ -61,7 +64,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.5.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.7.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -192,6 +195,8 @@ Fields (one `key: value` per line, easy to `grep`):
 | `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*` |
 | `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
 | `agents`  | CSV, e.g. `claude,codex` | the active roster (all declared agents, ≥2); default `claude,codex` |
+| `lang`    | language tag | language of generated files / runtime messages when available |
+| `session` | session id | current session id, also recorded in `M8SHIFT.sessions.jsonl` |
 | `turn`    | integer | number of the last closed turn |
 | `since`   | ISO-8601 UTC | since when this state has lasted |
 | `expires` | ISO-8601 UTC \| `-` | anti-deadlock takeover deadline (TTL 30 min) |
@@ -301,6 +306,8 @@ Guardrail:
   turn.
 - The archive can be consulted but is **never** re-read by the loop: only the
   living part of `M8SHIFT.md` drives the relay.
+- Session starts/closes are recorded separately in `M8SHIFT.sessions.jsonl`; this
+  ledger is append-only and is folded by `history`, never by the mutex/routing loop.
 
 ---
 
@@ -309,6 +316,8 @@ Guardrail:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py status                                # lock + last turn (NON-blocking)
+./m8shift.py doctor [--lint] [--json]              # read-only health/lint checks (never repairs or steals the pen)
+./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
@@ -444,6 +453,7 @@ holder:   none
 state:    IDLE
 agents:   __AGENTS__
 lang:     __LANG__
+session:  __SESSION__
 turn:     0
 since:    __NOW__
 expires:  -
@@ -742,6 +752,8 @@ def load_or_die():
     # whose lang isn't bundled here is still loadable (resolve_lang downgrades it to en).
     if lk.get("lang") not in (None, *KNOWN_LANGS):
         errs.append(f"lang={lk.get('lang')!r}")
+    if lk.get("session") is not None and not SESSION_ID_RE.fullmatch(lk.get("session", "")):
+        errs.append(f"session={lk.get('session')!r}")
     # §8 integration sentinel: `<id>@<hex-sha>`, valid ONLY while WORKING_<holder> (an in-flight
     # merge). Malformed or present in any other state ⇒ invalid LOCK (clean refusal, no traceback).
     ig = lk.get("integrating")
@@ -1001,9 +1013,12 @@ def cmd_init(args):
         # members; the first two only seed the __A__/__B__ stanza placeholders.
         cowork_exists = os.path.exists(COWORK)
         existing = None
+        existing_lk = None
+        existing_text = None
         if cowork_exists:
             try:
-                existing_lk = get_lock(read(COWORK))
+                existing_text = read(COWORK)
+                existing_lk = get_lock(existing_text)
             except (OSError, ValueError):
                 existing_lk = None
             if existing_lk is not None:
@@ -1050,12 +1065,32 @@ def cmd_init(args):
         if os.path.exists(COWORK) and not args.force:
             results.append(tr("cowork_preserved", file=os.path.basename(COWORK)))
         else:
+            t0 = now()
+            # A forced init is an explicit session restart. If the previous session was still
+            # open and carried a session id, record a terminal reset event before replacing
+            # the living relay file.
+            if args.force and existing_lk and existing_lk.get("session") and existing_lk.get("state") != "DONE":
+                turn_end = as_int(existing_lk.get("turn"), 0)
+                append_session_event(
+                    "reset", existing_lk["session"], timestamp=t0,
+                    closed_at=iso(t0), closed_by="init --force",
+                    state_before=existing_lk.get("state", "-"),
+                    turn_end=turn_end, turns=max(0, turn_end),
+                    agents_used=",".join(turn_agents(parse_turns(existing_text or ""))) or "-",
+                )
+            session_id = new_session_id(t0)
             text = (COWORK_TPL[LANG].replace("__PROJECT__", name)
-                    .replace("__NOW__", iso(now())).replace("__LANG__", LANG)
+                    .replace("__NOW__", iso(t0)).replace("__LANG__", LANG)
                     .replace("__VERSION__", VERSION)
+                    .replace("__SESSION__", session_id)
                     .replace("__AGENTS__", ",".join(full))
                     .replace("__A__", pair[0]).replace("__B__", pair[1]))
             write(text, COWORK)
+            append_session_event(
+                "start", session_id, timestamp=t0,
+                started_at=iso(t0), project=name, agents=",".join(full),
+                lang=LANG, turn_start=0,
+            )
             results.append(tr("cowork_written", file=os.path.basename(COWORK), name=name))
 
         # Anchors: the stanza is injected for EACH active agent (the FULL roster, N).
@@ -1156,6 +1191,182 @@ def parse_turns(text):
     return out
 
 
+SESSION_ID_RE = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
+
+
+def new_session_id(t=None):
+    """Human-sortable session id: UTC timestamp + short random suffix."""
+    t = t or now()
+    return t.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+
+
+def append_session_event(event, session_id, timestamp=None, **fields):
+    """Append one JSONL event to M8SHIFT.sessions.jsonl.
+
+    The ledger is append-only and passive: it never drives routing, locking or claimability.
+    Callers already hold file_lock() when mutating relay state; this helper uses the same
+    atomic write strategy as the rest of M8Shift and tolerates a missing ledger.
+    """
+    timestamp = timestamp or now()
+    row = {
+        "event": event,
+        "session_id": session_id,
+        "at": iso(timestamp),
+        "m8shift_version": VERSION,
+    }
+    row.update(fields)
+    prev = read(SESSIONS) if os.path.exists(SESSIONS) else ""
+    if prev and not prev.endswith("\n"):
+        prev += "\n"
+    write(prev + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n", SESSIONS)
+
+
+def parse_session_events(text):
+    """Parse the append-only session ledger.
+
+    Tolerant by design: invalid JSON / hand-written garbage is ignored so `history` remains
+    a read-only observer and never bricks the relay.
+    """
+    out = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("session_id"), str):
+            out.append(row)
+    return out
+
+
+def read_session_events():
+    return parse_session_events(read(SESSIONS)) if os.path.exists(SESSIONS) else []
+
+
+def as_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def all_turns(include_archive=True):
+    """Return turn records from archive + living journal, sorted by turn number."""
+    text = load_or_die()
+    turns = parse_turns(text)
+    if include_archive and os.path.exists(ARCHIVE):
+        turns = parse_turns(read(ARCHIVE)) + turns
+    turns.sort(key=lambda t: t["n"])
+    return text, turns
+
+
+def turn_agents(turns):
+    agents = []
+    for t in turns:
+        for name in (t["fields"].get("from", t["agent"]), t["fields"].get("to", "")):
+            if name and name not in ("none", "system") and re.fullmatch(AGENT_RE, name) and name not in agents:
+                agents.append(name)
+    return agents
+
+
+def fold_session_history(events, turns, lk):
+    """Fold start/done/reset JSONL events into session summaries for `history`."""
+    by_id, order = {}, []
+    for ev in events:
+        sid = ev.get("session_id")
+        if not sid:
+            continue
+        if sid not in by_id:
+            by_id[sid] = {"session_id": sid, "events": []}
+            order.append(sid)
+        by_id[sid]["events"].append(ev)
+        kind = ev.get("event")
+        if kind == "start":
+            by_id[sid].update({
+                "started_at": ev.get("started_at") or ev.get("at") or "-",
+                "project": ev.get("project", "-"),
+                "agents": ev.get("agents", "-"),
+                "lang": ev.get("lang", "-"),
+                "version": ev.get("m8shift_version", "-"),
+                "turn_start": as_int(ev.get("turn_start"), 0),
+            })
+        elif kind in ("done", "reset"):
+            by_id[sid].update({
+                "closed_at": ev.get("closed_at") or ev.get("at") or "-",
+                "closed_by": ev.get("closed_by", "-"),
+                "state": "DONE" if kind == "done" else "RESET",
+                "turn_end": as_int(ev.get("turn_end", ev.get("turns")), 0),
+                "turns": as_int(ev.get("turns"), 0),
+                "agents_used": ev.get("agents_used", "-"),
+            })
+
+    current_sid = lk.get("session")
+    if current_sid:
+        cur = by_id.setdefault(current_sid, {"session_id": current_sid, "events": []})
+        if current_sid not in order:
+            order.append(current_sid)
+        cur.setdefault("started_at", lk.get("since", "-"))
+        cur.setdefault("agents", lk.get("agents", ",".join(active_agents(lk))))
+        cur.setdefault("lang", lk.get("lang", "-"))
+        cur.setdefault("version", VERSION)
+        cur.setdefault("turn_start", 0)
+        cur["state"] = lk.get("state", "-")
+        cur["turn_end"] = as_int(lk.get("turn"), 0)
+
+    if not by_id:
+        # Backward-compatible view for old relays without M8SHIFT.sessions.jsonl.
+        max_turn = max([t["n"] for t in turns], default=as_int(lk.get("turn"), 0))
+        sid = lk.get("session") or "legacy"
+        by_id[sid] = {
+            "session_id": sid,
+            "started_at": "-",
+            "closed_at": "-" if lk.get("state") != "DONE" else lk.get("since", "-"),
+            "closed_by": "-",
+            "agents": lk.get("agents", ",".join(active_agents(lk))),
+            "lang": lk.get("lang", "-"),
+            "version": VERSION,
+            "turn_start": 0,
+            "turn_end": max_turn,
+            "turns": len([t for t in turns if t["n"] != 0]),
+            "state": lk.get("state", "-"),
+        }
+        order.append(sid)
+
+    out = []
+    for sid in order:
+        s = by_id[sid]
+        start = as_int(s.get("turn_start"), 0)
+        end = as_int(s.get("turn_end", lk.get("turn")), 0)
+        relevant = [t for t in turns if start < t["n"] <= end]
+        if "turns" not in s:
+            s["turns"] = len(relevant)
+        computed_agents = ",".join(turn_agents(relevant)) or "-"
+        s["agents_used"] = computed_agents if computed_agents != "-" else s.get("agents_used", "-")
+        s.setdefault("state", "OPEN")
+        s.setdefault("closed_at", "open")
+        s.setdefault("closed_by", "-")
+        s.setdefault("project", "-")
+        out.append(s)
+    return out
+
+
+def public_session_summary(s):
+    """Stable machine contract for `history --json` — same summary as the human view."""
+    return {
+        "session_id": s.get("session_id", "-"),
+        "started_at": s.get("started_at", "-"),
+        "closed_at": s.get("closed_at", "open"),
+        "state": s.get("state", "-"),
+        "agents": s.get("agents", "-"),
+        "turns": s.get("turns", 0),
+        "agents_used": s.get("agents_used", "-"),
+        "closed_by": s.get("closed_by", "-"),
+        "version": s.get("version", "-"),
+    }
+
+
 MEMORY_RE = re.compile(r"^- (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) (" + AGENT_RE + r"): (.*)$")
 
 
@@ -1207,13 +1418,349 @@ def fold_tasks(events):
     return cur
 
 
+SEVERITY_RANK = {"info": 0, "warning": 1, "error": 2}
+
+
+def doctor_finding(check, severity, message, path="", fix_hint=""):
+    """Structured read-only diagnostic. `check` is stable for tests/CI; message is human-facing."""
+    out = {"check": check, "severity": severity, "message": message}
+    if path:
+        out["path"] = path
+    if fix_hint:
+        out["fix_hint"] = fix_hint
+    return out
+
+
+def _doctor_anchor_findings(agent, anchor, seen):
+    findings = []
+    path = os.path.join(HERE, anchor)
+    if anchor in seen and seen[anchor] != agent:
+        findings.append(doctor_finding(
+            "anchor.collision", "warning",
+            f"{agent} maps to {anchor}, already used by {seen[anchor]} — bootstrap manually if both are active.",
+            anchor,
+        ))
+        return findings
+    seen[anchor] = agent
+    if not os.path.exists(path):
+        findings.append(doctor_finding(
+            "anchor.missing", "warning",
+            f"{anchor} is missing for active agent {agent}.",
+            anchor,
+            "run `./m8shift.py init` from the project root, then start a fresh agent session",
+        ))
+        return findings
+    try:
+        cur = read(path)
+    except OSError as e:
+        findings.append(doctor_finding(
+            "anchor.unreadable", "error", f"{anchor} cannot be read: {e}", anchor,
+        ))
+        return findings
+    has_begin = STANZA_BEGIN in cur
+    has_end = STANZA_END in cur
+    if has_begin != has_end:
+        findings.append(doctor_finding(
+            "anchor.stanza_incomplete", "error",
+            f"{anchor} has incomplete M8Shift stanza markers.",
+            anchor,
+            "fix the stanza markers or rerun `./m8shift.py init` after backing up the file",
+        ))
+    elif not has_begin:
+        findings.append(doctor_finding(
+            "anchor.stanza_missing", "warning",
+            f"{anchor} does not contain the M8Shift stanza.",
+            anchor,
+            "run `./m8shift.py init` and start a fresh agent session",
+        ))
+    elif not cur.startswith(STANZA_BEGIN):
+        findings.append(doctor_finding(
+            "anchor.stanza_not_first", "warning",
+            f"{anchor} contains the M8Shift stanza, but not at the top.",
+            anchor,
+            "run `./m8shift.py init` to refresh/move the stanza to the top",
+        ))
+    return findings
+
+
+def collect_doctor_findings():
+    """Read-only health checks. No file_lock, no write, no force recovery."""
+    findings = []
+    if not os.path.exists(COWORK):
+        return [doctor_finding(
+            "relay.missing", "error",
+            "M8SHIFT.md is missing.",
+            os.path.basename(COWORK),
+            "run `./m8shift.py init` from the project root",
+        )]
+    try:
+        text = read()
+    except OSError as e:
+        return [doctor_finding("relay.unreadable", "error", f"M8SHIFT.md cannot be read: {e}", os.path.basename(COWORK))]
+
+    lk = {}
+    roster = tuple(AGENTS)
+    if LOCK_BEGIN not in text or LOCK_END not in text:
+        findings.append(doctor_finding(
+            "lock.markers_missing", "error",
+            "M8SHIFT.md has no valid LOCK markers.",
+            os.path.basename(COWORK),
+            "restore the file or run `./m8shift.py init --force` to reset the relay",
+        ))
+    else:
+        try:
+            lk = get_lock(text)
+        except (ValueError, IndexError) as e:
+            findings.append(doctor_finding(
+                "lock.parse_error", "error",
+                f"LOCK block cannot be parsed: {e}",
+                os.path.basename(COWORK),
+            ))
+            lk = {}
+
+    if lk:
+        if "agents" in lk:
+            ag_valid, ag_invalid = roster_tokens(lk.get("agents", ""))
+            if ag_invalid or len(ag_valid) < 2:
+                findings.append(doctor_finding(
+                    "lock.agents_invalid", "error",
+                    f"LOCK agents field is invalid: {lk.get('agents')!r}.",
+                    os.path.basename(COWORK),
+                    "run `./m8shift.py init --force --agents a,b` after preserving any needed journal",
+                ))
+            else:
+                roster = tuple(ag_valid)
+        state = lk.get("state", "")
+        holder = lk.get("holder", "")
+        if state not in valid_states(roster):
+            findings.append(doctor_finding(
+                "lock.state_invalid", "error",
+                f"LOCK state is invalid for roster {','.join(roster)}: {state!r}.",
+                os.path.basename(COWORK),
+            ))
+        if holder not in set(roster) | {"none"}:
+            findings.append(doctor_finding(
+                "lock.holder_invalid", "error",
+                f"LOCK holder is invalid for roster {','.join(roster)}: {holder!r}.",
+                os.path.basename(COWORK),
+            ))
+        if not re.fullmatch(r"\d+", lk.get("turn", "")):
+            findings.append(doctor_finding(
+                "lock.turn_invalid", "error",
+                f"LOCK turn is not a non-negative integer: {lk.get('turn')!r}.",
+                os.path.basename(COWORK),
+            ))
+        if lk.get("lang") not in (None, *KNOWN_LANGS):
+            findings.append(doctor_finding(
+                "lock.lang_invalid", "error",
+                f"LOCK lang is unknown: {lk.get('lang')!r}.",
+                os.path.basename(COWORK),
+            ))
+        if lk.get("session") is not None and not SESSION_ID_RE.fullmatch(lk.get("session", "")):
+            findings.append(doctor_finding(
+                "lock.session_invalid", "error",
+                f"LOCK session id is invalid: {lk.get('session')!r}.",
+                os.path.basename(COWORK),
+            ))
+        integrating = lk.get("integrating")
+        if integrating is not None and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*@[0-9a-f]{7,64}", integrating)
+                                        or holder in (None, "none")
+                                        or state != f"WORKING_{holder.upper()}"):
+            findings.append(doctor_finding(
+                "lock.integrating_invalid", "error",
+                f"LOCK integrating sentinel is invalid here: {integrating!r}.",
+                os.path.basename(COWORK),
+            ))
+        if state.startswith("WORKING_"):
+            exp = parse_iso(lk.get("expires"))
+            if exp is None:
+                findings.append(doctor_finding(
+                    "lock.expires_invalid", "warning",
+                    f"WORKING lock has no valid expires timestamp: {lk.get('expires')!r}.",
+                    os.path.basename(COWORK),
+                ))
+            elif now() > exp:
+                findings.append(doctor_finding(
+                    "lock.stale_working", "warning",
+                    f"{holder}'s WORKING lock is stale (expired {lk.get('expires')}).",
+                    os.path.basename(COWORK),
+                    "review the last turn, then reclaim with `./m8shift.py claim <you> --force` if appropriate",
+                ))
+        turns = parse_turns(text)
+        if turns and re.fullmatch(r"\d+", lk.get("turn", "")):
+            last_n = max(t["n"] for t in turns)
+            if int(lk["turn"]) != last_n:
+                findings.append(doctor_finding(
+                    "lock.turn_mismatch", "warning",
+                    f"LOCK turn={lk['turn']} but last closed turn is #{last_n}.",
+                    os.path.basename(COWORK),
+                ))
+
+    if os.path.exists(LOCKFILE):
+        try:
+            age = time.time() - os.path.getmtime(LOCKFILE)
+        except OSError:
+            age = 0
+        if age > LOCK_STALE_S:
+            findings.append(doctor_finding(
+                "file_lock.stale", "warning",
+                f"{os.path.basename(LOCKFILE)} looks abandoned ({int(age)}s old).",
+                os.path.basename(LOCKFILE),
+                "rerun the command; m8shift.py will reclaim the internal file lock if it is still stale",
+                ))
+
+    if os.path.exists(SESSIONS):
+        try:
+            for n, line in enumerate(read(SESSIONS).splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as e:
+                    findings.append(doctor_finding(
+                        "sessions.jsonl_invalid", "warning",
+                        f"{os.path.basename(SESSIONS)} has invalid JSON near line {n}: {e}.",
+                        os.path.basename(SESSIONS),
+                    ))
+                    break
+                if (not isinstance(row, dict)
+                        or row.get("event") not in {"start", "done", "reset"}
+                        or not isinstance(row.get("session_id"), str)):
+                    findings.append(doctor_finding(
+                        "sessions.event_invalid", "warning",
+                        f"{os.path.basename(SESSIONS)} has an invalid session event near line {n}.",
+                        os.path.basename(SESSIONS),
+                    ))
+                    break
+        except OSError as e:
+            findings.append(doctor_finding(
+                "sessions.unreadable", "warning",
+                f"{os.path.basename(SESSIONS)} cannot be read: {e}.",
+                os.path.basename(SESSIONS),
+            ))
+
+    if not os.path.exists(PROTO):
+        findings.append(doctor_finding(
+            "protocol.missing", "warning",
+            "M8SHIFT.protocol.md is missing.",
+            os.path.basename(PROTO),
+            "run `./m8shift.py init` to regenerate protocol and anchors",
+        ))
+    else:
+        try:
+            expected = PROTOCOL[resolve_lang(lk=lk)]
+            if read(PROTO) != expected:
+                findings.append(doctor_finding(
+                    "protocol.out_of_sync", "warning",
+                    "M8SHIFT.protocol.md differs from this engine's embedded protocol.",
+                    os.path.basename(PROTO),
+                    "run `./m8shift.py init` after confirming the intended engine version",
+                ))
+        except (OSError, KeyError):
+            findings.append(doctor_finding(
+                "protocol.unreadable", "warning",
+                "M8SHIFT.protocol.md cannot be read or matched to the active language.",
+                os.path.basename(PROTO),
+            ))
+
+    seen = {}
+    for ag in roster:
+        anchor = ANCHORS.get(ag)
+        if not anchor:
+            findings.append(doctor_finding(
+                "anchor.unknown_agent", "info",
+                f"{ag} has no known auto-loaded anchor convention; bootstrap it manually.",
+            ))
+            continue
+        findings.extend(_doctor_anchor_findings(ag, anchor, seen))
+    override_path = os.path.join(HERE, CODEX_OVERRIDE)
+    if os.path.exists(override_path):
+        findings.extend(_doctor_anchor_findings("codex-override", CODEX_OVERRIDE, {}))
+
+    runtime_dir = os.path.join(os.path.dirname(COWORK), ".m8shift", "runtime")
+    if os.path.isdir(runtime_dir):
+        gitignore = os.path.join(os.path.dirname(COWORK), ".gitignore")
+        try:
+            ignored = os.path.exists(gitignore) and any(
+                line.strip() == ".m8shift/" for line in read(gitignore).splitlines()
+            )
+        except OSError:
+            ignored = False
+        if not ignored:
+            findings.append(doctor_finding(
+                "runtime.gitignore_missing", "warning",
+                ".m8shift/runtime exists but .m8shift/ is not gitignored.",
+                ".gitignore",
+                "add `.m8shift/` to .gitignore",
+            ))
+        for root, _, files in os.walk(runtime_dir):
+            for name in files:
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, os.path.dirname(COWORK))
+                if name.endswith(".json"):
+                    try:
+                        json.loads(read(path))
+                    except (OSError, json.JSONDecodeError) as e:
+                        findings.append(doctor_finding(
+                            "runtime.json_invalid", "warning",
+                            f"{rel} is not valid JSON: {e}.",
+                            rel,
+                        ))
+                elif name.endswith(".jsonl"):
+                    try:
+                        for n, line in enumerate(read(path).splitlines(), 1):
+                            if line.strip():
+                                try:
+                                    json.loads(line)
+                                except json.JSONDecodeError as e:
+                                    findings.append(doctor_finding(
+                                        "runtime.jsonl_invalid", "warning",
+                                        f"{rel} has invalid JSONL near line {n}: {e}.",
+                                        rel,
+                                    ))
+                                    break
+                    except (OSError, json.JSONDecodeError) as e:
+                        findings.append(doctor_finding(
+                            "runtime.jsonl_invalid", "warning",
+                            f"{rel} has invalid JSONL: {e}.",
+                            rel,
+                        ))
+    return findings
+
+
+def cmd_doctor(args):
+    threshold = SEVERITY_RANK[args.severity_min]
+    findings = collect_doctor_findings()
+    visible = [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
+    ok = not visible
+    if args.json:
+        print(json.dumps({
+            "ok": ok,
+            "m8shift_version": VERSION,
+            "severity_min": args.severity_min,
+            "findings": visible,
+        }, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"m8shift.py v{VERSION}")
+        print("── doctor ─────────────────────────────")
+        if not visible:
+            print("✓ no findings.")
+        else:
+            icon = {"info": "i", "warning": "⚠", "error": "✗"}
+            for f in visible:
+                print(f"{icon.get(f['severity'], '?')} {f['severity']} {f['check']}: {f['message']}")
+                if f.get("fix_hint"):
+                    print(f"  fix: {f['fix_hint']}")
+    return 1 if args.lint and not ok else 0
+
+
 def cmd_recap(args):
     """Read-only session-start briefing: current LOCK + the last N turn summaries."""
     text = load_or_die()
     lk = get_lock(text)
     print(f"m8shift.py v{VERSION}")
     print("── LOCK ───────────────────────────────")
-    for k in ("holder", "state", "agents", "turn", "since", "expires", "note"):
+    for k in ("holder", "state", "agents", "session", "turn", "since", "expires", "note"):
         v = ",".join(active_agents(lk)) if k == "agents" else lk.get(k, "")
         print(f"  {k:<8} {v}")
     turns = parse_turns(text)
@@ -1280,6 +1827,44 @@ def cmd_log(args):
             print(f"#{t['n']:<3} {frm:>8} -> {to:<8} ({nf} files)  done: {f.get('done', '-')}")
     return 0
 
+
+def cmd_history(args):
+    """Read-only session history: one folded entry per session."""
+    text, turns = all_turns(include_archive=True)
+    lk = get_lock(text)
+    sessions = fold_session_history(read_session_events(), turns, lk)
+    if args.limit > 0:
+        sessions = sessions[-args.limit:]
+    if args.json:
+        print(json.dumps({
+            "m8shift_version": VERSION,
+            "current_session": lk.get("session", ""),
+            "sessions": [public_session_summary(s) for s in sessions],
+        }, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.oneline:
+        for s in sessions:
+            print(
+                f"{s['session_id']} {s.get('started_at', '-')} -> {s.get('closed_at', 'open')} "
+                f"{s.get('state', '-')} turns={s.get('turns', 0)} agents={s.get('agents', '-')}"
+            )
+        return 0
+    print(f"m8shift.py v{VERSION}")
+    print("── session history ────────────────────")
+    for idx, s in enumerate(sessions, 1):
+        print(
+            f"#{idx} {s['session_id']}  {s.get('started_at', '-')} -> "
+            f"{s.get('closed_at', 'open')}  {s.get('state', '-')}"
+        )
+        print(f"  agents: {s.get('agents', '-')}")
+        print(f"  turns: {s.get('turns', 0)}")
+        print(f"  used: {s.get('agents_used', '-')}")
+        if s.get("closed_by", "-") != "-":
+            print(f"  closed_by: {s.get('closed_by')}")
+        print(f"  version: {s.get('version', '-')}")
+    return 0
+
+
 def cmd_status(args):
     text = load_or_die()
     lk = get_lock(text)
@@ -1301,7 +1886,7 @@ def cmd_status(args):
         return 0
     print(f"m8shift.py v{VERSION}")
     print("── LOCK ───────────────────────────────")
-    for k in ("holder", "state", "lang", "turn", "since", "expires", "note"):
+    for k in ("holder", "state", "lang", "session", "turn", "since", "expires", "note"):
         print(f"  {k:<8} {lk.get(k, '')}")
         if k == "state":
             print(f"  {'agents':<8} {','.join(active_agents(lk))}")
@@ -1610,14 +2195,24 @@ def cmd_done(args):
         text = load_or_die()
         agent = need_agent(args.agent)
         lk = get_lock(text)
+        prev_state = lk.get("state", "")
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "done")   # §8: refused while a merge is in flight
         if holder not in (agent, "none") and not args.force:
             sys.exit(tr("not_holder_done", holder=holder))
         t = now()
+        session_id = lk.get("session")
+        turn_end = as_int(lk.get("turn"), 0)
         lk.update(holder="none", state="DONE", since=iso(t), expires="-",
                   note=tr("note_done", agent=agent))
         write(set_lock(text, lk))
+        if session_id and prev_state != "DONE":
+            append_session_event(
+                "done", session_id, timestamp=t,
+                closed_at=iso(t), closed_by=agent,
+                turn_end=turn_end, turns=max(0, turn_end),
+                agents_used=",".join(turn_agents(parse_turns(text))) or "-",
+            )
     print(tr("done_ok"))
     return 0
 
@@ -1753,6 +2348,13 @@ def main():
     st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
     st.set_defaults(fn=cmd_status)
 
+    dr = sub.add_parser("doctor", help="read-only health/lint checks (no repair, no force)")
+    dr.add_argument("--json", action="store_true", help="machine-readable findings")
+    dr.add_argument("--lint", action="store_true", help="exit 1 on findings at/above --severity-min")
+    dr.add_argument("--severity-min", choices=tuple(SEVERITY_RANK), default="warning",
+                    help="threshold for ok/lint (default: warning)")
+    dr.set_defaults(fn=cmd_doctor)
+
     rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns + memory + tasks")
     rc.add_argument("--turns", type=int, default=6)
     rc.add_argument("--memory", type=int, default=5, help="memory headlines to show (<=0 = all)")
@@ -1768,6 +2370,12 @@ def main():
     lg.add_argument("--all", action="store_true", help="include archived turns")
     lg.add_argument("--oneline", action="store_true")
     lg.set_defaults(fn=cmd_log)
+
+    hs = sub.add_parser("history", help="read-only session history")
+    hs.add_argument("--limit", type=int, default=0, help="show only the last N sessions")
+    hs.add_argument("--oneline", action="store_true")
+    hs.add_argument("--json", action="store_true", help="machine-readable session history")
+    hs.set_defaults(fn=cmd_history)
 
     w = sub.add_parser("wait")
     w.add_argument("agent")

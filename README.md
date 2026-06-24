@@ -139,6 +139,10 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **Reference (protocol)** — [docs/en/protocol.md](docs/en/protocol.md) — the shared protocol, states and rules.
 - **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
 - **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
+- **RFC (runtime companion)** — [docs/en/rfc-runtime-companion.md](docs/en/rfc-runtime-companion.md) —
+  queues, presence, progress, and UI-safe waiting around the passive core.
+- **RFC (runtime patterns)** — [docs/en/rfc-runtime-patterns.md](docs/en/rfc-runtime-patterns.md) —
+  what M8Shift keeps, rejects, or defers from runtime/gateway designs.
 
 ## How it works
 
@@ -198,7 +202,9 @@ Verified by the tests and by multi-agent review:
   wrapping `wait → relaunch the agent → claim` — a host integration, not a change to
   the mutex. A system notification/webhook can *signal* a turn but cannot *wake* the AI
   by itself. An example runner is provided:
-  [`examples/headless_runner.py`](examples/headless_runner.py).
+  [`examples/headless_runner.py`](examples/headless_runner.py). A proposed runtime
+  companion design is documented in
+  [docs/en/rfc-runtime-companion.md](docs/en/rfc-runtime-companion.md).
 - **Cooperative, N-agent, advisory** — see the
   [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, one
   writer at a time).
@@ -260,12 +266,19 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
    `m8shift.py init --agents a,b,c…`; **all** of them relay (the holder hands the pen to
    any other member via `--to`), still **one writer at a time** (degree-1). See
    [RFC — configurable agent roster](docs/en/rfc-roster.md).
-2. **N concurrent writers** — true degree > 1 (multiple pens / isolated worktrees with
-   serialized integration); a separate, larger step with its own future RFC.
+2. **N concurrent writers (shipped, opt-in)** — true degree-2 via the **`m8shift-worktree.py`**
+   companion: agents work in **isolated git worktrees in parallel**, and a single serialized
+   **integration pen** merges them crash-safely — `claim`/`done`/`integrate`/`drop`/`status`, with a
+   non-committing `git merge --no-ff --no-commit`, an `integrating:<id>@<sha>` LOCK sentinel that
+   blocks a TTL reclaim mid-merge, and a `--to` handoff on every path (never stuck). The passive
+   degree-1 core stays one-writer-at-a-time; the companion adds the concurrency on top. See
+   [RFC — worktree companion](docs/en/rfc-worktree-companion.md).
 
 **Shipped read / handoff surface** — `recap` (session-start briefing: current LOCK + recent
 turns + memory headlines), `peek` (the last handoff addressed to you, parse-free), `log`
-(relay timeline), `status --json` (dashboard-/`watch`-friendly), **advisory turn fields** on
+(relay timeline), `history` (session timeline: agents, turns, state, version), `status --json`
+(dashboard-/`watch`-friendly), `doctor --lint --json`
+(read-only health checks for relay/anchor/runtime drift), **advisory turn fields** on
 `append` (`--branch`/`--commit`/`--tests`/`--next`/`--blocked-on` plus the open
 `--field key=value` `x_*` namespace, surfaced by `peek`, never interpreted), and **shared
 memory** — `m8shift.py remember <agent> "<note>"` appends to a durable, append-only,
@@ -276,10 +289,11 @@ by others since your last turn; and a **tasks board** — `task add/done/drop/li
 durable, append-only `M8SHIFT.tasks.md` (no pen needed; `--for`/`--blocked-on` are advisory free
 text, never enforced), with open-task headlines in `recap`.
 
-**Planned features** — the roadmap is complete: every staged feature has shipped (see *Shipped*
-above), and the last candidate, `subturn` (sub-agent fan-out provenance), was deliberately
+**Planned features** — the roadmap is complete: every staged degree-1 surface has shipped (see
+*Shipped* above), **and degree-2 has shipped too** as the opt-in `m8shift-worktree.py` companion
+(roadmap step 2). The last degree-1 candidate, `subturn` (sub-agent fan-out provenance), was deliberately
 **rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn
-durable streaming, so a fourth ledger would be redundant surface
+durable streaming, so another work-provenance ledger would be redundant surface
 ([rationale](docs/en/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/`.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent

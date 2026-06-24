@@ -30,17 +30,17 @@ If you have not run `init` yet, do that first — see the
 
 The nested instruction files (`CLAUDE.md` / `AGENTS.md`) only load reliably when
 the window is opened **exactly on the repository root**. A window opened too high
-in the tree (for example `/home/user/Documents/Code`) does **not** guarantee
+in the tree (for example `~/code`) does **not** guarantee
 they load.
 
-To open **Example Project**:
+To open **my-project**:
 
 1. Choose `File → New Window`.
 2. Choose `File → Open Folder…`.
 3. Open exactly this path:
 
    ```text
-   /home/user/Documents/Code/Books and Journals/Example Project
+   ~/code/my-project
    ```
 
 **Expected result:** a VS Code window whose root is the repository itself, with
@@ -78,7 +78,7 @@ each one reads its anchor file fresh.
 
 ## Step 3 — Open both UIs in the same window
 
-Work inside the **same window** (here, Example Project):
+Work inside the **same window** (here, my-project):
 
 1. Open the **Claude Code** panel (the ✱ icon).
 2. Open the **Codex** panel.

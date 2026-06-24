@@ -2,12 +2,12 @@
 """Tests M8Shift — unitaires (fonctions pures) + non-régression (CLI, bord à bord).
 
 Lancer :  python3 -m unittest discover -s tests        (depuis la racine du repo)
-   ou  :  python3 tests/test_cowork.py
+   ou  :  python3 tests/test_m8shift.py
 
 Modèle : `claim` est obligatoire et exclusif avant de travailler ; `append` n'est
 accepté que depuis `WORKING_<agent>`. Les tests CLI copient `m8shift.py` dans un
 dossier temporaire isolé et l'exécutent en sous-processus — comme un agent.
-(Le fichier garde le nom historique `test_cowork.py` ; il importe `m8shift as cowork`.)
+Les tests gardent l'alias interne `cowork` uniquement pour réduire le bruit historique.
 Chaque non-régression cible un bug corrigé (NR-n) ou une garantie du CDC.
 Stdlib uniquement.
 """
@@ -26,6 +26,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since v3.0.0)
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
+
+VERSION = "3.7.0"
 
 
 # ───────────────────────────── unitaires : fonctions pures ──────────────────
@@ -99,6 +101,15 @@ class TestPureFunctions(unittest.TestCase):
                                return_value=["AGENTS.md", "agents.md"]):
             with self.assertRaises(SystemExit):
                 cowork.ensure_canonical_anchor("AGENTS.md")
+
+    def test_parse_session_events_skips_malformed(self):
+        text = (
+            '{"event":"start","session_id":"20260624T120000Z-1234abcd"}\n'
+            "garbage\n"
+            '{"event":"done","session_id":"20260624T120000Z-1234abcd"}\n'
+        )
+        events = cowork.parse_session_events(text)
+        self.assertEqual([e["event"] for e in events], ["start", "done"])
 
 
 # ───────────────────────────── base CLI (sous-processus isolé) ──────────────
@@ -895,6 +906,53 @@ class TestReadCommands(CLIBase):
         d = json.loads(self.cw("status", "--json").stdout)
         self.assertTrue(d["stale"])
 
+    def test_doctor_healthy(self):
+        self.init()
+        r = self.cw("doctor")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no findings", r.stdout)
+        d = json.loads(self.cw("doctor", "--json").stdout)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["findings"], [])
+
+    def test_doctor_lint_missing_relay(self):
+        r = self.cw("doctor", "--lint", "--json")
+        self.assertEqual(r.returncode, 1)
+        d = json.loads(r.stdout)
+        self.assertFalse(d["ok"])
+        self.assertEqual(d["findings"][0]["check"], "relay.missing")
+        self.assertEqual(d["findings"][0]["severity"], "error")
+
+    def test_doctor_lint_missing_anchor(self):
+        self.init()
+        os.remove(os.path.join(self.d, "AGENTS.md"))
+        r = self.cw("doctor", "--lint", "--json")
+        self.assertEqual(r.returncode, 1)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("anchor.missing", checks)
+
+    def test_doctor_severity_min_filters_output(self):
+        self.init()
+        os.remove(os.path.join(self.d, "AGENTS.md"))  # warning only
+        r = self.cw("doctor", "--severity-min", "error", "--json")
+        self.assertEqual(r.returncode, 0)
+        d = json.loads(r.stdout)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["findings"], [])
+        text = self.cw("doctor", "--severity-min", "error")
+        self.assertEqual(text.returncode, 0)
+        self.assertIn("no findings", text.stdout)
+        self.assertNotIn("anchor.missing", text.stdout)
+
+    def test_doctor_lint_stale_working_lock(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.set_expires_past()
+        r = self.cw("doctor", "--lint", "--json")
+        self.assertEqual(r.returncode, 1)
+        findings = json.loads(r.stdout)["findings"]
+        self.assertIn("lock.stale_working", {f["check"] for f in findings})
+
     def test_recap(self):
         self._seed()
         out = self.cw("recap", "--turns", "2").stdout
@@ -1518,6 +1576,88 @@ class TestTasks(CLIBase):
         self.assertIn("todo one", out)
 
 
+# ───────────── session history : append-only ledger + read-only fold ─────────
+
+class TestHistory(CLIBase):
+    """`history` folds M8SHIFT.sessions.jsonl into one readable entry per session."""
+
+    def _sessions(self):
+        p = os.path.join(self.d, "M8SHIFT.sessions.jsonl")
+        if not os.path.exists(p):
+            return None
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+
+    def _session_rows(self):
+        return [json.loads(line) for line in self._sessions().splitlines() if line.strip()]
+
+    def test_init_records_session_and_history(self):
+        self.init("--name", "hist", "--agents", "claude,codex,gemini")
+        sid = self.lock()["session"]
+        self.assertRegex(sid, r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
+        rows = self._session_rows()
+        self.assertEqual(rows[0]["event"], "start")
+        self.assertEqual(rows[0]["session_id"], sid)
+        self.assertEqual(rows[0]["agents"], "claude,codex,gemini")
+        out = self.cw("history").stdout
+        self.assertIn(sid, out)
+        self.assertIn("agents: claude,codex,gemini", out)
+        self.assertIn("turns: 0", out)
+        js = json.loads(self.cw("history", "--json").stdout)
+        self.assertEqual(js["current_session"], sid)
+        self.assertEqual(js["sessions"][0]["turns"], 0)
+
+    def test_history_counts_turns_and_done(self):
+        self.init()
+        sid = self.lock()["session"]
+        self.turn("claude", "codex", done="one")
+        self.turn("codex", "claude", done="two")
+        r = self.cw("done", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = self._session_rows()
+        self.assertEqual([r["event"] for r in rows], ["start", "done"])
+        self.assertEqual(rows[-1]["closed_by"], "claude")
+        self.assertEqual(rows[-1]["agents_used"], "claude,codex")
+        js = json.loads(self.cw("history", "--json").stdout)
+        s = js["sessions"][0]
+        self.assertEqual(s["session_id"], sid)
+        self.assertEqual(s["state"], "DONE")
+        self.assertEqual(s["turns"], 2)
+        self.assertEqual(s["closed_by"], "claude")
+        self.assertEqual(s["agents_used"], "claude,codex")
+        self.assertNotIn("events", s)
+        self.assertNotIn("turn_start", s)
+        self.assertNotIn("turn_end", s)
+        self.assertNotIn("project", s)
+        self.assertNotIn("lang", s)
+        self.assertIn("DONE turns=2", self.cw("history", "--oneline").stdout)
+
+    def test_force_init_marks_previous_session_reset(self):
+        self.init()
+        old_sid = self.lock()["session"]
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        r = self.init("--force")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        new_sid = self.lock()["session"]
+        self.assertNotEqual(old_sid, new_sid)
+        rows = self._session_rows()
+        self.assertEqual([r["event"] for r in rows], ["start", "reset", "start"])
+        self.assertEqual(rows[1]["session_id"], old_sid)
+        self.assertEqual(rows[1]["state_before"], "WORKING_CLAUDE")
+        out = self.cw("history", "--oneline").stdout
+        self.assertIn(f"{old_sid}", out)
+        self.assertIn("RESET", out)
+        self.assertIn(f"{new_sid}", out)
+
+    def test_doctor_warns_on_invalid_session_jsonl(self):
+        self.init()
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), "a", encoding="utf-8") as f:
+            f.write("{bad json}\n")
+        r = self.cw("doctor")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("sessions.jsonl_invalid", r.stdout)
+
+
 # ───────────── régressions du round d'audit Codex (v3.x) ────────────────────
 
 class TestAuditFixes(CLIBase):
@@ -1541,6 +1681,24 @@ class TestAuditFixes(CLIBase):
         self.assertIn(f"v{v}", self.cw("recap").stdout.splitlines()[0])
         self.assertIn(v, self.md())                                   # stamped in the M8SHIFT.md banner
         self.assertEqual(json.loads(self.cw("status", "--json").stdout)["m8shift_version"], v)
+
+    def test_distributed_scripts_version_surface(self):
+        # Every tracked Python script carries the same explicit version surface as m8shift.py.
+        v = cowork.VERSION
+        scripts = [
+            "m8shift-i18n.py",
+            "m8shift-worktree.py",
+            os.path.join("examples", "headless_runner.py"),
+            os.path.join("scripts", "gen_docs.py"),
+            os.path.join("tests", "test_m8shift.py"),
+            os.path.join("tests", "test_worktree.py"),
+        ]
+        for rel in scripts:
+            with self.subTest(script=rel):
+                r = subprocess.run([sys.executable, os.path.join(REPO, rel), "--version"],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn(v, r.stdout)
 
     def test_done_release_are_baton_owner_ops(self):
         # #4: in AWAITING_*, `holder` is the baton owner; done/release act for them WITHOUT an
@@ -1723,4 +1881,7 @@ class TestStage8Core(CLIBase):
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv:
+        print(f"test_m8shift.py {VERSION}")
+        sys.exit(0)
     unittest.main(verbosity=2)

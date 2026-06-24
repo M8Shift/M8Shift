@@ -3,6 +3,7 @@ M8SHIFT.md
 M8SHIFT.archive.md
 M8SHIFT.memory.md
 M8SHIFT.tasks.md
+M8SHIFT.sessions.jsonl
 M8SHIFT.protocol.md
 CLAUDE.md
 AGENTS.md
@@ -15,6 +16,7 @@ ETAT-DES-LIEUX-*.md
 # Verrou interne + temporaires d'écriture atomique
 .m8shift.lock
 .m8shift-*.tmp
+.m8shift/
 
 # Sauvegardes des ancrages avant (ré)injection par `init`
 *.m8shift.bak
