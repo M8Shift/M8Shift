@@ -2057,6 +2057,9 @@ def cmd_next(args):
             print(tr("wait_stale", other=lk.get("holder")))
             print(tr("status_next", action=next_action_for(lk, agent=agent, stale=True)))
             return 3
+        if args.force:   # --force reclaims a STALE lock only; on a fresh WORKING_other, refuse like
+            sys.exit(tr("claim_active", holder=lk.get("holder"),  # `claim --force` — never poll forever
+                        expires=lk.get("expires")))
         if args.once:
             print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
             print(tr("status_next", action=next_action_for(lk, agent=agent)))

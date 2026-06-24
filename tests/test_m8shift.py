@@ -1804,6 +1804,21 @@ class TestLoopGuardrails(CLIBase):
         self.assertEqual(self.md(), before)
         self.assertIn("wait codex", r.stdout)
 
+    def test_next_force_refuses_fresh_lock_without_looping(self):
+        # `next --force` on a FRESH WORKING_<other> must refuse immediately (like `claim --force`),
+        # not fall through to the poll loop and hang. (regression for the infinite-loop bug)
+        self.init()
+        self.cw("claim", "codex")                       # WORKING_CODEX, fresh (not stale)
+        before = self.md()
+        try:
+            r = subprocess.run([sys.executable, "m8shift.py", "next", "claude", "--force"],
+                               cwd=self.d, capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            self.fail("next --force on a fresh lock hung — regressed the infinite poll")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("still valid", r.stdout + r.stderr)   # claim_active refusal, not a poll
+        self.assertEqual(self.md(), before)                 # no mutation
+
     def test_status_for_prints_and_serializes_next_action(self):
         self.init()
         out = self.cw("status", "--for", "codex").stdout
