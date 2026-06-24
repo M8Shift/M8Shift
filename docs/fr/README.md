@@ -33,6 +33,7 @@ M8Shift est **libre et open source**, publié sous
 | Document | Objet |
 |----------|-------|
 | [rfc-contrats-validation.md](rfc-contrats-validation.md) | Contrats Stage 4, décisions de revue et proposition de validation. |
+| [rfc-demande-reprise-cooperative.md](rfc-demande-reprise-cooperative.md) | Proposition de demande coopérative du bâton et de pilotage opérateur pour éviter les blocages entre UI. |
 | [rfc-ecritures-degre-plus-un-arbre-partage.md](rfc-ecritures-degre-plus-un-arbre-partage.md) | RFC de recherche sur le vrai degré > 1 dans un même working tree ; rejeté pour le cœur. |
 | [rfc-gestion-fournisseurs.md](rfc-gestion-fournisseurs.md) | Gestion future des fournisseurs/adaptateurs hors du cœur. |
 | [rfc-plan-controle-runtime-heberge.md](rfc-plan-controle-runtime-heberge.md) | Futur plan de contrôle runtime/hébergé optionnel. |
