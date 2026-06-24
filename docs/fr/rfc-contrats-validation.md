@@ -90,6 +90,10 @@ Le Stage 4 standardise le vocabulaire sans changer les règles de possession.
 | `reject` | Le résultat ne doit pas être intégré tel quel. | escalader ou redémarrer le travail |
 | `waive` | Une vérification manquante est acceptée consciemment. | continuer seulement avec `waiver_reason` |
 
+Le routage attendu désigne l'action conventionnelle suivante des agents ou humains.
+M8Shift ne l'impose pas ; le mutex route uniquement via l'état `LOCK` et la passation
+explicite du témoin.
+
 Une approbation est une preuve. Ce n'est ni un verrou, ni un merge, ni une
 permission.
 

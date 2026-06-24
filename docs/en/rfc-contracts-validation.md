@@ -87,6 +87,10 @@ Stage 4 standardizes decision language without changing ownership rules.
 | `reject` | The result should not be integrated as-is. | escalate or restart the work |
 | `waive` | A missing check is consciously accepted. | continue only with `waiver_reason` recorded |
 
+Expected routing means the conventional next action for agents or humans. M8Shift
+does not enforce it; the mutex routes only through the `LOCK` state and explicit
+baton handoff.
+
 An approval is evidence. It is not a lock, a merge, or a permission grant.
 
 ## 6. CLI surface
