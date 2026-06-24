@@ -142,6 +142,7 @@ continuez à attendre ou clôturez votre propre état `WORKING_<toi>` avec `appe
 
 La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 
+- **Index documentation française** — [docs/fr/README.md](../docs/fr/README.md) — tous les documents français au même endroit.
 - **Tutoriel** — [docs/fr/tutoriel.md](../docs/fr/tutoriel.md) — apprenez le relais pas à pas.
 - **Guide (VS Code)** — [docs/fr/guide-vscode.md](../docs/fr/guide-vscode.md) — lancez le relais avec un duo type Claude/Codex ou n'importe quel roster actif.
 - **Guide (Windows)** — [docs/fr/windows.md](../docs/fr/windows.md) — lancez sous Windows (WSL / Git Bash / natif).
