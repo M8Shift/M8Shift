@@ -110,12 +110,15 @@ and run `init` as above.
 
 ## Quickstart
 
-Each agent runs the same loop: `wait → claim → work → append`. `<you>` is your own
-agent name and `<other>` any other roster member you hand to (the examples below use the default
-pair `claude`/`codex`).
+Each agent runs the same loop: `next → work → append`. `next` is the guarded
+shortcut for `wait → claim → peek`: it waits if needed, then claims and prints the
+latest handoff addressed to you. `<you>` is your own agent name and `<other>` any
+other roster member you hand to (the examples below use the default pair
+`claude`/`codex`).
 
 ```bash
-./m8shift.py status                # who holds the pen? (non-blocking)
+./m8shift.py status --for claude   # who holds the pen + what should claude do next?
+./m8shift.py next claude           # wait if needed, then claim + show the handoff
 ./m8shift.py wait claude --once    # rc 0 = your turn (or DONE = stop); rc 3 = not yet
 
 # Acquire the pen BEFORE working (exclusive: only one winner):
@@ -125,7 +128,8 @@ pair `claude`/`codex`).
 ./m8shift.py append claude --to codex \
     --ask  "what you need from the other" \
     --done "what you just did" \
-    --files a,b
+    --files a,b \
+    --wait                         # optional: stay blocked until claude's next turn or DONE
 
 # Not your turn? Block until it is, then retry claim:
 ./m8shift.py wait claude           # polls ~60s (--interval N)
@@ -133,6 +137,8 @@ pair `claude`/`codex`).
 
 **Golden rule:** you only work and write **after acquiring the pen via `claim`**
 (`append` is accepted only from `WORKING_<you>`).
+Before stopping, run `status --for <you>`; if the relay is not `DONE`, keep waiting
+or close your own `WORKING_<you>` state with `append`/`done`.
 
 ## Documentation
 

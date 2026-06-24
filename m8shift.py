@@ -64,7 +64,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.8.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.9.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -137,8 +137,12 @@ own agent name and `<other>` is the agent you hand the pen to — any *other* me
 the `agents:` roster (with the default `claude`/`codex` pair, simply the other one).
 
 ```bash
+# Recommended single-step resumption: waits if needed, then claims + prints the
+# latest handoff addressed to you.
+./m8shift.py next <you>
+
 # 1. Am I expected? (NON-blocking commands)
-./m8shift.py status                 # read the `state` field
+./m8shift.py status --for <you>     # read the `state` field + your next action
 ./m8shift.py wait <you> --once      # rc 0 = your turn (or DONE = stop) ; rc 3 = not yet
 
 # 2. ACQUIRE the pen BEFORE working (EXCLUSIVE acquisition: when several agents
@@ -151,6 +155,7 @@ the `agents:` roster (with the default `claude`/`codex` pair, simply the other o
     --ask "what you expect from the other" \
     --done "what you just did" \
     --files file1,file2
+# Optional guardrail: add `--wait` to stay in the loop until your next turn or DONE.
 #    • If claim FAILS: it is not (or no longer) your turn → go back to waiting.
 
 # 3. Not your turn: touch NOTHING. Block until your turn, then resume at 2:
@@ -160,6 +165,11 @@ the `agents:` roster (with the default `claude`/`codex` pair, simply the other o
 Golden rule: **you work and write only if you have acquired the pen via
 `claim`.** `claim` is exclusive; `append` is accepted only if you hold the
 pen. Everything else in this document is just the detail of this loop.
+
+Loop guardrail: do **not** stop with the relay still active. Before ending your
+agent turn, run `status --for <you>` (or keep using `next <you>`). If the state is
+not `DONE`, either finish your own `WORKING_<you>` state with `append`/`done`, or
+keep waiting for your next turn.
 
 > The protocol makes you self-sufficient *once you are running*. In an interactive UI
 > (VS Code, …) a human still resumes you between turns — `wait` blocks a process, it
@@ -320,14 +330,15 @@ Guardrail:
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
-./m8shift.py status                                # lock + last turn (NON-blocking)
+./m8shift.py status [--for <agent>]                # lock + last turn + optional next-action hint
 ./m8shift.py doctor [--lint] [--json]              # read-only health/lint checks (never repairs or steals the pen)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
+./m8shift.py next <agent> [--once] [--interval N] [--force]  # wait if needed, then claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
-     --ask "..." --done "..." [--files a,b] [--body file.md|-]   # closes your turn + hands off
+     --ask "..." --done "..." [--files a,b] [--body file.md|-] [--wait]  # closes your turn + hands off
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
 ./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)
@@ -417,7 +428,8 @@ it is your source of coordination with **{other}**: apply `M8SHIFT.protocol.md`
 you have acquired the pen via `claim`.**
 
 ```bash
-./m8shift.py status                # who holds the pen? (non-blocking)
+./m8shift.py next {me}             # recommended: wait if needed, then claim + peek
+./m8shift.py status --for {me}     # who holds the pen + what should I do next?
 ./m8shift.py wait {me} --once      # rc 0 = your turn (or DONE = stop) ; rc 3 = not yet
 ```
 
@@ -427,12 +439,17 @@ you have acquired the pen via `claim`.**
 - **Then work and close your turn**: read the `ask:` that {other} left you
   (at IDLE startup, nothing to honor), do the work, then:
   `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+  Add `--wait` if you must keep the relay loop alive until your next turn or DONE.
 - **Not your turn**: touch nothing; `./m8shift.py wait {me}` blocks until your
   turn (poll ~60 s), then retry `claim`.
 - **{other}'s lock is stale** (`WORKING_{OTHER}` + `now > expires`):
   `./m8shift.py claim {me} --force`.
 
 A closed turn is immutable: to react, open the next turn.
+
+Before you stop responding, run `./m8shift.py status --for {me}`. If the relay is
+not `DONE`, do not final/exit: append or done if you hold the pen, otherwise keep
+waiting.
 
 _Interactive-UI note_: in a chat UI (VS Code, …) a human resumes you between turns —
 `wait` blocks a process, it does not wake your UI. Fully hands-off relays need a
@@ -544,6 +561,7 @@ MESSAGES = {
         "init_start": "Start: ./m8shift.py claim {a}  (then work, then ./m8shift.py append {a} --to {b} --ask \"…\" --done \"…\")",
         "init_bootstrap": "Bootstrap: start a new session/run of each agent to reload its anchor.",
         "status_stale": "  ⚠ stale lock — reclaim with: claim <you> --force",
+        "status_next": "  next     {action}",
         "last_turn": "── last turn: #{n} by {who}",
         "wait_your_turn": "✓ your turn ({st}) — `./m8shift.py claim {agent}` to acquire the pen.",
         "wait_free": "✓ free ({st}) — `./m8shift.py claim {agent}` to acquire the pen.",
@@ -563,6 +581,9 @@ MESSAGES = {
         "append_need_claim": "refused: you do not hold the pen (state={st}) — run `./m8shift.py claim {agent}` first (exclusive acquisition), then append.",
         "note_turn": "turn {n} posted by {agent}, awaiting {to}",
         "append_ok": "✓ turn {n} written by {agent}, handed off to {to}.",
+        "append_waiting": "… waiting for {agent}'s next turn after handoff.",
+        "next_already_working": "✓ {agent} already holds the pen — finish with `append`, `release`, or `done` before stopping.",
+        "next_peek_header": "── handoff for {agent} ──────────────────",
         "to_self": "refused: --to must target a different active agent.",
         "not_holder_release": "refused: {holder} holds the pen, not you (--force to override).",
         "note_release": "handed off to {to} by {agent} (no turn)",
@@ -1814,12 +1835,9 @@ def cmd_recap(args):
                 print(f"  #{ev['id']} {ev['author']}: {ev['text']}")
     return 0
 
-def cmd_peek(args):
-    """Print the last handoff addressed to <agent> as parse-free key=value (+ body).
-    rc 0 if it is your turn / free / done, rc 3 otherwise (mirrors `wait --once`)."""
-    text = load_or_die()
-    agent = need_agent(args.agent)
-    st = get_lock(text).get("state", "")
+def print_peek_for(agent, text=None):
+    """Print the last handoff addressed to <agent> as parse-free key=value (+ body)."""
+    text = text if text is not None else load_or_die()
     mine = [t for t in parse_turns(text) if t["fields"].get("to") == agent]
     if mine:
         t = mine[-1]
@@ -1830,6 +1848,15 @@ def cmd_peek(args):
             print(t["body"])
     else:
         print(tr("peek_none", agent=agent))
+
+
+def cmd_peek(args):
+    """Print the last handoff addressed to <agent> as parse-free key=value (+ body).
+    rc 0 if it is your turn / free / done, rc 3 otherwise (mirrors `wait --once`)."""
+    text = load_or_die()
+    agent = need_agent(args.agent)
+    st = get_lock(text).get("state", "")
+    print_peek_for(agent, text=text)
     return 0 if st in (f"AWAITING_{agent.upper()}", "IDLE", "DONE") else 3
 
 def cmd_log(args):
@@ -1891,6 +1918,40 @@ def cmd_history(args):
     return 0
 
 
+def next_action_for(lk, agent=None, stale=False):
+    """Human hint only: what the relay operator should do next.
+
+    This is deliberately advisory; routing still depends only on LOCK state and `claim`.
+    """
+    st = lk.get("state", "")
+    holder = lk.get("holder", "none")
+    if agent:
+        target = f"AWAITING_{agent.upper()}"
+        working = f"WORKING_{agent.upper()}"
+        if st == "DONE":
+            return f"{agent}: stop (session DONE)"
+        if st in ("IDLE", target):
+            return f"{agent}: ./m8shift.py next {agent}  # claim + peek"
+        if st == working:
+            return f"{agent}: finish with append/release/done before stopping"
+        if st.startswith("WORKING_") and stale and holder != agent:
+            return f"{agent}: ./m8shift.py next {agent} --force  # recover stale lock held by {holder}"
+        return f"{agent}: ./m8shift.py wait {agent} --interval 5"
+
+    if st == "DONE":
+        return "stop (session DONE)"
+    if st == "IDLE":
+        return "any active agent: ./m8shift.py next <agent>"
+    if st.startswith("AWAITING_"):
+        who = holder if holder != "none" else st[len("AWAITING_"):].lower()
+        return f"{who}: ./m8shift.py next {who}"
+    if st.startswith("WORKING_"):
+        if stale:
+            return f"{holder}: lock stale; recover with ./m8shift.py next <agent> --force"
+        return f"{holder}: finish with append/release/done; others wait"
+    return "inspect M8SHIFT.md"
+
+
 def cmd_status(args):
     text = load_or_die()
     lk = get_lock(text)
@@ -1908,6 +1969,9 @@ def cmd_status(args):
         out["stale"] = stale
         out["last_turn"] = last
         out["m8shift_version"] = VERSION     # the RUNNING script's version (dogfooding skew check)
+        if getattr(args, "for_agent", ""):
+            agent = need_agent(args.for_agent)
+            out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     print(f"m8shift.py v{VERSION}")
@@ -1918,6 +1982,11 @@ def cmd_status(args):
             print(f"  {'agents':<8} {','.join(active_agents(lk))}")
     if stale:
         print(tr("status_stale"))
+    if getattr(args, "for_agent", ""):
+        agent = need_agent(args.for_agent)
+        print(tr("status_next", action=next_action_for(lk, agent=agent, stale=stale)))
+    else:
+        print(tr("status_next", action=next_action_for(lk, stale=stale)))
     if last:
         print(tr("last_turn", n=last["n"], who=last["agent"]))
     return 0
@@ -1951,6 +2020,50 @@ def cmd_wait(args):
             return 3
         print(tr("wait_poll", st=st, holder=lk.get("holder"), interval=args.interval))
         time.sleep(args.interval)
+
+
+def _claim_and_print_handoff(agent, force=False):
+    cmd_claim(argparse.Namespace(
+        agent=agent, force=force, check=False, files="", turns=0,
+    ))
+    print(tr("next_peek_header", agent=agent))
+    print_peek_for(agent)
+    return 0
+
+
+def cmd_next(args):
+    """Single safe resumption step: wait if needed, then claim + print handoff."""
+    if not args.once and args.interval < 1:
+        sys.exit(tr("bad_interval"))
+    while True:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        target = f"AWAITING_{agent.upper()}"
+        working = f"WORKING_{agent.upper()}"
+        if st in (target, "IDLE"):
+            return _claim_and_print_handoff(agent)
+        if st == working:
+            print(tr("next_already_working", agent=agent))
+            return 0
+        if st == "DONE":
+            print(tr("wait_done"))
+            return 0
+        exp = parse_iso(lk.get("expires"))
+        if (st.startswith("WORKING_") and st != working and exp and now() > exp):
+            if args.force:
+                return _claim_and_print_handoff(agent, force=True)
+            print(tr("wait_stale", other=lk.get("holder")))
+            print(tr("status_next", action=next_action_for(lk, agent=agent, stale=True)))
+            return 3
+        if args.once:
+            print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
+            print(tr("status_next", action=next_action_for(lk, agent=agent)))
+            return 3
+        print(tr("wait_poll", st=st, holder=lk.get("holder"), interval=args.interval))
+        time.sleep(args.interval)
+
 
 def _files_in_turn(t):
     """Journal-side file tokens of a turn: split the files: CSV, trim, drop empty + the —
@@ -2192,6 +2305,9 @@ def cmd_append(args):
         )
         write(set_lock(text, lk))
     print(tr("append_ok", n=n, agent=agent, to=to))
+    if getattr(args, "wait", False):
+        print(tr("append_waiting", agent=agent))
+        return cmd_wait(argparse.Namespace(agent=agent, interval=args.wait_interval, once=False))
     return 0
 
 def cmd_release(args):
@@ -2372,6 +2488,8 @@ def main():
 
     st = sub.add_parser("status")
     st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
+    st.add_argument("--for", dest="for_agent", default="",
+                    help="show the next safe action for this agent")
     st.set_defaults(fn=cmd_status)
 
     dr = sub.add_parser("doctor", help="read-only health/lint checks (no repair, no force)")
@@ -2409,6 +2527,13 @@ def main():
     w.add_argument("--once", action="store_true", help="check once and exit (rc 3 if not your turn)")
     w.set_defaults(fn=cmd_wait)
 
+    nx = sub.add_parser("next", help="safe resumption: wait if needed, then claim + peek")
+    nx.add_argument("agent")
+    nx.add_argument("--interval", type=int, default=60)
+    nx.add_argument("--once", action="store_true", help="single non-blocking check (rc 3 if not your turn)")
+    nx.add_argument("--force", action="store_true", help="recover only a stale WORKING lock")
+    nx.set_defaults(fn=cmd_next)
+
     c = sub.add_parser("claim")
     c.add_argument("agent")
     c.add_argument("--force", action="store_true")
@@ -2426,6 +2551,10 @@ def main():
     a.add_argument("--done", default="")
     a.add_argument("--files", default="")
     a.add_argument("--body", default="")
+    a.add_argument("--wait", action="store_true",
+                   help="after handoff, wait for this agent's next turn or DONE")
+    a.add_argument("--wait-interval", type=int, default=60,
+                   help="poll interval for --wait (default: 60)")
     # §5 advisory turn fields (optional, passthrough): sugar flags + open namespace
     a.add_argument("--branch", default="")
     a.add_argument("--commit", default="")

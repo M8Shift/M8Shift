@@ -7,8 +7,9 @@ c'est ta source de coordination avec **{other}** : applique `M8SHIFT.protocol.md
 n'écris que si tu as acquis le stylo via `claim`.**
 
 ```bash
-./m8shift.py status                # qui a la main ? (non bloquant)
-./m8shift.py wait {me} --once      # rc 0 = tu peux acquérir ; rc 3 = pas encore
+./m8shift.py next {me}             # recommandé : attend si besoin, puis claim + peek
+./m8shift.py status --for {me}     # qui a la main + que dois-je faire ensuite ?
+./m8shift.py wait {me} --once      # rc 0 = ton tour (ou DONE = stop) ; rc 3 = pas encore
 ```
 
 - **Acquiers d'abord** (`state == AWAITING_{ME}` ou `IDLE`) :
@@ -17,12 +18,17 @@ n'écris que si tu as acquis le stylo via `claim`.**
 - **Puis travaille et clôts ton tour** : lis le `ask:` que {other} t'a laissé
   (en démarrage IDLE, rien à honorer), fais le travail, puis :
   `./m8shift.py append {me} --to {other} --ask "…" --done "…" [--files a,b]`
+  Ajoute `--wait` si tu dois garder la boucle active jusqu'à ton prochain tour ou DONE.
 - **Pas ton tour** : ne touche à rien ; `./m8shift.py wait {me}` bloque jusqu'à ton
   tour (poll ~60 s), puis retente `claim`.
 - **Verrou de {other} périmé** (`WORKING_{OTHER}` + `now > expires`) :
   `./m8shift.py claim {me} --force`.
 
 Un tour clôturé est immuable : pour réagir, ouvre le tour suivant.
+
+Avant de t'arrêter, lance `./m8shift.py status --for {me}`. Si le relais n'est pas
+`DONE`, ne finalise pas et ne quitte pas : append/done si tu tiens le stylo, sinon
+continue à attendre.
 
 _Note UI interactive_ : dans une UI de chat (VS Code, …) un humain te relance entre les
 tours — `wait` bloque un processus, il ne réveille pas ton UI. Un relais entièrement

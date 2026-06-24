@@ -111,10 +111,11 @@ et réalise cette mission :
 
 [MISSION]
 
-Après ton append vers codex, ne termine pas la boucle : attends de nouveau ton
-tour avec `python3 m8shift.py wait claude`, puis continue à suivre le protocole
-jusqu'à DONE, ou jusqu'à ce que tu rencontres un blocage qui nécessite mon
-intervention.
+Utilise `python3 m8shift.py next claude` pour reprendre proprement. Quand tu fais
+un append vers codex, utilise `--wait` sauf si tu clôtures avec DONE. Avant toute
+réponse finale à l'humain, lance `python3 m8shift.py status --for claude` ; si le
+relais n'est pas DONE, continue à attendre ou termine ton propre état
+WORKING_CLAUDE avec append/done.
 ```
 
 **Résultat attendu :** Claude prend le stylo (le tour initial / l'amorçage), et
@@ -142,19 +143,23 @@ Dans une **nouvelle conversation Codex**, collez :
 ```text
 Lis AGENTS.md et M8SHIFT.protocol.md.
 
-Tu es l'agent codex du relais M8Shift. Lance `python3 m8shift.py wait codex`,
-puis prends le stylo quand ton tour arrive. Traite la dernière demande, repasse
-la main à claude, puis continue à attendre. Ne modifie jamais le dépôt sans un
-claim réussi. Continue jusqu'à DONE ou un blocage.
+Tu es l'agent codex du relais M8Shift. Lance `python3 m8shift.py next codex` pour
+attendre si besoin, prendre le stylo quand ton tour arrive et afficher la dernière
+passation. Traite la dernière demande, repasse la main à claude avec
+`append --wait`, puis continue le protocole. Ne modifie jamais le dépôt sans un
+claim réussi. Avant toute réponse finale, lance `python3 m8shift.py status --for codex` ;
+si le relais n'est pas DONE, continue à attendre ou termine ton propre
+état WORKING_CODEX avec append/done.
 ```
 
 Le mode Agent de l'extension permet à Codex de lire, modifier et exécuter des
 commandes dans la fenêtre de travail.
 
-**Résultat attendu :** Codex se bloque sur `wait codex` jusqu'à ce que le tour
-lui passe, puis prend le stylo (état `WORKING_CODEX`), traite la demande, repasse
-la main à `claude`, et revient en attente. L'alternance stricte entre les deux
-agents est désormais en marche.
+**Résultat attendu :** Codex se bloque dans `next codex` jusqu'à ce que le tour
+lui passe, puis prend le stylo (état `WORKING_CODEX`), affiche la dernière
+passation, traite la demande, repasse la main à `claude`, et revient en attente
+si `--wait` a été utilisé. L'alternance stricte entre les deux agents est
+désormais en marche.
 
 > **Si Codex se met à modifier sans attendre, alors** il a sauté la séquence
 > `wait`/`claim`. Arrêtez-le et renvoyez le prompt ci-dessus — il ne doit jamais
@@ -167,12 +172,12 @@ agents est désormais en marche.
 - **Une conversation d'interface terminée ne se réveille pas toute seule** quand
   `M8SHIFT.md` change. C'est exactement pour cela que les deux prompts (étapes 4
   et 5) demandent explicitement à chaque agent de **rester dans la boucle** avec
-  `wait`.
+  `next`, `append --wait` et `status --for`.
 
 - **Si un panneau s'arrête malgré tout**, envoyez-lui simplement :
 
   ```text
-  Reprends la boucle M8Shift à partir de `python3 m8shift.py status`.
+  Reprends la boucle M8Shift avec `python3 m8shift.py next <ton-agent>`.
   ```
 
 - **Vérifiez l'état du relais à tout moment** depuis un terminal à la racine du
