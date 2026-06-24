@@ -84,7 +84,7 @@ le jugement du mainteneur.
 | EF-5 | `wait <agent>` attend le tour ; `wait --once` retourne `3` si ce n'est pas le tour. |
 | EF-5b | `next <agent>` reprend la boucle sans ambiguïté : attend si besoin, puis claim et affiche le dernier handoff ; `--once` ne mute rien si ce n'est pas le tour. |
 | EF-6 | `claim --force` ne reprend qu'un verrou `WORKING_*` périmé ; le détenteur peut rafraîchir son propre TTL avec `claim <soi>`, et un wrapper long doit le faire au moins 5 minutes avant expiration. |
-| EF-7 | `release` et `done` sont des opérations de détenteur du bâton (`holder`) ; `append` seul exige un stylo actif. |
+| EF-7 | `release` et `done` sont des opérations de détenteur du bâton (`holder`) ; `append` seul exige un stylo actif. `--force --reason TEXTE` outrepasse et journalise la raison. |
 | EF-8 | `archive --keep N` déplace les anciens tours clos vers `M8SHIFT.archive.md` sans toucher au LOCK ni au tour #0. |
 | EF-9 | `init` génère `M8SHIFT.md`, `M8SHIFT.protocol.md` et injecte les ancrages sans dupliquer les strophes. |
 | EF-10 | Les variantes d'ancrage (`agents.md`, `CLAUDE.md`, etc.) sont normalisées ou refusées si ambiguës. |
@@ -93,7 +93,7 @@ le jugement du mainteneur.
 | EF-13 | `remember` ajoute une note durable dans `M8SHIFT.memory.md` sans prendre le stylo. |
 | EF-14 | `task add/done/drop/list/show` maintient un registre append-only `M8SHIFT.tasks.md`. |
 | EF-15 | `claim --check` sonde les chevauchements de fichiers sans prendre le stylo. |
-| EF-16 | `doctor` signale les dérives de santé sans réparer ni forcer le verrou. |
+| EF-16 | `doctor` signale les dérives de santé sans réparer ni forcer le verrou ; `doctor --security` ajoute les contrôles de racine effective, taille de registres, événements forcés et fichier lock. |
 | EF-17 | `history` affiche une entrée par session : id, début/fin, état, agents, tours, version. |
 | EF-18 | Les sorties humaines affichent UTC + heure locale ; `status` dérive aussi `started`/`duration` depuis `M8SHIFT.sessions.jsonl` en lecture seule ; les sorties JSON restent en UTC canonique. |
 | EF-19 | `m8shift-worktree.py` permet le degré 2 optionnel : travail parallèle en worktrees isolés, intégration sérialisée. |
@@ -166,7 +166,7 @@ le routage.
 m8shift.py init [--name X] [--agents a,b,c…] [--lang code] [--force]
 m8shift.py status [--for agent] [--json]
 m8shift.py watch [--for agent] [--interval N] [--clear] [--changes-only]
-m8shift.py doctor [--lint] [--json] [--severity-min info|warning|error]
+m8shift.py doctor [--lint] [--json] [--security] [--severity-min info|warning|error]
 m8shift.py recap [--turns N] [--memory N] [--tasks N]
 m8shift.py wait <agent> [--once] [--interval N]
 m8shift.py next <agent> [--once] [--interval N] [--force]
@@ -175,11 +175,11 @@ m8shift.py claim <agent> --check [--files CSV] [--turns N]
 m8shift.py peek <agent>
 m8shift.py log [--limit N] [--all] [--oneline]
 m8shift.py history [--limit N] [--oneline] [--json]
-m8shift.py append <agent> --to <autre> --ask … --done … [--files …] [--body f|-] [--wait]
+m8shift.py append <agent> --to <autre> --ask … --done … [--files …] [--body f|-] [--allow-large-body] [--wait]
 m8shift.py remember <agent> "<note>"
 m8shift.py task add|done|drop|list|show …
-m8shift.py release <agent> --to <autre> [--force]
-m8shift.py done <agent> [--force]
+m8shift.py release <agent> --to <autre> [--force --reason TEXTE]
+m8shift.py done <agent> [--force --reason TEXTE]
 m8shift.py archive [--keep N]
 ```
 
@@ -217,7 +217,8 @@ flowchart LR
 
 - M8Shift ne verrouille pas physiquement le système de fichiers du dépôt ; la sécurité
   repose sur la discipline `claim → travail → append`.
-- Un agent malveillant ou une édition manuelle peut contourner le modèle.
+- Un agent malveillant ou une édition manuelle peut contourner le modèle ; une raison
+  `--force` est une trace d'audit, pas une autorisation cryptographique.
 - Les UI interactives doivent être relancées par un humain ou par un compagnon externe.
 - Les verrous `O_EXCL`/`rename` sont ciblés pour un disque local, pas un FS réseau incertain.
 - Les sidecars mémoire/tâches/sessions sont observables ; ils ne pilotent jamais le routage.

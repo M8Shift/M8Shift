@@ -32,7 +32,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = None        # canonical repo root (set in main, before any core read/write)
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")   # mirrors the core sentinel id class
-VERSION = "3.11.0"
+VERSION = "3.12.0"
 
 
 def die(msg):
@@ -66,7 +66,22 @@ def git_out(args, cwd=None):
 
 
 def resolves(ref, cwd=None):
-    return bool(git_out(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd))
+    return bool(git_out(["rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"], cwd))
+
+
+def safe_branch_name(branch, label="branch"):
+    if not branch:
+        die(f"{label} is empty")
+    if branch.startswith("-") or any(ord(c) < 32 or c.isspace() for c in branch):
+        die(f"unsafe {label} {branch!r} — no leading '-' / whitespace / control characters")
+    r = git(["check-ref-format", "--branch", branch], check=False)
+    if r.returncode != 0:
+        die(f"unsafe {label} {branch!r} — not a valid Git branch name")
+    return branch
+
+
+def local_branch_exists(branch):
+    return git(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False).returncode == 0
 
 
 def merge_in_progress(tree):
@@ -152,6 +167,7 @@ def claim_pen(agent, idv, target_sha):
                   expires=core.iso(t + dt.timedelta(minutes=core.TTL_MIN)),
                   integrating=sentinel,
                   note=f"integrating {idv} into target by {agent}")
+        guard.require_owned()
         core.write(core.set_lock(text, lk))
         if not guard.still_owned():
             die("lost the .m8shift.lock token during the pen claim — aborted (no merge started)")
@@ -205,6 +221,7 @@ def finalize(agent, to, idv, sentinel, *, done, advisory=(), commit_tree=None):
         lk.update(holder=to, state=f"AWAITING_{to.upper()}", turn=str(n),
                   since=core.iso(t), expires="-", note=f"integrate {idv} → handed to {to}")
         lk.pop("integrating", None)                          # cleared on EVERY ours-path finalization
+        guard.require_owned()
         core.write(core.set_lock(text, lk))
     return n, ok
 
@@ -215,13 +232,13 @@ def cmd_claim(args):
     idv = safe_id(args.id)
     lk = core.get_lock(core.load_or_die())
     roster_or_die(lk, args.agent)
-    branch = args.branch or idv
+    branch = safe_branch_name(args.branch or idv)
     ftree = wt_path(idv)
     if os.path.exists(ftree):
         die(f"worktree {idv!r} already exists at {ftree}")
     if not resolves(args.base):
         die(f"--base {args.base!r} does not resolve to a commit")
-    if resolves(branch):
+    if local_branch_exists(branch):
         git(["worktree", "add", ftree, branch])              # check out an existing branch
     else:
         git(["worktree", "add", "-b", branch, ftree, args.base])  # new branch off --base
@@ -236,11 +253,12 @@ def cmd_done(args):
     ledger). It records that a worktree's branch is ready to integrate; the real handoff is
     `integrate`."""
     idv = safe_id(args.id)
-    with core.file_lock():
+    with core.file_lock() as guard:
         roster_or_die(core.get_lock(core.load_or_die()), args.agent)
         log = os.path.join(ROOT, ".m8shift", "done.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
         prev = core.read(log) if os.path.exists(log) else "# m8shift-worktree done ledger (degree-2)\n"
+        guard.require_owned()
         core.write(prev + f"- {idv} done by {args.agent} @ {core.iso(core.now())}\n", log)
     print(f"✓ noted worktree {idv} done by {args.agent}")
     return 0
@@ -284,14 +302,14 @@ def cmd_status(args):
 
 def cmd_integrate(args):
     idv = safe_id(args.id)
-    agent, to, into = args.agent, args.to, args.into
+    agent, to, into = args.agent, args.to, safe_branch_name(args.into, "--into")
 
     # ---- fail BEFORE claiming (pure reads + integration-tree prep) -------------
     lk = core.get_lock(core.load_or_die())
     roster_or_die(lk, agent, to)
     if to == agent:
         die("--to must hand off to a DIFFERENT agent")
-    if git(["show-ref", "--verify", "--quiet", f"refs/heads/{into}"], check=False).returncode != 0:
+    if not local_branch_exists(into):
         die(f"--into {into!r} is not a local branch — integration must advance a BRANCH; pass a "
             f"branch name (a commit/tag/detached ref would merge into a detached HEAD and silently "
             f"NOT update any branch)")

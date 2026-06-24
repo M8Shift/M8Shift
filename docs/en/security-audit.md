@@ -30,6 +30,36 @@ plain-text operation. The code review also found three concrete hardening gaps w
 tracking: `init --name` can inject a fake lock block, deeply nested session JSON can crash
 read-only observers, and stale-lock takeover has a path-unlink race.
 
+## Implementation status
+
+Implemented in `m8shift.py` / companions `v3.12.0`:
+
+- prompt-security wording in `PROTOCOL_EN`, `STANZA_EN`, generated protocol docs, and
+  `i18n/*/stanza.txt`;
+- `release --force` / `done --force` now require `--reason`, record force metadata in
+  `M8SHIFT.sessions.jsonl`, and are surfaced by `doctor --security`;
+- `init --name` rejects line breaks and `M8SHIFT:` / `COWORK:` markers;
+- session JSON parsing catches malformed/deep JSON without traceback;
+- stale internal lock takeover uses a serialized unlink guard, mode `0600`, `O_NOFOLLOW`
+  where available, and ownership-token checks before core writes;
+- `append --body` is capped at 256 KiB by default, with explicit `--allow-large-body`;
+- `doctor --security` warns about oversized relay/ledger files, external effective roots,
+  force events, and suspicious lock-file state;
+- `m8shift-i18n.py --name` must remain a basename inside `--into`;
+- `m8shift-worktree.py` validates branch names and rejects leading dash, whitespace,
+  control characters, and non-branch `--into` targets.
+
+Deferred / still policy-level:
+
+- `M8SHIFT_ROOT` is warned by `doctor --security`, but not forbidden; the worktree
+  companion intentionally uses it for canonical-root coordination.
+- `release/done --force` do not require a second `--allow-active-holder` flag; `--reason`
+  plus audit logging was chosen as the lower-friction recovery guard.
+- `peek` still prints peer bodies directly; the stanza/protocol now carries the
+  untrusted-content boundary instead.
+- secret scanning in relay files remains future `doctor --security` work because simple
+  keyword matching is noisy.
+
 ## Existing protections worth preserving
 
 | Control | Evidence | Security effect |

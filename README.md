@@ -224,7 +224,7 @@ Verified by the tests and by multi-agent review:
 - **Stale-lock recovery** — `claim --force` reclaims **only a stale lock** (refused
   on an active one); the holder can refresh its own lock. Long-running wrappers
   should refresh at least 5 minutes before `expires`.
-- **Guardrails** — `release` / `done` are baton-owner ops (the `holder`: pen holder in WORKING / awaited agent in AWAITING); only `append` requires the pen. `--force` = recovery.
+- **Guardrails** — `release` / `done` are baton-owner ops (the `holder`: pen holder in WORKING / awaited agent in AWAITING); only `append` requires the pen. `--force --reason TEXT` = audited recovery.
 - **Serialized concurrency** — an inter-process lock `.m8shift.lock` (`O_EXCL`, with
   an ownership token) plus atomic writes (unique temp file + `os.replace`, mode
   preserved) ⇒ two concurrent `m8shift.py` runs never corrupt the file.
@@ -320,8 +320,8 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 **Shipped read / handoff surface** — `recap` (session-start briefing: current LOCK + recent
 turns + memory headlines), `peek` (the last handoff addressed to you, parse-free), `log`
 (relay timeline), `history` (session timeline: agents, turns, state, version), `status --json`
-(dashboard-/`watch`-friendly), `doctor --lint --json`
-(read-only health checks for relay/anchor/runtime drift), **advisory turn fields** on
+(dashboard-/`watch`-friendly), `doctor --lint --json` and `doctor --security`
+(read-only health/security checks for relay/anchor/runtime drift), **advisory turn fields** on
 `append` (`--branch`/`--commit`/`--tests`/`--next`/`--blocked-on` plus the open
 `--field key=value` `x_*` namespace, surfaced by `peek`, never interpreted), and **shared
 memory** — `m8shift.py remember <agent> "<note>"` appends to a durable, append-only,

@@ -27,7 +27,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
 
-VERSION = "3.11.0"
+VERSION = "3.12.0"
 
 
 # ───────────────────────────── unitaires : fonctions pures ──────────────────
@@ -120,6 +120,16 @@ class TestPureFunctions(unittest.TestCase):
         text = (
             '{"event":"start","session_id":"20260624T120000Z-1234abcd"}\n'
             "garbage\n"
+            '{"event":"done","session_id":"20260624T120000Z-1234abcd"}\n'
+        )
+        events = cowork.parse_session_events(text)
+        self.assertEqual([e["event"] for e in events], ["start", "done"])
+
+    def test_parse_session_events_skips_deep_json_without_traceback(self):
+        deep = "[" * 20000 + "0" + "]" * 20000
+        text = (
+            '{"event":"start","session_id":"20260624T120000Z-1234abcd"}\n'
+            f"{deep}\n"
             '{"event":"done","session_id":"20260624T120000Z-1234abcd"}\n'
         )
         events = cowork.parse_session_events(text)
@@ -224,6 +234,13 @@ class TestInit(CLIBase):
     def test_init_project_name(self):
         self.init("--name", "Mon Super Projet")
         self.assertIn("# M8Shift · Mon Super Projet", self.md())
+
+    def test_init_project_name_rejects_lock_marker_injection(self):
+        bad = "x\n<!-- M8SHIFT:LOCK:BEGIN -->\nholder: evil\nstate: WORKING_EVIL\n"
+        r = self.cw("init", "--name", bad)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+        self.assertNotIn("Traceback", r.stderr)
 
     def test_missing_agents_bridges_existing_claude_instructions(self):
         """Un projet Claude-only devient utilisable par Codex sans action manuelle."""
@@ -481,9 +498,14 @@ class TestMutexGuards(CLIBase):
     def test_release_done_force_overrides(self):
         self.init()
         self.cw("claim", "claude")
-        r = self.cw("done", "codex", "--force")
+        r0 = self.cw("done", "codex", "--force")
+        self.assertNotEqual(r0.returncode, 0)
+        self.assertIn("--reason", r0.stdout + r0.stderr)
+        r = self.cw("done", "codex", "--force", "--reason", "operator recovery")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.lock()["state"], "DONE")
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as f:
+            self.assertIn("operator recovery", f.read())
 
 
 # ───────────────────────────── robustesse / entrées ────────────────────────
@@ -499,6 +521,18 @@ class TestRobustness(CLIBase):
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("--body", r.stdout + r.stderr)
         self.assertEqual(self.md().count("M8SHIFT:TURN"), before)
+
+    def test_body_size_limit_and_explicit_override(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        large = "x" * (cowork.MAX_BODY_BYTES + 1)
+        r = self.cw("append", "claude", "--to", "codex", "--ask", "x", "--done", "y",
+                    "--body", "-", stdin=large)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("above the default limit", r.stdout + r.stderr)
+        r2 = self.cw("append", "claude", "--to", "codex", "--ask", "x", "--done", "y",
+                     "--body", "-", "--allow-large-body", stdin=large)
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
 
     def test_invalid_agent_clean_exit(self):
         self.init()
@@ -1012,6 +1046,24 @@ class TestReadCommands(CLIBase):
         findings = json.loads(r.stdout)["findings"]
         self.assertIn("lock.stale_working", {f["check"] for f in findings})
 
+    def test_doctor_security_warns_on_oversized_ledger(self):
+        self.init()
+        with open(os.path.join(self.d, "M8SHIFT.memory.md"), "w", encoding="utf-8") as f:
+            f.write("x" * (cowork.MAX_LEDGER_BYTES + 1))
+        r = self.cw("doctor", "--security", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("file.oversized", checks)
+
+    def test_doctor_security_highlights_force_event(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.assertEqual(self.cw("done", "codex", "--force", "--reason", "operator recovery").returncode, 0)
+        r = self.cw("doctor", "--security", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("sessions.force_event", checks)
+
     def test_recap(self):
         self._seed()
         out = self.cw("recap", "--turns", "2").stdout
@@ -1225,6 +1277,20 @@ class TestInjector(unittest.TestCase):
         claim = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
                                cwd=d, capture_output=True, text=True)
         self.assertIn("pluma tomada", claim.stdout)  # es claim_ok
+
+    def test_output_name_must_stay_inside_output_dir(self):
+        d = tempfile.mkdtemp(prefix="m8shift-i18n-out-")
+        self.addCleanup(shutil.rmtree, d, True)
+        cases = [
+            ["--name", "../evil.py"],
+            ["--name", os.path.join(d, "evil.py")],
+        ]
+        for extra in cases:
+            with self.subTest(extra=extra):
+                r = subprocess.run([sys.executable, self.INJ, "--langs", "fr", "--into", d, *extra],
+                                   capture_output=True, text=True)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("--name", r.stderr)
 
 
 # ───────────── §5 : champs de tour avisés (passthrough) ─────────────────────

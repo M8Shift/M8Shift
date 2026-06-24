@@ -19,7 +19,7 @@ import unittest
 ROOT_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = os.path.join(ROOT_SRC, "m8shift.py")
 COMPANION = os.path.join(ROOT_SRC, "m8shift-worktree.py")
-VERSION = "3.11.0"
+VERSION = "3.12.0"
 
 
 def run(args, cwd, env=None):
@@ -196,6 +196,16 @@ class TestWorktreeSafety(WTBase):
             r = self.wt("integrate", bad, "claude", "--into", "main", "--to", "codex")
             self.assertNotEqual(r.returncode, 0, bad)
             self.assertIn("unsafe", (r.stdout + r.stderr).lower())
+
+    def test_branch_policy_rejects_ambiguous_or_whitespace_names(self):
+        for extra in (
+            ("--branch=-bad",),
+            ("--branch", "bad branch"),
+        ):
+            with self.subTest(extra=extra):
+                r = self.wt("claim", "feat-safe", "claude", "--base", "main", *extra)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("unsafe", (r.stdout + r.stderr).lower())
 
     def test_drop_needs_yes(self):
         self.wt("claim", "feat-a", "claude", "--base", "main")
