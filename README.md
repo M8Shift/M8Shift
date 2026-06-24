@@ -79,12 +79,21 @@ vendor lock-in.
 One-line local install for macOS/Linux/Git Bash:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --verify --agents claude,codex
 ```
 
 This downloads `m8shift.py` plus the `m8shift-worktree.py` toolbox into the current
-directory, then runs `python3 m8shift.py init --agents claude,codex`. No `sudo`, no
-global PATH change, no background service.
+directory, verifies both files against `checksums.sha256`, then runs
+`python3 m8shift.py init --agents claude,codex`. No `sudo`, no global PATH change,
+no background service.
+
+For a pinned release, fetch the installer from the tag and use the same ref for the
+downloaded files:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/vX.Y.Z/install.sh | \
+  bash -s -- --ref vX.Y.Z --verify --agents claude,codex
+```
 
 Manual install:
 
