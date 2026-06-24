@@ -140,7 +140,7 @@ blocks and never changes anything, so it is always safe to run.
 **Expected result:**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   none
   state    IDLE
@@ -262,7 +262,7 @@ Look at the lock again. It should now point at `codex`.
 **Expected result:**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   codex
   state    AWAITING_CODEX
@@ -339,7 +339,7 @@ Check the status one more time to confirm the hand-back.
 **Expected result:**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   claude
   state    AWAITING_CLAUDE
@@ -410,7 +410,7 @@ Check the final status:
 **Expected result:**
 
 ```text
-m8shift.py v3.8.0
+m8shift.py v3.9.0
 ── LOCK ───────────────────────────────
   holder   none
   state    DONE
