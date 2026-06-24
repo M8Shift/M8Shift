@@ -246,7 +246,7 @@ ne route pas le travail, ne donne aucune permission, ne lance aucun outil et ne
 mute pas le `LOCK`. L'enforcement des permissions par l'hôte ou l'UI peut être
 ajouté autour de M8Shift, tandis que le cœur reste un relais mono-fichier passif.
 Le contrat d'implémentation est suivi dans
-[RFC — Contrats et validation Stage 4](rfc-contrats-validation.md).
+[RFC — Contrats et validation Stage 4](../en/rfc-contracts-validation.md).
 
 ---
 
