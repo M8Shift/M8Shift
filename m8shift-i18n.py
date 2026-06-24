@@ -23,7 +23,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.join(HERE, "m8shift.py")
 PACKS_DIR = os.path.join(HERE, "i18n")
-VERSION = "3.11.0"
+VERSION = "3.12.0"
 
 # family -> (dict name, constant prefix, pack file, raw-string?)  — raw must match the EN constant.
 FAMILIES = [
@@ -39,6 +39,14 @@ PLACEHOLDERS = {  # str.format keys a body may legitimately contain (others = tr
 
 def die(msg):
     sys.exit(f"m8shift-i18n: {msg}")
+
+
+def safe_output_name(name):
+    if not name or os.path.basename(name) != name or os.path.isabs(name):
+        die("--name must be a plain file name, not a path")
+    if os.altsep and os.altsep in name:
+        die("--name must be a plain file name, not a path")
+    return name
 
 
 def load_core():
@@ -236,8 +244,12 @@ def main():
             assert mod.MESSAGES[lang][k] == v, f"{lang} message {k!r} round-trip"
     assert mod.LANGS == tuple(["en"] + langs), f"LANGS = {mod.LANGS}"
 
+    out_name = safe_output_name(args.name)
     os.makedirs(args.into, exist_ok=True)
-    out = os.path.join(args.into, args.name)
+    real_into = os.path.realpath(args.into)
+    out = os.path.realpath(os.path.join(real_into, out_name))
+    if os.path.commonpath([real_into, out]) != real_into:
+        die("output path escapes --into")
     with open(out, "w", encoding="utf-8") as f:
         f.write(built)
     os.chmod(out, 0o755)
