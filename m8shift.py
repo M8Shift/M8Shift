@@ -61,7 +61,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.4.2"        # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.5.0"        # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -1520,6 +1520,27 @@ def collect_advisory_fields(args):
     return out
 
 
+def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", advisory=()):
+    """Render ONE append-only journal turn block — the single shared format used by cmd_append and
+    by the §8 worktree companion's low-level integration handoff. The caller owns the turn-number
+    bump and the LOCK flip; this only renders the block text."""
+    block = (
+        f"<!-- M8SHIFT:TURN {n} {agent} BEGIN -->\n"
+        f"- from:    {agent}\n"
+        f"- to:      {to}\n"
+        f"- ask:     {ask}\n"
+        f"- done:    {done}\n"
+        f"- files:   {files}\n"
+        f"- handoff: {to}\n"
+    )
+    for key, value in advisory:   # §5: advisory fields follow the fixed routing block
+        block += f"- {key}: {value}\n"
+    if body:
+        block += "\n" + body + "\n"
+    block += f"<!-- M8SHIFT:TURN {n} {agent} END -->\n"
+    return block
+
+
 def cmd_append(args):
     # Field/body reading stays OUTSIDE the critical section (stdin may block); agent
     # validation happens UNDER the lock, against the roster load_or_die reads.
@@ -1544,21 +1565,7 @@ def cmd_append(args):
         if st != f"WORKING_{agent.upper()}":
             sys.exit(tr("append_need_claim", st=st, agent=agent))
         n = int(lk.get("turn", "0")) + 1
-        brand = "M8SHIFT"  # M8Shift-only: turn markers are always M8SHIFT:*
-        block = (
-            f"<!-- {brand}:TURN {n} {agent} BEGIN -->\n"
-            f"- from:    {agent}\n"
-            f"- to:      {to}\n"
-            f"- ask:     {ask}\n"
-            f"- done:    {done}\n"
-            f"- files:   {files}\n"
-            f"- handoff: {to}\n"
-        )
-        for key, value in advisory:   # §5: advisory fields follow the fixed routing block
-            block += f"- {key}: {value}\n"
-        if body:
-            block += "\n" + body + "\n"
-        block += f"<!-- {brand}:TURN {n} {agent} END -->\n"
+        block = render_turn(n, agent, to, ask=ask, done=done, files=files, body=body, advisory=advisory)
 
         # insert the turn at the end of the file (append-only journal)
         text = text.rstrip("\n") + "\n\n" + block

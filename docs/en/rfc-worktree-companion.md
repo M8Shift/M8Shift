@@ -178,3 +178,43 @@ These close real correctness holes in the merge/sentinel flow; they are part of 
 field with force guards; non-committing merge + pre-commit sentinel/HEAD reverify; retry-finalize after an
 already-applied merge; unconditional `--to` handoff on every non-crash post-claim path; deterministic tests
 for sentinel-TTL, token-loss, double-integrate, conflict-abort, and committed-but-unhanded retry.
+
+## v1 implementation notes & failure modes (`m8shift-worktree.py`)
+
+- **`--into` must be a local branch.** Integration *advances a branch*, so `--into` is validated as a
+  local branch ref (`git show-ref --verify refs/heads/<into>`) **before claiming** — a commit / tag /
+  detached ref is refused (it would merge into a detached HEAD and silently update no branch).
+- **The integration target must not be checked out elsewhere.** Git forbids the same branch in two
+  worktrees, so the dedicated `_integration` tree cannot own `--into` if the canonical root (or a
+  feature worktree) has it checked out. `integrate` refuses **before claiming** (`git worktree list
+  --porcelain`) with an actionable message. Run the canonical root **detached** (or on a coordination
+  branch) so integration targets like `main` are free for the `_integration` tree.
+- **Every post-claim path is non-stranding.** `finalize()` re-verifies *ours* (holder + state + exact
+  sentinel + lock token); when the pen is ours it ALWAYS reaches the handoff (flip → `AWAITING_<to>`,
+  clear the sentinel):
+  - conflict / dirty-precondition / merge-error → `git merge --abort` (if `MERGE_HEAD`) + handoff with
+    `blocked_on=conflict|merge-error:<id>`, exit non-zero.
+  - integration HEAD moved out-of-band → abort + handoff with `blocked_on=head-moved:<id>` (no commit).
+  - the final `git commit` fails (failing pre-commit hook / identity / signing — user hooks stay
+    active, never `--no-verify`) → abort + handoff with `blocked_on=commit-error:<id>`; a hook failure
+    can never leave the merge committed-but-unhanded or the pen stuck.
+  - **resume-by-id**: a committed-but-unhanded retry matches the recorded sentinel by `<id>` (the
+    recorded `<sha>` is the *pre-merge* target, which the committed merge has since moved past), then
+    finalizes without re-merging — exactly one merge effect.
+- **The one non-handoff exit is an externally changed/stolen pen** (`not ours`): only reachable by a
+  manual LOCK edit (the sentinel makes `claim/release/done --force` and `append` refuse, so no
+  legitimate command can take a WORKING+sentinel pen). It aborts our own uncommitted merge and refuses
+  to touch the foreign LOCK — **no stolen merge** — surfacing it for human / `init --force` recovery.
+- **`write()` failure mid-finalize** (disk full, …) is a documented hard crash; the atomic write means
+  the on-disk LOCK is either fully flipped or unchanged, and the committed-but-unhanded **retry-finalize**
+  recovers it. This is the only NO-STUCK-WORKING exception (a hard crash), as specified.
+- **`done <id> <agent>`** appends to a companion-only ledger `.m8shift/done.log` **under the canonical
+  file lock**, deliberately separate from the core's `M8SHIFT.tasks.md` — degree-2 worktree ids are a
+  different id space from the core's integer task board, so the companion never collides with the dumb
+  core ledger's format or lock.
+
+Validated by a 7-lens adversarial sweep (merge-integrity / sentinel-lifecycle / no-stuck-WORKING /
+lock-order-token / git-edge / crash-recovery / path-safety), each probing a throwaway git repo and
+verified by reproduction; the merge-integrity, git-edge and path-safety lenses were clean, and the
+finalize `die()` strand it surfaced is fixed (the above non-stranding handoff). Companion tests live in
+`tests/test_worktree.py` (deterministic temp git repos).
