@@ -42,7 +42,9 @@ Implemented in `m8shift.py` / companions `v3.12.0`:
 - session JSON parsing catches malformed/deep JSON without traceback;
 - stale internal lock takeover uses a serialized unlink guard, mode `0600`, `O_NOFOLLOW`
   where available, and ownership-token checks before core writes;
-- `append --body` is capped at 256 KiB by default, with explicit `--allow-large-body`;
+- `append --body` is capped at 256 KiB by default, with explicit `--allow-large-body`,
+  and single-line fields such as `--ask`, `--done`, `--files`, advisory `--field`
+  values, `--reason`, and `--note` are capped at 64 KiB;
 - `doctor --security` warns about oversized relay/ledger files, external effective roots,
   force events, and suspicious lock-file state;
 - `m8shift-i18n.py --name` must remain a basename inside `--into`;
@@ -231,6 +233,8 @@ Deferred / still policy-level:
   remote exploit.
 - **Recommendation:**
   - add a default maximum body size, e.g. 256 KiB, with an explicit `--allow-large-body`;
+  - cap single-line turn/admin fields separately so huge `--ask`, `--done`, `--files`,
+    `--field`, `--reason`, or `--note` values cannot bypass the body limit;
   - add `doctor` warnings for `M8SHIFT.md`, archive, memory, tasks, and sessions over
     configurable size thresholds;
   - make `recap` and `log` degrade gracefully when bodies or ledgers are oversized.
