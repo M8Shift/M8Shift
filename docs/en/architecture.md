@@ -181,7 +181,7 @@ on **two levels**.
 |-----------------|-----------|
 | **OS mutex** (low level) | `.m8shift.lock` opened with `O_CREAT\|O_EXCL`: a real OS lock that serializes the **critical section** = the read-modify-write of `M8SHIFT.md`. The *enforced* technical mutex. |
 | **Owned application lock** (high level) | the `WORKING_<agent>` state in the LOCK block: a **named, owned** lock held across the whole **work window** (not just during a single command). The *semantic* mutex protecting the shared resource (the repo). |
-| **Lease / TTL** (anti-deadlock) | `expires` (30-min TTL) + ownership token: the **lease-based distributed-lock** pattern (ZooKeeper ephemeral nodes, Redlock). If the holder dies, the lease expires → `claim --force`. |
+| **Lease / TTL** (anti-deadlock) | `expires` (30-min TTL) + ownership token: the **lease-based distributed-lock** pattern (ZooKeeper ephemeral nodes, Redlock). If the holder dies, the lease expires → `claim --force`. If the holder is alive during a long turn, a wrapper should refresh with `claim <me>` at T-5 min. |
 | **Monitor / condition variable + baton** | `wait <agent>` polls until `AWAITING_<self>` (a **condition wait**); the explicit handoff `--to <other>` is **token-passing** (a baton / token ring). |
 
 Two properties set it apart from a strict in-process mutex:
@@ -193,7 +193,8 @@ Two properties set it apart from a strict in-process mutex:
   *work itself* relies on the discipline `claim → work → append` (see
   [specification](specification.md) §8).
 - **Re-entrant for the holder.** The current holder may re-`claim` to refresh its
-  lease — a holder-recursive lock.
+  lease — a holder-recursive lock. Long-running wrappers should do that at least
+  **5 minutes before** `expires`, not at the last second.
 
 **Why this matters.** Generalizing to an active roster of N agents keeps the core degree
 at **1**: the baton is passed among participants, but only one can edit the shared tree.

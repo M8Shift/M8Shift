@@ -203,7 +203,8 @@ Verified by the tests and by multi-agent review:
   `WORKING_<you>`. You work only after a successful `claim`, so no two agents ever
   modify the repository at the same time. `--to` ≠ self (strict alternation).
 - **Stale-lock recovery** — `claim --force` reclaims **only a stale lock** (refused
-  on an active one); the holder can refresh its own lock.
+  on an active one); the holder can refresh its own lock. Long-running wrappers
+  should refresh at least 5 minutes before `expires`.
 - **Guardrails** — `release` / `done` are baton-owner ops (the `holder`: pen holder in WORKING / awaited agent in AWAITING); only `append` requires the pen. `--force` = recovery.
 - **Serialized concurrency** — an inter-process lock `.m8shift.lock` (`O_EXCL`, with
   an ownership token) plus atomic writes (unique temp file + `os.replace`, mode

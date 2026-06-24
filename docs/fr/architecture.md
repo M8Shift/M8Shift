@@ -184,7 +184,7 @@ classiques** sur **deux niveaux**.
 |-------------------|-------------|
 | **Mutex OS** (bas niveau) | `.m8shift.lock` ouvert en `O_CREAT\|O_EXCL` : un vrai verrou OS qui sérialise la **section critique** = le read-modify-write de `M8SHIFT.md`. Le mutex technique *appliqué*. |
 | **Lock applicatif possédé** (haut niveau) | l'état `WORKING_<agent>` du bloc LOCK : un verrou **nommé, avec propriétaire**, tenu pendant toute la **fenêtre de travail** (pas seulement le temps d'une commande). Le mutex *sémantique* qui protège la ressource partagée (le dépôt). |
-| **Bail / TTL** (anti-blocage) | `expires` (TTL 30 min) + jeton de propriété : le pattern des **verrous distribués à bail** (nœuds éphémères ZooKeeper, Redlock). Si le détenteur meurt, le bail expire → `claim --force`. |
+| **Bail / TTL** (anti-blocage) | `expires` (TTL 30 min) + jeton de propriété : le pattern des **verrous distribués à bail** (nœuds éphémères ZooKeeper, Redlock). Si le détenteur meurt, le bail expire → `claim --force`. Si le détenteur est vivant pendant un tour long, un wrapper devrait rafraîchir par `claim <soi>` à T-5 min. |
 | **Moniteur / variable de condition + témoin** | `wait <agent>` poll jusqu'à `AWAITING_<soi>` (une **attente de condition**) ; la passation explicite `--to <autre>` est du **token-passing** (témoin / anneau à jeton). |
 
 Deux propriétés le distinguent d'un mutex in-process strict :
@@ -196,7 +196,8 @@ Deux propriétés le distinguent d'un mutex in-process strict :
   l'exclusivité du *travail* repose sur la discipline `claim → travail → append`
   (voir [cahier des charges](cahier-des-charges.md) §8).
 - **Ré-entrant pour le détenteur.** Le titulaire peut re-`claim` pour rafraîchir son
-  bail — un verrou récursif côté propriétaire.
+  bail — un verrou récursif côté propriétaire. Les wrappers de tours longs devraient
+  le faire au moins **5 minutes avant** `expires`, pas au dernier moment.
 
 **Pourquoi ça compte.** Généraliser à un roster actif de N agents garde le degré du
 cœur à **1** : le témoin circule entre participants, mais un seul édite l'arbre

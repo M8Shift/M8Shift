@@ -13,6 +13,10 @@ Design (the points a naive `while wait; do …` loop gets wrong):
     naive loop would relaunch forever at `DONE`.
   * A **designated IDLE starter** (`--start-on-idle`) avoids two agents both starting
     from `IDLE`.
+  * **Heartbeat for long turns**: while the agent process is running, if this
+    runner sees `WORKING_<me>` with less than 5 minutes before `expires`, it runs
+    `python3 m8shift.py claim <me>` to refresh the TTL. This is a manual heartbeat:
+    it extends only the holder's own lock and never steals another agent's pen.
   * **Post-run validation**: if the agent process exits while the pen is still
     `WORKING_<me>` (it claimed then died without `append`), that is a crash → retry,
     up to a cap, then stop and leave the pen for manual recovery (never force-steals).
@@ -26,6 +30,7 @@ The agent command (everything after --cmd) is run verbatim as argv; it must, by 
 perform exactly one turn against this project's M8SHIFT.md (claim → work → append).
 """
 import argparse
+import datetime as dt
 import re
 import subprocess
 import sys
@@ -34,6 +39,7 @@ import time
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
 VERSION = "3.9.0"
+DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 
 
 def read_lock(m8shift_path):
@@ -58,6 +64,50 @@ def log(msg):
     print(f"[m8shift-runner] {msg}", flush=True)
 
 
+def parse_iso_z(value):
+    """Parse M8Shift's UTC `...Z` timestamp, returning None for absent/invalid values."""
+    if not value or value == "-":
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        out = dt.datetime.fromisoformat(value)
+        if out.tzinfo is None:
+            out = out.replace(tzinfo=dt.timezone.utc)
+        return out.astimezone(dt.timezone.utc)
+    except ValueError:
+        return None
+
+
+def maybe_refresh_ttl(args, me, me_working):
+    """Refresh our own working lock when expiry is close. Never force-steals."""
+    margin = max(0, args.heartbeat_before_expiry)
+    if margin == 0:
+        return
+    lk = read_lock(args.m8shift) or {}
+    if lk.get("state") != me_working or lk.get("holder") != me:
+        return
+    exp = parse_iso_z(lk.get("expires"))
+    if exp is None:
+        return
+    remaining = (exp - dt.datetime.now(dt.timezone.utc)).total_seconds()
+    if remaining > margin:
+        return
+    cmd = [sys.executable, args.m8shift_py, "claim", me]
+    try:
+        r = subprocess.run(cmd, check=False, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
+        log(f"heartbeat failed to launch {args.m8shift_py}: {e}")
+        return
+    if r.returncode == 0:
+        log(f"heartbeat refreshed TTL ({remaining:.0f}s remained).")
+    else:
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        detail = detail[0] if detail else f"rc={r.returncode}"
+        log(f"heartbeat refresh failed: {detail}")
+
+
 def main():
     p = argparse.ArgumentParser(description="Headless M8Shift runner for one agent.")
     p.add_argument("--version", action="version", version=f"headless_runner.py {VERSION}")
@@ -69,6 +119,10 @@ def main():
     p.add_argument("--max-retries", type=int, default=3,
                    help="consecutive failed turns before giving up")
     p.add_argument("--max-backoff", type=int, default=120, help="cap on backoff seconds")
+    p.add_argument("--m8shift-py", default="m8shift.py",
+                   help="path to m8shift.py used for heartbeat TTL refreshes")
+    p.add_argument("--heartbeat-before-expiry", type=int, default=DEFAULT_HEARTBEAT_MARGIN_S,
+                   help="seconds before expires to refresh while working; default 300 (5 min), 0 disables")
     p.add_argument("--cmd", nargs=argparse.REMAINDER, required=True,
                    help="the headless agent command (static argv; runs ONE turn)")
     args = p.parse_args()
@@ -100,10 +154,16 @@ def main():
         # It is our turn: run the headless agent for exactly one turn (static argv).
         log(f"state={state} → running the agent for one turn.")
         try:
-            subprocess.run(args.cmd, check=False)
+            proc = subprocess.Popen(args.cmd)
         except OSError as e:
             log(f"could not launch the agent: {e}")
             return 2
+        while True:
+            try:
+                proc.wait(timeout=min(args.interval, 30))
+                break
+            except subprocess.TimeoutExpired:
+                maybe_refresh_ttl(args, me, me_working)
 
         # Post-run validation against the new state.
         after = read_lock(args.m8shift) or {}
