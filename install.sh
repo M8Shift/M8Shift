@@ -51,6 +51,8 @@ Options:
   --version           Show installer version.
 
 The installer is local-only: no sudo, no PATH mutation, no background service.
+Security note: --verify checks integrity against the selected ref's manifest;
+for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
 EOF
 }
 

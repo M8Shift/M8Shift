@@ -95,6 +95,11 @@ curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/vX.Y.Z/install.sh |
   bash -s -- --ref vX.Y.Z --verify --agents claude,codex
 ```
 
+Security boundary: `--verify` checks downloaded files against the `checksums.sha256`
+manifest from the selected ref. That catches corruption or mismatch. For out-of-band
+trust against a compromised origin, pin reviewed digests with `--sha256 FILE:HEX` or
+use a signed release tag.
+
 Manual install:
 
 ```bash
