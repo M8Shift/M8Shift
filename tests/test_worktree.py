@@ -66,7 +66,8 @@ class WTBase(unittest.TestCase):
 
     def lock(self):
         """Parse the canonical LOCK fields from M8SHIFT.md."""
-        text = open(os.path.join(self.d, "M8SHIFT.md")).read()
+        with open(os.path.join(self.d, "M8SHIFT.md"), encoding="utf-8") as f:
+            text = f.read()
         body = text[text.index("LOCK:BEGIN"):text.index("LOCK:END")]
         out = {}
         for line in body.splitlines():
@@ -136,7 +137,8 @@ class TestWorktreeConflict(WTBase):
         lk = self.lock()
         self.assertEqual(lk["state"], "AWAITING_CODEX")        # NOT stuck WORKING — handed off
         self.assertNotIn("integrating", lk)                    # sentinel cleared on the failure path
-        self.assertIn("conflict:feat-b", open(os.path.join(self.d, "M8SHIFT.md")).read())  # reason recorded
+        with open(os.path.join(self.d, "M8SHIFT.md"), encoding="utf-8") as f:
+            self.assertIn("conflict:feat-b", f.read())  # reason recorded
 
     def test_commit_failure_hands_off_not_stranded(self):
         # a git commit failure (failing pre-commit hook / signing / identity) is NOT a hard crash:
@@ -153,7 +155,8 @@ class TestWorktreeConflict(WTBase):
         lk = self.lock()
         self.assertEqual(lk["state"], "AWAITING_CODEX")           # handed off — NOT stuck WORKING
         self.assertNotIn("integrating", lk)                       # sentinel cleared
-        self.assertIn("commit-error:feat-a", open(os.path.join(self.d, "M8SHIFT.md")).read())
+        with open(os.path.join(self.d, "M8SHIFT.md"), encoding="utf-8") as f:
+            self.assertIn("commit-error:feat-a", f.read())
         integ = os.path.join(self.d, ".m8shift", "worktrees", "_integration")
         merge_head = self.git("rev-parse", "--verify", "--quiet", "MERGE_HEAD", cwd=integ, check=False)
         self.assertNotEqual(merge_head.returncode, 0)             # MERGE_HEAD gone (merge aborted)
@@ -225,11 +228,13 @@ class TestWorktreeRecovery(WTBase):
         sha = self.git("rev-parse", "main~1" if False else "main").stdout.strip()  # any 40-hex sha
         target_sha = self.git("rev-parse", "main^1").stdout.strip()                # the pre-merge tip
         p = os.path.join(self.d, "M8SHIFT.md")
-        text = open(p).read()
+        with open(p, encoding="utf-8") as f:
+            text = f.read()
         text = re.sub(r"(?m)^(state:\s*).*$", r"\1WORKING_CLAUDE", text, count=1)
         text = re.sub(r"(?m)^(holder:\s*).*$", r"\1claude", text, count=1)
         text = re.sub(r"(?m)^(note:)", f"integrating: feat-a@{target_sha}\nnote:", text, count=1)
-        open(p, "w").write(text)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
         r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(self.merge_commits_on("main")), 1)   # NO double-apply
@@ -244,17 +249,20 @@ class TestWorktreeRecovery(WTBase):
         self.claim_and_commit("feat-a", "a.txt", "from A\n")
         bogus = "0" * 40                                   # a valid-format sha that ≠ the integ HEAD
         p = os.path.join(self.d, "M8SHIFT.md")
-        text = open(p).read()
+        with open(p, encoding="utf-8") as f:
+            text = f.read()
         text = re.sub(r"(?m)^(state:\s*).*$", r"\1WORKING_CLAUDE", text, count=1)
         text = re.sub(r"(?m)^(holder:\s*).*$", r"\1claude", text, count=1)
         text = re.sub(r"(?m)^(note:)", f"integrating: feat-a@{bogus}\nnote:", text, count=1)
-        open(p, "w").write(text)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
         r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)      # failed, but cleanly
         lk = self.lock()
         self.assertEqual(lk["state"], "AWAITING_CODEX")            # handed off — NOT stuck WORKING
         self.assertNotIn("integrating", lk)                        # sentinel cleared, not stranded
-        self.assertIn("head-moved:feat-a", open(p).read())         # reason recorded
+        with open(p, encoding="utf-8") as f:
+            self.assertIn("head-moved:feat-a", f.read())           # reason recorded
         integ = os.path.join(self.d, ".m8shift", "worktrees", "_integration")
         self.assertEqual(self.git("status", "--porcelain", cwd=integ).stdout, "")  # merge aborted
 

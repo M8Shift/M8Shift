@@ -255,7 +255,9 @@ Guardrail:
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB
-  unless `--allow-large-body` is explicit.
+  unless `--allow-large-body` is explicit. Single-line fields (`--ask`, `--done`,
+  `--files`, advisory fields, `--reason`, `--note`, etc.) are capped at 64 KiB and
+  still reject line breaks and reserved relay markers.
 - `--to` must target **a different active agent** (self-hand-off refused; with 3+ agents, name the recipient).
 - **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
   **without** `--once` blocks until your turn — do not use it if you must return

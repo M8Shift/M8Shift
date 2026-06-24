@@ -70,6 +70,7 @@ VERSION = "3.12.0"       # m8shift.py script version (bump on release). Surfaced
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
 MAX_BODY_BYTES = 256 * 1024       # default append body limit; opt out with --allow-large-body
+MAX_FIELD_BYTES = 64 * 1024       # single-line ask/done/files/field/etc. cap
 MAX_LEDGER_BYTES = 1024 * 1024    # doctor --security warning threshold for local ledger files
 DEFAULT_LANG = "en"              # default / ultimate fallback language
 # Well-formed language tags M8Shift recognizes — a curated SUPERSET of LANGS. The LOCK `lang`
@@ -374,7 +375,9 @@ Guardrail:
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB
-  unless `--allow-large-body` is explicit.
+  unless `--allow-large-body` is explicit. Single-line fields (`--ask`, `--done`,
+  `--files`, advisory fields, `--reason`, `--note`, etc.) are capped at 64 KiB and
+  still reject line breaks and reserved relay markers.
 - `--to` must target **a different active agent** (self-hand-off refused; with 3+ agents, name the recipient).
 - **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
   **without** `--once` blocks until your turn — do not use it if you must return
@@ -570,6 +573,7 @@ MESSAGES = {
         "lock_invalid": "{file} corrupted (invalid LOCK: {errs}) — `./m8shift.py init --force` to repair.",
         "field_newline": "refused: {label} must not contain a line break.",
         "field_reserved": "refused: {label} contains a reserved marker ({marker}).",
+        "field_too_large": "refused: {label} is {size} bytes, above the limit of {limit} bytes.",
         "init_bad_name": "refused: --name must be a plain Markdown title (no line breaks or M8SHIFT/COWORK markers).",
         "bad_agent": "invalid agent: {a} (expected: {agents})",
         "bad_roster": "invalid --agents: {raw} — provide at least two distinct agent names (e.g. claude,codex).",
@@ -964,6 +968,9 @@ def clean_field(label, val):
     val = (val or "").strip()
     if any(c in val for c in LINE_BREAKS):
         sys.exit(tr("field_newline", label=label))
+    size = len(val.encode("utf-8"))
+    if size > MAX_FIELD_BYTES:
+        sys.exit(tr("field_too_large", label=label, size=size, limit=MAX_FIELD_BYTES))
     for r in RESERVED:
         if r in val:
             sys.exit(tr("field_reserved", label=label, marker=r))
