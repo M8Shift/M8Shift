@@ -83,7 +83,7 @@ flowchart LR
 | EF-12 | The stanza is idempotent and placed at the head of the anchors; if `AGENTS.override.md` exists, it is synchronized in the override and in `AGENTS.md`. | `test_stanza_is_moved_to_anchor_start`, `test_codex_override_also_receives_stanza` |
 | EF-13 | If the project had `CLAUDE.md` but no Codex instructions, `init` creates in the new `AGENTS.md` a bridge to the common instructions in `CLAUDE.md`; a pre-existing Codex anchor stays autonomous. | `test_missing_agents_bridges_existing_claude_instructions`, `test_existing_agents_does_not_receive_claude_bridge` |
 | EF-14 | `history` shows one folded entry per relay session: session id, start/end, state, agents, turn count, agents used and version; `--json` exposes the same data. | `test_init_records_session_and_history`, `test_history_counts_turns_and_done`, `test_force_init_marks_previous_session_reset` |
-| EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time label; `status` also derives read-only session `started`/`duration` metadata from `M8SHIFT.sessions.jsonl`; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_local_label`, `test_display_duration`, `test_status_and_recap_show_local_time_labels`, `test_status_json`, `test_status_shows_local_time_labels` |
+| EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time prefixed by the timezone name/offset when available (otherwise `local`); `status` also derives read-only session `started`/`duration` metadata from `M8SHIFT.sessions.jsonl`; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_timezone_prefixed_local_time`, `test_display_duration`, `test_status_and_recap_show_timezone_prefixed_local_time`, `test_status_json`, `test_status_shows_timezone_prefixed_local_time` |
 | EF-16 | Operator-loop guardrails keep agents from stopping mid-relay: `status --for <agent>` prints/serializes the next safe action and `append --wait` blocks after handoff until the caller's next turn or `DONE`. | `test_status_for_prints_and_serializes_next_action`, `test_append_wait_blocks_until_agent_turn_returns` |
 | EF-17 | `watch [--for agent]` is a foreground, read-only live view over `status`: it can refresh a terminal automatically, but never claims, hands off, repairs, or force-recovers. | `test_watch_once_is_read_only_and_shows_next_action`, `test_watch_interval_invalid_clean_exit` |
 
@@ -155,8 +155,9 @@ At the head of `M8SHIFT.md`, between `<!-- M8SHIFT:LOCK:BEGIN -->` and `:END`:
 
 Timestamps are stored as ISO-8601 UTC with `Z` to keep TTL comparisons stable across
 agents and machines. Human-facing commands (`status`, `recap`, `history`, `task show`,
-and the worktree companion's `status`) also append a local-time label; JSON output keeps
-UTC values only.
+and the worktree companion's `status`) also append the user's local time prefixed by
+the timezone name/offset when available (otherwise `local`); JSON output keeps UTC
+values only.
 
 `status` additionally derives two display-only session lines from
 `M8SHIFT.sessions.jsonl` when possible: `started` (session start timestamp) and
@@ -351,7 +352,7 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [rfc-claim-check.md](rfc-claim-check.md) | **Advisory pre-claim check** | `claim <agent> --check [--files CSV] [--turns N]` reports readiness and exact file overlap with recent turns. | Takes no pen, mutates nothing; overlap never changes rc or feeds routing. |
 | [rfc-tasks.md](rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
 | [rfc-session-history.md](rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
-| [rfc-runtime-patterns.md](rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, local-time labels in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| [rfc-runtime-patterns.md](rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
 | Operator live view | **Passive monitoring** | `watch [--for <agent>] [--interval N] [--clear] [--changes-only]` repeats the status view in a terminal. | Foreground/read-only loop only; no daemon, no notification, no `claim`, no force recovery. |
 | Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |
 | [rfc-worktree-companion.md](rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |

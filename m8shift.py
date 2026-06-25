@@ -65,7 +65,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.12.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.12.1"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -230,8 +230,9 @@ Fields (one `key: value` per line, easy to `grep`):
 
 M8Shift stores timestamps in UTC (`Z`) to keep comparisons stable across agents and
 machines. Human-facing commands such as `status`, `recap`, `history`, and `task show`
-also print the user's local time next to UTC. Machine-readable JSON keeps canonical
-UTC values only.
+also print the user's local time next to UTC, prefixed by the timezone name/offset
+when available (otherwise `local`). Machine-readable JSON keeps canonical UTC values
+only.
 
 `status` also derives two read-only session lines from `M8SHIFT.sessions.jsonl` when
 possible: `started` (session start timestamp) and `duration` (elapsed time since
@@ -699,22 +700,25 @@ def parse_iso(s):
     except ValueError:
         return None
 
-def local_time_label(s):
-    """Human-local rendering for an M8Shift UTC timestamp.
+def local_timezone_prefix(local):
+    zone = (local.tzname() or local.strftime("%z") or "").strip()
+    return zone or "local"
+
+def local_time_display(s):
+    """Human-local rendering parts for an M8Shift UTC timestamp.
 
     Storage stays canonical UTC (`...Z`). This is display-only and intentionally not
     used by routing / TTL comparisons.
     """
     t = parse_iso(s)
     if t is None:
-        return ""
+        return None, ""
     local = t.astimezone()
-    zone = local.tzname() or local.strftime("%z")
-    return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {zone}".strip()
+    return local_timezone_prefix(local), local.strftime("%Y-%m-%d %H:%M:%S")
 
 def display_time(s):
-    label = local_time_label(s)
-    return f"{s}  local {label}" if label else (s or "")
+    prefix, label = local_time_display(s)
+    return f"{s}  {prefix} {label}" if label else (s or "")
 
 def display_lock_value(key, value):
     return display_time(value) if key in ("since", "expires") else (value or "")

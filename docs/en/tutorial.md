@@ -152,7 +152,7 @@ m8shift.py v3.9.0
   lang     en
   session  20260624T155219Z-16e3a02d
   turn     0
-  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
+  since    2026-06-24T15:52:19Z  CEST 2026-06-24 17:52:19
   expires  -
   note     session initialized, no turn opened
 ── last turn: #0 by system
@@ -274,7 +274,7 @@ m8shift.py v3.9.0
   lang     en
   session  20260624T155219Z-16e3a02d
   turn     1
-  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
+  since    2026-06-24T15:52:19Z  CEST 2026-06-24 17:52:19
   expires  -
   note     turn 1 posted by claude, awaiting codex
 ── last turn: #1 by claude
@@ -351,7 +351,7 @@ m8shift.py v3.9.0
   lang     en
   session  20260624T155219Z-16e3a02d
   turn     2
-  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
+  since    2026-06-24T15:52:19Z  CEST 2026-06-24 17:52:19
   expires  -
   note     turn 2 posted by codex, awaiting claude
 ── last turn: #2 by codex
@@ -422,7 +422,7 @@ m8shift.py v3.9.0
   lang     en
   session  20260624T155219Z-16e3a02d
   turn     2
-  since    2026-06-24T15:52:19Z  local 2026-06-24 17:52:19 CEST
+  since    2026-06-24T15:52:19Z  CEST 2026-06-24 17:52:19
   expires  -
   note     session closed by claude
 ── last turn: #2 by codex

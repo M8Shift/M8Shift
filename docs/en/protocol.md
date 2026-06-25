@@ -110,8 +110,9 @@ Fields (one `key: value` per line, easy to `grep`):
 
 M8Shift stores timestamps in UTC (`Z`) to keep comparisons stable across agents and
 machines. Human-facing commands such as `status`, `recap`, `history`, and `task show`
-also print the user's local time next to UTC. Machine-readable JSON keeps canonical
-UTC values only.
+also print the user's local time next to UTC, prefixed by the timezone name/offset
+when available (otherwise `local`). Machine-readable JSON keeps canonical UTC values
+only.
 
 `status` also derives two read-only session lines from `M8SHIFT.sessions.jsonl` when
 possible: `started` (session start timestamp) and `duration` (elapsed time since

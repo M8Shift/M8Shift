@@ -110,8 +110,9 @@ Champs (un `clé: valeur` par ligne, faciles à `grep`) :
 
 M8Shift stocke les timestamps en UTC (`Z`) pour garder des comparaisons stables entre
 agents et machines. Les commandes humaines comme `status`, `recap`, `history` et
-`task show` affichent aussi l'heure locale utilisateur à côté de l'UTC. Les sorties JSON
-restent en UTC canonique.
+`task show` affichent aussi l'heure locale utilisateur à côté de l'UTC, préfixée par
+le nom/offset de fuseau quand disponible (sinon `local`). Les sorties JSON restent
+en UTC canonique.
 
 `status` dérive aussi deux lignes de session en lecture seule depuis
 `M8SHIFT.sessions.jsonl` lorsque c'est possible : `started` (horodatage du début de

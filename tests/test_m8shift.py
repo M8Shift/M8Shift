@@ -27,7 +27,9 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.12.0"
+VERSION = "3.12.1"
+
+TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
 
 # ───────────────────────────── unit tests: pure functions ───────────────────
@@ -46,10 +48,24 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIsNone(cowork.parse_iso(""))
         self.assertIsNone(cowork.parse_iso("not a date"))
 
-    def test_display_time_keeps_utc_and_adds_local_label(self):
+    def test_local_timezone_prefix_prefers_zone_then_offset_then_local(self):
+        named = cowork.dt.datetime(
+            2026, 6, 24, 15, 52, 46,
+            tzinfo=cowork.dt.timezone(cowork.dt.timedelta(hours=2), "CEST"),
+        )
+        offset_only = cowork.dt.datetime(
+            2026, 6, 24, 15, 52, 46,
+            tzinfo=cowork.dt.timezone(cowork.dt.timedelta(hours=2), ""),
+        )
+        naive = cowork.dt.datetime(2026, 6, 24, 15, 52, 46)
+        self.assertEqual(cowork.local_timezone_prefix(named), "CEST")
+        self.assertEqual(cowork.local_timezone_prefix(offset_only), "+0200")
+        self.assertEqual(cowork.local_timezone_prefix(naive), "local")
+
+    def test_display_time_keeps_utc_and_adds_timezone_prefixed_local_time(self):
         out = cowork.display_time("2026-06-24T13:52:46Z")
         self.assertIn("2026-06-24T13:52:46Z", out)
-        self.assertIn(" local ", out)
+        self.assertRegex(out, r"2026-06-24T13:52:46Z  " + TZ_PREFIXED_TIME_RE)
         self.assertEqual(cowork.display_time("-"), "-")
         self.assertEqual(cowork.display_time("not-a-date"), "not-a-date")
 
@@ -992,14 +1008,14 @@ class TestReadCommands(CLIBase):
         self.assertRegex(d["session_duration"], r"(\d+d )?\d\dh \d\dm \d\ds")
         self.assertNotIn(" local ", r.stdout)  # machine output stays canonical UTC
 
-    def test_status_and_recap_show_local_time_labels(self):
+    def test_status_and_recap_show_timezone_prefixed_local_time(self):
         self.init()
         status = self.cw("status").stdout
         recap = self.cw("recap").stdout
-        self.assertRegex(status, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
-        self.assertRegex(status, r"started\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
+        self.assertRegex(status, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  " + TZ_PREFIXED_TIME_RE)
+        self.assertRegex(status, r"started\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  " + TZ_PREFIXED_TIME_RE)
         self.assertRegex(status, r"duration\s+(\d+d )?\d\dh \d\dm \d\ds")
-        self.assertRegex(recap, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  local ")
+        self.assertRegex(recap, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  " + TZ_PREFIXED_TIME_RE)
         self.assertIn("expires  -", status)
 
     def test_status_session_metadata_degrades_without_ledger(self):
@@ -1790,7 +1806,7 @@ class TestHistory(CLIBase):
         self.assertNotIn("lang", s)
         oneline = self.cw("history", "--oneline").stdout
         self.assertIn("DONE turns=2", oneline)
-        self.assertIn(" local ", oneline)
+        self.assertRegex(oneline, r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  " + TZ_PREFIXED_TIME_RE)
 
     def test_force_init_marks_previous_session_reset(self):
         self.init()
