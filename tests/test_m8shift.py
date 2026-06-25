@@ -11,6 +11,7 @@ Tests keep the internal `cowork` alias only to reduce historical noise.
 Each regression test targets a fixed bug (NR-n) or a specification guarantee.
 Standard library only.
 """
+import hashlib
 import json
 import os
 import re
@@ -2293,6 +2294,41 @@ class TestInstallerVerifyDefault(unittest.TestCase):
     def test_explicit_flag_overrides_env(self):
         self.assertNotEqual(self._rc(["--verify"], {"M8SHIFT_INSTALL_VERIFY": "0"}), 0)
         self.assertEqual(self._rc(["--no-verify"], {"M8SHIFT_INSTALL_VERIFY": "1"}), 0)
+
+    def test_manual_pin_is_self_sufficient_without_manifest(self):
+        # A mirror with NO checksums.sha256: a correct --sha256 pin still verifies (manifest
+        # skipped), a wrong one is rejected, and default verify fails for lack of a manifest.
+        bare = tempfile.mkdtemp(prefix="m8shift-bare-")
+        self.addCleanup(shutil.rmtree, bare, True)
+        shutil.copy(os.path.join(REPO, "m8shift.py"), bare)   # original, untampered
+        good = hashlib.sha256(open(os.path.join(bare, "m8shift.py"), "rb").read()).hexdigest()
+
+        def rc(extra):
+            target = tempfile.mkdtemp(prefix="m8shift-bd-")
+            self.addCleanup(shutil.rmtree, target, True)
+            return subprocess.run(
+                ["bash", os.path.join(REPO, "install.sh"), "--dir", target,
+                 "--base-url", "file://" + bare, "--no-worktree", "--no-init", *extra],
+                capture_output=True, text=True).returncode
+
+        self.assertEqual(rc(["--sha256", "m8shift.py:" + good]), 0)
+        self.assertNotEqual(rc(["--sha256", "m8shift.py:" + "0" * 64]), 0)
+        self.assertNotEqual(rc([]), 0)
+
+
+class TestChecksumsManifest(unittest.TestCase):
+    """checksums.sha256 must match the actual release files, so editing any listed file
+    (e.g. install.sh) without refreshing the manifest is caught here, not at release."""
+
+    def test_manifest_matches_files(self):
+        manifest = os.path.join(REPO, "checksums.sha256")
+        for line in open(manifest, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            expected, name = line.split()
+            actual = hashlib.sha256(open(os.path.join(REPO, name), "rb").read()).hexdigest()
+            self.assertEqual(actual, expected, f"stale checksum for {name}")
 
 
 if __name__ == "__main__":
