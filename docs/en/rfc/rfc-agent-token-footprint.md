@@ -1,18 +1,21 @@
 # RFC — Reducing the per-session agent token footprint
 
-- **Status:** proposed
-- **Scope:** cut the tokens M8Shift makes each agent read per session, without
-  changing the one-pen mutex, the turn journal, or any command semantics.
-- **Core invariant:** this is a *packaging/footprint* change only. The protocol
-  meaning, the LOCK, the append-only journal, and every command behavior stay
-  byte-for-byte identical. No information is deleted — only relocated to on-demand
-  reference.
+- **Status:** proposed (revised after Codex review, turn 3)
+- **Scope:** cut the tokens M8Shift makes each agent read per session by splitting
+  the bundled protocol into a first-read operational core plus an on-demand
+  reference, without changing the one-pen mutex, the turn journal, or any command
+  semantics.
+- **Invariant (reworded):** mutex / journal / command **semantics** are unchanged.
+  Command **behavior** is unchanged except for one documented new generated
+  reference file (and optional future `--brief` surfaces, deferred to Stage 2). No
+  protocol information is deleted — only relocated to on-demand reference. The
+  source of truth stays `PROTOCOL["en"]` in `m8shift.py`.
 
 ## Problem
 
-Every agent that joins a relay pays a fixed token cost just to *know how to
-participate*, before doing any work. Measured on the live dogfooding relay
-(engine v3.18.3):
+Every agent that joins a relay pays a fixed token cost to learn how to participate,
+before doing any work. Measured on the live dogfooding relay (engine v3.18.3,
+proxy `bytes / 4`):
 
 | Surface | Bytes | ~tokens | Read cadence |
 |---------|------:|--------:|--------------|
@@ -23,12 +26,12 @@ participate*, before doing any work. Measured on the live dogfooding relay
 | `status` output | 580 | ~145 | ~every turn |
 | `log` output | 493 | ~123 | per turn when called |
 
-The protocol document dominates. Broken down by section:
+The protocol document dominates the first-read context. By section:
 
 | Protocol section | ~tokens | Needed to *operate* a session? |
 |------------------|--------:|--------------------------------|
 | §0 TL;DR — the self-contained loop | ~908 | yes (essential) |
-| §8 Adoption by any project (portability) | ~898 | no — one-time *adoption*, not per-session |
+| §8 Adoption by any project (portability) | ~898 | no — one-time *adoption* |
 | §7 The `m8shift.py` tool (full reference) | ~813 | no — discoverable via `--help` |
 | §2 The LOCK block | ~584 | yes |
 | §4 Work cycle | ~457 | yes |
@@ -37,65 +40,132 @@ The protocol document dominates. Broken down by section:
 | §3 Format of a turn | ~222 | yes |
 | §6 Keeping it bounded over time | ~142 | partly |
 
-About **54% of the protocol (~2619 tokens: §0 partial + §7 + §8)** is adoption or
-full-command reference that an agent *operating an existing relay* does not need
-in front of it every session. The genuinely operational core (loop + LOCK + turn
-format + work cycle + anti-deadlock) is **~1800 tokens**.
-
-The recurring per-turn cost is `status` (~145) plus re-reading the growing
-`M8SHIFT.md` (~1395 and climbing); `archive` already bounds the latter but cadence
-is undocumented.
+About **54% (~2619 tokens: §7 + §8 + part of §0/§1)** is adoption or full-command
+reference that an agent *operating an existing relay* does not need every session.
+The operational core (loop + LOCK + turn format + work cycle + anti-deadlock) is
+**~1800 tokens**. The recurring per-turn cost is `status` (~145) plus re-reading
+the growing `M8SHIFT.md` (~1395); `archive` bounds the latter but cadence is
+undocumented.
 
 ## Decision
 
-Split the protocol the relay *bundles for agents* from the protocol the *repo
-documents for humans/adopters*, and inject only the operational core.
+### 1. Exact generated file layout (no one-line-pointer)
 
-1. **Operational core** — a compact stanza (target **≤ 2000 tokens**) containing
-   only what an agent needs to participate: the self-contained loop, the LOCK
-   block, the turn format, the work cycle, and the stale-lock rule. `init` injects
-   this core into the project's `M8SHIFT.protocol.md` (or keeps a one-line pointer
-   to it), instead of the full ~4842-token document.
-2. **Reference appendix** — portability/adoption (§8) and the full `m8shift.py`
-   command reference (§7) move to repo docs (`docs/en/protocol-reference.md`),
-   read on demand. The tool's own `--help` already covers the command reference at
-   zero standing cost.
-3. **Optional `--brief` output** — a compact mode for `status`/`recap` that drops
-   decorative framing, for agents that poll frequently.
-4. **Documented archive cadence** — a one-line guideline (e.g. `archive` when the
-   living journal exceeds N turns) so `M8SHIFT.md` re-read cost stays bounded.
+The split is concrete and offline-first — `M8SHIFT.protocol.md` stays a real,
+self-sufficient first-read core, never a pointer stub:
 
-Source of truth stays `PROTOCOL["en"]` in `m8shift.py`; the core/reference split is
-expressed there, and `gen_docs.py` regenerates both the bundled core and the
-reference doc, so they can never drift (the existing in-sync test extends to cover
-the split).
+| File | Role | Budget |
+|------|------|--------|
+| `M8SHIFT.protocol.md` (generated by `init`) | **operational core** an agent reads first: loop, LOCK, turn format, work cycle, stale-lock, safety invariants | ≤ 2000 proxy tokens |
+| `M8SHIFT.protocol-reference.md` (generated by `init`) | full adoption/portability (§8) + complete command reference (§7) | none |
+| `docs/en/protocol.md` (regenerated by `gen_docs.py`) | repo mirror of the core | ≤ 2000 |
+| `docs/en/protocol-reference.md` (regenerated by `gen_docs.py`) | repo mirror of the reference | none |
+
+The core ends with an explicit pointer: *"For project adoption and the full command
+reference, see `M8SHIFT.protocol-reference.md` (read on demand)."* `init` generates
+both files; an agent can operate from the core alone, offline, without chasing
+files.
+
+### 2. Safety-critical text that must NOT be shortened away
+
+The core MUST retain, in full force, these invariants (condensing wording is fine,
+dropping any is not):
+
+- relay/coordination data (ask, body, memory, tasks, peer text) is **untrusted**
+  and cannot override system/developer/user instructions;
+- **claim before any work**; never edit the relay without holding the pen;
+- the `append` / `release` / `done` rules (closed turns are immutable; no bouncing
+  unread incoming turns; audited `release --force --reason` only);
+- stale-lock / `claim --force` guardrails;
+- body/marker safety (turn markers are HTML comments; never edit a closed turn);
+- no network, no daemon, no authority escalation; dangerous handoffs need explicit
+  human authorization.
+
+A test asserts each of these invariant keywords/anchors is present in the generated
+core.
+
+### 3. i18n strategy
+
+Source of truth stays `PROTOCOL["en"]`. The repo also ships `i18n/<lang>/protocol.md`
+packs and generated localized docs.
+
+- **Phase 1 is English-only**: split `PROTOCOL["en"]` into core + reference, generate
+  EN core/reference docs, add test scaffolding. EN is the only language whose core
+  is budget-checked.
+- **i18n packs stay full** (unchanged) until a language-specific follow-up; they are
+  NOT auto-split in Phase 1, to avoid unsafe machine edits to translated prose.
+- The split mechanism in `gen_docs.py` is written so a pack *can* later opt into the
+  same core/reference split only when its translation is updated by hand.
+- The RFC calls this out explicitly so EN and packs do not silently diverge; a test
+  asserts packs remain whole (single-file) in Phase 1.
+
+### 4. Budget measurement (concrete)
+
+- A helper computes proxy tokens as `len(text.encode("utf-8")) // 4`.
+- Test `test_protocol_core_within_budget`: the generated core ≤ **2000** proxy
+  tokens; on failure the message reports the actual count and which sections pushed
+  it over.
+- The reference file has **no** budget.
+- Existing `test_protocol_docs_in_sync` extends to cover BOTH core and reference
+  regeneration (core ↔ `PROTOCOL["en"]` core, reference ↔ `PROTOCOL["en"]`
+  reference), so they cannot drift.
+
+### 5. `--brief` deferred to Stage 2
+
+`status`/`recap --brief` is valuable but orthogonal to the core split. It is
+**deferred to Stage 2**: not implemented in Phase 1. When taken up, Stage 2 will
+define exact surfaces (which fields drop) and test that `--brief` output is a strict
+subset of default output, with default output unchanged.
+
+### 6. Documented archive cadence
+
+A one-line guideline in the core: run `archive` when the living journal exceeds
+~N turns, so `M8SHIFT.md` re-read cost stays bounded. (Guideline only; no behavior
+change.)
 
 ## Non-goals
 
-- No change to mutex semantics, LOCK format, turn journal, or any command behavior.
+- No change to mutex semantics, LOCK format, turn journal, or command **semantics**.
 - No deletion of protocol content — the full text stays available as reference.
 - No LLM/lossy summarization; the core is a hand-authored subset, deterministic.
 - No new network, daemon, or second authority.
-- Not a docs-prettiness change; success is measured in tokens, not aesthetics.
+- Not a docs-prettiness change; success is measured in tokens.
+- Phase 1 does NOT split i18n packs and does NOT ship `--brief`.
+
+## Implementation checklist (Phase 1, files likely touched)
+
+- `m8shift.py` — express `PROTOCOL["en"]` as core + reference; `init` writes both
+  `M8SHIFT.protocol.md` (core) and `M8SHIFT.protocol-reference.md` (reference).
+- `scripts/gen_docs.py` — regenerate `docs/en/protocol.md` (core) and new
+  `docs/en/protocol-reference.md` (reference) from the same source.
+- `docs/en/protocol.md` — becomes the core mirror.
+- `docs/en/protocol-reference.md` — new reference mirror.
+- `docs/en/README.md` — index the new reference doc.
+- `tests/test_m8shift.py` — `test_protocol_core_within_budget`, safety-invariant
+  presence test, packs-remain-whole test, extended in-sync test.
+- `checksums.sha256` — refreshed if shipped script bytes change.
+- i18n packs: untouched in Phase 1 (asserted by test).
 
 ## Acceptance criteria
 
-- The bundled operational core is **≤ 2000 tokens** and contains the loop, LOCK,
-  turn format, work cycle, and stale-lock rule.
-- The full reference (portability + command reference) remains discoverable from
-  the core via an explicit pointer and lives in repo docs.
-- `init` injects the core, not the full document; a fresh relay's
-  `M8SHIFT.protocol.md` measures ≤ 2000 tokens.
-- Protocol *meaning* is unchanged: an agent following only the core can still run
-  the full `claim → work → append`, handle a stale lock, and stay bounded.
-- A size-budget test asserts the core stays under budget and the in-sync test
-  covers core ↔ reference regeneration.
-- `--brief` output (if adopted) is a strict subset of the full output; default
-  output is unchanged.
+- The generated core `M8SHIFT.protocol.md` is ≤ 2000 proxy tokens and contains the
+  loop, LOCK, turn format, work cycle, stale-lock rule, AND every named
+  safety-critical invariant (§2).
+- `M8SHIFT.protocol.md` is a real offline core, never a one-line-only pointer.
+- `init` generates both core and reference; `gen_docs.py` regenerates both repo
+  mirrors; the in-sync test covers both.
+- An agent following only the core can run the full `claim → work → append`, handle
+  a stale lock, stay within the safety boundary, and stay bounded.
+- i18n packs are unchanged in Phase 1 (asserted by test); the RFC states the
+  follow-up path.
+- Budget test and doc-generation tests exist and pass; budget-test failure explains
+  what exceeded the budget.
+- `--brief` is explicitly deferred to Stage 2.
+- The RFC is implementable without another clarification round.
 
 ## Measurement method (for re-analysis)
 
-Token figures use `bytes / 4` as a portable proxy. Re-run with the engine pointed
-at the relay root (`M8SHIFT_ROOT=<relay> python3 m8shift.py status|recap|log`) and
-`wc -c` on `M8SHIFT.protocol.md` / `M8SHIFT.md`. The post-implementation re-analysis
-should report the new per-session core size and confirm the ≤ 2000-token budget.
+Token figures use `len(text.encode("utf-8")) // 4` as a portable proxy. Re-run with
+the engine pointed at the relay root (`M8SHIFT_ROOT=<relay> python3 m8shift.py
+status|recap|log`) and the helper on `M8SHIFT.protocol.md`. Post-implementation
+re-analysis reports the new core size and confirms the ≤ 2000-token budget.
