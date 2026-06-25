@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.15.0"
+VERSION = "3.16.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2084,6 +2084,36 @@ subprocess.check_call([
         self.assertIsNotNone(lk, "runner cannot read a current M8SHIFT.md")
         self.assertEqual(lk["state"], "IDLE")
 
+    def test_headless_runner_dry_run_and_argument_validation(self):
+        runner = os.path.join(REPO, "examples", "headless_runner.py")
+        r = subprocess.run(
+            [sys.executable, runner, "claude", "--dry-run", "--cmd", sys.executable, "-c", "print('x')"],
+            cwd=self.d, capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["agent"], "claude")
+        bad = subprocess.run(
+            [sys.executable, runner, "../bad", "--dry-run", "--cmd", sys.executable, "-c", "print('x')"],
+            cwd=self.d, capture_output=True, text=True,
+        )
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("invalid agent name", bad.stderr + bad.stdout)
+
+    def test_headless_runner_turn_timeout_is_bounded_and_logged(self):
+        self.init()
+        runner = os.path.join(REPO, "examples", "headless_runner.py")
+        r = subprocess.run(
+            [sys.executable, runner, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--start-on-idle", "--once",
+             "--interval", "1", "--max-retries", "1", "--turn-timeout", "1",
+             "--kill-grace", "0", "--cmd", sys.executable, "-c", "import time; time.sleep(10)"],
+            cwd=self.d, capture_output=True, text=True, timeout=8,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as fh:
+            events = [json.loads(line)["event"] for line in fh if line.strip()]
+        self.assertIn("run.timeout", events)
+
     def test_injector_check_rejects_format_unsafe_pack(self):
         # #8: --check must reject a pack whose translated message renames/adds a placeholder
         bad = os.path.join(REPO, "i18n", "_zzbadtest")
@@ -2289,6 +2319,54 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(status["runtime"]["claude"]["last_progress"]["message"], "reading")
         doctor = json.loads(self.rt("doctor", "--json").stdout)
         self.assertTrue(doctor["ok"])
+
+    def test_runtime_init_providers_roles_workflows_and_report(self):
+        self.init("--agents", "claude,codex,gemini")
+        r = self.rt("init", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        created = json.loads(r.stdout)["created"]
+        self.assertIn(".m8shift/providers.json", created)
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "roles", "implementer.md")))
+
+        plist = json.loads(self.rt("providers", "list", "--json").stdout)
+        self.assertEqual([row["name"] for row in plist["agents"]], ["claude", "codex", "gemini"])
+        check = json.loads(self.rt("providers", "check", "--json").stdout)
+        self.assertTrue(check["ok"], check)
+        rendered = json.loads(self.rt("providers", "render", "codex",
+                                      "--prompt", "do one turn", "--run", "run1", "--json").stdout)
+        self.assertEqual(rendered["argv"], ["codex", "exec", "do one turn"])
+
+        roles = json.loads(self.rt("roles", "list", "--json").stdout)
+        self.assertIn("reviewer", roles["roles"])
+        self.assertIn("Implementer role", self.rt("roles", "show", "implementer").stdout)
+        workflows = json.loads(self.rt("workflows", "list", "--json").stdout)
+        self.assertIn("default-code-review", workflows["workflows"])
+
+        self.assertEqual(self.rt("progress", "claude", "--run", "run1", "reading").returncode, 0)
+        self.assertEqual(self.rt("approve", "run1", "push", "--by", "human",
+                                 "--decision", "approved", "--reason", "ok").returncode, 0)
+        report = json.loads(self.rt("report", "run1", "--json").stdout)
+        self.assertEqual(report["progress"][0]["message"], "reading")
+        self.assertEqual(report["approvals"][0]["decision"], "approved")
+        write = self.rt("report", "run1", "--write")
+        self.assertEqual(write.returncode, 0, write.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runs", "run1", "report.md")))
+
+    def test_provider_check_rejects_shell_string_argv_and_missing_env(self):
+        self.init()
+        self.rt("providers", "init", "--force")
+        path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["agents"][0]["argv"] = "claude -p $M8SHIFT_PROMPT"
+        data["agents"][0]["requires_env"] = ["MISSING_TEST_SECRET"]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        r = self.rt("providers", "check", "--json")
+        self.assertNotEqual(r.returncode, 0)
+        findings = json.loads(r.stdout)["findings"]
+        self.assertTrue(any(f["check"] == "providers.argv_string" for f in findings))
+        self.assertTrue(any(f["check"] == "providers.env_missing" for f in findings))
 
 
 # ───────────── §8 core foundation (degree-2 worktree companion) ──────────────

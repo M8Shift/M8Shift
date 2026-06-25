@@ -203,7 +203,11 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **RFC (cooperative turn request)** — [docs/en/rfc/rfc-cooperative-turn-request.md](docs/en/rfc/rfc-cooperative-turn-request.md) —
   audit-only `request-turn` plus `yield-turn`/`decline-turn`/`steer-turn --force` for interactive UI deadlocks.
 - **RFC (agent runtime architecture)** — [docs/en/rfc/rfc-agent-runtime-architecture.md](docs/en/rfc/rfc-agent-runtime-architecture.md) —
-  future local runtime/scaffold layer for roles, workflows, approvals, artifacts, and reports.
+  shipped local runtime/scaffold layer for roles, workflows, approvals, provider registry, and reports.
+- **RFC (provider management)** — [docs/en/rfc/rfc-provider-management.md](docs/en/rfc/rfc-provider-management.md) —
+  shipped local provider registry for cooperative agent identities and safe argv rendering.
+- **RFC (headless runner hardening)** — [docs/en/rfc/rfc-headless-runner-hardening.md](docs/en/rfc/rfc-headless-runner-hardening.md) —
+  validation, dry-run, turn timeout, child termination, and timeout audit events.
 - **RFC input (neutral runtime patterns)** — [docs/en/rfc/rfc-input-neutral-patterns.md](docs/en/rfc/rfc-input-neutral-patterns.md) —
   curated pattern inventory for future companion RFCs.
 - **RFC (runtime patterns)** — [docs/en/rfc/rfc-runtime-patterns.md](docs/en/rfc/rfc-runtime-patterns.md) —
@@ -212,8 +216,6 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
   Stage 4 typed handoffs, review decisions, sugar flags, `contract validate`, and `doctor --contracts`.
 - **RFC (future runtime/control plane)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](docs/en/rfc/rfc-hosted-runtime-control-plane.md) —
   optional hosted/local runtime supervision outside the passive core.
-- **RFC (provider management)** — [docs/en/rfc/rfc-provider-management.md](docs/en/rfc/rfc-provider-management.md) —
-  future adapter registry for Claude, Codex, Gemini, Vibe, and other cooperative agents.
 - **RFC (shared-tree degree > 1)** — [docs/en/rfc/rfc-shared-tree-degree-gt1.md](docs/en/rfc/rfc-shared-tree-degree-gt1.md) —
   research RFC; rejected for the core in favor of isolated worktrees.
 

@@ -1,7 +1,8 @@
 # RFC — Agent runtime architecture companion
 
-- **Status:** analysis RFC; broader runtime architecture remains future. A smaller
-  local sidecar companion (`m8shift-runtime.py`) shipped in v3.15.0.
+- **Status:** implemented v1 in v3.16.0 for local scaffold, roles, workflows,
+  approvals, provider registry, and run reports. Broader hosted/runtime control
+  plane remains future.
 - **Scope:** local runtime/scaffold layer around M8Shift for roles, workflows, runs,
   permissions, approvals, and artifacts
 - **Related RFCs:** [rfc-runtime-companion.md](rfc-runtime-companion.md),
@@ -33,7 +34,7 @@ expanding the core relay into a framework.
 
 ## 2. Decision
 
-Create a future **agent runtime companion** as a local-first layer around the passive
+Create an **agent runtime companion** as a local-first layer around the passive
 core. The companion may scaffold configuration and operate local workflows, but every
 write handoff still goes through:
 
@@ -94,7 +95,7 @@ Generated / ignored candidates:
 `M8SHIFT.md`, `M8SHIFT.tasks.md`, `M8SHIFT.memory.md`, and
 `M8SHIFT.sessions.jsonl` remain the existing relay-side records owned by the core.
 
-## 4. Proposed local layout
+## 4. Shipped local layout
 
 ```text
 project/
@@ -254,17 +255,15 @@ Reject these as core features:
 
 These can only appear, if ever, as optional companion surfaces with clear boundaries.
 
-## 8. Suggested companion commands
-
-Illustrative only:
+## 8. Shipped companion commands
 
 ```bash
-m8shift-runtime init
-m8shift-runtime agents list
-m8shift-runtime roles list
-m8shift-runtime run <workflow> --agent codex --once
-m8shift-runtime approve <run-id> <gate-id>
-m8shift-runtime report <run-id>
+python3 m8shift-runtime.py init [--agents claude,codex] [--force]
+python3 m8shift-runtime.py providers {init,list,show,check,render} ...
+python3 m8shift-runtime.py roles list|show
+python3 m8shift-runtime.py workflows list|show
+python3 m8shift-runtime.py approve <run-id> <gate-id> --by <actor> --decision approved|rejected|waived
+python3 m8shift-runtime.py report <run-id> [--json] [--write]
 ```
 
 Each command that writes project files must first use the normal M8Shift relay when
@@ -295,8 +294,8 @@ A first runtime companion is acceptable when:
 
 ## 11. Recommendation
 
-Proceed only as a future companion RFC implementation. Do not fold this runtime
-architecture into the passive core.
+Keep this architecture as a companion implementation. Do not fold it into the passive
+core.
 
 The immediate value is to formalize the boundary: M8Shift core coordinates the pen;
 the runtime companion may coordinate processes, roles, approvals, and reports around

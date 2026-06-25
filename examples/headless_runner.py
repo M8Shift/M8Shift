@@ -45,8 +45,9 @@ import uuid
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.15.0"
+VERSION = "3.16.0"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
+AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 
 
 def read_lock(m8shift_path):
@@ -100,6 +101,35 @@ def append_run_event(args, event, run_id, agent, **fields):
     path = os.path.join(args.runtime_dir, "runs.jsonl")
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def validate_args(args):
+    if not AGENT_RE.fullmatch(args.agent.lower()):
+        raise SystemExit("invalid agent name: expected [a-z][a-z0-9_-]*")
+    if args.interval < 1:
+        raise SystemExit("--interval must be >= 1")
+    if args.max_retries < 1:
+        raise SystemExit("--max-retries must be >= 1")
+    if args.max_backoff < 1:
+        raise SystemExit("--max-backoff must be >= 1")
+    if args.heartbeat_before_expiry < 0:
+        raise SystemExit("--heartbeat-before-expiry must be >= 0")
+    if args.turn_timeout < 0:
+        raise SystemExit("--turn-timeout must be >= 0")
+    if args.kill_grace < 0:
+        raise SystemExit("--kill-grace must be >= 0")
+
+
+def stop_child(proc, grace):
+    """Terminate a timed-out child, then kill after the grace window."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 def parse_iso_z(value):
@@ -163,22 +193,32 @@ def main():
                    help="path to m8shift.py used for heartbeat TTL refreshes")
     p.add_argument("--heartbeat-before-expiry", type=int, default=DEFAULT_HEARTBEAT_MARGIN_S,
                    help="seconds before expires to refresh while working; default 300 (5 min), 0 disables")
+    p.add_argument("--turn-timeout", type=int, default=0,
+                   help="maximum seconds for one agent turn; 0 disables timeout")
+    p.add_argument("--kill-grace", type=int, default=10,
+                   help="seconds to wait after terminate before kill on timeout")
     p.add_argument("--runtime-dir", default=os.path.join(".m8shift", "runtime"),
                    help="local runtime sidecar dir for runs.jsonl (default: .m8shift/runtime)")
     p.add_argument("--no-run-log", action="store_true",
                    help="disable .m8shift/runtime/runs.jsonl lifecycle logging")
     p.add_argument("--once", action="store_true",
                    help="run at most one eligible turn, then exit")
+    p.add_argument("--dry-run", action="store_true",
+                   help="validate configuration, print the command argv as JSON, then exit")
     p.add_argument("--cmd", nargs=argparse.REMAINDER, required=True,
                    help="the headless agent command (static argv; runs ONE turn)")
     args = p.parse_args()
     if not args.cmd:
         p.error("--cmd requires the agent command (e.g. --cmd claude -p \"...\")")
+    validate_args(args)
 
     me = args.agent.lower()
     me_working = f"WORKING_{me.upper()}"
     me_awaiting = f"AWAITING_{me.upper()}"
     fails = 0
+    if args.dry_run:
+        print(json.dumps({"agent": me, "cmd": args.cmd, "runner_version": VERSION}, sort_keys=True))
+        return 0
 
     while True:
         lk = read_lock(args.m8shift)
@@ -213,9 +253,21 @@ def main():
             log(f"could not launch the agent: {e}")
             append_run_event(args, "run.launch_failed", run_id, me, detail=str(e))
             return 2
+        started = time.monotonic()
+        timed_out = False
         while True:
+            elapsed = time.monotonic() - started
+            if args.turn_timeout and elapsed > args.turn_timeout:
+                timed_out = True
+                log(f"turn timeout after {args.turn_timeout}s; terminating child.")
+                stop_child(proc, args.kill_grace)
+                append_run_event(args, "run.timeout", run_id, me, timeout_seconds=args.turn_timeout)
+                break
+            wait_for = min(args.interval, 30)
+            if args.turn_timeout:
+                wait_for = max(0.1, min(wait_for, args.turn_timeout - elapsed))
             try:
-                proc.wait(timeout=min(args.interval, 30))
+                proc.wait(timeout=wait_for)
                 break
             except subprocess.TimeoutExpired:
                 maybe_refresh_ttl(args, me, me_working, run_id)
@@ -224,7 +276,12 @@ def main():
         after = read_lock(args.m8shift) or {}
         progressed = (after.get("turn") != lk.get("turn")
                       or after.get("state") not in (state, me_working))
-        if after.get("state") == me_working and after.get("holder") == me:
+        if timed_out:
+            fails += 1
+            append_run_event(args, "run.ended", run_id, me, status="timeout",
+                             returncode=proc.returncode, relay_state=after.get("state", ""),
+                             relay_turn=after.get("turn", ""))
+        elif after.get("state") == me_working and after.get("holder") == me:
             # claimed but exited without append → crashed mid-turn.
             fails += 1
             log(f"agent exited holding the pen (crash {fails}/{args.max_retries}).")

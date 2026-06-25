@@ -1,6 +1,6 @@
 # RFC — Provider management
 
-- **Status:** future companion RFC, not implemented
+- **Status:** implemented v1 in v3.16.0 via `m8shift-runtime.py providers`
 - **Scope:** optional adapter registry for agent tools and execution surfaces
 - **Core invariant:** M8Shift coordinates agents; it does not become a model provider
 
@@ -50,31 +50,25 @@ commands, capabilities, and policies.
 
 ## 5. Provider registry model
 
-A future companion may use a gitignored host config such as:
+The shipped companion uses a stdlib-friendly JSON registry at
+`.m8shift/providers.json`:
 
-```toml
-[[agents]]
-name = "codex"
-provider = "openai-codex"
-mode = "headless"
-anchor = "AGENTS.md"
-argv = ["codex", "exec", "$M8SHIFT_PROMPT"]
-capabilities = ["read_repo", "write_repo", "run_tests"]
-permissions = "workspace-write"
-
-[[agents]]
-name = "gemini"
-provider = "google-gemini"
-mode = "interactive"
-anchor = "GEMINI.md"
-capabilities = ["read_repo", "review", "image_reasoning"]
-
-[[agents]]
-name = "vibe"
-provider = "vibe"
-mode = "interactive"
-anchor = "AGENTS.md"
-capabilities = ["read_repo", "write_repo"]
+```json
+{
+  "schema": "m8shift.providers.v1",
+  "agents": [
+    {
+      "name": "codex",
+      "provider": "openai-codex",
+      "mode": "headless",
+      "anchor": "AGENTS.md",
+      "argv": ["codex", "exec", "$M8SHIFT_PROMPT"],
+      "capabilities": ["read_repo", "write_repo", "run_tests"],
+      "requires_env": [],
+      "permissions": "workspace-write"
+    }
+  ]
+}
 ```
 
 This file is not a core protocol file. It is host/runtime configuration.
@@ -177,9 +171,21 @@ agents: claude,codex,gemini,vibe
 Provider management explains what those names mean to the host. It never changes
 the lock semantics.
 
-## 13. Open questions
+## 13. Shipped command surface
 
-- Should the registry format be TOML, JSON, or YAML?
+```bash
+python3 m8shift-runtime.py providers init [--agents claude,codex] [--force]
+python3 m8shift-runtime.py providers list [--json]
+python3 m8shift-runtime.py providers show <agent>
+python3 m8shift-runtime.py providers check [agent] [--json]
+python3 m8shift-runtime.py providers render <agent> --prompt "..." [--run RUN] [--json]
+```
+
+`render` substitutes only explicit placeholders such as `$M8SHIFT_PROMPT` inside
+argv elements. It never evaluates a shell string.
+
+## 14. Open questions
+
 - Should there be a built-in registry of known anchors for common tools?
 - Should adapter templates be versioned independently from the core?
 - Should provider management live in the runtime control plane package rather
