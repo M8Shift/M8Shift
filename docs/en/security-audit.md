@@ -271,6 +271,8 @@ Deferred / still policy-level:
   - either remove the local source-repo relay artifacts if the external relay is canonical,
     or regenerate them with the current engine;
   - add a maintainer note identifying the canonical dogfooding relay path;
+  - promote the canonical dogfooding relay to every stable version after release checks pass, and
+    record any intentional skew as an operational exception;
   - include `doctor --lint` in release checks, at least for packaged/demo relay files.
 
 ### SEC-11 — Lock-file hardening could be stricter against local filesystem tricks

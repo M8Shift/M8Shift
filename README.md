@@ -401,3 +401,5 @@ the test suite before opening a PR.
 > **Made with ❤ & M8Shift.** M8Shift is improved *with M8Shift*: Claude ⇄ Codex
 > coordinate every change through the relay itself — see
 > [Developing M8Shift with M8Shift](docs/en/specification.md#11-developing-m8shift-with-m8shift-dogfooding).
+> The dogfooding relay is promoted to each stable version after tests pass, so the coordinator
+> does not silently drift behind the tool being developed.
