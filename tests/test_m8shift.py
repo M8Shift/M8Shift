@@ -2244,6 +2244,57 @@ class TestStage8Core(CLIBase):
             self.assertFalse(guard.still_owned())
 
 
+# ───────────────────────── installer verify default ─────────────────────────
+
+class TestInstallerVerifyDefault(unittest.TestCase):
+    """install.sh verifies downloads by DEFAULT (mirrors install.ps1); --no-verify or a
+    falsey M8SHIFT_INSTALL_VERIFY opts out, --verify/--checksums force it on. A tampered
+    m8shift.py whose hash no longer matches checksums.sha256 is rejected when verification
+    is on and installed when it is off. Served over file:// so the test needs no network."""
+
+    def setUp(self):
+        self.src = tempfile.mkdtemp(prefix="m8shift-isrc-")
+        self.addCleanup(shutil.rmtree, self.src, True)
+        for f in ("m8shift.py", "m8shift-worktree.py", "checksums.sha256"):
+            shutil.copy(os.path.join(REPO, f), self.src)
+        with open(os.path.join(self.src, "m8shift.py"), "a") as fh:
+            fh.write("\n# tampered\n")              # hash no longer matches the manifest
+
+    def _rc(self, extra_args, env_extra=None):
+        target = tempfile.mkdtemp(prefix="m8shift-idst-")
+        self.addCleanup(shutil.rmtree, target, True)
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--no-worktree", "--no-init", *extra_args],
+            capture_output=True, text=True, env=env,
+        ).returncode
+
+    def test_default_verifies_and_rejects_tampered(self):
+        self.assertNotEqual(self._rc([]), 0)
+
+    def test_no_verify_skips(self):
+        self.assertEqual(self._rc(["--no-verify"]), 0)
+
+    def test_verify_flag_still_verifies(self):
+        self.assertNotEqual(self._rc(["--verify"]), 0)
+
+    def test_env_falsey_skips(self):
+        for val in ("0", "false", "no", "No", "FALSE"):
+            with self.subTest(val=val):
+                self.assertEqual(self._rc([], {"M8SHIFT_INSTALL_VERIFY": val}), 0)
+
+    def test_env_truthy_verifies(self):
+        self.assertNotEqual(self._rc([], {"M8SHIFT_INSTALL_VERIFY": "1"}), 0)
+
+    def test_explicit_flag_overrides_env(self):
+        self.assertNotEqual(self._rc(["--verify"], {"M8SHIFT_INSTALL_VERIFY": "0"}), 0)
+        self.assertEqual(self._rc(["--no-verify"], {"M8SHIFT_INSTALL_VERIFY": "1"}), 0)
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")

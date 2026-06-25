@@ -2,7 +2,7 @@
 # M8Shift local installer.
 #
 # Intended one-liner:
-#   curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --verify --agents claude,codex
+#   curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
 #
 # This script installs M8Shift into the current project directory by downloading the
 # standalone CLI files, then runs `m8shift.py init`. It does not use sudo, does not
@@ -20,7 +20,8 @@ LANG_CODE=""
 RUN_INIT=1
 WITH_WORKTREE=1
 FORCE_INIT=0
-VERIFY_DOWNLOADS="${M8SHIFT_INSTALL_VERIFY:-0}"
+VERIFY_EXPLICIT=""   # --verify sets 1, --no-verify sets 0; otherwise env/default decide
+VERIFY_DOWNLOADS=1   # resolved after arg parsing (verification is ON by default)
 CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
 CHECKSUMS_TEXT=""
 EXPECTED_SHA256S=""
@@ -31,7 +32,7 @@ usage() {
 M8Shift installer
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --verify --agents claude,codex
+  curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
   bash install.sh [options]
 
 Options:
@@ -44,14 +45,16 @@ Options:
   --no-worktree       Do not download m8shift-worktree.py.
   --ref REF            Git ref used for downloads when --base-url is not set (default: main).
   --base-url URL      Download base URL (default: GitHub raw for --ref).
-  --verify            Verify downloaded files against checksums.sha256.
-  --checksums URL     Use a custom checksums URL or local path for --verify.
+  --verify            Force checksum verification (already the default).
+  --no-verify         Skip checksum verification.
+  --checksums URL     Use a custom checksums URL or local path (implies verification).
   --sha256 FILE:HEX   Pin one expected SHA-256 manually; repeatable.
   -h, --help          Show this help.
   --version           Show installer version.
 
 The installer is local-only: no sudo, no PATH mutation, no background service.
-Security note: --verify checks integrity against the selected ref's manifest;
+Verification is enabled by default; --no-verify disables it.
+Security note: verification checks integrity against the selected ref's manifest;
 for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
 EOF
 }
@@ -206,13 +209,17 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --verify)
-      VERIFY_DOWNLOADS=1
+      VERIFY_EXPLICIT=1
+      shift
+      ;;
+    --no-verify)
+      VERIFY_EXPLICIT=0
       shift
       ;;
     --checksums)
       need_value "$1" "${2:-}"
       CHECKSUMS_URL="$2"
-      VERIFY_DOWNLOADS=1
+      VERIFY_EXPLICIT=1
       shift 2
       ;;
     --sha256)
@@ -233,6 +240,21 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# Verification is ON by default (mirrors install.ps1). --no-verify or a falsey
+# M8SHIFT_INSTALL_VERIFY ("0/false/no") disables it; --verify / --checksums force it on.
+if [ "$VERIFY_EXPLICIT" = "0" ]; then
+  VERIFY_DOWNLOADS=0
+elif [ "$VERIFY_EXPLICIT" = "1" ]; then
+  VERIFY_DOWNLOADS=1
+elif [ -n "${M8SHIFT_INSTALL_VERIFY:-}" ]; then
+  case "$M8SHIFT_INSTALL_VERIFY" in
+    0|false|False|FALSE|no|No|NO) VERIFY_DOWNLOADS=0 ;;
+    *) VERIFY_DOWNLOADS=1 ;;
+  esac
+else
+  VERIFY_DOWNLOADS=1
+fi
 
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN is required"
 validate_ref
