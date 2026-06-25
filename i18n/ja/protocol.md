@@ -191,6 +191,8 @@ loop:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # ここにキットを（再）生成
 ./m8shift.py status                                # ロック + 直近のターン（非ブロッキング）
+./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # ヘルス/セキュリティ/契約の読み取り専用診断
+./m8shift.py contract validate [--strict] [--json] # Stage 4 契約の読み取り専用検証
 ./m8shift.py wait <agent> [--once] [--interval N]  # あなたの番を待つ ; --once = 1回チェック（あなたの番でなければ rc 3）
 ./m8shift.py claim <agent> [--force]               # ペンを取得（排他的）— あなたの番 /
                                                   #   IDLE / 自分自身のロックから ; --force = 古いロックのみ
