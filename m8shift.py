@@ -69,7 +69,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.18.1"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.18.2"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -2022,6 +2022,67 @@ def render_session_report(session, turns, include_body=False):
     return "\n".join(lines)
 
 
+RESERVED_REPORT_OUTPUT_RELATIVE_PATHS = (
+    "m8shift.py",
+    "m8shift-runtime.py",
+    "m8shift-worktree.py",
+    "m8shift-i18n.py",
+    "examples/headless_runner.py",
+    "scripts/gen_docs.py",
+    "install.sh",
+    "install.ps1",
+    "checksums.sha256",
+)
+
+
+def normalized_report_output_path(path):
+    return os.path.normcase(os.path.realpath(path)).casefold()
+
+
+def project_relative_reserved_path(root, rel):
+    if not rel or "\x00" in rel or os.path.isabs(rel):
+        return None
+    candidate = os.path.realpath(os.path.join(root, *rel.replace("\\", "/").split("/")))
+    try:
+        if os.path.commonpath([root, candidate]) != root:
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
+def checksummed_report_output_paths(root):
+    manifest = os.path.join(root, "checksums.sha256")
+    if not os.path.exists(manifest):
+        return set()
+    out = set()
+    try:
+        with open(manifest, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.strip().split(None, 1)
+                if len(parts) != 2:
+                    continue
+                candidate = project_relative_reserved_path(root, parts[1].strip())
+                if candidate:
+                    out.add(candidate)
+    except OSError:
+        return set()
+    return out
+
+
+def discovered_report_output_script_paths(root):
+    out = set()
+    for rel_dir in ("examples", "scripts"):
+        base = os.path.join(root, rel_dir)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, _, filenames in os.walk(base):
+            for name in filenames:
+                if name.endswith((".py", ".sh", ".ps1")):
+                    out.add(os.path.realpath(os.path.join(dirpath, name)))
+    return out
+
+
 def reserved_report_output_paths():
     root = os.path.realpath(os.path.dirname(COWORK) or ".")
     reserved = {
@@ -2033,20 +2094,24 @@ def reserved_report_output_paths():
         SESSIONS,
         REQUESTS,
         LOCKFILE,
-        os.path.join(root, "m8shift.py"),
-        os.path.join(root, "m8shift-runtime.py"),
-        os.path.join(root, "m8shift-worktree.py"),
-        os.path.join(root, "m8shift-i18n.py"),
         os.path.abspath(__file__),
     }
+    for rel in RESERVED_REPORT_OUTPUT_RELATIVE_PATHS:
+        candidate = project_relative_reserved_path(root, rel)
+        if candidate:
+            reserved.add(candidate)
+    reserved |= checksummed_report_output_paths(root)
+    reserved |= discovered_report_output_script_paths(root)
     return {os.path.realpath(path) for path in reserved}
 
 
 def reject_reserved_report_output(path):
     root = os.path.realpath(os.path.dirname(COWORK) or ".")
     path_real = os.path.realpath(path)
-    reports_real = os.path.realpath(SESSION_REPORTS)
-    if path_real == reports_real or path_real in reserved_report_output_paths():
+    path_key = normalized_report_output_path(path)
+    reports_key = normalized_report_output_path(SESSION_REPORTS)
+    reserved_keys = {normalized_report_output_path(p) for p in reserved_report_output_paths()}
+    if path_key == reports_key or path_key in reserved_keys:
         try:
             label = os.path.relpath(path_real, root)
         except ValueError:
@@ -2080,8 +2145,8 @@ def resolve_report_output(session_id, output=""):
 
 def write_report_atomic(path, text, force=False):
     parent = os.path.dirname(path) or "."
-    os.makedirs(parent, exist_ok=True)
     reject_reserved_report_output(path)
+    os.makedirs(parent, exist_ok=True)
     if os.path.isdir(path):
         sys.exit("refused: report output is a directory.")
     if os.path.islink(path):

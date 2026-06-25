@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.18.1"
+VERSION = "3.18.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE_PATH = os.path.join(HERE, "m8shift.py")
 RUNTIME_DIR = os.path.join(HERE, ".m8shift", "runtime")
