@@ -1,6 +1,6 @@
 # RFC — Session reports and decision ledger
 
-- **Status:** implemented v1 in v3.18.0
+- **Status:** implemented v1 in v3.18.1
 - **Scope:** read-only session inspection plus optional Markdown report generation
 - **Core invariant:** session reports are derived memory. They never route work, grant
   the pen, mutate the `LOCK`, or replace the append-only turn journal.
@@ -167,6 +167,9 @@ Custom `--output PATH` is allowed only for files under the project root:
 - require `commonpath([project_root, output_path]) == project_root`;
 - refuse an existing symlink target;
 - refuse a parent directory whose real path escapes the project root;
+- refuse reserved M8Shift coordination and script files (`M8SHIFT.md`, session/request
+  ledgers, protocol/memory/task files, `.m8shift.lock`, and shipped `m8shift*.py`
+  scripts), even when `--force` is provided;
 - write atomically through a temporary file in the same directory and `os.replace`;
 - when not using `--force`, refuse an existing target without a check/write race
   (`x`-style creation or equivalent guarded path).
@@ -233,6 +236,8 @@ The command must keep the existing field/body safety model:
   drive-style selectors, and selectors containing path separators are rejected and never
   write outside `M8SHIFT.session-reports/`.
 - custom `--output` paths outside the project root or through symlink escapes are rejected.
+- custom `--output` paths targeting reserved M8Shift coordination or script files are
+  rejected, including with `--force`.
 - report writes are atomic and race-safe for existing targets.
 - reports include archived and living turns for the requested session.
 - structured decisions from Stage 4 fields are listed without inventing missing ones.
