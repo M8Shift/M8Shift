@@ -63,6 +63,18 @@ agent turn, run `status --for <you>` (or keep using `next <you>`). If the state 
 not `DONE`, either finish your own `WORKING_<you>` state with `append`/`done`, or
 keep waiting for your next turn.
 
+Listening invariant: `idle` is **not** `DONE`. Do not stop listening because you
+predict the peer has no more work. If the relay is not `DONE` and you do not hold
+the pen, keep `wait <you>` armed (or use `append --wait` / a headless runner) until
+your next turn or `DONE`.
+
+Unread-turn guardrail: when a handoff is addressed to you, **read it before any
+empty handback**. Use `next <you>` (preferred) or `claim <you>` + `peek <you>`.
+`release <you> --to <other>` is only for an intentional no-body handoff; it refuses
+to bounce a pending incoming turn unless you pass `--force --reason TEXT`, which is
+audited. Normal review/answer flow is `peek` → do the required work or analysis →
+`append`.
+
 > The protocol makes you self-sufficient *once you are running*. In an interactive UI
 > (VS Code, …) a human still resumes you between turns — `wait` blocks a process, it
 > does not wake your chat UI. Fully hands-off relays need a headless runner, not a

@@ -51,6 +51,15 @@ Implemented in `m8shift.py` / companions `v3.12.0`:
 - `m8shift-worktree.py` validates branch names and rejects leading dash, whitespace,
   control characters, and non-branch `--into` targets.
 
+Implemented in `m8shift.py` `v3.14.0`:
+
+- `release` refuses to silently bounce the latest incoming turn addressed to the
+  releasing agent. The agent must read/answer it with `peek` + `append`, or use
+  `release --force --reason TEXT` for an intentional audited empty handback.
+- the protocol and injected stanza now state the keep-listening invariant explicitly:
+  `idle` is not `DONE`; while the relay is open and the agent does not hold the pen,
+  keep `wait <agent>` / `append --wait` / a headless runner armed.
+
 Deferred / still policy-level:
 
 - `M8SHIFT_ROOT` is warned by `doctor --security`, but not forbidden; the worktree
