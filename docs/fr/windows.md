@@ -50,15 +50,34 @@ python m8shift.py status
 
 ## Option C — PowerShell / cmd natif
 
+Dans PowerShell :
+
+```powershell
+irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex
+python m8shift.py status
+```
+
+Depuis `cmd.exe` :
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex"
+python m8shift.py status
+```
+
+L'installateur PowerShell télécharge `m8shift.py` et la boîte à outils optionnelle
+`m8shift-worktree.py`, les vérifie par défaut avec `checksums.sha256`, puis lance `init`.
+
+Alternative manuelle :
+
 ```powershell
 python m8shift.py init
 python m8shift.py claim claude
 python m8shift.py append claude --to codex --ask "..." --done "..."
 ```
 
-PowerShell natif ne lance pas l'installateur Bash. Téléchargez ou copiez d'abord
-`m8shift.py` dans le projet ; copiez `m8shift-worktree.py` à côté seulement si
-vous utilisez les worktrees parallèles isolés.
+Si vous n'utilisez pas l'installateur, téléchargez ou copiez d'abord `m8shift.py`
+dans le projet ; copiez `m8shift-worktree.py` à côté seulement si vous utilisez les
+worktrees parallèles isolés.
 
 `claude` et `codex` sont des noms de roster d'exemple. Remplacez-les par `gemini`,
 `vibe` ou tout agent coopératif qui respecte le protocole du relais.
