@@ -4,7 +4,7 @@
 >
 > Cette page reflète le modèle v3 courant : roster actif de ≥2 agents, stylo unique
 > dans le cœur (degré 1), registres append-only/read-only, historique de sessions,
-> packs i18n, et compagnon optionnel `m8shift-worktree.py` pour la concurrence par
+> packs i18n, et compagnon optionnel [`m8shift-worktree.py`](../en/rfc-worktree-companion.md) pour la concurrence par
 > worktrees isolés (degré 2). Pour les règles commande par commande, voir
 > [protocole.md](protocole.md) et [cahier-des-charges.md](cahier-des-charges.md).
 
@@ -101,7 +101,7 @@ flowchart TB
 **Composants** : (a) le bloc `LOCK` = automate d'état ; (b) le journal de tours
 append-only ; (c) les ancrages porteurs de la *strophe* d'auto-instruction ;
 (d) la CLI `m8shift.py` ; (e) les registres passifs (`memory`, `tasks`, `sessions`) ;
-(f) le compagnon optionnel `m8shift-worktree.py`.
+(f) le compagnon optionnel [`m8shift-worktree.py`](../en/rfc-worktree-companion.md).
 
 **Automate d'état** (`X`, `Y` = deux membres quelconques du roster actif) :
 

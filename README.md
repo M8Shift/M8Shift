@@ -371,8 +371,9 @@ durable, append-only `M8SHIFT.tasks.md` (no pen needed; `--for`/`--blocked-on` a
 text, never enforced), with open-task headlines in `recap`.
 
 **Roadmap status** — the roadmap is complete: every staged degree-1 surface has shipped (see
-*Shipped* above), **and degree-2 has shipped too** as the opt-in `m8shift-worktree.py` companion
-(roadmap step 2). The last degree-1 candidate, `subturn` (sub-agent fan-out provenance), was deliberately
+*Shipped* above), **and degree-2 has shipped too** as the opt-in
+[`m8shift-worktree.py`](docs/en/rfc-worktree-companion.md) companion (roadmap step 2).
+The last degree-1 candidate, `subturn` (sub-agent fan-out provenance), was deliberately
 **rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn
 durable streaming, so another work-provenance ledger would be redundant surface
 ([rationale](docs/en/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/`.
@@ -380,7 +381,8 @@ RFCs are English-only; localized documentation should link to the canonical Engl
 RFC instead of maintaining translated copies.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
-disjoint writes inside the shared tree (use the opt-in worktree companion instead); a
+disjoint writes inside the shared tree (use the
+[opt-in worktree companion](docs/en/rfc-worktree-companion.md) instead); a
 background daemon / autonomous watcher / push-notifier; running git, builds or APIs (needs auth +
 network → an orchestrator); third-party deps or a multi-file package; and "smart"
 *derived* memory (dedup / summarize / prune) — the ledger stays a dumb, human-curated

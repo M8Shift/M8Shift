@@ -22,9 +22,9 @@ git worktree and serializes integration.
 
 Do **not** implement this in the M8Shift core.
 
-The current answer for parallel work is the worktree companion: isolated trees,
-independent commits, one serialized integration pen. Shared-tree degree > 1 is
-kept as a research topic and must not weaken the core's single-pen guarantee.
+The current answer for parallel work is the [worktree companion](rfc-worktree-companion.md):
+isolated trees, independent commits, one serialized integration pen. Shared-tree degree
+> 1 is kept as a research topic and must not weaken the core's single-pen guarantee.
 
 ## 3. Why it is tempting
 
@@ -141,8 +141,8 @@ This topic should not be reconsidered for the core unless a prototype proves:
 - no path lease can bypass `append` provenance;
 - tests cover simultaneous writers and conflict recovery.
 
-Until then, the core remains degree-1 and the worktree companion remains the
-parallelism story.
+Until then, the core remains degree-1 and the
+[worktree companion](rfc-worktree-companion.md) remains the parallelism story.
 
 ## 10. Final stance
 
@@ -150,5 +150,5 @@ This RFC documents the idea so it is not repeatedly rediscovered. The current
 decision is:
 
 - **core:** rejected;
-- **companion:** use isolated worktrees;
+- **companion:** use [isolated worktrees](rfc-worktree-companion.md);
 - **research:** possible only as a separate experimental orchestrator.

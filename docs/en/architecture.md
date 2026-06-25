@@ -4,7 +4,7 @@
 >
 > This architecture reflects the current v3 model: active roster of ≥2 agents, one
 > core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
-> and the opt-in `m8shift-worktree.py` companion for degree-2 isolated worktree
+> and the opt-in [`m8shift-worktree.py`](rfc-worktree-companion.md) companion for degree-2 isolated worktree
 > concurrency. For command-level rules, see [protocol.md](protocol.md) and
 > [specification.md](specification.md).
 
@@ -100,7 +100,8 @@ flowchart TB
 **Components**: (a) the `LOCK` block = state machine; (b) the append-only turn
 log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
 `m8shift.py` CLI; (e) passive side ledgers (`memory`, `tasks`, `sessions`) used only
-by read-only or append-only commands; (f) the optional `m8shift-worktree.py` companion.
+by read-only or append-only commands; (f) the optional
+[`m8shift-worktree.py`](rfc-worktree-companion.md) companion.
 
 **State machine** (`X`, `Y` = any two active roster members):
 

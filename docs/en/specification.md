@@ -18,7 +18,7 @@ human still nudges each agent to resume between turns — see §8.
 | Included | Excluded |
 |----------|----------|
 | Single-file lock, turn journal, control CLI | Network / multi-machine orchestration |
-| Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in `m8shift-worktree.py` companion) |
+| Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in [`m8shift-worktree.py`](rfc-worktree-companion.md) companion) |
 | Anti-deadlock via TTL, bounded archiving | Resident daemon, persistent queue |
 | `CLAUDE.md` / `AGENTS.md` anchors | Authentication / encryption of the state file |
 
@@ -378,7 +378,8 @@ The remaining future topics are now explicit RFCs:
   roster identities (`claude`, `codex`, `gemini`, `vibe`, …) to host provider
   commands, capabilities, and policies.
 - [RFC — True degree > 1 writes in one shared working tree](rfc-shared-tree-degree-gt1.md):
-  research topic, rejected for the core; use isolated worktrees for real parallelism.
+  research topic, rejected for the core; use the
+  [worktree companion](rfc-worktree-companion.md) for real parallelism.
 
 `subturn` was **rejected** (see [rfc-subturn.md](rfc-subturn.md)): §5 advisory fields cover
 at-append provenance and `remember` covers mid-turn streaming, so a fourth ledger would be
@@ -392,7 +393,7 @@ itself stays a pure degree-1 mutex while true concurrency is available when want
 
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|
-| **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the `m8shift-worktree.py` companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
+| **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the [`m8shift-worktree.py`](rfc-worktree-companion.md) companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
 | **Background daemon / autonomous watcher / push-notifier** | passive | M8Shift has no resident process. The shipped `watch` command is only a foreground read-only terminal view; notifications can *signal* a turn, never *wake* the AI. |
 | **Runtime supervision in the core** | passive / single-file | Queues, presence, progress drafts, and operator inboxes are useful host integration concerns, but they belong in an opt-in companion ([rfc-runtime-companion.md](rfc-runtime-companion.md)), not in the mutex. |
 | **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns M8Shift into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |

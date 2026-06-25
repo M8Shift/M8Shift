@@ -353,12 +353,13 @@ champs consultatifs sur `append` (`--branch`/`--commit`/`--tests`/`--next`/
 des données déjà stockées par M8Shift ; elles ne pilotent jamais le mutex.
 
 **État de la roadmap** — la roadmap de degré 1 est complète, **et le degré 2 est livré**
-(compagnon opt-in `m8shift-worktree.py`, étape 2). Le dernier candidat degré 1,
+([compagnon opt-in `m8shift-worktree.py`](en/rfc-worktree-companion.md), étape 2). Le dernier candidat degré 1,
 `subturn`, a été rejeté : les champs consultatifs couvrent la provenance au moment de
 l'append, et `remember` couvre le streaming durable en cours de tour.
 
 **Non-goals** (briseraient une qualité de M8Shift) : *baux* par chemin pour des écritures
-disjointes concurrentes dans l'arbre partagé (utiliser plutôt le compagnon worktree optionnel) ;
+disjointes concurrentes dans l'arbre partagé (utiliser plutôt le
+[compagnon worktree optionnel](en/rfc-worktree-companion.md)) ;
 un daemon / watcher autonome / push de notifications en arrière-plan ; lancer git, des builds
 ou des API (auth + réseau → un orchestrateur) ; des dépendances tierces ou un paquet
 multi-fichiers ; et une mémoire *dérivée* « intelligente » (dédup / résumé / purge) —
