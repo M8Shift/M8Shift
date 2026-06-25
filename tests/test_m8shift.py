@@ -2301,7 +2301,8 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         bare = tempfile.mkdtemp(prefix="m8shift-bare-")
         self.addCleanup(shutil.rmtree, bare, True)
         shutil.copy(os.path.join(REPO, "m8shift.py"), bare)   # original, untampered
-        good = hashlib.sha256(open(os.path.join(bare, "m8shift.py"), "rb").read()).hexdigest()
+        with open(os.path.join(bare, "m8shift.py"), "rb") as fh:
+            good = hashlib.sha256(fh.read()).hexdigest()
 
         def rc(extra):
             target = tempfile.mkdtemp(prefix="m8shift-bd-")
@@ -2322,12 +2323,15 @@ class TestChecksumsManifest(unittest.TestCase):
 
     def test_manifest_matches_files(self):
         manifest = os.path.join(REPO, "checksums.sha256")
-        for line in open(manifest, encoding="utf-8"):
+        with open(manifest, encoding="utf-8") as fh:
+            entries = fh.read().splitlines()
+        for line in entries:
             line = line.strip()
             if not line:
                 continue
             expected, name = line.split()
-            actual = hashlib.sha256(open(os.path.join(REPO, name), "rb").read()).hexdigest()
+            with open(os.path.join(REPO, name), "rb") as f2:
+                actual = hashlib.sha256(f2.read()).hexdigest()
             self.assertEqual(actual, expected, f"stale checksum for {name}")
 
 
