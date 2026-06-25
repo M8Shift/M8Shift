@@ -68,7 +68,7 @@ ANCHORS = {
     "claude":  "CLAUDE.md",
     "codex":   "AGENTS.md",        # + AGENTS.override.md
     "gemini":  "GEMINI.md",        # Gemini CLI auto-loads GEMINI.md
-    "lechat":  "AGENTS.md",        # Le Chat / Mistral: AGENTS.md (best-effort) — see below
+    "vibe":    "AGENTS.md",        # Vibe / AGENTS-compatible tools (best-effort) — see below
     # nested-path anchors (e.g. Copilot's .github/copilot-instructions.md) are out of
     # stage 1: ensure_canonical_anchor is not path-aware → manual-bootstrap fallback.
 }
@@ -80,13 +80,13 @@ agent).
 
 Two hard cases, handled explicitly (not silently):
 
-1. **Anchor collision.** Several "codex-compatible" tools (`codex`, `lechat`,
-   `mistral`) auto-load `AGENTS.md`. We inject **one** stanza there; with a roster
+1. **Anchor collision.** Several AGENTS-compatible tools (`codex`, `vibe`,
+   and similar tools) auto-load `AGENTS.md`. We inject **one** stanza there; with a roster
    that shares a file, the stanza must be **generic** ("you are one of the agents
    sharing this file; identify yourself by your host tool") and list the valid
    `--to` targets. Honest limit: a tool sharing `AGENTS.md` does not intrinsically
    *know* which roster name it is — agent identity remains a human/launch convention.
-2. **No auto-load convention** (e.g. Le Chat today, or any cron/CI launched outside
+2. **No auto-load convention** (e.g. a custom Vibe setup, or any cron/CI launched outside
    the project, or a tool with no project-doc mechanism). M8Shift is **passive**: it
    can provide the stanza but cannot force a read. `init` writes a best-effort
    fallback anchor and **prints a warning**: *"agent `<X>`: no known auto-loaded
