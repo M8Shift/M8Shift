@@ -50,7 +50,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [rfc-runtime-patterns.md](rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |
 | [rfc-session-history.md](rfc-session-history.md) | Session history ledger and `history` command. |
 | [rfc-shared-tree-degree-gt1.md](rfc-shared-tree-degree-gt1.md) | Research RFC for true degree > 1 writes in one shared working tree; rejected for the core. |
-| [rfc-stage6-integrations.md](rfc-stage6-integrations.md) | Stage 6 integration plan: remaining work, value, risks, and priorities. |
+| [rfc-stage6-integrations.md](rfc-stage6-integrations.md) | Stage 6 closure: local integration layer shipped; heavier integrations deferred to post-Stage-6 companions. |
 | [rfc-subturn.md](rfc-subturn.md) | Rejected `subturn` proposal. |
 | [rfc-tasks.md](rfc-tasks.md) | Shared append-only task board. |
 | [rfc-worktree-companion.md](rfc-worktree-companion.md) | Opt-in worktree companion for degree-2 parallel work and serialized integration. |
