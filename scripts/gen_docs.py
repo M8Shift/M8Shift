@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import m8shift  # noqa: E402
 
-VERSION = "3.16.0"
+VERSION = "3.17.0"
 
 
 def main(argv=None):

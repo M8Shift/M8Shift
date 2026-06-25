@@ -90,6 +90,7 @@ flowchart LR
 | EF-18 | Stage-4 contract metadata is accepted on `append` via dedicated flags and/or `--field`; `contract validate` and `doctor --contracts` validate it read-only, with strict mode failing malformed `schema=stage4.v1` turns only when explicitly requested. | `test_contract_sugar_fields_written_and_validate_clean`, `test_contract_validate_warns_by_default_but_strict_fails`, `test_doctor_contracts_includes_contract_findings` |
 | EF-19 | The local install layer ships copy/download recipes, `checksums.sha256`, Bash and PowerShell installers, and version surfaces for distributed scripts. Verification is enabled by default and `--no-verify` is an explicit opt-out. | `test_default_verifies_and_rejects_tampered`, `test_no_verify_skips`, `test_verify_flag_still_verifies`, `test_manifest_matches_files` |
 | EF-20 | `examples/headless_runner.py` is a reference local runner for one headless agent lane: it waits/claims through the core, launches one static command, refreshes the TTL heartbeat before expiry, passes `M8SHIFT_RUN_ID`, and appends lifecycle events to `.m8shift/runtime/runs.jsonl`. | `test_headless_runner_once_writes_run_ledger_and_env_run_id`, `test_headless_runner_reads_m8shift_lock` |
+| EF-21 | `pause <holder> --reason` parks an open session with no active task as `PAUSED`/`holder=none`; `resume <agent> --reason` or `next <agent> --resume --reason` explicitly assigns new user scope before any claim can proceed. `doctor` warns on parked `WORKING_*` notes and ack-bounce livelocks. | `test_pause_parks_session_and_resume_is_explicit`, `test_pause_requires_current_holder_and_release_refuses_paused`, `test_doctor_warns_when_working_note_parks_the_pen` |
 
 ## 5. Non-functional requirements
 
@@ -151,8 +152,8 @@ At the head of `M8SHIFT.md`, between `<!-- M8SHIFT:LOCK:BEGIN -->` and `:END`:
 
 | field | type | values |
 |-------|------|--------|
-| `holder` | enum | pen holder (WORKING) \| awaited baton-owner (AWAITING) \| `none` |
-| `state` | enum | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` (one per active agent) |
+| `holder` | enum | pen holder (WORKING) \| awaited baton-owner (AWAITING) \| `none` (`IDLE`, `PAUSED`, `DONE`) |
+| `state` | enum | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` (one per active agent where applicable) |
 | `agents` | CSV \| absent | the active roster (all declared agents, ≥2; default `claude,codex`) |
 | `session` | id \| absent | current session id (`YYYYMMDDTHHMMSSZ-xxxxxxxx`); absent in legacy files |
 | `turn` | integer | number of the last closed turn |
@@ -193,7 +194,11 @@ stateDiagram-v2
     AWAITING_Y --> WORKING_Y: Y claims
     WORKING_X --> WORKING_X: X re-claims (refresh TTL)
     WORKING_X --> WORKING_Y: Y force-claims (X stale)
+    WORKING_X --> PAUSED: X pauses (no assigned work)
+    AWAITING_Y --> PAUSED: Y pauses (no assigned work)
+    PAUSED --> AWAITING_X: resume X
     WORKING_X --> DONE: done
+    PAUSED --> DONE: done
     DONE --> [*]
 ```
 
@@ -202,11 +207,12 @@ stateDiagram-v2
 `init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json]` · `watch [--for agent] [--interval N] [--clear] [--changes-only]` · `doctor [--lint] [--json] [--security] [--contracts] [--severity-min …]` ·
 `contract validate [--strict] [--json] [--all] [--severity-min …]` ·
 `recap [--turns N] [--memory N] [--tasks N]` ·
-`wait <agent> [--once] [--interval N]` · `next <agent> [--once] [--interval N] [--force]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
+`wait <agent> [--once] [--interval N]` · `next <agent> [--once] [--interval N] [--force] [--resume --reason TEXT]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
 `peek <agent>` · `log [--limit N] [--all] [--oneline]` · `history [--limit N] [--oneline] [--json]` ·
 `append <agent> --to <other> --ask … --done … [--files …] [--body f|-] [--allow-large-body] [--wait] [--branch/--commit/--tests/--next/--blocked-on …] [--schema/--relation/--role-from/--role-to/--requires/--expected-output/--evidence/--decision/--waiver-reason/--permissions …] [--field k=v]` ·
 `release <agent> --to <other> [--force --reason TEXT]` (no-body handoff; refuses a pending incoming
 turn unless forced with an audited reason) · `done <agent> [--force --reason TEXT]` · `archive [--keep N]` ·
+`pause <holder> --reason TEXT` · `resume <agent> --reason TEXT` ·
 `remember <agent> "<note>"` · `task add|done|drop <agent> … | task list|show …`
 
 > The single shipped file is **English-only**; `--lang` selects among languages bundled into
@@ -402,6 +408,7 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [rfc-provider-management.md](rfc/rfc-provider-management.md) | **Provider management v1** | `m8shift-runtime.py providers init/list/show/check/render`; `.m8shift/providers.json`. | Host-side mapping from roster names to safe argv arrays; no provider SDK, secrets, or core routing authority. |
 | [rfc-headless-runner-hardening.md](rfc/rfc-headless-runner-hardening.md) | **Headless runner hardening** | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, argument validation, and `run.timeout` events. | Bounds stuck provider processes while preserving post-run validation and no force-steal rule. |
 | [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | **Cooperative turn request** | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, and append-only `M8SHIFT.requests.md`. | Requests never make `claim` succeed; only explicit yield/force-steer changes routing, and `steer-turn` refuses fresh `WORKING_*`. |
+| [rfc-pause-resume.md](rfc/rfc-pause-resume.md) | **Pause / resume** | `PAUSED`, `pause <holder> --reason`, `resume <agent> --reason`, `next --resume --reason`, and livelock doctor warnings. | Open session with no active task has no holder; no automatic claim until explicit user-scope resume. |
 
 ### 12.2 Stage 4 contract surface
 

@@ -100,8 +100,8 @@ Champs (un `clé: valeur` par ligne, faciles à `grep`) :
 
 | champ     | valeurs | sens |
 |-----------|---------|------|
-| `holder`  | un agent actif \| `none` | qui tient le stylo (défaut `claude`/`codex`) |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | état courant (`<X>` = un agent actif, en majuscules) |
+| `holder`  | un agent actif \| `none` | détenteur du stylo en `WORKING_*`, agent attendu en `AWAITING_*`, `none` en `IDLE`, `PAUSED` ou `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | état courant (`<X>` = un agent actif, en majuscules) |
 | `agents`  | CSV, ex. `claude,codex` | le couple du relais (les 2 premiers déclarés) ; défaut `claude,codex` |
 | `turn`    | entier | numéro du dernier tour clôturé |
 | `since`   | ISO-8601 UTC | depuis quand cet état dure |
@@ -122,13 +122,15 @@ jamais la claimabilité ni le routage. `status --json` expose les mêmes métado
 et sérialise les valeurs indisponibles en `null`.
 
 > `expires` ne porte une date **que** pendant `WORKING_*` (un agent travaille,
-> TTL 30 min). Il repasse à `-` dès qu'on attend (`AWAITING_*`, `IDLE`, `DONE`) :
+> TTL 30 min). Il repasse à `-` dès qu'on attend (`AWAITING_*`, `IDLE`, `PAUSED`, `DONE`) :
 > personne ne tient le stylo, donc pas de péremption à surveiller.
 
 **Lecture des états** (`<X>` = un agent actif — par défaut `claude`/`codex`) :
 - `AWAITING_<X>` → c'est à `<X>` de jouer (l'autre agent attend).
 - `WORKING_<X>` → `<X>` tient le stylo et travaille (l'autre attend, ne touche à rien).
 - `IDLE` → personne n'a la main, le premier qui a quelque chose à dire démarre.
+- `PAUSED` → la session reste ouverte mais aucun agent n'a de tâche assignée ;
+  reprise seulement quand l'utilisateur donne un nouveau périmètre.
 - `DONE` → session close, plus de relais attendu.
 
 ---
@@ -170,9 +172,11 @@ boucle:
        b. TRAVAILLER dans le dépôt (tant que tu tiens le stylo, toi seul)
        c. APPEND  : ./m8shift.py append <moi> --to <autre>
                    écrit mon tour <turn+1>, state=AWAITING_<AUTRE>
-  3. sinon (WORKING_<autre> ou AWAITING_<autre>) :
+  3. sinon si state == PAUSED :
+       ne pas claim ; attendre un nouveau périmètre utilisateur, puis reprendre explicitement.
+  4. sinon (WORKING_<autre> ou AWAITING_<autre>) :
        attendre ~60 s (wait), retourner en 1
-  4. si state == DONE : sortir
+  5. si state == DONE : sortir
 ```
 
 En pratique : `claim` **acquiert** le stylo (exclusif), `append` **clôt** ton tour
@@ -240,7 +244,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py log [--limit N] [--all] [--oneline]  # timeline du relais (lecture seule)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # historique de session (lecture seule)
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # attend si besoin, puis claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # attend si besoin, puis claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
                                                   #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
 ./m8shift.py append <agent> --to <autre> \
@@ -249,6 +253,8 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py yield-turn <détenteur> --request N --to <agent>       # accepte une demande coopérative de tour
 ./m8shift.py decline-turn <détenteur> --request N --reason "..."   # refuse une demande coopérative de tour
 ./m8shift.py steer-turn <agent> --from <détenteur> --request N --force --reason "..."  # redirige un détenteur idle AWAITING
+./m8shift.py pause <détenteur> --reason "..."       # met la session ouverte en attente utilisateur (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."          # reprend PAUSED pour un agent précis avant claim
 ./m8shift.py remember <agent> "<note>"  # ajoute une note mémoire durable (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registre de tâches advisory (todos par agent)
 ./m8shift.py release <agent> --to <autre> [--force --reason "pourquoi"]  # repasser la main sans corps

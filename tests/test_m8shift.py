@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.16.0"
+VERSION = "3.17.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2272,6 +2272,60 @@ class TestCooperativeTurnRequest(CLIBase):
         self.assertIn("not WORKING_CODEX", r3.stderr + r3.stdout)
 
 
+class TestPauseResume(CLIBase):
+    """PAUSED is the stable open/no-work state: no pen holder, explicit resume required."""
+
+    def test_pause_parks_session_and_resume_is_explicit(self):
+        self.init()
+        self.cw("claim", "claude")
+        r = self.cw("pause", "claude", "--reason", "no further work; waiting for user scope")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lk = self.lock()
+        self.assertEqual(lk["state"], "PAUSED")
+        self.assertEqual(lk["holder"], "none")
+        self.assertEqual(lk["expires"], "-")
+
+        self.assertNotEqual(self.cw("claim", "codex").returncode, 0)
+        wait = self.cw("wait", "codex", "--once")
+        self.assertEqual(wait.returncode, 3)
+        self.assertIn("paused", wait.stdout)
+        nxt = self.cw("next", "codex", "--once")
+        self.assertEqual(nxt.returncode, 3)
+        self.assertIn("paused", nxt.stdout)
+
+        resumed = self.cw("next", "codex", "--once", "--resume", "--reason", "user assigned new scope")
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertEqual(self.lock()["state"], "WORKING_CODEX")
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
+            ledger = fh.read()
+        self.assertIn('"event": "pause"', ledger)
+        self.assertIn('"event": "resume"', ledger)
+
+    def test_pause_requires_current_holder_and_release_refuses_paused(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.assertNotEqual(
+            self.cw("pause", "codex", "--reason", "not holder").returncode,
+            0,
+        )
+        self.cw("pause", "claude", "--reason", "waiting for user scope")
+        r = self.cw("release", "claude", "--to", "codex", "--force", "--reason", "try bypass")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("PAUSED", r.stderr + r.stdout)
+
+    def test_doctor_warns_when_working_note_parks_the_pen(self):
+        self.init()
+        self.cw("claim", "claude")
+        p = os.path.join(self.d, "M8SHIFT.md")
+        with open(p, encoding="utf-8") as fh:
+            text = fh.read()
+        text = re.sub(r"(?m)^note:.*$", "note:     no further work; waiting for user", text, count=1)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        findings = json.loads(self.cw("doctor", "--json").stdout)["findings"]
+        self.assertTrue(any(f["check"] == "livelock.working_without_task" for f in findings))
+
+
 class TestRuntimeCompanion(CLIBase):
     """Runtime companion sidecars are advisory and do not mutate the relay."""
 
@@ -2367,6 +2421,18 @@ class TestRuntimeCompanion(CLIBase):
         findings = json.loads(r.stdout)["findings"]
         self.assertTrue(any(f["check"] == "providers.argv_string" for f in findings))
         self.assertTrue(any(f["check"] == "providers.env_missing" for f in findings))
+
+    def test_report_write_rejects_path_traversal_run_ids(self):
+        self.init()
+        self.assertEqual(self.rt("progress", "claude", "--run", "safe-run", "reading").returncode, 0)
+        ok = self.rt("report", "safe-run", "--write")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runs", "safe-run", "report.md")))
+        for bad in ("..", "../escape", "../../escape", "/tmp/m8shift-pwned", "C:escape", r"safe\escape"):
+            with self.subTest(bad=bad):
+                r = self.rt("report", bad, "--write")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("unsafe run id", r.stderr + r.stdout)
 
 
 # ───────────── §8 core foundation (degree-2 worktree companion) ──────────────

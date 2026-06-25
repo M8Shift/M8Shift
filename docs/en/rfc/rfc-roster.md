@@ -101,7 +101,7 @@ Two hard cases, handled explicitly (not silently):
   roster instead of a frozen tuple:
 
   ```python
-  valid_states(roster) = {"IDLE", "DONE"} \
+  valid_states(roster) = {"IDLE", "PAUSED", "DONE"} \
       ∪ {f"WORKING_{a.upper()}" for a in roster} \
       ∪ {f"AWAITING_{a.upper()}" for a in roster}
   ```

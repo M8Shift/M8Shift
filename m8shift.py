@@ -67,7 +67,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.16.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.17.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -242,8 +242,8 @@ Fields (one `key: value` per line, easy to `grep`):
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*` |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
+| `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*`; `none` while `IDLE`, `PAUSED`, or `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
 | `agents`  | CSV, e.g. `claude,codex` | the active roster (all declared agents, ≥2); default `claude,codex` |
 | `lang`    | language tag | language of generated files / runtime messages when available |
 | `session` | session id | current session id, also recorded in `M8SHIFT.sessions.jsonl` |
@@ -266,12 +266,14 @@ same metadata and serializes unavailable values as `null`.
 
 > `expires` carries a date **only** during `WORKING_*` (an agent is working,
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
-> `DONE`): nobody holds the pen, so there is no staleness to watch.
+> `PAUSED`, `DONE`): nobody holds the pen, so there is no staleness to watch.
 
 **Reading the states** (`<X>` is an active agent — by default `claude`/`codex`):
 - `AWAITING_<X>` → it is `<X>`'s turn to play (the other agents wait).
 - `WORKING_<X>` → `<X>` holds the pen and is working (the others wait, touch nothing).
 - `IDLE` → nobody has the hand, the first who has something to say starts.
+- `PAUSED` → the session stays open but no agent has assigned work; resume only
+  when the user gives a new scope.
 - `DONE` → session closed, no further relay expected.
 
 ---
@@ -313,9 +315,11 @@ loop:
        b. WORK in the repository (while you hold the pen, you alone)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    writes my turn <turn+1>, state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        wait ~60 s (wait), go back to 1
-  4. if state == DONE: exit
+  5. if state == DONE: exit
 ```
 
 In practice: `claim` **acquires** the pen (exclusive), `append` **closes** your
@@ -389,7 +393,7 @@ Guardrail:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # wait if needed, then claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
@@ -398,6 +402,8 @@ Guardrail:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py release <agent> --to <other> [--force --reason "why"]  # hand off without a body (does NOT re-increment turn)
@@ -1101,7 +1107,7 @@ def active_agents(lk):
     return tuple(roster_full(lk))
 
 def valid_states(pair):
-    s = {"IDLE", "DONE"}
+    s = {"IDLE", "PAUSED", "DONE"}
     for a in pair:
         s.add(f"WORKING_{a.upper()}")
         s.add(f"AWAITING_{a.upper()}")
@@ -2217,7 +2223,31 @@ def collect_doctor_findings(security=False, contracts=False):
                     os.path.basename(COWORK),
                     "review the last turn, then reclaim with `./m8shift.py claim <you> --force` if appropriate",
                 ))
+            note = (lk.get("note") or "").lower()
+            if any(needle in note for needle in (
+                "no further work", "no further implementation", "waiting for user",
+                "waiting for scope", "wait for user", "awaiting user",
+            )):
+                findings.append(doctor_finding(
+                    "livelock.working_without_task", "warning",
+                    "WORKING lock note looks like parked/no-work state.",
+                    os.path.basename(COWORK),
+                    "use `./m8shift.py pause <holder> --reason \"...\"` instead of parking the pen",
+                ))
         turns = parse_turns(text)
+        if len(turns) >= 4:
+            recent = turns[-4:]
+            ack_words = ("ack", "approve", "approved", "no further", "nothing to", "rien à", "attendre")
+            if all((t["fields"].get("files", "").strip() in ("", "—"))
+                   and any(w in (t["fields"].get("ask", "") + " " + t["fields"].get("done", "")).lower()
+                           for w in ack_words)
+                   for t in recent):
+                findings.append(doctor_finding(
+                    "livelock.ack_bounce", "warning",
+                    "recent turns look like ack/no-work ping-pong with no files touched.",
+                    os.path.basename(COWORK),
+                    "assign new work, use `pause`, or close with `done`",
+                ))
         if turns and re.fullmatch(r"\d+", lk.get("turn", "")):
             last_n = max(t["n"] for t in turns)
             if int(lk["turn"]) != last_n:
@@ -2255,7 +2285,7 @@ def collect_doctor_findings(security=False, contracts=False):
                     ))
                     break
                 if (not isinstance(row, dict)
-                        or row.get("event") not in {"start", "done", "reset", "force"}
+                        or row.get("event") not in {"start", "done", "reset", "force", "pause", "resume"}
                         or not isinstance(row.get("session_id"), str)):
                     findings.append(doctor_finding(
                         "sessions.event_invalid", "warning",
@@ -2570,6 +2600,8 @@ def next_action_for(lk, agent=None, stale=False):
             return f"{agent}: answer request #{r0.get('id')} with yield-turn or decline-turn"
         if st == "DONE":
             return f"{agent}: stop (session DONE)"
+        if st == "PAUSED":
+            return f"{agent}: paused; wait for user scope, then ./m8shift.py resume {agent} --reason \"...\""
         if st in ("IDLE", target):
             return f"{agent}: ./m8shift.py next {agent}  # claim + peek"
         if st == working:
@@ -2580,6 +2612,8 @@ def next_action_for(lk, agent=None, stale=False):
 
     if st == "DONE":
         return "stop (session DONE)"
+    if st == "PAUSED":
+        return "paused: waiting for user scope; resume <agent> only when new work is assigned"
     if st == "IDLE":
         return "any active agent: ./m8shift.py next <agent>"
     if st.startswith("AWAITING_"):
@@ -2722,6 +2756,10 @@ def cmd_wait(args):
             key = "wait_your_turn" if st == target else "wait_free"
             print(tr(key, st=st, agent=agent))
             return 0
+        if st == "PAUSED":
+            print("paused: waiting for user scope; do not claim until `resume <agent> --reason ...`.")
+            if args.once:
+                return 3
         if st == "DONE":
             print(tr("wait_done"))
             return 0
@@ -2751,6 +2789,9 @@ def _claim_and_print_handoff(agent, force=False):
 
 def cmd_next(args):
     """Single safe resumption step: wait if needed, then claim + print handoff."""
+    resume_reason = clean_field("--reason", getattr(args, "reason", "")) if getattr(args, "resume", False) else ""
+    if getattr(args, "resume", False) and not resume_reason:
+        sys.exit("refused: --resume requires --reason.")
     if not args.once and args.interval < 1:
         sys.exit(tr("bad_interval"))
     while True:
@@ -2762,6 +2803,12 @@ def cmd_next(args):
         working = f"WORKING_{agent.upper()}"
         if st in (target, "IDLE"):
             return _claim_and_print_handoff(agent)
+        if st == "PAUSED":
+            if args.resume:
+                cmd_resume(argparse.Namespace(agent=agent, reason=resume_reason))
+                return _claim_and_print_handoff(agent)
+            print("paused: waiting for user scope; rerun with `--resume --reason \"...\"` only after new work is assigned.")
+            return 3
         if st == working:
             print(tr("next_already_working", agent=agent))
             return 0
@@ -3210,6 +3257,76 @@ def cmd_append(args):
         return cmd_wait(argparse.Namespace(agent=agent, interval=args.wait_interval, once=False))
     return 0
 
+
+def cmd_pause(args):
+    reason = clean_field("--reason", args.reason)
+    if not reason:
+        sys.exit("refused: pause requires --reason.")
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        lk = get_lock(text)
+        holder = lk.get("holder", "none")
+        st = lk.get("state", "")
+        _guard_integrating(args, lk, "pause")
+        if st in ("DONE", "PAUSED"):
+            sys.exit(f"refused: cannot pause from state={st}.")
+        if holder != agent:
+            sys.exit(f"refused: only the current holder may pause (holder={holder}).")
+        t = now()
+        session_id = lk.get("session")
+        lk.update(
+            holder="none",
+            state="PAUSED",
+            since=iso(t),
+            expires="-",
+            note=f"paused by {agent}: {reason}",
+        )
+        guard.require_owned()
+        write(set_lock(text, lk))
+        if session_id:
+            guard.require_owned()
+            append_session_event(
+                "pause", session_id, timestamp=t,
+                by=agent, reason=reason, previous_state=st,
+                turn=lk.get("turn", "0"),
+            )
+    print(f"✓ session paused by {agent}; waiting for user scope.")
+    return 0
+
+
+def cmd_resume(args):
+    reason = clean_field("--reason", args.reason)
+    if not reason:
+        sys.exit("refused: resume requires --reason.")
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        if st != "PAUSED":
+            sys.exit(f"refused: resume is only valid from PAUSED (state={st}).")
+        t = now()
+        session_id = lk.get("session")
+        lk.update(
+            holder=agent,
+            state=f"AWAITING_{agent.upper()}",
+            since=iso(t),
+            expires="-",
+            note=f"resumed for {agent}: {reason}",
+        )
+        guard.require_owned()
+        write(set_lock(text, lk))
+        if session_id:
+            guard.require_owned()
+            append_session_event(
+                "resume", session_id, timestamp=t,
+                by=agent, reason=reason, turn=lk.get("turn", "0"),
+            )
+    print(f"✓ session resumed for {agent}.")
+    return 0
+
+
 def cmd_release(args):
     reason = clean_field("--reason", getattr(args, "reason", "")) if getattr(args, "force", False) else ""
     if getattr(args, "force", False) and not reason:
@@ -3223,6 +3340,8 @@ def cmd_release(args):
         lk = get_lock(text)
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "release")   # §8: refused while a merge is in flight
+        if lk.get("state") == "PAUSED":
+            sys.exit("refused: session is PAUSED; use `resume <agent> --reason ...` to assign new work.")
         if holder not in (agent, "none") and not args.force:
             sys.exit(tr("not_holder_release", holder=holder))
         pending = pending_incoming_turn(text, agent)
@@ -3491,6 +3610,9 @@ def main():
     nx.add_argument("--interval", type=int, default=60)
     nx.add_argument("--once", action="store_true", help="single non-blocking check (rc 3 if not your turn)")
     nx.add_argument("--force", action="store_true", help="recover only a stale WORKING lock")
+    nx.add_argument("--resume", action="store_true",
+                    help="resume a PAUSED session for this agent before claiming")
+    nx.add_argument("--reason", default="", help="required with --resume")
     nx.set_defaults(fn=cmd_next)
 
     c = sub.add_parser("claim")
@@ -3574,6 +3696,17 @@ def main():
     rm.add_argument("agent")
     rm.add_argument("note")
     rm.set_defaults(fn=cmd_remember)
+
+    ps = sub.add_parser("pause", help="park an open session with no active task (state=PAUSED)")
+    ps.add_argument("agent")
+    ps.add_argument("--reason", required=True,
+                    help="why no agent should hold the pen until new user scope arrives")
+    ps.set_defaults(fn=cmd_pause)
+
+    rs = sub.add_parser("resume", help="resume a PAUSED session for one agent")
+    rs.add_argument("agent")
+    rs.add_argument("--reason", required=True, help="new user scope / reason for resuming")
+    rs.set_defaults(fn=cmd_resume)
 
     tk = sub.add_parser("task", help="shared append-only to-do ledger (no pen needed)")
     tk.set_defaults(fn=cmd_task)

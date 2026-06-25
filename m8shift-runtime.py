@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.16.0"
+VERSION = "3.17.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE_PATH = os.path.join(HERE, "m8shift.py")
 RUNTIME_DIR = os.path.join(HERE, ".m8shift", "runtime")
@@ -284,6 +284,16 @@ def validate_session_id(session_id):
     return session_id
 
 
+def validate_run_id(run_id):
+    if (not SESSION_RE.fullmatch(run_id)
+            or run_id in {".", ".."}
+            or "/" in run_id
+            or "\\" in run_id
+            or ":" in run_id):
+        sys.exit("m8shift-runtime: unsafe run id")
+    return run_id
+
+
 def load_status(core):
     text = core.load_or_die()
     lk = core.get_lock(text)
@@ -433,10 +443,11 @@ def cmd_operator(args):
 def cmd_progress(args):
     core = load_core()
     agent = validate_agent(core, args.agent)
+    run_id = validate_run_id(args.run)
     row = {
         "type": "progress",
         "agent": agent,
-        "run_id": args.run,
+        "run_id": run_id,
         "message": args.message,
         "ts": iso(),
     }
@@ -656,26 +667,29 @@ def cmd_approve(args):
     by = args.by.strip().lower()
     if not AGENT_RE.fullmatch(by):
         sys.exit("m8shift-runtime: invalid --by agent/operator name")
+    run_id = validate_run_id(args.run)
+    gate_id = validate_run_id(args.gate)
     row = {
         "type": "approval",
-        "run_id": args.run,
-        "gate_id": args.gate,
+        "run_id": run_id,
+        "gate_id": gate_id,
         "by": by,
         "decision": args.decision,
         "reason": args.reason,
         "ts": iso(),
     }
     append_jsonl(APPROVALS, row)
-    print(f"✓ approval recorded for {args.run}/{args.gate}: {args.decision}")
+    print(f"✓ approval recorded for {run_id}/{gate_id}: {args.decision}")
     return 0
 
 
 def cmd_report(args):
-    events = [row for row in read_jsonl(RUNS) if row.get("run_id") == args.run]
-    progress = [row for row in read_jsonl(PROGRESS) if row.get("run_id") == args.run]
-    approvals = [row for row in read_jsonl(APPROVALS) if row.get("run_id") == args.run]
+    run_id = validate_run_id(args.run)
+    events = [row for row in read_jsonl(RUNS) if row.get("run_id") == run_id]
+    progress = [row for row in read_jsonl(PROGRESS) if row.get("run_id") == run_id]
+    approvals = [row for row in read_jsonl(APPROVALS) if row.get("run_id") == run_id]
     payload = {
-        "run_id": args.run,
+        "run_id": run_id,
         "events": events,
         "progress": progress,
         "approvals": approvals,
@@ -685,7 +699,7 @@ def cmd_report(args):
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
     lines = [
-        f"# M8Shift run report — {args.run}",
+        f"# M8Shift run report — {run_id}",
         "",
         f"- events: {len(events)}",
         f"- progress notes: {len(progress)}",
@@ -700,7 +714,7 @@ def cmd_report(args):
         lines.append(f"- approval `{row.get('gate_id')}` by {row.get('by')}: {row.get('decision')} — {row.get('reason', '')}")
     report = "\n".join(lines).rstrip() + "\n"
     if args.write:
-        out_dir = os.path.join(RUN_REPORTS_DIR, args.run)
+        out_dir = os.path.join(RUN_REPORTS_DIR, run_id)
         os.makedirs(out_dir, exist_ok=True)
         path = os.path.join(out_dir, "report.md")
         with open(path, "w", encoding="utf-8") as fh:

@@ -74,8 +74,8 @@ Campi (un `key: value` per riga, facile da `grep`):
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | un agente attivo \| `none` | chi detiene la penna (predefinito `claude`/`codex`) |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | stato corrente (`<X>` = un agente attivo, in maiuscolo) |
+| `holder`  | un agente attivo \| `none` | detentore della penna in `WORKING_*`, agente atteso in `AWAITING_*`, `none` in `IDLE`, `PAUSED` o `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | stato corrente (`<X>` = un agente attivo, in maiuscolo) |
 | `agents`  | CSV, es. `claude,codex` | la coppia del relay (i primi due dichiarati); predefinito `claude,codex` |
 | `turn`    | intero | numero dell'ultimo turno chiuso |
 | `since`   | ISO-8601 UTC | da quando dura questo stato |
@@ -84,12 +84,14 @@ Campi (un `key: value` per riga, facile da `grep`):
 
 > `expires` riporta una data **solo** durante `WORKING_*` (un agente sta lavorando,
 > TTL 30 min). Ritorna a `-` non appena si è in attesa (`AWAITING_*`, `IDLE`,
-> `DONE`): nessuno detiene la penna, quindi non c'è obsolescenza da sorvegliare.
+> `PAUSED`, `DONE`): nessuno detiene la penna, quindi non c'è obsolescenza da sorvegliare.
 
 **Lettura degli stati** (`<X>` è un agente attivo — per impostazione predefinita `claude`/`codex`):
 - `AWAITING_<X>` → è il turno di `<X>` (l'altro agente attende).
 - `WORKING_<X>` → `<X>` detiene la penna e sta lavorando (l'altro attende, non tocca nulla).
 - `IDLE` → nessuno ha la mano, il primo che ha qualcosa da dire inizia.
+- `PAUSED` → la sessione resta aperta, ma nessun agente ha lavoro assegnato;
+  riprendere solo quando l'utente assegna un nuovo ambito.
 - `DONE` → sessione chiusa, nessun ulteriore relay atteso.
 
 ---
@@ -131,9 +133,11 @@ loop:
        b. WORK in the repository (while you hold the pen, you alone)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    writes my turn <turn+1>, state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        wait ~60 s (wait), go back to 1
-  4. if state == DONE: exit
+  5. if state == DONE: exit
 ```
 
 In pratica: `claim` **acquisisce** la penna (esclusivo), `append` **chiude** il tuo
@@ -200,7 +204,7 @@ Garanzia:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # timeline del relay (sola lettura)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # cronologia di sessione (sola lettura)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # attende se serve, poi claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # attende se serve, poi claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
@@ -209,6 +213,8 @@ Garanzia:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # aggiunge una nota di memoria durevole (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registro task advisory (to-do per agente)
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)

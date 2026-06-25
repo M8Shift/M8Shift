@@ -173,7 +173,8 @@ ci-dessous utilisent le couple par défaut `claude`/`codex`).
 **Règle d'or :** vous ne travaillez et n'écrivez **qu'après avoir acquis le stylo via `claim`**
 (`append` n'est accepté que depuis `WORKING_<toi>`).
 Avant de vous arrêter, lancez `status --for <toi>` ; si le relais n'est pas `DONE`,
-continuez à attendre ou clôturez votre propre état `WORKING_<toi>` avec `append`/`done`.
+restez en attente, passez votre propre `WORKING_<toi>` avec `append`, fermez-le avec
+`done`, ou garez une session ouverte sans travail avec `pause`.
 Pour suivre le relais sans relancer `status` à la main, laissez
 `./m8shift.py watch --for <toi> --interval 5` tourner dans un terminal séparé ; il
 ne claim pas et ne modifie jamais le relais.
@@ -199,6 +200,7 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **RFC (gestion des fournisseurs)** — [docs/en/rfc/rfc-provider-management.md](../docs/en/rfc/rfc-provider-management.md) _(en)_ — registry local livré pour mapper les identités d'agents vers des commandes argv sûres.
 - **RFC (durcissement headless runner)** — [docs/en/rfc/rfc-headless-runner-hardening.md](../docs/en/rfc/rfc-headless-runner-hardening.md) _(en)_ — validation, dry-run, timeout de tour et audit des timeouts.
 - **RFC (demande coopérative de tour)** — [docs/en/rfc/rfc-cooperative-turn-request.md](../docs/en/rfc/rfc-cooperative-turn-request.md) _(en)_ — `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force` pour les blocages d'UI interactives.
+- **RFC (pause/reprise)** — [docs/en/rfc/rfc-pause-resume.md](../docs/en/rfc/rfc-pause-resume.md) _(en)_ — état stable `PAUSED` pour session ouverte sans tâche active.
 - **RFC (contrats et validation)** — [docs/en/rfc/rfc-contracts-validation.md](../docs/en/rfc/rfc-contracts-validation.md) _(en)_ — Stage 4 livré : passations typées, décisions de revue, flags dédiés, `contract validate` et `doctor --contracts`.
 - **RFC (plan de contrôle runtime/hébergé)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](../docs/en/rfc/rfc-hosted-runtime-control-plane.md) _(en)_ — supervision optionnelle hors cœur.
 - **RFC (gestion des fournisseurs)** — [docs/en/rfc/rfc-provider-management.md](../docs/en/rfc/rfc-provider-management.md) _(en)_ — registre futur d'adaptateurs pour Claude, Codex, Gemini, Vibe et autres agents coopératifs.
@@ -225,8 +227,9 @@ flowchart LR
 
 Les champs du verrou — `holder`, `state`, `agents`, `lang`, `session`, `turn`,
 `since`, `expires`, `note` — sont un `key: value` par ligne (faciles à `grep`er). `holder` est le
-détenteur du stylo en `WORKING_*`, l'agent attendu en `AWAITING_*`, ou `none` ;
-`agents` est le roster actif complet (≥2, défaut `claude,codex`) ; les états sont `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE`
+détenteur du stylo en `WORKING_*`, l'agent attendu en `AWAITING_*`, ou `none` en
+`IDLE`, `PAUSED` ou `DONE` ; `agents` est le roster actif complet (≥2, défaut
+`claude,codex`) ; les états sont `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `PAUSED`, `DONE`
 (`<X>` = un agent actif, en majuscules). Les tours sont encadrés par des commentaires
 HTML `M8SHIFT:TURN <n> <agent> BEGIN/END` (invisibles dans
 le rendu Markdown) et sont **immuables** une fois clos.

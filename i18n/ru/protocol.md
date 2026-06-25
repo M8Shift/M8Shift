@@ -74,8 +74,8 @@
 
 | поле      | значения | смысл |
 |-----------|---------|------|
-| `holder`  | активный агент \| `none` | кто держит перо (по умолчанию `claude`/`codex`) |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | текущее состояние (`<X>` = активный агент, в верхнем регистре) |
+| `holder`  | активный агент \| `none` | держатель пера при `WORKING_*`, ожидаемый агент при `AWAITING_*`, `none` при `IDLE`, `PAUSED` или `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | текущее состояние (`<X>` = активный агент, в верхнем регистре) |
 | `agents`  | CSV, например `claude,codex` | реле-пара (первые два объявленных); по умолчанию `claude,codex` |
 | `turn`    | целое | номер последнего закрытого хода |
 | `since`   | ISO-8601 UTC | с какого момента длится это состояние |
@@ -84,12 +84,14 @@
 
 > `expires` несёт дату **только** во время `WORKING_*` (агент работает,
 > TTL 30 мин). Оно возвращается к `-`, как только мы ждём (`AWAITING_*`, `IDLE`,
-> `DONE`): никто не держит перо, поэтому за устареванием следить не нужно.
+> `PAUSED`, `DONE`): никто не держит перо, поэтому за устареванием следить не нужно.
 
 **Чтение состояний** (`<X>` — активный агент, по умолчанию `claude`/`codex`):
 - `AWAITING_<X>` → ход за `<X>` (другой агент ждёт).
 - `WORKING_<X>` → `<X>` держит перо и работает (другой ждёт, ничего не трогает).
 - `IDLE` → ни у кого нет хода, начинает первый, у кого есть что сказать.
+- `PAUSED` → сессия остаётся открытой, но ни одному агенту не назначена работа;
+  возобновлять только после нового scope от пользователя.
 - `DONE` → сессия закрыта, дальнейшего реле не ожидается.
 
 ---
@@ -131,9 +133,11 @@ loop:
        b. WORK in the repository (while you hold the pen, you alone)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    writes my turn <turn+1>, state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        wait ~60 s (wait), go back to 1
-  4. if state == DONE: exit
+  5. if state == DONE: exit
 ```
 
 На практике: `claim` **захватывает** перо (эксклюзивно), `append` **закрывает** ваш
@@ -200,7 +204,7 @@ loop:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # лента реле (только для чтения)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # история сессии (только для чтения)
 ./m8shift.py wait <agent> [--once] [--interval N]  # ожидает вашего хода ; --once = 1 проверка (rc 3, если не ваш ход)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # ждёт при необходимости, затем claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # ждёт при необходимости, затем claim + peek
 ./m8shift.py claim <agent> [--force]               # ЗАХВАТИТЬ перо (эксклюзивно) — из вашего хода /
                                                   #   IDLE / вашей собственной блокировки ; --force = ТОЛЬКО устаревшая блокировка
 ./m8shift.py append <agent> --to <other> \
@@ -209,6 +213,8 @@ loop:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # добавить долговременную заметку памяти (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # журнал задач advisory (дела по агентам)
 ./m8shift.py release <agent> --to <other> [--force]  # передаёт без тела (НЕ инкрементирует turn повторно)

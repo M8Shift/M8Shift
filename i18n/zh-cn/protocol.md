@@ -73,8 +73,8 @@
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | 一个活动 agent \| `none` | 谁持有笔（默认 `claude`/`codex`） |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | 当前状态（`<X>` = 一个活动 agent，大写） |
+| `holder`  | 一个活动 agent \| `none` | `WORKING_*` 时的持笔者，`AWAITING_*` 时被等待的 agent，`IDLE`、`PAUSED` 或 `DONE` 时为 `none` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | 当前状态（`<X>` = 一个活动 agent，大写） |
 | `agents`  | CSV，例如 `claude,codex` | 中继的那一对（声明的前两个）；默认 `claude,codex` |
 | `turn`    | 整数 | 最后一个已关闭轮次的编号 |
 | `since`   | ISO-8601 UTC | 该状态持续的起始时间 |
@@ -83,12 +83,13 @@
 
 > `expires` **仅**在 `WORKING_*` 期间携带日期（某个 agent 正在工作，
 > TTL 30 分钟）。一旦进入等待状态（`AWAITING_*`、`IDLE`、
-> `DONE`），它就回到 `-`：没有人持有笔，因此没有需要监视的失效。
+> `PAUSED`、`DONE`），它就回到 `-`：没有人持有笔，因此没有需要监视的失效。
 
 **读取状态**（`<X>` 是一个活动 agent —— 默认为 `claude`/`codex`）：
 - `AWAITING_<X>` → 轮到 `<X>` 行动（另一个 agent 等待）。
 - `WORKING_<X>` → `<X>` 持有笔并正在工作（另一个等待，什么都不碰）。
 - `IDLE` → 没有人持有控制权，第一个有话要说的人开始。
+- `PAUSED` → 会话保持打开，但没有 agent 被分配工作；只有用户给出新范围后才恢复。
 - `DONE` → 会话已关闭，不再期待进一步的中继。
 
 ---
@@ -130,9 +131,11 @@ loop:
        b. WORK in the repository (while you hold the pen, you alone)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    writes my turn <turn+1>, state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        wait ~60 s (wait), go back to 1
-  4. if state == DONE: exit
+  5. if state == DONE: exit
 ```
 
 实践中：`claim` **获取**笔（独占），`append` **关闭**你的
@@ -199,7 +202,7 @@ loop:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # 中继时间线（只读）
 ./m8shift.py history [--limit N] [--oneline] [--json]  # 会话历史（只读）
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # 需要时等待，然后 claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # 需要时等待，然后 claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
@@ -208,6 +211,8 @@ loop:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # 追加一条持久记忆笔记（advisory）
 ./m8shift.py task {add,done,drop,list,show} …  # advisory 任务清单（按代理的待办）
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)

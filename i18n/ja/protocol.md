@@ -73,8 +73,8 @@
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | アクティブなエージェント \| `none` | 誰がペンを保持しているか（デフォルト `claude`/`codex`） |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | 現在の状態（`<X>` = アクティブなエージェント、大文字） |
+| `holder`  | アクティブなエージェント \| `none` | `WORKING_*` ではペン保持者、`AWAITING_*` では待たれているエージェント、`IDLE`/`PAUSED`/`DONE` では `none` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | 現在の状態（`<X>` = アクティブなエージェント、大文字） |
 | `agents`  | CSV、例 `claude,codex` | リレーするペア（最初に宣言された2つ）; デフォルト `claude,codex` |
 | `turn`    | 整数 | 最後に閉じたターンの番号 |
 | `since`   | ISO-8601 UTC | この状態がいつから続いているか |
@@ -82,13 +82,15 @@
 | `note`    | 短いテキスト | 読みやすいメモ |
 
 > `expires` は `WORKING_*` の間**のみ**日付を持ちます（エージェントが作業中、
-> TTL 30分）。待機状態（`AWAITING_*`、`IDLE`、`DONE`）になり次第 `-` に戻ります:
+> TTL 30分）。待機状態（`AWAITING_*`、`IDLE`、`PAUSED`、`DONE`）になり次第 `-` に戻ります:
 > 誰もペンを保持していないため、監視すべき古さはありません。
 
 **状態の読み方**（`<X>` はアクティブなエージェント — デフォルトでは `claude`/`codex`）:
 - `AWAITING_<X>` → `<X>` の番です（もう一方のエージェントは待機）。
 - `WORKING_<X>` → `<X>` がペンを保持して作業中（もう一方は待機し、何にも触れない）。
 - `IDLE` → 誰も手番を持っていない、何か言うことのある最初の者が開始します。
+- `PAUSED` → セッションは開いたままですが、割り当て済みの作業はありません。
+  ユーザーが新しいスコープを与えたときだけ再開します。
 - `DONE` → セッションは閉じられ、これ以上のリレーは期待されません。
 
 ---
@@ -130,9 +132,11 @@ loop:
        b. WORK in the repository (ペンを保持している間、あなただけが)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    自分のターン <turn+1> を書き込み、state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        約60秒待機（wait）、1 に戻る
-  4. if state == DONE: exit
+  5. if state == DONE: exit
 ```
 
 実際には: `claim` がペンを**取得**し（排他的）、`append` があなたのターンを**閉じて**
@@ -199,7 +203,7 @@ loop:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # リレーのタイムライン（読み取り専用）
 ./m8shift.py history [--limit N] [--oneline] [--json]  # セッション履歴（読み取り専用）
 ./m8shift.py wait <agent> [--once] [--interval N]  # あなたの番を待つ ; --once = 1回チェック（あなたの番でなければ rc 3）
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # 必要なら待機し、claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # 必要なら待機し、claim + peek
 ./m8shift.py claim <agent> [--force]               # ペンを取得（排他的）— あなたの番 /
                                                   #   IDLE / 自分自身のロックから ; --force = 古いロックのみ
 ./m8shift.py append <agent> --to <other> \
@@ -208,6 +212,8 @@ loop:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # 永続的なメモリのメモを追記（advisory）
 ./m8shift.py task {add,done,drop,list,show} …  # advisory なタスク台帳（エージェントごとの ToDo）
 ./m8shift.py release <agent> --to <other> [--force]  # 本文なしで引き継ぐ（ターンを再インクリメントしない）

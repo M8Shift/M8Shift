@@ -94,7 +94,7 @@ optional `validate_specs.py`, not engine input.
 
 ```
 holder:   <active agent | none>
-state:    IDLE | WORKING_<X> | AWAITING_<X> | DONE   (X = any active agent, uppercased)
+state:    IDLE | WORKING_<X> | AWAITING_<X> | PAUSED | DONE   (X = any active agent, uppercased)
 agents:   claude,codex,gemini,...                    (CSV — now N active, was 2)
 roles:    claude=coordinator,codex=writer+implementer,...   ← new, optional, advisory
 turn:     <n>
