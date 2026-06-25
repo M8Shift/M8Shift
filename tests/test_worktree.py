@@ -19,7 +19,7 @@ import unittest
 ROOT_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = os.path.join(ROOT_SRC, "m8shift.py")
 COMPANION = os.path.join(ROOT_SRC, "m8shift-worktree.py")
-VERSION = "3.18.1"
+VERSION = "3.18.2"
 
 
 def run(args, cwd, env=None):

@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.18.1"
+VERSION = "3.18.2"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2030,14 +2030,23 @@ class TestSessionReports(CLIBase):
 
         for output in (
             "M8SHIFT.md",
+            "M8shift.md",
             "M8SHIFT.sessions.jsonl",
+            "M8SHIFT.SESSIONS.JSONL",
             "M8SHIFT.protocol.md",
+            "M8SHIFT.Protocol.MD",
             ".m8shift.lock",
+            ".M8shift.lock",
             "m8shift.py",
+            "M8shift.py",
             "m8shift-runtime.py",
+            "M8SHIFT-RUNTIME.PY",
             "m8shift-worktree.py",
             "m8shift-i18n.py",
+            "examples/headless_runner.py",
+            "scripts/gen_docs.py",
             "M8SHIFT.session-reports",
+            "m8shift.session-reports",
         ):
             with self.subTest(output=output):
                 r = self.cw(
@@ -2050,6 +2059,8 @@ class TestSessionReports(CLIBase):
         self.assertEqual(self.md(), before_relay)
         with open(os.path.join(self.d, "m8shift.py"), encoding="utf-8") as fh:
             self.assertEqual(fh.read(), before_script)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "examples")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "scripts")))
 
     def test_session_report_rejects_symlink_output(self):
         self._review_session()
