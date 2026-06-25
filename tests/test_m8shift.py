@@ -2335,6 +2335,30 @@ class TestChecksumsManifest(unittest.TestCase):
             self.assertEqual(actual, expected, f"stale checksum for {name}")
 
 
+class TestProtocolPackCommandCoverage(unittest.TestCase):
+    """Every localized protocol pack must reference the canonical section-7 command set,
+    so a newer command is not silently missing from a pack. English (PROTOCOL["en"]) is
+    the canonical source; the localized packs are the on-demand i18n/<lang>/protocol.md."""
+
+    CANONICAL = ("init", "status", "watch", "doctor", "contract validate", "history",
+                 "wait", "next", "claim", "append", "release", "done", "archive")
+    PACKS = ("de", "es", "it", "ja", "pt", "ru", "zh-cn")
+
+    def test_english_core_has_canonical_commands(self):
+        for cmd in self.CANONICAL:
+            self.assertIn(f"m8shift.py {cmd}", cowork.PROTOCOL["en"],
+                          f"EN core protocol is missing the canonical command {cmd!r}")
+
+    def test_localized_packs_have_canonical_commands(self):
+        for lang in self.PACKS:
+            with open(os.path.join(REPO, "i18n", lang, "protocol.md"), encoding="utf-8") as fh:
+                pack = fh.read()
+            for cmd in self.CANONICAL:
+                with self.subTest(lang=lang, cmd=cmd):
+                    self.assertIn(f"m8shift.py {cmd}", pack,
+                                  f"{lang} protocol pack is missing the canonical command {cmd!r}")
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")
