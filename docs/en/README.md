@@ -39,7 +39,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 |----------|---------|
 | [rfc-agent-runtime-architecture.md](rfc/rfc-agent-runtime-architecture.md) | Future local agent runtime companion architecture around the passive core. |
 | [rfc-claim-check.md](rfc/rfc-claim-check.md) | Advisory pre-claim overlap checks. |
-| [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | Proposed cooperative baton request and operator steering for interactive UI deadlocks. |
+| [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | Shipped cooperative baton request and operator steering for interactive UI deadlocks. |
 | [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | Stage 4 contracts, review decisions, and shipped read-only validation. |
 | [rfc-hosted-runtime-control-plane.md](rfc/rfc-hosted-runtime-control-plane.md) | Future optional hosted/runtime control plane. |
 | [rfc-i18n-packs.md](rfc/rfc-i18n-packs.md) | Build-time language packs and localized single-file variants. |
@@ -48,7 +48,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [rfc-n-agents.md](rfc/rfc-n-agents.md) | N-agent relay model with one shared pen. |
 | [rfc-provider-management.md](rfc/rfc-provider-management.md) | Future provider/adapter registry outside the core. |
 | [rfc-roster.md](rfc/rfc-roster.md) | Historical configurable roster RFC. |
-| [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | Optional runtime companion concepts around the passive core. |
+| [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |
 | [rfc-runtime-patterns.md](rfc/rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |
 | [rfc-session-history.md](rfc/rfc-session-history.md) | Session history ledger and `history` command. |
 | [rfc-shared-tree-degree-gt1.md](rfc/rfc-shared-tree-degree-gt1.md) | Research RFC for true degree > 1 writes in one shared working tree; rejected for the core. |

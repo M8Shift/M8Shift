@@ -86,8 +86,9 @@ PowerShell Windows natif :
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex
 ```
 
-Ces installateurs téléchargent `m8shift.py` et la boîte à outils `m8shift-worktree.py`
-dans le répertoire courant, vérifient les deux fichiers avec `checksums.sha256`,
+Ces installateurs téléchargent `m8shift.py`, `m8shift-worktree.py` et
+`m8shift-runtime.py` dans le répertoire courant, vérifient les fichiers avec
+`checksums.sha256`,
 puis lancent `m8shift.py init --agents claude,codex` avec l'interpréteur Python 3.8+
 détecté. Pas de `sudo`, pas de modification du PATH global, pas de service en arrière-plan.
 
@@ -193,6 +194,8 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **RFC** — les RFC sont maintenues uniquement en anglais sous `docs/en/rfc/` afin d'éviter une double maintenance ; les liens ci-dessous pointent vers cette source canonique.
 - **RFC (historique de sessions)** — [docs/en/rfc/rfc-session-history.md](../docs/en/rfc/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
 - **RFC (compagnon worktree)** — [docs/en/rfc/rfc-worktree-companion.md](../docs/en/rfc/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
+- **RFC (compagnon runtime)** — [docs/en/rfc/rfc-runtime-companion.md](../docs/en/rfc/rfc-runtime-companion.md) _(en)_ — compagnon local livré : présence, inbox opérateur, progression et diagnostics.
+- **RFC (demande coopérative de tour)** — [docs/en/rfc/rfc-cooperative-turn-request.md](../docs/en/rfc/rfc-cooperative-turn-request.md) _(en)_ — `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force` pour les blocages d'UI interactives.
 - **RFC (contrats et validation)** — [docs/en/rfc/rfc-contracts-validation.md](../docs/en/rfc/rfc-contracts-validation.md) _(en)_ — Stage 4 livré : passations typées, décisions de revue, flags dédiés, `contract validate` et `doctor --contracts`.
 - **RFC (plan de contrôle runtime/hébergé)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](../docs/en/rfc/rfc-hosted-runtime-control-plane.md) _(en)_ — supervision optionnelle hors cœur.
 - **RFC (gestion des fournisseurs)** — [docs/en/rfc/rfc-provider-management.md](../docs/en/rfc/rfc-provider-management.md) _(en)_ — registre futur d'adaptateurs pour Claude, Codex, Gemini, Vibe et autres agents coopératifs.
@@ -269,6 +272,8 @@ Vérifiées par les tests et par revue multi-agents :
   intégration à l'hôte, pas une modification du mutex. Une notification système/webhook
   peut *signaler* un tour mais ne peut pas *réveiller* l'IA à elle seule. Un exemple de
   lanceur est fourni : [`examples/headless_runner.py`](../examples/headless_runner.py).
+  Le compagnon optionnel [`m8shift-runtime.py`](../m8shift-runtime.py) ajoute la présence locale,
+  l'inbox opérateur, la progression et les diagnostics sous `.m8shift/runtime/`.
 - **Coopératif, roster N-agent, verrou conseillé** — voir la
   [spécification anglaise](../docs/en/specification.md) §8 (mutex coopératif,
   verrou conseillé, un seul écrivain à la fois).

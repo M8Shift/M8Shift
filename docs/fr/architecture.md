@@ -4,8 +4,9 @@
 >
 > Cette page reflète le modèle v3 courant : roster actif de ≥2 agents, stylo unique
 > dans le cœur (degré 1), registres append-only/read-only, historique de sessions,
-> packs i18n, et compagnon optionnel [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md) pour la concurrence par
-> worktrees isolés (degré 2). Pour les règles commande par commande, voir
+> packs i18n, compagnon optionnel [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md) pour la concurrence par
+> worktrees isolés (degré 2), et compagnon local `m8shift-runtime.py` pour les sidecars
+> présence/inbox/progression. Pour les règles commande par commande, voir
 > [protocole.md](protocole.md) et [cahier-des-charges.md](cahier-des-charges.md).
 
 Ce document suit le modèle multi-vues *Document d'architecture*
@@ -100,8 +101,9 @@ flowchart TB
 
 **Composants** : (a) le bloc `LOCK` = automate d'état ; (b) le journal de tours
 append-only ; (c) les ancrages porteurs de la *strophe* d'auto-instruction ;
-(d) la CLI `m8shift.py` ; (e) les registres passifs (`memory`, `tasks`, `sessions`) ;
-(f) le compagnon optionnel [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md).
+(d) la CLI `m8shift.py` ; (e) les registres passifs (`memory`, `tasks`, `sessions`, `requests`) ;
+(f) le compagnon optionnel [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md) ;
+(g) le compagnon optionnel `m8shift-runtime.py` pour les sidecars runtime consultatifs.
 
 **Automate d'état** (`X`, `Y` = deux membres quelconques du roster actif) :
 
@@ -167,7 +169,9 @@ sequenceDiagram
 | agent | `M8SHIFT.archive.md` | système de fichiers local | W (append) |
 | `m8shift.py init` / `done` | `M8SHIFT.sessions.jsonl` | système de fichiers local | W (append) |
 | agent | `M8SHIFT.memory.md`, `M8SHIFT.tasks.md` | système de fichiers local | W (append), R pour recap/list/show |
+| agent/opérateur | `M8SHIFT.requests.md` | système de fichiers local | W (append), R pour les hints status/next |
 | `m8shift-worktree.py` | `.m8shift/worktrees/*`, `M8SHIFT.md` canonique | système de fichiers local + Git | W, intégration sérialisée |
+| `m8shift-runtime.py` | `.m8shift/runtime/*` | système de fichiers local | W (sidecars consultatifs uniquement) |
 
 ### 1.8 Modèle de concurrence — un mutex, pas un sémaphore
 

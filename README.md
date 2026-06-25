@@ -82,8 +82,9 @@ Native Windows PowerShell:
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex
 ```
 
-These installers download `m8shift.py` plus the `m8shift-worktree.py` toolbox into the current
-directory, verify both files against `checksums.sha256`, then run
+These installers download `m8shift.py` plus `m8shift-worktree.py` and
+`m8shift-runtime.py` into the current directory, verify the files against
+`checksums.sha256`, then run
 `m8shift.py init --agents claude,codex` through the detected Python 3.8+ interpreter. No `sudo`, no global PATH change,
 no background service.
 
@@ -198,7 +199,9 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **RFC (worktree companion)** — [docs/en/rfc/rfc-worktree-companion.md](docs/en/rfc/rfc-worktree-companion.md) —
   opt-in degree-2 concurrency through isolated git worktrees.
 - **RFC (runtime companion)** — [docs/en/rfc/rfc-runtime-companion.md](docs/en/rfc/rfc-runtime-companion.md) —
-  queues, presence, progress, and UI-safe waiting around the passive core.
+  shipped local sidecar companion for presence, operator inbox, progress, and UI-safe waiting.
+- **RFC (cooperative turn request)** — [docs/en/rfc/rfc-cooperative-turn-request.md](docs/en/rfc/rfc-cooperative-turn-request.md) —
+  audit-only `request-turn` plus `yield-turn`/`decline-turn`/`steer-turn --force` for interactive UI deadlocks.
 - **RFC (agent runtime architecture)** — [docs/en/rfc/rfc-agent-runtime-architecture.md](docs/en/rfc/rfc-agent-runtime-architecture.md) —
   future local runtime/scaffold layer for roles, workflows, approvals, artifacts, and reports.
 - **RFC input (neutral runtime patterns)** — [docs/en/rfc/rfc-input-neutral-patterns.md](docs/en/rfc/rfc-input-neutral-patterns.md) —
@@ -283,8 +286,9 @@ Verified by the tests and by multi-agent review:
   by itself. An example runner is provided:
   [`examples/headless_runner.py`](examples/headless_runner.py). It supports `--once`,
   manual TTL heartbeat, `M8SHIFT_RUN_ID`, and local `.m8shift/runtime/runs.jsonl`
-  lifecycle events. A broader runtime companion design is documented in
-  [docs/en/rfc/rfc-runtime-companion.md](docs/en/rfc/rfc-runtime-companion.md).
+  lifecycle events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
+  companion adds local presence, operator inbox, progress, and runtime diagnostics
+  under `.m8shift/runtime/`.
 - **Cooperative, N-agent, advisory** — see the
   [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, one
   writer at a time).

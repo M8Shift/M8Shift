@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.14.0"
+VERSION = "3.15.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -1985,6 +1985,7 @@ class TestAuditFixes(CLIBase):
         v = cowork.VERSION
         scripts = [
             "m8shift-i18n.py",
+            "m8shift-runtime.py",
             "m8shift-worktree.py",
             os.path.join("examples", "headless_runner.py"),
             os.path.join("scripts", "gen_docs.py"),
@@ -2172,6 +2173,124 @@ class TestLoopGuardrails(CLIBase):
         self.assertIn("your turn (AWAITING_CLAUDE)", out)
 
 
+class TestCooperativeTurnRequest(CLIBase):
+    """`request-turn` is audit-only; `yield-turn`/`steer-turn --force` are explicit routing ops."""
+
+    def _handoff_to_codex(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex", "--ask", "review", "--done", "draft")
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
+    def test_request_turn_is_audit_only_and_status_surfaces_it(self):
+        self._handoff_to_codex()
+        before = self.md()
+        r = self.cw("request-turn", "claude", "--to", "codex", "--reason", "human resumed Claude UI")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        self.assertEqual(self.md(), before)
+        req_path = os.path.join(self.d, "M8SHIFT.requests.md")
+        with open(req_path, encoding="utf-8") as fh:
+            reqs = cowork.parse_request_events(fh.read())
+        self.assertEqual(reqs[0]["status"], "open")
+        self.assertEqual(reqs[0]["from"], "claude")
+        out = self.cw("status", "--for", "claude").stdout
+        self.assertIn("request  #1 open", out)
+        js = json.loads(self.cw("status", "--for", "claude", "--json").stdout)
+        self.assertEqual(js["turn_requests"][0]["id"], 1)
+
+    def test_yield_turn_accepts_request_and_moves_baton(self):
+        self._handoff_to_codex()
+        self.cw("request-turn", "claude", "--to", "codex", "--reason", "operator active")
+        r = self.cw("yield-turn", "codex", "--request", "1", "--to", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+        self.assertEqual(self.lock()["holder"], "claude")
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+
+    def test_decline_turn_closes_request_without_lock_change(self):
+        self._handoff_to_codex()
+        self.cw("request-turn", "claude", "--to", "codex", "--reason", "operator active")
+        before = self.lock()
+        r = self.cw("decline-turn", "codex", "--request", "1", "--reason", "still reviewing")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lock()["state"], before["state"])
+        self.assertEqual(self.lock()["holder"], before["holder"])
+        js = json.loads(self.cw("status", "--for", "claude", "--json").stdout)
+        self.assertEqual(js["turn_requests"], [])
+
+    def test_steer_turn_requires_force_and_refuses_working_holder(self):
+        self._handoff_to_codex()
+        self.cw("request-turn", "claude", "--to", "codex", "--reason", "operator active")
+        r = self.cw("steer-turn", "claude", "--from", "codex", "--request", "1",
+                    "--reason", "operator confirmed idle")
+        self.assertNotEqual(r.returncode, 0)
+        r2 = self.cw("steer-turn", "claude", "--from", "codex", "--request", "1",
+                     "--force", "--reason", "operator confirmed idle")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
+            self.assertIn('"op": "steer-turn"', fh.read())
+
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex", "--ask", "again", "--done", "again")
+        self.cw("claim", "codex")  # fresh WORKING_CODEX
+        self.cw("request-turn", "claude", "--to", "codex", "--reason", "operator active again")
+        r3 = self.cw("steer-turn", "claude", "--from", "codex", "--request", "2",
+                     "--force", "--reason", "operator asks")
+        self.assertNotEqual(r3.returncode, 0)
+        self.assertIn("not WORKING_CODEX", r3.stderr + r3.stdout)
+
+
+class TestRuntimeCompanion(CLIBase):
+    """Runtime companion sidecars are advisory and do not mutate the relay."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"), os.path.join(self.d, "m8shift-runtime.py"))
+
+    def rt(self, *args):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", *args],
+            cwd=self.d, capture_output=True, text=True,
+        )
+
+    def test_watch_operator_progress_and_status_runtime(self):
+        self.init()
+        before = self.md()
+        r = self.rt("watch", "claude", "--session", "s1", "--once", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.md(), before)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["presence"]["state"], "blocked")
+        self.assertIn("next claude", payload["resume_prompt"])
+
+        presence_path = os.path.join(self.d, ".m8shift", "runtime", "presence.json")
+        with open(presence_path, encoding="utf-8") as fh:
+            presence = json.load(fh)
+        presence["claude"]["pid"] = os.getpid()  # simulate a still-live lane owner
+        with open(presence_path, "w", encoding="utf-8") as fh:
+            json.dump(presence, fh)
+        dup = self.rt("watch", "claude", "--session", "s2", "--once")
+        self.assertNotEqual(dup.returncode, 0)
+        self.assertIn("already owned", dup.stderr)
+
+        self.assertEqual(self.rt("operator", "claude", "--mode", "followup",
+                                 "--idempotency-key", "k1", "note").returncode, 0)
+        second = self.rt("operator", "claude", "--mode", "followup",
+                         "--idempotency-key", "k1", "note")
+        self.assertEqual(second.returncode, 0)
+        self.assertIn("duplicate ignored", second.stdout)
+        self.assertEqual(self.rt("progress", "claude", "--run", "r1", "reading").returncode, 0)
+
+        status = json.loads(self.rt("status-runtime", "claude", "--json").stdout)
+        self.assertEqual(status["runtime_version"], cowork.VERSION)
+        self.assertEqual(status["runtime"]["claude"]["inbox_count"], 1)
+        self.assertEqual(status["runtime"]["claude"]["last_progress"]["message"], "reading")
+        doctor = json.loads(self.rt("doctor", "--json").stdout)
+        self.assertTrue(doctor["ok"])
+
+
 # ───────────── §8 core foundation (degree-2 worktree companion) ──────────────
 
 class TestStage8Core(CLIBase):
@@ -2300,7 +2419,7 @@ class TestInstallerVerifyDefault(unittest.TestCase):
     def setUp(self):
         self.src = tempfile.mkdtemp(prefix="m8shift-isrc-")
         self.addCleanup(shutil.rmtree, self.src, True)
-        for f in ("m8shift.py", "m8shift-worktree.py", "checksums.sha256"):
+        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "checksums.sha256"):
             shutil.copy(os.path.join(REPO, f), self.src)
         with open(os.path.join(self.src, "m8shift.py"), "a") as fh:
             fh.write("\n# tampered\n")              # hash no longer matches the manifest
@@ -2353,7 +2472,7 @@ class TestInstallerVerifyDefault(unittest.TestCase):
             self.addCleanup(shutil.rmtree, target, True)
             return subprocess.run(
                 ["bash", os.path.join(REPO, "install.sh"), "--dir", target,
-                 "--base-url", "file://" + bare, "--no-worktree", "--no-init", *extra],
+                 "--base-url", "file://" + bare, "--no-worktree", "--no-runtime", "--no-init", *extra],
                 capture_output=True, text=True).returncode
 
         self.assertEqual(rc(["--sha256", "m8shift.py:" + good]), 0)

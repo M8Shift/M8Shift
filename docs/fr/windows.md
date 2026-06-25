@@ -28,8 +28,9 @@ curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | b
 python3 m8shift.py status
 ```
 
-L'installateur télécharge `m8shift.py` et le compagnon optionnel
-`m8shift-worktree.py`, les vérifie avec `checksums.sha256`, puis lance `init`.
+L'installateur télécharge `m8shift.py`, le compagnon optionnel
+`m8shift-worktree.py` et le compagnon optionnel `m8shift-runtime.py`, les vérifie
+avec `checksums.sha256`, puis lance `init`.
 
 WSL fournit un vrai système de fichiers POSIX (vrai `O_EXCL`, `chmod`, `rename`
 atomique) : le comportement est identique à Linux.
@@ -64,8 +65,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 python m8shift.py status
 ```
 
-L'installateur PowerShell télécharge `m8shift.py` et la boîte à outils optionnelle
-`m8shift-worktree.py`, les vérifie par défaut avec `checksums.sha256`, puis lance `init`.
+L'installateur PowerShell télécharge `m8shift.py`, la boîte à outils optionnelle
+`m8shift-worktree.py` et le compagnon optionnel `m8shift-runtime.py`, les vérifie par
+défaut avec `checksums.sha256`, puis lance `init`.
 
 Alternative manuelle :
 

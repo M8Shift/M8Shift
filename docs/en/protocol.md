@@ -262,6 +262,10 @@ Guardrail:
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-] [--allow-large-body] [--wait]  # closes your turn + hands off
+./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
+./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
+./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
+./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py release <agent> --to <other> [--force --reason "why"]  # hand off without a body (does NOT re-increment turn)
@@ -293,12 +297,14 @@ Guardrail:
 `m8shift.py` is **self-sufficient**: it embeds this protocol, the `M8SHIFT.md`
 template and the anchors. `init` generates relay files, but it does **not** copy
 scripts into the target project. The one-line installer handles that by placing
-`m8shift.py` and the optional `m8shift-worktree.py` toolbox next to each other,
+`m8shift.py`, the optional `m8shift-worktree.py` toolbox, and the optional
+`m8shift-runtime.py` companion next to each other,
 then running `init`. For manual adoption:
 
 ```bash
 cp /path/to/m8shift.py .          # core relay
 cp /path/to/m8shift-worktree.py . # optional: isolated parallel worktrees
+cp /path/to/m8shift-runtime.py .  # optional: local presence/inbox/progress companion
 ./m8shift.py init                 # project name = folder name (otherwise --name)
 ```
 

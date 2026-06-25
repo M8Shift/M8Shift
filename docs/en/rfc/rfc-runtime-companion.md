@@ -1,6 +1,6 @@
 # RFC — Runtime companion: queues, presence, and UI-safe waiting
 
-**Status:** proposed · **Target:** separate companion tool · **Builds on:**
+**Status:** implemented v1 in v3.15.0 · **Target:** separate companion tool · **Builds on:**
 [specification.md](../specification.md) §8, [vscode-guide.md](../vscode-guide.md), and
 [rfc-worktree-companion.md](rfc-worktree-companion.md) §8c · **Inspiration:**
 runtime command queues, steering modes, presence, run lifecycle, and progress drafts.
@@ -12,7 +12,8 @@ The retained/rejected runtime pattern inventory is tracked separately in
 Stabilize M8Shift runs when agents live in interactive UIs or headless CLIs, without
 changing the core mutex.
 
-The companion answers a different question than `m8shift.py`:
+The shipped companion is `m8shift-runtime.py`. It answers a different question than
+`m8shift.py`:
 
 | Layer | Responsibility |
 |-------|----------------|
@@ -57,7 +58,7 @@ The companion must preserve M8Shift's core qualities:
    agent identity (`codex`, `claude`, …) so multiple UI/CLI sessions do not race under
    the same roster name.
 
-## Proposed file layout
+## Implemented file layout
 
 Runtime state is local, generated, and gitignored:
 
@@ -65,7 +66,7 @@ Runtime state is local, generated, and gitignored:
 .m8shift/
   runtime/
     presence.json          # latest heartbeat per agent/session
-    runs.jsonl             # append-only run lifecycle events
+    runs.jsonl             # append-only run lifecycle events (shared with headless runner)
     progress.jsonl         # append-only progress notes
     inbox/
       codex.jsonl          # operator messages queued for codex
@@ -141,10 +142,10 @@ The companion owns an operator inbox with four modes:
 Proposed companion command surface:
 
 ```bash
-m8shift-runtime operator codex --mode followup  "also check the README"
-m8shift-runtime operator codex --mode collect   "second note before the next turn"
-m8shift-runtime operator codex --mode interrupt "stop after current safe point"
-m8shift-runtime operator codex --mode status    "where are you?"
+python3 m8shift-runtime.py operator codex --mode followup  "also check the README"
+python3 m8shift-runtime.py operator codex --mode collect   "second note before the next turn"
+python3 m8shift-runtime.py operator codex --mode interrupt "stop after current safe point"
+python3 m8shift-runtime.py operator codex --mode status    "where are you?"
 ```
 
 For a headless CLI integration, the companion may inject inbox content into the next
@@ -177,9 +178,9 @@ The core remains identity-based; instance-level ownership lives only in the comp
 Long turns should emit small, append-only progress events:
 
 ```bash
-m8shift-runtime progress codex --run "$RUN_ID" "reading tests"
-m8shift-runtime progress codex --run "$RUN_ID" "running unit suite"
-m8shift-runtime progress codex --run "$RUN_ID" "preparing append"
+python3 m8shift-runtime.py progress codex --run "$RUN_ID" "reading tests"
+python3 m8shift-runtime.py progress codex --run "$RUN_ID" "running unit suite"
+python3 m8shift-runtime.py progress codex --run "$RUN_ID" "preparing append"
 ```
 
 Progress does not replace `append --done`. It gives humans a reliable answer to
@@ -202,7 +203,7 @@ wake a VS Code chat by itself. It does what is actually possible:
 Example:
 
 ```bash
-m8shift-runtime watch codex --session codex-vscode-main
+python3 m8shift-runtime.py watch codex --session codex-vscode-main
 ```
 
 The human still pastes or sends the prompt to the UI, but the companion removes the
@@ -213,7 +214,7 @@ ambiguity about who is expected and what should be resumed.
 In `headless` mode the companion can drive a local command template:
 
 ```bash
-m8shift-runtime run codex \
+python3 m8shift-runtime.py run codex \
   --exec 'codex exec --dangerously-bypass-approvals-and-sandbox "$M8SHIFT_PROMPT"'
 ```
 
@@ -233,7 +234,7 @@ zero; it verifies the core state after the run.
 Companion actions that cause side effects should accept an optional idempotency key:
 
 ```bash
-m8shift-runtime operator codex --idempotency-key ui-20260624-001 --mode followup "..."
+python3 m8shift-runtime.py operator codex --idempotency-key ui-20260624-001 --mode followup "..."
 ```
 
 The key suppresses duplicate queued messages, repeated notifications, and retried
@@ -245,7 +246,7 @@ the core turn log remains append-only.
 A runtime companion should expose:
 
 ```bash
-m8shift-runtime doctor
+python3 m8shift-runtime.py doctor
 ```
 
 Minimum checks:
@@ -282,17 +283,22 @@ Minimum checks:
 - Replacing the worktree companion; runtime supervision and degree-2 integration are
   separate companions that may share sidecar conventions.
 
-## Minimal v1
+## Minimal v1 status
 
-Ship in this order:
+Shipped in v3.15.0:
 
-1. **Read-only watch loop**: `watch <agent>`, `presence.json`, stale UI detection,
+1. **Read-only watch loop**: `watch <agent>`, `presence.json`, lane ownership,
    exact resume prompt.
 2. **Operator inbox**: `operator <agent> --mode followup|collect|interrupt|status`.
 3. **Progress log**: `progress <agent> --run ID <note>` and `status-runtime`.
 4. **Doctor**: local health checks and one-runtime-per-agent warnings.
-5. **Headless wrapper**: optional `run <agent> --exec ...` with post-run verification.
-6. **Idempotency keys**: duplicate suppression for companion-originated actions.
+5. **Idempotency keys**: duplicate suppression for companion-originated actions.
+
+Deferred:
+
+- **Headless wrapper**: optional `run <agent> --exec ...` with post-run verification.
+  The repo already ships `examples/headless_runner.py`; folding that lifecycle into
+  `m8shift-runtime.py run` remains a future companion increment.
 
 No v1 feature may require changing the core `LOCK` format.
 
@@ -303,9 +309,8 @@ No v1 feature may require changing the core `LOCK` format.
 - If the UI stops after `wait`, `presence.json` exposes that no live runtime is waiting.
 - When `status --json` is `AWAITING_CODEX`, `watch codex` emits a concrete resume
   prompt without claiming the pen.
-- In headless mode, a process exit is followed by core-state verification; if the pen
-  remains `WORKING_CODEX`, the companion reports `blocked` rather than pretending the
-  turn completed.
+- Headless `run` mode remains deferred; the existing `examples/headless_runner.py`
+  performs post-run verification separately.
 - Operator `interrupt` is recorded and presented to the agent, but the companion does
   not steal or rewrite the pen.
 - Removing `.m8shift/runtime/` loses only telemetry/inbox state, never the relay log or
@@ -313,11 +318,9 @@ No v1 feature may require changing the core `LOCK` format.
 
 ## Open questions
 
-1. Should the runtime companion live as `m8shift-runtime.py` or as a mode of a broader
-   `m8shift-ops.py` tool?
-2. Should `init` optionally add `.m8shift/` to the host project's `.gitignore`, or
+1. Should `init` optionally add `.m8shift/` to the host project's `.gitignore`, or
    should each companion provide its own `install` command?
-3. What is the safest cross-platform notification mechanism that keeps the stdlib-only
+2. What is the safest cross-platform notification mechanism that keeps the stdlib-only
    constraint? If none is acceptable, v1 should print/write prompts only.
-4. Should `status --json` stay core-only, or should a separate `status-runtime` merge
-   core status with presence/progress?
+3. Should the deferred `run` mode live in `m8shift-runtime.py` or remain as a
+   dedicated example runner?

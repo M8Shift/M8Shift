@@ -1,9 +1,9 @@
 # Security audit — code, coordination, and prompt surfaces
 
 - **Date:** 2026-06-25
-- **Scope:** `m8shift.py`, `m8shift-worktree.py`, `m8shift-i18n.py`,
-  `examples/headless_runner.py`, generated protocol/stanza documentation, and the
-  operational relay files present in this repository.
+- **Scope:** `m8shift.py`, `m8shift-runtime.py`, `m8shift-worktree.py`,
+  `m8shift-i18n.py`, `examples/headless_runner.py`, generated protocol/stanza
+  documentation, and the operational relay files present in this repository.
 - **Mode:** read-only source review plus built-in diagnostics. No network or third-party
   scanner was required; the project is a stdlib-only Python CLI, not a web service.
 
@@ -82,6 +82,8 @@ Deferred / still policy-level:
 | Turn header injection guards | `m8shift.py:847-864`, `m8shift.py:2354-2385`, `tests/test_m8shift.py:1270-1292` | Prevents forged `- key: value` turn fields and fake `M8SHIFT:` markers through normal CLI writes. |
 | Append requires prior claim | `m8shift.py:2409-2448` | Prevents a non-holder from recording a legitimate turn. |
 | Integration sentinel lockdown | `m8shift.py:2294-2305`, `m8shift-worktree.py:130-158`, `m8shift-worktree.py:161-209` | Prevents public operations from stealing or stranding an in-flight worktree merge. |
+| Runtime sidecars are advisory | `m8shift-runtime.py`, `docs/en/rfc/rfc-runtime-companion.md` | Presence, inbox, idempotency, and progress files never grant the pen and never edit `M8SHIFT.md` directly. |
+| Cooperative request ledger is non-authoritative | `m8shift.py request-turn/yield-turn/decline-turn/steer-turn`, `M8SHIFT.requests.md` | A request cannot make `claim` succeed; routing changes require explicit holder yield or audited idle steering. |
 | Honest limitation documented | `docs/en/specification.md:214-224`, `docs/en/architecture.md:189-193`, `docs/en/architecture.md:410-414` | The project correctly documents that filesystem writes remain cooperative/advisory. |
 
 ## Findings and recommendations

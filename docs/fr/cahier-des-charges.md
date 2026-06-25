@@ -235,7 +235,7 @@ flowchart LR
 - M8Shift ne verrouille pas physiquement le système de fichiers du dépôt ; la sécurité
   repose sur la discipline `claim → travail → append`.
 - `init` initialise l'état M8Shift et les ancrages dans le projet courant. Il ne copie
-  pas `m8shift.py`, `m8shift-worktree.py`, les variantes de langue ni les installateurs
+  pas `m8shift.py`, `m8shift-worktree.py`, `m8shift-runtime.py`, les variantes de langue ni les installateurs
   dans un répertoire cible ; le déploiement des scripts relève des recettes de copie/
   téléchargement ou des installateurs Bash/PowerShell, qui peuvent vérifier
   `checksums.sha256`.
@@ -264,6 +264,8 @@ La documentation française les référence sans maintenir de copie traduite.
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
 | [rfc-contracts-validation.md](../en/rfc/rfc-contracts-validation.md) | `contract validate`, `doctor --contracts`, flags contrat `append` | validation read-only ; ne route pas le travail et ne donne pas de permissions |
 | [rfc-stage6-integrations.md](../en/rfc/rfc-stage6-integrations.md) | installateurs Bash/PowerShell, `checksums.sha256`, scripts versionnés, `watch`, runner headless avec `M8SHIFT_RUN_ID` et `.m8shift/runtime/runs.jsonl` | couche locale livrée autour du cœur passif ; fournisseurs/IDE/MCP/plan de contrôle restent optionnels |
+| [rfc-runtime-companion.md](../en/rfc/rfc-runtime-companion.md) | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`, sidecars `.m8shift/runtime/` | compagnon local consultatif ; aucune autorité de stylo et aucune écriture directe dans `M8SHIFT.md` |
+| [rfc-cooperative-turn-request.md](../en/rfc/rfc-cooperative-turn-request.md) | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, `M8SHIFT.requests.md` | les demandes ne rendent jamais `claim` légal ; seul yield/steer explicite route, et `steer-turn` refuse `WORKING_*` frais |
 
 Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc/rfc-contracts-validation.md)
 décrit les contrats de passation typés, décisions de revue explicites (`approve`, `revise`,
@@ -272,11 +274,10 @@ avertissements ou erreurs strictes lorsque l'opérateur le demande, mais elle ne
 travail, ne donne pas de permissions, ne lance pas d'outils et ne mute pas le `LOCK`.
 
 Surfaces futures documentées :
-[RFC — Requête coopérative de tour](../en/rfc/rfc-cooperative-turn-request.md)
-pour request/yield/decline/steer dans les blocages d'UI interactives, non implémentée
-dans le cœur à ce stade ;
 [RFC — Plan de contrôle runtime / hébergé](../en/rfc/rfc-hosted-runtime-control-plane.md)
-pour présence, voies, inbox opérateur, progression et notifications hors cœur ;
+pour la supervision hébergée et les notifications hors cœur ; la présence locale,
+l'inbox opérateur, la progression et les diagnostics locaux sont déjà couverts par
+`m8shift-runtime.py` ;
 [RFC — Gestion des fournisseurs](../en/rfc/rfc-provider-management.md) pour associer les
 identités du roster (`claude`, `codex`, `gemini`, `vibe`, …) aux commandes et
 capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](../en/rfc/rfc-shared-tree-degree-gt1.md)

@@ -223,11 +223,12 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   operation needs a **headless** loop (`claude -p`, `codex exec`, cron) wrapping
   `wait → relaunch the agent → claim` — a host integration, not a change to the mutex. A
   notification/webhook can *signal* a turn but cannot *wake* the AI by itself. The
-  proposed host-side answer is a separate runtime companion for queues, presence,
-  progress, and operator inboxes; see [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md).
+  shipped local host-side answer is `m8shift-runtime.py` for presence, operator inbox,
+  progress, and runtime diagnostics; see [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md).
 - **Installer vs `init` boundary**: `init` initializes M8Shift state and anchors in the
-  current project. It does **not** copy `m8shift.py`, `m8shift-worktree.py`, language
-  variants, or installers into a target directory. Script deployment is handled by
+  current project. It does **not** copy `m8shift.py`, `m8shift-worktree.py`,
+  `m8shift-runtime.py`, language variants, or installers into a target directory.
+  Script deployment is handled by
   explicit copy/download recipes or the Bash/PowerShell installers, which can also
   verify `checksums.sha256`.
 - **Work-window exclusivity**: guaranteed by `claim` (exclusive acquisition of
@@ -338,7 +339,7 @@ reports the script version, `status`/`recap` print `m8shift.py v<VERSION>`, and 
 `M8SHIFT.md` banner records the version that wrote it. Compare `--version` across the two locations
 to spot a stale coordinator (and bump `VERSION` on every release so the comparison is meaningful).
 All tracked Python scripts expose their own `--version` too (`m8shift-i18n.py`,
-`m8shift-worktree.py`, `examples/headless_runner.py`, `scripts/gen_docs.py`, and the
+`m8shift-runtime.py`, `m8shift-worktree.py`, `examples/headless_runner.py`, `scripts/gen_docs.py`, and the
 test runners) and are kept in lockstep with the core version by tests.
 
 **Stable-version policy.** The dogfooding relay is refreshed at **every stable version**. A stable
@@ -396,6 +397,8 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
 | [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
 | [rfc-stage6-integrations.md](rfc/rfc-stage6-integrations.md) | **Stage 6 local integration layer** | Bash/PowerShell installers, `checksums.sha256`, versioned distributed scripts, `watch`, site/docs sync, and `examples/headless_runner.py` with `M8SHIFT_RUN_ID`, heartbeat, and `.m8shift/runtime/runs.jsonl`. | Shipped local convenience layer around the passive core; provider/IDE/MCP/control-plane integrations remain optional companions. |
+| [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | **Runtime companion v1** | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`; `.m8shift/runtime/{presence.json,progress.jsonl,idempotency.jsonl,inbox/*.jsonl}`. | Local advisory sidecars only; no direct `M8SHIFT.md` edits and no second pen authority. |
+| [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | **Cooperative turn request** | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, and append-only `M8SHIFT.requests.md`. | Requests never make `claim` succeed; only explicit yield/force-steer changes routing, and `steer-turn` refuses fresh `WORKING_*`. |
 
 ### 12.2 Stage 4 contract surface
 
@@ -417,11 +420,9 @@ The remaining future topics are now explicit RFCs:
   curated source material for future companion RFCs, with shipped core surfaces
   separated from deferred runtime patterns.
 - [RFC — Hosted/runtime control plane](rfc/rfc-hosted-runtime-control-plane.md):
-  optional runtime supervision, lanes, operator inboxes, progress, and notifications
-  around the passive core.
-- [RFC — Cooperative turn request and operator steering](rfc/rfc-cooperative-turn-request.md):
-  proposed audit-only request/yield/decline/steer flow for interactive UI deadlocks;
-  not implemented in the core yet.
+  optional hosted/runtime supervision and notifications around the passive core;
+  local presence, inbox, progress, and diagnostics are already covered by
+  `m8shift-runtime.py`.
 - [RFC — Provider management](rfc/rfc-provider-management.md): optional mapping from
   roster identities (`claude`, `codex`, `gemini`, `vibe`, …) to host provider
   commands, capabilities, and policies.

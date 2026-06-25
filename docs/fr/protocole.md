@@ -245,6 +245,10 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
                                                   #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
 ./m8shift.py append <agent> --to <autre> \
      --ask "..." --done "..." [--files a,b] [--body fichier.md|-] [--allow-large-body] [--wait]  # clôt ton tour + passe la main
+./m8shift.py request-turn <agent> --to <détenteur> --reason "..."  # demande au détenteur courant de céder (registre seulement)
+./m8shift.py yield-turn <détenteur> --request N --to <agent>       # accepte une demande coopérative de tour
+./m8shift.py decline-turn <détenteur> --request N --reason "..."   # refuse une demande coopérative de tour
+./m8shift.py steer-turn <agent> --from <détenteur> --request N --force --reason "..."  # redirige un détenteur idle AWAITING
 ./m8shift.py remember <agent> "<note>"  # ajoute une note mémoire durable (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registre de tâches advisory (todos par agent)
 ./m8shift.py release <agent> --to <autre> [--force --reason "pourquoi"]  # repasser la main sans corps
@@ -274,12 +278,14 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 `m8shift.py` est **auto-suffisant** : il embarque ce protocole, le gabarit de
 `M8SHIFT.md` et les ancrages. `init` génère les fichiers de relais, mais il ne
 copie **pas** les scripts dans le projet cible. L'installateur en une ligne s'en
-charge en plaçant `m8shift.py` et le compagnon optionnel `m8shift-worktree.py`
-côte à côte, puis en lançant `init`. Pour une adoption manuelle :
+charge en plaçant `m8shift.py`, le compagnon optionnel `m8shift-worktree.py`
+et le compagnon optionnel `m8shift-runtime.py` côte à côte, puis en lançant `init`.
+Pour une adoption manuelle :
 
 ```bash
 cp /chemin/vers/m8shift.py .      # relais cœur
 cp /chemin/vers/m8shift-worktree.py . # optionnel : worktrees parallèles isolés
+cp /chemin/vers/m8shift-runtime.py .  # optionnel : présence/inbox/progression locales
 ./m8shift.py init                 # nom du projet = nom du dossier (sinon --name)
 ```
 

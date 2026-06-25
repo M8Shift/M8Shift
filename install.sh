@@ -19,6 +19,7 @@ PROJECT_NAME=""
 LANG_CODE=""
 RUN_INIT=1
 WITH_WORKTREE=1
+WITH_RUNTIME=1
 FORCE_INIT=0
 VERIFY_EXPLICIT=""   # --verify sets 1, --no-verify sets 0; otherwise env/default decide
 VERIFY_DOWNLOADS=1   # resolved after arg parsing (verification is ON by default)
@@ -43,6 +44,7 @@ Options:
   --force             Pass `--force` to init (reinitialize M8SHIFT.md).
   --no-init           Download files only; do not run init.
   --no-worktree       Do not download m8shift-worktree.py.
+  --no-runtime        Do not download m8shift-runtime.py.
   --ref REF            Git ref used for downloads when --base-url is not set (default: main).
   --base-url URL      Download base URL (default: GitHub raw for --ref).
   --verify            Force checksum verification (already the default).
@@ -147,8 +149,8 @@ add_expected_sha256() {
     *) die "--sha256 expects FILE:HEX" ;;
   esac
   case "$name" in
-    m8shift.py|m8shift-worktree.py) ;;
-    *) die "--sha256 file must be m8shift.py or m8shift-worktree.py" ;;
+    m8shift.py|m8shift-worktree.py|m8shift-runtime.py) ;;
+    *) die "--sha256 file must be m8shift.py, m8shift-worktree.py, or m8shift-runtime.py" ;;
   esac
   printf '%s' "$hex" | grep -Eiq '^[0-9a-f]{64}$' || die "--sha256 expects a 64-char hex digest"
   EXPECTED_SHA256S="${EXPECTED_SHA256S}${hex} ${name}
@@ -196,6 +198,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-worktree)
       WITH_WORKTREE=0
+      shift
+      ;;
+    --no-runtime)
+      WITH_RUNTIME=0
       shift
       ;;
     --ref)
@@ -276,6 +282,9 @@ pins_cover_downloads() {
   if [ "$WITH_WORKTREE" -eq 1 ]; then
     printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-worktree.py$' || return 1
   fi
+  if [ "$WITH_RUNTIME" -eq 1 ]; then
+    printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-runtime.py$' || return 1
+  fi
   return 0
 }
 
@@ -310,6 +319,9 @@ download_file() {
 download_file "m8shift.py"
 if [ "$WITH_WORKTREE" -eq 1 ]; then
   download_file "m8shift-worktree.py"
+fi
+if [ "$WITH_RUNTIME" -eq 1 ]; then
+  download_file "m8shift-runtime.py"
 fi
 
 if [ "$RUN_INIT" -eq 1 ]; then

@@ -35,10 +35,12 @@ Already shipped or available today:
   work with serialized integration;
 - `examples/headless_runner.py`: reference headless runner with heartbeat, `--once`,
   `M8SHIFT_RUN_ID`, and local `.m8shift/runtime/runs.jsonl` lifecycle events;
+- `m8shift-runtime.py`: optional local runtime companion for presence, operator inbox,
+  progress, `status-runtime`, and runtime diagnostics;
 - documentation and website pages for quickstart, VS Code-style UI operation,
   Linux/macOS/Windows, worktree toolbox, limitations, roadmap, and security notes;
-- RFCs for runtime companion, hosted/runtime control plane, provider management, and
-  shared-tree degree > 1 research.
+- RFCs for hosted/runtime control plane, provider management, and shared-tree degree > 1
+  research.
 
 Stage 6 therefore should focus on adoption, operator visibility, and host integration,
 not on changing the core mutex.
@@ -156,8 +158,9 @@ alias m8w='python3 m8shift.py watch --interval 5 --for'
 ## 4B. Post-Stage-6 / future companions (deferred)
 
 These are **not** part of the shipped Stage 6 closure. They remain optional, host-side, and
-governed by the linked RFCs; each stays outside the passive core and is picked up only after
-the local layer proves value in real use.
+governed by the linked RFCs; each stays outside the passive core. The local runtime
+companion v1 is now shipped separately; the deferred items here are provider, hosted,
+and broader workflow/control-plane layers.
 
 ### 6D — Provider registry
 
@@ -342,15 +345,15 @@ Post-Stage-6 acceptance (deferred companions, §4B) is **not** required for this
 
 This RFC is an umbrella for Stage 6. It does not replace:
 
-- [rfc-runtime-companion.md](rfc-runtime-companion.md): local runtime/presence ideas;
+- [rfc-runtime-companion.md](rfc-runtime-companion.md): shipped local runtime companion v1;
 - [rfc-hosted-runtime-control-plane.md](rfc-hosted-runtime-control-plane.md): broader
   hosted/runtime control-plane boundary;
 - [rfc-provider-management.md](rfc-provider-management.md): provider adapter registry;
 - [rfc-cooperative-turn-request.md](rfc-cooperative-turn-request.md): cooperative baton
   negotiation for interactive UI deadlocks.
 
-Stage 6 should implement these pieces incrementally, starting with low-risk local
-adoption improvements before any hosted or provider-running surface.
+Stage 6 implements the low-risk local adoption layer first; hosted or provider-running
+surfaces remain separate future companions.
 
 ## 9. Conclusion
 
