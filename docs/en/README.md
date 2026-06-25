@@ -45,6 +45,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | Document | Purpose |
 |----------|---------|
 | [rfc-agent-runtime-architecture.md](rfc/rfc-agent-runtime-architecture.md) | Shipped local runtime scaffold for roles, workflows, approvals, providers, and reports. |
+| [rfc-agent-token-footprint.md](rfc/rfc-agent-token-footprint.md) | Proposed: cut the per-session token footprint by splitting an operational core from on-demand reference. |
 | [rfc-claim-check.md](rfc/rfc-claim-check.md) | Advisory pre-claim overlap checks. |
 | [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | Shipped cooperative baton request and operator steering for interactive UI deadlocks. |
 | [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | Stage 4 contracts, review decisions, and shipped read-only validation. |
