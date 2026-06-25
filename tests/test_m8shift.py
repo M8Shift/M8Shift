@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.18.2"
+VERSION = "3.18.3"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2061,6 +2061,53 @@ class TestSessionReports(CLIBase):
             self.assertEqual(fh.read(), before_script)
         self.assertFalse(os.path.exists(os.path.join(self.d, "examples")))
         self.assertFalse(os.path.exists(os.path.join(self.d, "scripts")))
+
+    def test_session_report_refuses_checksummed_outputs_and_tolerates_bad_manifest(self):
+        self._review_session()
+        manifest = os.path.join(self.d, "checksums.sha256")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write("0" * 64 + "  tools/custom_tool.py\n")
+
+        r = self.cw(
+            "session", "report", "current",
+            "--write", "--output", "TOOLS/CUSTOM_TOOL.PY", "--force",
+        )
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("reserved M8Shift", r.stderr + r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "tools")))
+
+        with open(manifest, "wb") as fh:
+            fh.write(b"\xff\xfe\xfa not utf8\n")
+        ok = self.cw("session", "report", "current", "--write", "--output", "reports/ok.md")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "reports", "ok.md")))
+
+    def test_session_report_refuses_existing_scripts_and_examples_discovered_files(self):
+        self._review_session()
+        for rel, content in (
+            ("scripts/helper.bash", "#!/usr/bin/env bash\n"),
+            ("scripts/Makefile", "all:\n"),
+            ("examples/HELPER.PY", "print('x')\n"),
+            ("examples/run", "#!/bin/sh\n"),
+        ):
+            path = os.path.join(self.d, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+
+        for output in (
+            "scripts/helper.bash",
+            "scripts/makefile",
+            "examples/helper.py",
+            "examples/RUN",
+        ):
+            with self.subTest(output=output):
+                r = self.cw(
+                    "session", "report", "current",
+                    "--write", "--output", output, "--force",
+                )
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("reserved M8Shift", r.stderr + r.stdout)
 
     def test_session_report_rejects_symlink_output(self):
         self._review_session()

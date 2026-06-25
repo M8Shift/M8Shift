@@ -69,7 +69,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.18.2"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.18.3"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -2057,7 +2057,7 @@ def checksummed_report_output_paths(root):
         return set()
     out = set()
     try:
-        with open(manifest, encoding="utf-8") as fh:
+        with open(manifest, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 parts = line.strip().split(None, 1)
                 if len(parts) != 2:
@@ -2065,7 +2065,7 @@ def checksummed_report_output_paths(root):
                 candidate = project_relative_reserved_path(root, parts[1].strip())
                 if candidate:
                     out.add(candidate)
-    except OSError:
+    except (OSError, UnicodeError):
         return set()
     return out
 
@@ -2078,7 +2078,8 @@ def discovered_report_output_script_paths(root):
             continue
         for dirpath, _, filenames in os.walk(base):
             for name in filenames:
-                if name.endswith((".py", ".sh", ".ps1")):
+                path = os.path.join(dirpath, name)
+                if os.path.isfile(path):
                     out.add(os.path.realpath(os.path.join(dirpath, name)))
     return out
 
