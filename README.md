@@ -193,25 +193,25 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
 - **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
 - **Explanation (philosophy)** — [docs/en/philosophy.md](docs/en/philosophy.md) — why the project exists.
-- **RFC (session history)** — [docs/en/rfc-session-history.md](docs/en/rfc-session-history.md) —
+- **RFC (session history)** — [docs/en/rfc/rfc-session-history.md](docs/en/rfc/rfc-session-history.md) —
   session ledger and `history`.
-- **RFC (worktree companion)** — [docs/en/rfc-worktree-companion.md](docs/en/rfc-worktree-companion.md) —
+- **RFC (worktree companion)** — [docs/en/rfc/rfc-worktree-companion.md](docs/en/rfc/rfc-worktree-companion.md) —
   opt-in degree-2 concurrency through isolated git worktrees.
-- **RFC (runtime companion)** — [docs/en/rfc-runtime-companion.md](docs/en/rfc-runtime-companion.md) —
+- **RFC (runtime companion)** — [docs/en/rfc/rfc-runtime-companion.md](docs/en/rfc/rfc-runtime-companion.md) —
   queues, presence, progress, and UI-safe waiting around the passive core.
-- **RFC (agent runtime architecture)** — [docs/en/rfc-agent-runtime-architecture.md](docs/en/rfc-agent-runtime-architecture.md) —
+- **RFC (agent runtime architecture)** — [docs/en/rfc/rfc-agent-runtime-architecture.md](docs/en/rfc/rfc-agent-runtime-architecture.md) —
   future local runtime/scaffold layer for roles, workflows, approvals, artifacts, and reports.
-- **RFC input (neutral runtime patterns)** — [docs/en/rfc-input-neutral-patterns.md](docs/en/rfc-input-neutral-patterns.md) —
+- **RFC input (neutral runtime patterns)** — [docs/en/rfc/rfc-input-neutral-patterns.md](docs/en/rfc/rfc-input-neutral-patterns.md) —
   curated pattern inventory for future companion RFCs.
-- **RFC (runtime patterns)** — [docs/en/rfc-runtime-patterns.md](docs/en/rfc-runtime-patterns.md) —
+- **RFC (runtime patterns)** — [docs/en/rfc/rfc-runtime-patterns.md](docs/en/rfc/rfc-runtime-patterns.md) —
   what M8Shift keeps, rejects, or defers from runtime/gateway designs.
-- **RFC (contracts and validation)** — [docs/en/rfc-contracts-validation.md](docs/en/rfc-contracts-validation.md) —
+- **RFC (contracts and validation)** — [docs/en/rfc/rfc-contracts-validation.md](docs/en/rfc/rfc-contracts-validation.md) —
   Stage 4 typed handoffs, review decisions, sugar flags, `contract validate`, and `doctor --contracts`.
-- **RFC (future runtime/control plane)** — [docs/en/rfc-hosted-runtime-control-plane.md](docs/en/rfc-hosted-runtime-control-plane.md) —
+- **RFC (future runtime/control plane)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](docs/en/rfc/rfc-hosted-runtime-control-plane.md) —
   optional hosted/local runtime supervision outside the passive core.
-- **RFC (provider management)** — [docs/en/rfc-provider-management.md](docs/en/rfc-provider-management.md) —
+- **RFC (provider management)** — [docs/en/rfc/rfc-provider-management.md](docs/en/rfc/rfc-provider-management.md) —
   future adapter registry for Claude, Codex, Gemini, Vibe, and other cooperative agents.
-- **RFC (shared-tree degree > 1)** — [docs/en/rfc-shared-tree-degree-gt1.md](docs/en/rfc-shared-tree-degree-gt1.md) —
+- **RFC (shared-tree degree > 1)** — [docs/en/rfc/rfc-shared-tree-degree-gt1.md](docs/en/rfc/rfc-shared-tree-degree-gt1.md) —
   research RFC; rejected for the core in favor of isolated worktrees.
 
 ## How it works
@@ -284,7 +284,7 @@ Verified by the tests and by multi-agent review:
   [`examples/headless_runner.py`](examples/headless_runner.py). It supports `--once`,
   manual TTL heartbeat, `M8SHIFT_RUN_ID`, and local `.m8shift/runtime/runs.jsonl`
   lifecycle events. A broader runtime companion design is documented in
-  [docs/en/rfc-runtime-companion.md](docs/en/rfc-runtime-companion.md).
+  [docs/en/rfc/rfc-runtime-companion.md](docs/en/rfc/rfc-runtime-companion.md).
 - **Cooperative, N-agent, advisory** — see the
   [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, one
   writer at a time).
@@ -345,14 +345,14 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 1. **N-agent roster, one pen (shipped)** — declare any roster of ≥2 agents via
    `m8shift.py init --agents a,b,c…`; **all** of them relay (the holder hands the pen to
    any other member via `--to`), still **one writer at a time** (degree-1). See
-   [RFC — configurable agent roster](docs/en/rfc-roster.md).
+   [RFC — configurable agent roster](docs/en/rfc/rfc-roster.md).
 2. **N concurrent writers (shipped, opt-in)** — true degree-2 via the **`m8shift-worktree.py`**
    companion: agents work in **isolated git worktrees in parallel**, and a single serialized
    **integration pen** merges them crash-safely — `claim`/`done`/`integrate`/`drop`/`status`, with a
    non-committing `git merge --no-ff --no-commit`, an `integrating:<id>@<sha>` LOCK sentinel that
    blocks a TTL reclaim mid-merge, and a `--to` handoff on every path (never stuck). The passive
    degree-1 core stays one-writer-at-a-time; the companion adds the concurrency on top. See
-   [RFC — worktree companion](docs/en/rfc-worktree-companion.md).
+   [RFC — worktree companion](docs/en/rfc/rfc-worktree-companion.md).
 
 **Shipped read / handoff surface** — `recap` (session-start briefing: current LOCK + recent
 turns + memory headlines), `peek` (the last handoff addressed to you, parse-free), `log`
@@ -374,17 +374,17 @@ text, never enforced), with open-task headlines in `recap`.
 **Roadmap status** — the core roadmap through Stage 5 is complete: every staged degree-1 surface
 has shipped (see *Shipped* above), Stage 4 read-only validation is now available, **and degree-2
 has shipped too** as the opt-in
-[`m8shift-worktree.py`](docs/en/rfc-worktree-companion.md) companion (roadmap step 2).
+[`m8shift-worktree.py`](docs/en/rfc/rfc-worktree-companion.md) companion (roadmap step 2).
 The last degree-1 candidate, `subturn` (sub-agent fan-out provenance), was deliberately
 **rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn
 durable streaming, so another work-provenance ledger would be redundant surface
-([rationale](docs/en/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/`.
+([rationale](docs/en/rfc/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/rfc/`.
 RFCs are English-only; localized documentation should link to the canonical English
 RFC instead of maintaining translated copies.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
 disjoint writes inside the shared tree (use the
-[opt-in worktree companion](docs/en/rfc-worktree-companion.md) instead); a
+[opt-in worktree companion](docs/en/rfc/rfc-worktree-companion.md) instead); a
 background daemon / autonomous watcher / push-notifier; running git, builds or APIs (needs auth +
 network → an orchestrator); third-party deps or a multi-file package; and "smart"
 *derived* memory (dedup / summarize / prune) — the ledger stays a dumb, human-curated

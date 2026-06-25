@@ -18,7 +18,7 @@ human still nudges each agent to resume between turns — see §8.
 | Included | Excluded |
 |----------|----------|
 | Single-file lock, turn journal, control CLI | Network / multi-machine orchestration |
-| Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in [`m8shift-worktree.py`](rfc-worktree-companion.md) companion) |
+| Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion) |
 | Anti-deadlock via TTL, bounded archiving | Resident daemon, persistent queue |
 | `CLAUDE.md` / `AGENTS.md` anchors | Authentication / encryption of the state file |
 
@@ -108,7 +108,7 @@ flowchart LR
 > --into DIR` splices chosen languages into a single self-contained variant (KNOWN_LANGS-
 > validated, raw-string-safe, round-trip-checked, byte-reproducible). Packs: fr
 > (human-authored) + es,it,de,pt,ja,ru,zh-cn (machine-translated, review-pending). Runtime
-> = one file; authoring = the injector. See CONTRIBUTING.md and `docs/en/rfc-*`.
+> = one file; authoring = the injector. See CONTRIBUTING.md and `docs/en/rfc/`.
 
 ## 6. Data model — files and `LOCK`
 
@@ -209,7 +209,7 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   `wait → relaunch the agent → claim` — a host integration, not a change to the mutex. A
   notification/webhook can *signal* a turn but cannot *wake* the AI by itself. The
   proposed host-side answer is a separate runtime companion for queues, presence,
-  progress, and operator inboxes; see [rfc-runtime-companion.md](rfc-runtime-companion.md).
+  progress, and operator inboxes; see [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md).
 - **Work-window exclusivity**: guaranteed by `claim` (exclusive acquisition of
   `WORKING_<self>`) + `append` restricted to `WORKING_<self>`. It relies on the
   **discipline** claim→work→append; M8Shift cannot lock the file system, so an
@@ -230,9 +230,9 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   nothing at the file-system level prevents it (manual edit).
 - **N-agent roster, one pen (current)**: an active roster of ≥2 agents relays through a
   single **degree-1 mutex** — any holder hands the pen to any other member via `--to`, one
-  writer at a time (`init --agents a,b,c…`; see [RFC — roster](rfc-roster.md), now superseded
+  writer at a time (`init --agents a,b,c…`; see [RFC — roster](rfc/rfc-roster.md), now superseded
   by this generalized model). **Shipped (off-core)**: **N concurrent writers** via the opt-in
-  [`m8shift-worktree.py`](rfc-worktree-companion.md) companion — isolated git worktrees in parallel
+  [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion — isolated git worktrees in parallel
   plus a single serialized integration pen, layered on this same degree-1 core.
 - **Anchor loading**: it depends on the host tool. Codex builds its instruction
   chain once per execution, gives priority to `AGENTS.override.md` in a folder
@@ -350,7 +350,7 @@ stores**, or it lives in an opt-in companion that preserves the core's single pe
 Rejected ideas are kept explicit so future changes do not reopen settled trade-offs
 without a new RFC.
 
-RFCs are authored and maintained in English only, under `docs/en/rfc-*.md`. Localized
+RFCs are authored and maintained in English only, under `docs/en/rfc/`. Localized
 documentation links to those canonical RFCs instead of keeping translated copies.
 
 ### 12.1 Shipped surfaces (v3.x)
@@ -361,20 +361,20 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 
 | RFC / source | Feature | Surface | Charter |
 |--------------|---------|---------|---------|
-| [rfc-memory.md](rfc-memory.md) | **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | Dumb, file-ordered ledger; `remember` never calls `set_lock`, so memory can never feed mutex/routing. |
-| [rfc-claim-check.md](rfc-claim-check.md) | **Advisory pre-claim check** | `claim <agent> --check [--files CSV] [--turns N]` reports readiness and exact file overlap with recent turns. | Takes no pen, mutates nothing; overlap never changes rc or feeds routing. |
-| [rfc-tasks.md](rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
-| [rfc-session-history.md](rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
-| [rfc-runtime-patterns.md](rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| [rfc-memory.md](rfc/rfc-memory.md) | **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | Dumb, file-ordered ledger; `remember` never calls `set_lock`, so memory can never feed mutex/routing. |
+| [rfc-claim-check.md](rfc/rfc-claim-check.md) | **Advisory pre-claim check** | `claim <agent> --check [--files CSV] [--turns N]` reports readiness and exact file overlap with recent turns. | Takes no pen, mutates nothing; overlap never changes rc or feeds routing. |
+| [rfc-tasks.md](rfc/rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
+| [rfc-session-history.md](rfc/rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
+| [rfc-runtime-patterns.md](rfc/rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
 | Operator live view | **Passive monitoring** | `watch [--for <agent>] [--interval N] [--clear] [--changes-only]` repeats the status view in a terminal. | Foreground/read-only loop only; no daemon, no notification, no `claim`, no force recovery. |
 | Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |
-| [rfc-worktree-companion.md](rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
+| [rfc-worktree-companion.md](rfc/rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
-| [rfc-contracts-validation.md](rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
+| [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
 
 ### 12.2 Stage 4 contract surface
 
-[RFC — Stage 4 contracts and validation](rfc-contracts-validation.md) is now implemented as a
+[RFC — Stage 4 contracts and validation](rfc/rfc-contracts-validation.md) is now implemented as a
 read-only validation surface: typed handoff contracts, explicit review decisions
 (`approve`, `revise`, `reject`, `waive`), ergonomic append flags, `contract validate`, and
 `doctor --contracts`. Its boundary is the same as the rest of the core: validation may report
@@ -385,27 +385,27 @@ run tools, or mutate the `LOCK`.
 
 The remaining future topics are now explicit RFCs:
 
-- [RFC — Agent runtime architecture companion](rfc-agent-runtime-architecture.md):
+- [RFC — Agent runtime architecture companion](rfc/rfc-agent-runtime-architecture.md):
   future local runtime/scaffold layer for agent registries, roles, workflows,
   approvals, artifacts, and reports; explicitly outside the passive core.
-- [RFC input — Neutral runtime patterns inventory](rfc-input-neutral-patterns.md):
+- [RFC input — Neutral runtime patterns inventory](rfc/rfc-input-neutral-patterns.md):
   curated source material for future companion RFCs, with shipped core surfaces
   separated from deferred runtime patterns.
-- [RFC — Hosted/runtime control plane](rfc-hosted-runtime-control-plane.md):
+- [RFC — Hosted/runtime control plane](rfc/rfc-hosted-runtime-control-plane.md):
   optional runtime supervision, lanes, operator inboxes, progress, and notifications
   around the passive core.
-- [RFC — Provider management](rfc-provider-management.md): optional mapping from
+- [RFC — Provider management](rfc/rfc-provider-management.md): optional mapping from
   roster identities (`claude`, `codex`, `gemini`, `vibe`, …) to host provider
   commands, capabilities, and policies.
-- [RFC — True degree > 1 writes in one shared working tree](rfc-shared-tree-degree-gt1.md):
+- [RFC — True degree > 1 writes in one shared working tree](rfc/rfc-shared-tree-degree-gt1.md):
   research topic, rejected for the core; use the
-  [worktree companion](rfc-worktree-companion.md) for real parallelism.
+  [worktree companion](rfc/rfc-worktree-companion.md) for real parallelism.
 
-`subturn` was **rejected** (see [rfc-subturn.md](rfc-subturn.md)): §5 advisory fields cover
+`subturn` was **rejected** (see [rfc-subturn.md](rfc/rfc-subturn.md)): §5 advisory fields cover
 at-append provenance and `remember` covers mid-turn streaming, so a fourth ledger would be
 redundant surface.
 
-**Degree-2 has shipped off-core** as the opt-in [`m8shift-worktree.py`](rfc-worktree-companion.md)
+**Degree-2 has shipped off-core** as the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md)
 companion — parallel isolated git worktrees plus a single serialized integration pen — so the core
 itself stays a pure degree-1 mutex while true concurrency is available when wanted.
 
@@ -413,9 +413,9 @@ itself stays a pure degree-1 mutex while true concurrency is available when want
 
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|
-| **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the [`m8shift-worktree.py`](rfc-worktree-companion.md) companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
+| **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
 | **Background daemon / autonomous watcher / push-notifier** | passive | M8Shift has no resident process. The shipped `watch` command is only a foreground read-only terminal view; notifications can *signal* a turn, never *wake* the AI. |
-| **Runtime supervision in the core** | passive / single-file | Queues, presence, progress drafts, and operator inboxes are useful host integration concerns, but they belong in an opt-in companion ([rfc-runtime-companion.md](rfc-runtime-companion.md)), not in the mutex. |
+| **Runtime supervision in the core** | passive / single-file | Queues, presence, progress drafts, and operator inboxes are useful host integration concerns, but they belong in an opt-in companion ([rfc-runtime-companion.md](rfc/rfc-runtime-companion.md)), not in the mutex. |
 | **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns M8Shift into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |
 | **Third-party deps / multi-file package** | single file | Every item is scoped to stdlib (`json`, `fnmatch`, `re`); a DB / queue / server would split the tool — no more `cp m8shift.py`. |
 | **"Smart" *derived* memory** (dedup / summarize / search / prune) | minimal / file-based | The ledger is a dumb append-only record; any digest is verbatim agent passthrough. The instant M8Shift curates content it owns a knowledge base with policy — a second source of truth. |

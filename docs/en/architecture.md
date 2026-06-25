@@ -4,7 +4,7 @@
 >
 > This architecture reflects the current v3 model: active roster of ≥2 agents, one
 > core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
-> and the opt-in [`m8shift-worktree.py`](rfc-worktree-companion.md) companion for degree-2 isolated worktree
+> and the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion for degree-2 isolated worktree
 > concurrency. For command-level rules, see [protocol.md](protocol.md) and
 > [specification.md](specification.md).
 
@@ -101,7 +101,7 @@ flowchart TB
 log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
 `m8shift.py` CLI; (e) passive side ledgers (`memory`, `tasks`, `sessions`) used only
 by read-only or append-only commands; (f) the optional
-[`m8shift-worktree.py`](rfc-worktree-companion.md) companion.
+[`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion.
 
 **State machine** (`X`, `Y` = any two active roster members):
 
@@ -242,7 +242,7 @@ The architectural boundary is deliberate: validation reads the append-only turn 
 report warnings or strict errors, but it does not route work, grant permissions, run tools, or
 mutate the `LOCK`. Host/UI permission enforcement can be layered around M8Shift, while the core
 remains a passive single-file relay. The implementation contract is tracked in
-[RFC — Stage 4 contracts and validation](rfc-contracts-validation.md).
+[RFC — Stage 4 contracts and validation](rfc/rfc-contracts-validation.md).
 
 ---
 

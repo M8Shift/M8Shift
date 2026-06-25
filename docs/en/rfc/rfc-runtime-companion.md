@@ -1,7 +1,7 @@
 # RFC — Runtime companion: queues, presence, and UI-safe waiting
 
 **Status:** proposed · **Target:** separate companion tool · **Builds on:**
-[specification.md](specification.md) §8, [vscode-guide.md](vscode-guide.md), and
+[specification.md](../specification.md) §8, [vscode-guide.md](../vscode-guide.md), and
 [rfc-worktree-companion.md](rfc-worktree-companion.md) §8c · **Inspiration:**
 runtime command queues, steering modes, presence, run lifecycle, and progress drafts.
 The retained/rejected runtime pattern inventory is tracked separately in
