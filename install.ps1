@@ -19,6 +19,7 @@ param(
     [switch]$Force,
     [switch]$NoInit,
     [switch]$NoWorktree,
+    [switch]$NoRuntime,
     [string]$Ref = $(if ($env:M8SHIFT_INSTALL_REF) { $env:M8SHIFT_INSTALL_REF } else { "main" }),
     [string]$BaseUrl = $(if ($env:M8SHIFT_INSTALL_BASE_URL) { $env:M8SHIFT_INSTALL_BASE_URL } else { "" }),
     [switch]$Verify,
@@ -51,6 +52,7 @@ Options:
   -Force               Pass --force to init (reinitialize M8SHIFT.md).
   -NoInit              Download files only; do not run init.
   -NoWorktree          Do not download m8shift-worktree.py.
+  -NoRuntime           Do not download m8shift-runtime.py.
   -Ref REF             Git ref used for downloads when -BaseUrl is not set (default: main).
   -BaseUrl URL         Download base URL (default: GitHub raw for -Ref).
   -Verify              Verify downloaded files against checksums.sha256.
@@ -113,8 +115,8 @@ function Add-ExpectedSha256([string]$Spec) {
     if ($Spec -match "^([^:=]+)[:=]([0-9a-fA-F]{64})$") {
         $file = $Matches[1]
         $hex = $Matches[2].ToLowerInvariant()
-        if ($file -notin @("m8shift.py", "m8shift-worktree.py")) {
-            Fail "-Sha256 file must be m8shift.py or m8shift-worktree.py"
+        if ($file -notin @("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py")) {
+            Fail "-Sha256 file must be m8shift.py, m8shift-worktree.py, or m8shift-runtime.py"
         }
         $script:ExpectedSha256[$file] = $hex
         return
@@ -248,6 +250,9 @@ $Python = Resolve-Python
 Install-File "m8shift.py" $BaseUrl $TargetDir $VerifyDownloads
 if (-not $NoWorktree) {
     Install-File "m8shift-worktree.py" $BaseUrl $TargetDir $VerifyDownloads
+}
+if (-not $NoRuntime) {
+    Install-File "m8shift-runtime.py" $BaseUrl $TargetDir $VerifyDownloads
 }
 
 if (-not $NoInit) {

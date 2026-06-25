@@ -4,8 +4,9 @@
 >
 > This architecture reflects the current v3 model: active roster of ≥2 agents, one
 > core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
-> and the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion for degree-2 isolated worktree
-> concurrency. For command-level rules, see [protocol.md](protocol.md) and
+> the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion for degree-2 isolated worktree
+> concurrency, and the local `m8shift-runtime.py` companion for presence/inbox/progress sidecars.
+> For command-level rules, see [protocol.md](protocol.md) and
 > [specification.md](specification.md).
 
 This document follows the multi-view *Architecture Document* template
@@ -99,9 +100,10 @@ flowchart TB
 
 **Components**: (a) the `LOCK` block = state machine; (b) the append-only turn
 log; (c) the anchors carrying the *stanza* of self-instruction; (d) the
-`m8shift.py` CLI; (e) passive side ledgers (`memory`, `tasks`, `sessions`) used only
+`m8shift.py` CLI; (e) passive side ledgers (`memory`, `tasks`, `sessions`, `requests`) used only
 by read-only or append-only commands; (f) the optional
-[`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion.
+[`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion; (g) the optional
+`m8shift-runtime.py` companion for advisory runtime sidecars.
 
 **State machine** (`X`, `Y` = any two active roster members):
 
@@ -166,7 +168,9 @@ sequenceDiagram
 | agent | `M8SHIFT.archive.md` | local file system | W (append) |
 | `m8shift.py init` / `done` | `M8SHIFT.sessions.jsonl` | local file system | W (append) |
 | agent | `M8SHIFT.memory.md`, `M8SHIFT.tasks.md` | local file system | W (append), R for recap/list/show |
+| agent/operator | `M8SHIFT.requests.md` | local file system | W (append), R for status/next hints |
 | `m8shift-worktree.py` | `.m8shift/worktrees/*`, canonical `M8SHIFT.md` | local file system + Git | W, serialized integration |
+| `m8shift-runtime.py` | `.m8shift/runtime/*` | local file system | W (advisory sidecars only) |
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
 

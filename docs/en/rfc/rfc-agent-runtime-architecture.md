@@ -1,6 +1,7 @@
 # RFC — Agent runtime architecture companion
 
-- **Status:** analysis RFC; proposed for a future companion, not for the passive core
+- **Status:** analysis RFC; broader runtime architecture remains future. A smaller
+  local sidecar companion (`m8shift-runtime.py`) shipped in v3.15.0.
 - **Scope:** local runtime/scaffold layer around M8Shift for roles, workflows, runs,
   permissions, approvals, and artifacts
 - **Related RFCs:** [rfc-runtime-companion.md](rfc-runtime-companion.md),

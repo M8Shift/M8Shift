@@ -204,6 +204,10 @@ loop:
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # closes your turn + hands off
+./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
+./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
+./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
+./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py remember <agent> "<note>"  # 追加一条持久记忆笔记（advisory）
 ./m8shift.py task {add,done,drop,list,show} …  # advisory 任务清单（按代理的待办）
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)

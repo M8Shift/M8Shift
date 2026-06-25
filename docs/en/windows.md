@@ -28,7 +28,8 @@ python3 m8shift.py status
 ```
 
 The installer downloads `m8shift.py` plus the optional `m8shift-worktree.py`
-toolbox, verifies them against `checksums.sha256`, then runs `init`.
+toolbox and `m8shift-runtime.py` companion, verifies them against
+`checksums.sha256`, then runs `init`.
 
 WSL gives a true POSIX filesystem (real `O_EXCL`, `chmod`, atomic `rename`), so
 behavior is identical to Linux.
@@ -64,8 +65,8 @@ python m8shift.py status
 ```
 
 The PowerShell installer downloads `m8shift.py` plus the optional
-`m8shift-worktree.py` toolbox, verifies them against `checksums.sha256` by default,
-then runs `init`.
+`m8shift-worktree.py` toolbox and `m8shift-runtime.py` companion, verifies them
+against `checksums.sha256` by default, then runs `init`.
 
 Manual fallback:
 

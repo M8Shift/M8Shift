@@ -205,6 +205,10 @@ loop:
                                                   #   IDLE / вашей собственной блокировки ; --force = ТОЛЬКО устаревшая блокировка
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # закрывает ваш ход + передаёт
+./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
+./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
+./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
+./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py remember <agent> "<note>"  # добавить долговременную заметку памяти (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # журнал задач advisory (дела по агентам)
 ./m8shift.py release <agent> --to <other> [--force]  # передаёт без тела (НЕ инкрементирует turn повторно)

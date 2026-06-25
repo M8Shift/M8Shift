@@ -205,6 +205,10 @@ Salvaguarda:
                                                   #   IDLE / tu propio bloqueo ; --force = SOLO bloqueo obsoleto
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # cierra tu turno + entrega
+./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
+./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
+./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
+./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py remember <agent> "<note>"  # añade una nota de memoria duradera (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registro de tareas advisory (pendientes por agente)
 ./m8shift.py release <agent> --to <other> [--force]  # entrega sin cuerpo (NO reincrementa el turno)

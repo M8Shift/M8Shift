@@ -1,6 +1,6 @@
 # RFC — Cooperative turn request and operator steering
 
-**Status:** proposed · **Target:** M8Shift core, with optional runtime companion support ·
+**Status:** implemented in v3.15.0 · **Target:** M8Shift core, with optional runtime companion support ·
 **Scope:** prevent interactive-agent deadlocks when the human resumes an agent that is
 not currently the awaited baton owner.
 
@@ -55,7 +55,7 @@ Add an explicit, auditable, low-risk protocol for baton negotiation:
 - Do not let a pending request make `claim` succeed.
 - Do not make M8Shift responsible for waking a closed chat UI.
 
-## Proposed core surface
+## Implemented core surface
 
 ### 1. `request-turn`
 

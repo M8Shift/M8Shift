@@ -33,6 +33,7 @@ PROTO = os.path.join(HERE, "M8SHIFT.protocol.md")
 MEMORY = os.path.join(HERE, "M8SHIFT.memory.md")     # shared, append-only, human-curated notes
 TASKS = os.path.join(HERE, "M8SHIFT.tasks.md")       # shared, append-only to-do event log
 SESSIONS = os.path.join(HERE, "M8SHIFT.sessions.jsonl")  # append-only session ledger
+REQUESTS = os.path.join(HERE, "M8SHIFT.requests.md")  # append-only cooperative turn-request ledger
 LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXCL)
 
 
@@ -48,7 +49,7 @@ def configure_root(root):
     is a one-time bootstrap meant to run *in* the target project dir — its `CLAUDE.md`/`AGENTS.md`
     anchors are written next to the kit (`HERE`), not rebased — so don't bootstrap a kit through
     `$M8SHIFT_ROOT`; point it at an already-init'd root."""
-    global COWORK, ARCHIVE, PROTO, MEMORY, TASKS, SESSIONS, LOCKFILE
+    global COWORK, ARCHIVE, PROTO, MEMORY, TASKS, SESSIONS, REQUESTS, LOCKFILE
     root = os.path.abspath(root)
     COWORK = os.path.join(root, "M8SHIFT.md")
     ARCHIVE = os.path.join(root, "M8SHIFT.archive.md")
@@ -56,6 +57,7 @@ def configure_root(root):
     MEMORY = os.path.join(root, "M8SHIFT.memory.md")
     TASKS = os.path.join(root, "M8SHIFT.tasks.md")
     SESSIONS = os.path.join(root, "M8SHIFT.sessions.jsonl")
+    REQUESTS = os.path.join(root, "M8SHIFT.requests.md")
     LOCKFILE = os.path.join(root, ".m8shift.lock")
 
 
@@ -65,7 +67,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.14.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.15.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -94,7 +96,7 @@ CONTRACT_RELATIONS = frozenset(("handoff", "review_request", "review_result", "e
 CONTRACT_DECISIONS = frozenset(("approve", "revise", "reject", "waive"))
 CONTRACT_REVIEW_REQUEST_REQUIRED = ("role_to", "requires", "expected_output")
 # Reserved marker prefixes: forbidden in fields, neutralized in bodies.
-RESERVED = ("M8SHIFT:TURN", "M8SHIFT:LOCK", "M8SHIFT:STANZA", "M8SHIFT:TASK")
+RESERVED = ("M8SHIFT:TURN", "M8SHIFT:LOCK", "M8SHIFT:STANZA", "M8SHIFT:TASK", "M8SHIFT:REQUEST")
 # Every char str.splitlines() treats as a line boundary — a single-line field must contain
 # NONE of them, else a value could forge an extra `- key: value` line that parse_turns reads.
 LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"   # all str.splitlines() boundaries
@@ -392,6 +394,10 @@ Guardrail:
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-] [--allow-large-body] [--wait]  # closes your turn + hands off
+./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
+./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
+./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
+./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py release <agent> --to <other> [--force --reason "why"]  # hand off without a body (does NOT re-increment turn)
@@ -423,12 +429,14 @@ Guardrail:
 `m8shift.py` is **self-sufficient**: it embeds this protocol, the `M8SHIFT.md`
 template and the anchors. `init` generates relay files, but it does **not** copy
 scripts into the target project. The one-line installer handles that by placing
-`m8shift.py` and the optional `m8shift-worktree.py` toolbox next to each other,
+`m8shift.py`, the optional `m8shift-worktree.py` toolbox, and the optional
+`m8shift-runtime.py` companion next to each other,
 then running `init`. For manual adoption:
 
 ```bash
 cp /path/to/m8shift.py .          # core relay
 cp /path/to/m8shift-worktree.py . # optional: isolated parallel worktrees
+cp /path/to/m8shift-runtime.py .  # optional: local presence/inbox/progress companion
 ./m8shift.py init                 # project name = folder name (otherwise --name)
 ```
 
@@ -1518,6 +1526,162 @@ def read_session_events():
     return parse_session_events(read(SESSIONS)) if os.path.exists(SESSIONS) else []
 
 
+REQUEST_RE = re.compile(
+    r"<!-- M8SHIFT:REQUEST (\d+) BEGIN -->\n?"
+    r"(.*?)"
+    r"<!-- M8SHIFT:REQUEST \1 END -->",
+    re.DOTALL,
+)
+REQUEST_HEADER = "# M8Shift · cooperative turn requests\n\n"
+
+
+def parse_request_events(text):
+    """Parse the append-only cooperative turn-request ledger.
+
+    The ledger is advisory/audit data. It never feeds `claim` or `append`; only the
+    explicit `yield-turn` / `steer-turn --force` commands below may update LOCK.
+    """
+    out = []
+    for m in REQUEST_RE.finditer(text or ""):
+        fields = {}
+        for line in m.group(2).splitlines():
+            fm = re.match(r"- ([a-z][a-z0-9_]*):\s*(.*)$", line)
+            if fm:
+                fields[fm.group(1)] = fm.group(2).rstrip()
+        try:
+            rid = int(fields.get("id", m.group(1)))
+        except (TypeError, ValueError):
+            continue
+        fields["id"] = rid
+        out.append(fields)
+    return out
+
+
+def read_request_events():
+    return parse_request_events(read(REQUESTS)) if os.path.exists(REQUESTS) else []
+
+
+def fold_turn_requests(events):
+    """Fold request events by id.
+
+    First `turn_request` event defines the request identity. Later events close it
+    (`accepted`, `declined`, `steered`). Last event wins for status only; routing
+    remains LOCK-driven.
+    """
+    by_id, order = {}, []
+    for ev in events:
+        rid = ev.get("id")
+        if not isinstance(rid, int):
+            continue
+        cur = by_id.setdefault(rid, {"id": rid})
+        if rid not in order:
+            order.append(rid)
+        if ev.get("kind") == "turn_request":
+            cur.update({
+                "from": ev.get("from", ""),
+                "to": ev.get("to", ""),
+                "reason": ev.get("reason", ""),
+                "created_at": ev.get("at", ""),
+                "state_seen": ev.get("state_seen", ""),
+            })
+        cur.update({
+            "status": ev.get("status", cur.get("status", "open")),
+            "last_kind": ev.get("kind", ""),
+            "last_at": ev.get("at", ""),
+            "last_actor": ev.get("actor", ev.get("from", "")),
+            "last_reason": ev.get("reason", cur.get("reason", "")),
+        })
+    return [by_id[rid] for rid in order]
+
+
+def open_turn_requests(events=None):
+    events = events if events is not None else read_request_events()
+    return [r for r in fold_turn_requests(events) if r.get("status") == "open"]
+
+
+def turn_requests_for_agent(agent, events=None, include_closed=False):
+    events = events if events is not None else read_request_events()
+    reqs = fold_turn_requests(events)
+    if not include_closed:
+        reqs = [r for r in reqs if r.get("status") == "open"]
+    return [r for r in reqs if r.get("from") == agent or r.get("to") == agent]
+
+
+def next_request_id(events):
+    ids = [ev["id"] for ev in events if isinstance(ev.get("id"), int)]
+    return max(ids, default=0) + 1
+
+
+def clean_request_reason(label, value):
+    value = clean_field(label, value)
+    if not value:
+        sys.exit(f"refused: {label} is required.")
+    return value
+
+
+def render_request_event(request_id, *, kind, status, actor, from_agent, to_agent,
+                         reason="", state_seen="", created_at=""):
+    fields = [
+        ("id", str(request_id)),
+        ("at", iso(now())),
+        ("kind", kind),
+        ("status", status),
+        ("actor", actor),
+        ("from", from_agent),
+        ("to", to_agent),
+    ]
+    if reason:
+        fields.append(("reason", reason))
+    if state_seen:
+        fields.append(("state_seen", state_seen))
+    if created_at:
+        fields.append(("created_at", created_at))
+    body = "\n".join(f"- {k}: {v}" for k, v in fields)
+    return (
+        f"<!-- M8SHIFT:REQUEST {request_id} BEGIN -->\n"
+        f"{body}\n"
+        f"<!-- M8SHIFT:REQUEST {request_id} END -->\n"
+    )
+
+
+def append_request_event(request_id, **fields):
+    prev = read(REQUESTS) if os.path.exists(REQUESTS) else REQUEST_HEADER
+    if prev and not prev.endswith("\n"):
+        prev += "\n"
+    write(prev + render_request_event(request_id, **fields) + "\n", REQUESTS)
+
+
+def find_open_turn_request(request_id, from_agent=None, to_agent=None):
+    for req in open_turn_requests():
+        if req.get("id") != request_id:
+            continue
+        if from_agent and req.get("from") != from_agent:
+            return None
+        if to_agent and req.get("to") != to_agent:
+            return None
+        return req
+    return None
+
+
+def _request_hint_line(req, agent):
+    rid = req.get("id")
+    frm = req.get("from", "")
+    to = req.get("to", "")
+    reason = req.get("reason", "")
+    if agent == to:
+        return (f"request  #{rid} from {frm}: yield with `./m8shift.py yield-turn {to} "
+                f"--request {rid} --to {frm}` or decline with `./m8shift.py decline-turn {to} "
+                f"--request {rid} --reason \"…\"` — {reason}")
+    if agent == frm:
+        return f"request  #{rid} open: asking {to} to yield the pen — {reason}"
+    return ""
+
+
+def request_hints_for_agent(agent):
+    return [line for line in (_request_hint_line(req, agent) for req in turn_requests_for_agent(agent))
+            if line]
+
+
 def as_int(value, default=0):
     try:
         return int(value)
@@ -2400,6 +2564,10 @@ def next_action_for(lk, agent=None, stale=False):
     if agent:
         target = f"AWAITING_{agent.upper()}"
         working = f"WORKING_{agent.upper()}"
+        incoming = [r for r in turn_requests_for_agent(agent) if r.get("to") == agent]
+        if incoming and st in (target, working):
+            r0 = incoming[0]
+            return f"{agent}: answer request #{r0.get('id')} with yield-turn or decline-turn"
         if st == "DONE":
             return f"{agent}: stop (session DONE)"
         if st in ("IDLE", target):
@@ -2454,6 +2622,8 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent=""):
     if for_agent:
         agent = need_agent(for_agent)
         print(tr("status_next", action=next_action_for(lk, agent=agent, stale=stale)))
+        for line in request_hints_for_agent(agent):
+            print(f"  {line}")
     else:
         print(tr("status_next", action=next_action_for(lk, stale=stale)))
     if last:
@@ -2477,6 +2647,7 @@ def _status_signature(lk, stale, last, for_agent=""):
     if for_agent:
         agent = need_agent(for_agent)
         data["next_action"] = next_action_for(lk, agent=agent, stale=stale)
+        data["turn_requests"] = turn_requests_for_agent(agent)
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
@@ -2498,6 +2669,7 @@ def cmd_status(args):
         if getattr(args, "for_agent", ""):
             agent = need_agent(args.for_agent)
             out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
+            out["turn_requests"] = turn_requests_for_agent(agent)
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""))
@@ -2609,8 +2781,12 @@ def cmd_next(args):
         if args.once:
             print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
             print(tr("status_next", action=next_action_for(lk, agent=agent)))
+            for line in request_hints_for_agent(agent):
+                print(line)
             return 3
         print(tr("wait_poll", st=st, holder=lk.get("holder"), interval=args.interval))
+        for line in request_hints_for_agent(agent):
+            print(line)
         time.sleep(args.interval)
 
 
@@ -2828,6 +3004,164 @@ def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", ad
         block += "\n" + body + "\n"
     block += f"<!-- M8SHIFT:TURN {n} {agent} END -->\n"
     return block
+
+
+def cmd_request_turn(args):
+    reason = clean_request_reason("--reason", args.reason)
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        to = need_agent(args.to)
+        if to == agent:
+            sys.exit("refused: cannot request the pen from yourself.")
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        holder = lk.get("holder", "none")
+        if st in ("DONE", "IDLE"):
+            sys.exit(f"refused: no cooperative transfer needed while state={st}.")
+        if holder != to or st not in (f"AWAITING_{to.upper()}", f"WORKING_{to.upper()}"):
+            sys.exit(f"refused: {to} is not the current holder (state={st}, holder={holder}).")
+        if st in (f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}"):
+            sys.exit(f"refused: {agent} already has the turn.")
+        events = read_request_events()
+        request_id = next_request_id(events)
+        t = now()
+        guard.require_owned()
+        append_request_event(
+            request_id,
+            kind="turn_request",
+            status="open",
+            actor=agent,
+            from_agent=agent,
+            to_agent=to,
+            reason=reason,
+            state_seen=st,
+            created_at=iso(t),
+        )
+    print(f"✓ request #{request_id} opened: {agent} asks {to} to yield the pen.")
+    print(f"  {to}: ./m8shift.py yield-turn {to} --request {request_id} --to {agent}")
+    print(f"  {to}: ./m8shift.py decline-turn {to} --request {request_id} --reason \"…\"")
+    return 0
+
+
+def cmd_yield_turn(args):
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        to = need_agent(args.to)
+        if to == agent:
+            sys.exit("refused: cannot yield the pen to yourself.")
+        req = find_open_turn_request(args.request, from_agent=to, to_agent=agent)
+        if not req:
+            sys.exit(f"refused: no open request #{args.request} from {to} to {agent}.")
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        if lk.get("holder") != agent or st not in (f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}"):
+            sys.exit(f"refused: {agent} is not the current holder (state={st}, holder={lk.get('holder')}).")
+        t = now()
+        lk.update(
+            holder=to,
+            state=f"AWAITING_{to.upper()}",
+            since=iso(t),
+            expires="-",
+            note=f"request #{args.request} yielded by {agent} to {to}",
+        )
+        guard.require_owned()
+        write(set_lock(text, lk))
+        guard.require_owned()
+        append_request_event(
+            args.request,
+            kind="yield_turn",
+            status="accepted",
+            actor=agent,
+            from_agent=to,
+            to_agent=agent,
+            reason=clean_field("--reason", getattr(args, "reason", "")),
+            state_seen=st,
+            created_at=req.get("created_at", ""),
+        )
+    print(f"✓ request #{args.request} accepted: pen yielded to {to}.")
+    return 0
+
+
+def cmd_decline_turn(args):
+    reason = clean_request_reason("--reason", args.reason)
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        reqs = [r for r in open_turn_requests() if r.get("id") == args.request and r.get("to") == agent]
+        if not reqs:
+            sys.exit(f"refused: no open request #{args.request} addressed to {agent}.")
+        req = reqs[0]
+        lk = get_lock(text)
+        if lk.get("holder") != agent:
+            sys.exit(f"refused: {agent} is not the current holder (holder={lk.get('holder')}).")
+        guard.require_owned()
+        append_request_event(
+            args.request,
+            kind="decline_turn",
+            status="declined",
+            actor=agent,
+            from_agent=req.get("from", ""),
+            to_agent=agent,
+            reason=reason,
+            state_seen=lk.get("state", ""),
+            created_at=req.get("created_at", ""),
+        )
+    print(f"✓ request #{args.request} declined by {agent}.")
+    return 0
+
+
+def cmd_steer_turn(args):
+    reason = clean_request_reason("--reason", args.reason)
+    if not args.force:
+        sys.exit("refused: steer-turn requires --force and a reason.")
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        from_agent = need_agent(args.from_agent)
+        if from_agent == agent:
+            sys.exit("refused: cannot steer the pen from yourself.")
+        req = find_open_turn_request(args.request, from_agent=agent, to_agent=from_agent)
+        if not req:
+            sys.exit(f"refused: no open request #{args.request} from {agent} to {from_agent}.")
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        if lk.get("holder") != from_agent:
+            sys.exit(f"refused: {from_agent} is not the current holder (holder={lk.get('holder')}).")
+        if st != f"AWAITING_{from_agent.upper()}":
+            sys.exit(f"refused: steer-turn only redirects an idle AWAITING holder, not {st}.")
+        t = now()
+        lk.update(
+            holder=agent,
+            state=f"AWAITING_{agent.upper()}",
+            since=iso(t),
+            expires="-",
+            note=f"request #{args.request} force-steered from {from_agent} to {agent}: {reason}",
+        )
+        guard.require_owned()
+        write(set_lock(text, lk))
+        guard.require_owned()
+        append_request_event(
+            args.request,
+            kind="steer_turn",
+            status="steered",
+            actor=agent,
+            from_agent=agent,
+            to_agent=from_agent,
+            reason=reason,
+            state_seen=st,
+            created_at=req.get("created_at", ""),
+        )
+        if lk.get("session"):
+            guard.require_owned()
+            append_session_event(
+                "force", lk["session"], timestamp=t,
+                op="steer-turn", by=agent, from_holder=from_agent, to=agent,
+                reason=reason, force="true", request=str(args.request),
+            )
+    print(f"✓ request #{args.request} force-steered: {agent} now has the turn.")
+    return 0
 
 
 def cmd_append(args):
@@ -3202,6 +3536,38 @@ def main():
     a.add_argument("--field", action="append", default=[], metavar="KEY=VALUE",
                    help="advisory turn field, repeatable (KEY snake_case or x_*)")
     a.set_defaults(fn=cmd_append)
+
+    rq = sub.add_parser("request-turn",
+                        help="ask the current holder to yield the pen (audit-only; no LOCK change)")
+    rq.add_argument("agent", help="requesting agent")
+    rq.add_argument("--to", required=True, help="current holder being asked to yield")
+    rq.add_argument("--reason", required=True, help="why you need the pen")
+    rq.set_defaults(fn=cmd_request_turn)
+
+    yd = sub.add_parser("yield-turn",
+                        help="current holder accepts an open request and yields the pen")
+    yd.add_argument("agent", help="current holder")
+    yd.add_argument("--request", type=int, required=True, help="open request id")
+    yd.add_argument("--to", required=True, help="requesting agent that should receive the turn")
+    yd.add_argument("--reason", default="", help="optional audit note")
+    yd.set_defaults(fn=cmd_yield_turn)
+
+    dc = sub.add_parser("decline-turn",
+                        help="current holder declines an open cooperative turn request")
+    dc.add_argument("agent", help="current holder")
+    dc.add_argument("--request", type=int, required=True, help="open request id")
+    dc.add_argument("--reason", required=True, help="why the holder keeps the pen")
+    dc.set_defaults(fn=cmd_decline_turn)
+
+    sr = sub.add_parser("steer-turn",
+                        help="operator/requestor redirects an idle AWAITING holder after an open request")
+    sr.add_argument("agent", help="requesting agent that should receive the turn")
+    sr.add_argument("--from", dest="from_agent", required=True,
+                    help="idle current holder being redirected")
+    sr.add_argument("--request", type=int, required=True, help="open request id")
+    sr.add_argument("--force", action="store_true", help="required; records an audit event")
+    sr.add_argument("--reason", required=True, help="why the idle holder is being redirected")
+    sr.set_defaults(fn=cmd_steer_turn)
 
     rm = sub.add_parser("remember",
                         help="append one durable note to M8SHIFT.memory.md (no pen needed)")

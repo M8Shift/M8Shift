@@ -206,6 +206,10 @@ Schutzvorrichtung:
                                                   #   IDLE / deiner eigenen Sperre ; --force = NUR veraltete Sperre
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # schließt deinen Zug ab + übergibt
+./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
+./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
+./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
+./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py remember <agent> "<note>"  # eine dauerhafte Speichernotiz anhängen (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory Aufgabenliste (To-dos pro Agent)
 ./m8shift.py release <agent> --to <other> [--force]  # übergibt ohne Text (erhöht turn NICHT erneut)
