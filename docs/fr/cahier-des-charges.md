@@ -239,14 +239,13 @@ La documentation française les référence sans maintenir de copie traduite.
 | garde-fou opérateur | `next <agent>`, `status --for <agent>`, `append --wait` | aide à rester dans la boucle ; `next` ne mute qu'en faisant le `claim` normal |
 | [rfc-worktree-companion.md](../en/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
+| [rfc-contracts-validation.md](../en/rfc-contracts-validation.md) | `contract validate`, `doctor --contracts`, flags contrat `append` | validation read-only ; ne route pas le travail et ne donne pas de permissions |
 
-Surface planifiée : [RFC — Contrats et validation Stage 4](../en/rfc-contracts-validation.md)
-spécifie la prochaine étape d'implémentation : contrats de passation typés, décisions
-de revue explicites (`approve`, `revise`, `reject`, `waive`) et commandes de
-validation read-only. Ce n'est pas encore une garantie livrée. La validation pourra
-signaler des avertissements ou erreurs strictes lorsque l'opérateur le demande, mais
-elle ne devra pas router le travail, donner des permissions, lancer des outils ou
-muter le `LOCK`.
+Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc-contracts-validation.md)
+décrit les contrats de passation typés, décisions de revue explicites (`approve`, `revise`,
+`reject`, `waive`) et commandes de validation read-only. La validation peut signaler des
+avertissements ou erreurs strictes lorsque l'opérateur le demande, mais elle ne route pas le
+travail, ne donne pas de permissions, ne lance pas d'outils et ne mute pas le `LOCK`.
 
 Surfaces futures documentées :
 [RFC — Plan de contrôle runtime / hébergé](../en/rfc-hosted-runtime-control-plane.md)

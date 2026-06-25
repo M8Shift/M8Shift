@@ -357,15 +357,16 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |
 | [rfc-worktree-companion.md](rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
+| [rfc-contracts-validation.md](rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
 
-### 12.2 Planned contract surface
+### 12.2 Stage 4 contract surface
 
-[RFC — Stage 4 contracts and validation](rfc-contracts-validation.md) specifies the
-next implementation step: typed handoff contracts, explicit review decisions
-(`approve`, `revise`, `reject`, `waive`), and read-only validation commands. This is
-not part of the shipped guarantee yet. Its boundary is the same as the rest of the
-core: validation may report warnings or strict errors when explicitly requested, but
-it must not route work, grant permissions, run tools, or mutate the `LOCK`.
+[RFC — Stage 4 contracts and validation](rfc-contracts-validation.md) is now implemented as a
+read-only validation surface: typed handoff contracts, explicit review decisions
+(`approve`, `revise`, `reject`, `waive`), ergonomic append flags, `contract validate`, and
+`doctor --contracts`. Its boundary is the same as the rest of the core: validation may report
+warnings or strict errors when explicitly requested, but it does not route work, grant permissions,
+run tools, or mutate the `LOCK`.
 
 ### 12.3 Future companion / research RFCs
 

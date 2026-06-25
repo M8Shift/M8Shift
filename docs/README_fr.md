@@ -199,7 +199,7 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **RFC** — les RFC sont maintenues uniquement en anglais sous `docs/en/rfc-*.md` afin d'éviter une double maintenance ; les liens ci-dessous pointent vers cette source canonique.
 - **RFC (historique de sessions)** — [docs/en/rfc-session-history.md](../docs/en/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
 - **RFC (compagnon worktree)** — [docs/en/rfc-worktree-companion.md](../docs/en/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
-- **RFC (contrats et validation)** — [docs/en/rfc-contracts-validation.md](../docs/en/rfc-contracts-validation.md) _(en)_ — spécification Stage 4 pour passations typées, décisions de revue et validation read-only.
+- **RFC (contrats et validation)** — [docs/en/rfc-contracts-validation.md](../docs/en/rfc-contracts-validation.md) _(en)_ — Stage 4 livré : passations typées, décisions de revue, flags dédiés, `contract validate` et `doctor --contracts`.
 - **RFC (plan de contrôle runtime/hébergé)** — [docs/en/rfc-hosted-runtime-control-plane.md](../docs/en/rfc-hosted-runtime-control-plane.md) _(en)_ — supervision optionnelle hors cœur.
 - **RFC (gestion des fournisseurs)** — [docs/en/rfc-provider-management.md](../docs/en/rfc-provider-management.md) _(en)_ — registre futur d'adaptateurs pour Claude, Codex, Gemini, Vibe et autres agents coopératifs.
 - **RFC (degré > 1 dans un même arbre)** — [docs/en/rfc-shared-tree-degree-gt1.md](../docs/en/rfc-shared-tree-degree-gt1.md) _(en)_ — sujet de recherche rejeté pour le cœur au profit des worktrees isolés.

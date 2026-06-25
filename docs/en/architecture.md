@@ -202,13 +202,14 @@ at **1**: the baton is passed among participants, but only one can edit the shar
 Degree-2 exists only as an opt-in companion that isolates concurrent work in separate
 git worktrees and serializes integration.
 
-### 1.9 Stage 4 contracts and validation — planned extension
+### 1.9 Stage 4 contracts and validation — shipped read-only extension
 
-Stage 4 is specified as an extension, not as a shipped runtime guarantee yet. The
-existing engine already stores required handoff fields (`ask`, `done`, `files`),
-advisory metadata (`branch`, `commit`, `tests`, `next`, `blocked_on`, `x_*`), and
-read-only diagnostics (`peek`, `recap`, `history`, `doctor`). Stage 4 formalizes
-that metadata into typed handoff contracts and review decisions.
+Stage 4 is implemented as a read-only extension. The engine stores required handoff
+fields (`ask`, `done`, `files`), advisory metadata (`branch`, `commit`, `tests`, `next`,
+`blocked_on`, `x_*`), and typed contract metadata (`schema`, `relation`, `role_from`,
+`role_to`, `requires`, `expected_output`, `evidence`, `decision`, `waiver_reason`,
+`permissions`). `contract validate` and `doctor --contracts` check that metadata without
+mutating the `LOCK`.
 
 ```mermaid
 flowchart LR
@@ -237,11 +238,10 @@ flowchart LR
 Legend: blue = agents, yellow = persisted turn data, green = validation or accepted
 continuation, purple = explicit decision, red = human escalation.
 
-The architectural boundary is deliberate: validation reads the append-only turn
-history and can report warnings or strict errors, but it does not route work, grant
-permissions, run tools, or mutate the `LOCK`. Host/UI permission enforcement can be
-layered around M8Shift, while the core remains a passive single-file relay. The
-implementation contract is tracked in
+The architectural boundary is deliberate: validation reads the append-only turn history and can
+report warnings or strict errors, but it does not route work, grant permissions, run tools, or
+mutate the `LOCK`. Host/UI permission enforcement can be layered around M8Shift, while the core
+remains a passive single-file relay. The implementation contract is tracked in
 [RFC — Stage 4 contracts and validation](rfc-contracts-validation.md).
 
 ---

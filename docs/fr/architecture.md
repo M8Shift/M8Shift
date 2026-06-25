@@ -204,14 +204,14 @@ cœur à **1** : le témoin circule entre participants, mais un seul édite l'ar
 partagé. Le degré 2 existe seulement via un compagnon opt-in qui isole le travail
 concurrent dans des worktrees git séparés et sérialise l'intégration.
 
-### 1.9 Contrats et validation Stage 4 — extension planifiée
+### 1.9 Contrats et validation Stage 4 — extension read-only livrée
 
-Le Stage 4 est spécifié comme une extension, pas comme une garantie runtime déjà
-livrée. Le moteur actuel stocke déjà les champs de passation obligatoires (`ask`,
-`done`, `files`), les métadonnées consultatives (`branch`, `commit`, `tests`,
-`next`, `blocked_on`, `x_*`) et les diagnostics read-only (`peek`, `recap`,
-`history`, `doctor`). Le Stage 4 formalise ces métadonnées en contrats typés de
-passation et en décisions de revue.
+Le Stage 4 est implémenté comme une extension read-only. Le moteur stocke les champs
+de passation obligatoires (`ask`, `done`, `files`), les métadonnées consultatives
+(`branch`, `commit`, `tests`, `next`, `blocked_on`, `x_*`) et les métadonnées de contrat
+(`schema`, `relation`, `role_from`, `role_to`, `requires`, `expected_output`, `evidence`,
+`decision`, `waiver_reason`, `permissions`). `contract validate` et `doctor --contracts`
+vérifient ces données sans muter le `LOCK`.
 
 ```mermaid
 flowchart LR
