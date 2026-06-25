@@ -204,7 +204,7 @@ sequenceDiagram
     B->>M: append --to A
 ```
 
-Le degré 2 existe seulement avec [`m8shift-worktree.py`](../en/rfc-worktree-companion.md) :
+Le degré 2 existe seulement avec [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md) :
 
 ```mermaid
 flowchart LR
@@ -226,33 +226,33 @@ flowchart LR
 
 ## 11. RFC livrées et surfaces correspondantes
 
-Les RFC sont rédigées et maintenues uniquement en anglais sous `docs/en/rfc-*.md`.
+Les RFC sont rédigées et maintenues uniquement en anglais sous `docs/en/rfc/`.
 La documentation française les référence sans maintenir de copie traduite.
 
 | Source | Surface livrée | Règle de périmètre |
 |--------|----------------|--------------------|
-| [rfc-memory.md](../en/rfc-memory.md) | `remember` + `M8SHIFT.memory.md` | registre append-only, jamais utilisé pour router |
-| [rfc-claim-check.md](../en/rfc-claim-check.md) | `claim --check` | lecture seule, aucune acquisition de stylo |
-| [rfc-tasks.md](../en/rfc-tasks.md) | `task add/done/drop/list/show` + `M8SHIFT.tasks.md` | état replié à la lecture, jamais imposé au mutex |
-| [rfc-session-history.md](../en/rfc-session-history.md) | `history` + `M8SHIFT.sessions.jsonl` | observabilité de session, pas de claimabilité |
-| [rfc-runtime-patterns.md](../en/rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine préfixée par le fuseau | diagnostics et formatteurs read-only |
+| [rfc-memory.md](../en/rfc/rfc-memory.md) | `remember` + `M8SHIFT.memory.md` | registre append-only, jamais utilisé pour router |
+| [rfc-claim-check.md](../en/rfc/rfc-claim-check.md) | `claim --check` | lecture seule, aucune acquisition de stylo |
+| [rfc-tasks.md](../en/rfc/rfc-tasks.md) | `task add/done/drop/list/show` + `M8SHIFT.tasks.md` | état replié à la lecture, jamais imposé au mutex |
+| [rfc-session-history.md](../en/rfc/rfc-session-history.md) | `history` + `M8SHIFT.sessions.jsonl` | observabilité de session, pas de claimabilité |
+| [rfc-runtime-patterns.md](../en/rfc/rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine préfixée par le fuseau | diagnostics et formatteurs read-only |
 | garde-fou opérateur | `next <agent>`, `status --for <agent>`, `append --wait` | aide à rester dans la boucle ; `next` ne mute qu'en faisant le `claim` normal |
-| [rfc-worktree-companion.md](../en/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
+| [rfc-worktree-companion.md](../en/rfc/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
-| [rfc-contracts-validation.md](../en/rfc-contracts-validation.md) | `contract validate`, `doctor --contracts`, flags contrat `append` | validation read-only ; ne route pas le travail et ne donne pas de permissions |
+| [rfc-contracts-validation.md](../en/rfc/rfc-contracts-validation.md) | `contract validate`, `doctor --contracts`, flags contrat `append` | validation read-only ; ne route pas le travail et ne donne pas de permissions |
 
-Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc-contracts-validation.md)
+Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc/rfc-contracts-validation.md)
 décrit les contrats de passation typés, décisions de revue explicites (`approve`, `revise`,
 `reject`, `waive`) et commandes de validation read-only. La validation peut signaler des
 avertissements ou erreurs strictes lorsque l'opérateur le demande, mais elle ne route pas le
 travail, ne donne pas de permissions, ne lance pas d'outils et ne mute pas le `LOCK`.
 
 Surfaces futures documentées :
-[RFC — Plan de contrôle runtime / hébergé](../en/rfc-hosted-runtime-control-plane.md)
+[RFC — Plan de contrôle runtime / hébergé](../en/rfc/rfc-hosted-runtime-control-plane.md)
 pour présence, voies, inbox opérateur, progression et notifications hors cœur ;
-[RFC — Gestion des fournisseurs](../en/rfc-provider-management.md) pour associer les
+[RFC — Gestion des fournisseurs](../en/rfc/rfc-provider-management.md) pour associer les
 identités du roster (`claude`, `codex`, `gemini`, `vibe`, …) aux commandes et
-capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](../en/rfc-shared-tree-degree-gt1.md)
+capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](../en/rfc/rfc-shared-tree-degree-gt1.md)
 comme sujet de recherche rejeté pour le cœur, remplacé en pratique par les worktrees isolés.
 
 Les idées rejetées restent documentées comme non-goals : daemon, notifications push

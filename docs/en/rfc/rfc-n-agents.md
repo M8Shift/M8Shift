@@ -1,11 +1,11 @@
 # RFC — M8Shift Stage 2: N-agent relay (single pen)
 
 - **Status:** Historical / implemented, now superseded by the current
-  [specification](specification.md) and [architecture](architecture.md)
+  [specification](../specification.md) and [architecture](../architecture.md)
 - **Supersedes scope of:** [RFC — configurable agent pair](rfc-roster.md) (Stage 1, shipped)
 - **Prior art:** the `m8shift-vscode-multiagent-kit` (RFC-MA-001/002/003) — this RFC
   *reconciles* that design with M8Shift's single-file / passive / stdlib / degree-1 identity.
-- **Rationale & rejected alternatives:** [stage2-rationale.md](stage2-rationale.md) — why each
+- **Rationale & rejected alternatives:** [stage2-rationale.md](../stage2-rationale.md) — why each
   choice was made and what was discarded.
 
 > ℹ️ **Status update.** The **degree-1 N-agent relay** designed here is shipped:
@@ -284,7 +284,7 @@ to another active agent (or back to the coordinator), recording the reason in a 
 It is honest about its limits: it detects **liveness** (no progress past TTL), **not** capability
 or output quality (those are the bounce-back + review loop, §9). It adds **no** core surface — it
 is a pure consumer of the core's read commands + `claim --force` + `tasks set`, in the same family
-as [`examples/headless_runner.py`](../../examples/headless_runner.py). Keeping it in the companion
+as [`examples/headless_runner.py`](../../../examples/headless_runner.py). Keeping it in the companion
 is what preserves the core's "no background loop" guarantee.
 
 ## 9. Validation = advisory, in the core; enforcement only in a separate tier

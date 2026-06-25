@@ -5,7 +5,7 @@
 > ⚠️ **Historical.** This RFC framed stage 1 as a *configurable pair* (first two active). The
 > shipped model is broader: an **active roster of ≥2 agents, all of which relay**, with **one
 > pen** (degree-1) — the holder hands off to any other member via `--to`. For the live model
-> see [the protocol](protocol.md) §1–2 and the README. "Stage 2" below = **N *concurrent*
+> see [the protocol](../protocol.md) §1–2 and the README. "Stage 2" below = **N *concurrent*
 > writers** (degree-2, isolated worktrees) — see [rfc-n-agents.md](rfc-n-agents.md). The text
 > below is kept as the original design record; read it as historical.
 
@@ -18,7 +18,7 @@ model**: it stays a **degree-1 mutex** (one pen, strict alternation between the 
 chosen agents). It is a *minimal delta* — the lock, the `O_EXCL` serialization, the
 TTL lease and the turn journal are untouched.
 
-> See [architecture §1.8](architecture.md) — *a mutex, not a semaphore*. This RFC
+> See [architecture §1.8](../architecture.md) — *a mutex, not a semaphore*. This RFC
 > keeps the degree at 1; it widens the **alphabet** of agent names, not the number
 > of simultaneous holders.
 
