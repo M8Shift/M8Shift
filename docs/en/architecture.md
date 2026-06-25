@@ -32,7 +32,7 @@ an enterprise infrastructure that is not relevant here.
 ### 1.1 General context
 
 M8Shift is a **coordination tool for an active roster of two or more AI agents**
-(Claude, Codex, Gemini, Le Chat, …) working on the same repository. The core
+(Claude, Codex, Gemini, Vibe, …) working on the same repository. The core
 materializes a **single pen**: only one roster member writes to the shared tree at a
 time, the others wait for their turn. Core coordination state lives in a readable,
 versionable file `M8SHIFT.md`, with append-only side ledgers for memory, tasks and

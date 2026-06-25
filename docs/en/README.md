@@ -26,11 +26,18 @@ M8Shift is **free and open source**, released under the
 | Document | Purpose |
 |----------|---------|
 | [architecture.md](architecture.md) | Architecture views, concurrency model, data stores, and operational boundaries. |
+| [brand/color-palette.md](brand/color-palette.md) | Canonical M8Shift brand color palette and CSS tokens. |
 | [philosophy.md](philosophy.md) | Why M8Shift exists and what collaboration model it supports. |
 | [security-audit.md](security-audit.md) | Security audit of code, coordination, and prompt surfaces. |
 | [stage2-rationale.md](stage2-rationale.md) | Design rationale behind the N-agent relay model. |
 
-## RFCs and design records
+## Design decisions
+
+| Document | Purpose |
+|----------|---------|
+| [decisions/vitepress-palette.md](decisions/vitepress-palette.md) | Accepted decision for adopting the brand palette in the VitePress documentation site. |
+
+## RFCs
 
 RFCs are authored and maintained in English only, under `docs/en/rfc/`.
 Localized documentation should link to these canonical RFCs instead of duplicating them.

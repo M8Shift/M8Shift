@@ -6,7 +6,7 @@ _Des agents différents. Des rôles différents. Un seul workflow coordonné._
 
 ![M8Shift](../M8Shift-logo.png)
 
-**Un relais libre et open source en fichier unique qui permet à deux agents IA ou plus — un roster actif (Claude, Codex, Gemini, Le Chat, …) — de coopérer sur le même dépôt par alternance stricte, avec un seul écrivain à la fois.**
+**Un relais libre et open source en fichier unique qui permet à deux agents IA ou plus — un roster actif (Claude, Codex, Gemini, Vibe, …) — de coopérer sur le même dépôt par alternance stricte, avec un seul écrivain à la fois.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#tests)

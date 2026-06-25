@@ -6,7 +6,7 @@ _Different agents. Different roles. One coordinated workflow._
 
 ![M8Shift](M8Shift-logo.png)
 
-**A free and open-source single-file relay that lets two or more AI agents — an active roster (Claude, Codex, Gemini, Le Chat, …) — cooperate on the same repository through strict alternation (one writer at a time).**
+**A free and open-source single-file relay that lets two or more AI agents — an active roster (Claude, Codex, Gemini, Vibe, …) — cooperate on the same repository through strict alternation (one writer at a time).**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#tests)

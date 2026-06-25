@@ -32,7 +32,7 @@ infrastructure d'entreprise non pertinente ici.
 ### 1.1 Contexte général
 
 M8Shift est un **outil de coordination pour un roster actif de deux agents IA ou plus**
-(Claude, Codex, Gemini, Le Chat, …) travaillant sur un même dépôt. Le cœur matérialise
+(Claude, Codex, Gemini, Vibe, …) travaillant sur un même dépôt. Le cœur matérialise
 un **stylo unique** : un seul membre du roster écrit dans l'arbre partagé à la fois,
 les autres attendent leur tour. L'état de coordination vit dans un fichier lisible et
 versionnable `M8SHIFT.md`, avec des registres append-only pour mémoire, tâches et
