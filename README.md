@@ -199,6 +199,10 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
   opt-in degree-2 concurrency through isolated git worktrees.
 - **RFC (runtime companion)** — [docs/en/rfc-runtime-companion.md](docs/en/rfc-runtime-companion.md) —
   queues, presence, progress, and UI-safe waiting around the passive core.
+- **RFC (agent runtime architecture)** — [docs/en/rfc-agent-runtime-architecture.md](docs/en/rfc-agent-runtime-architecture.md) —
+  future local runtime/scaffold layer for roles, workflows, approvals, artifacts, and reports.
+- **RFC input (neutral runtime patterns)** — [docs/en/rfc-input-neutral-patterns.md](docs/en/rfc-input-neutral-patterns.md) —
+  curated pattern inventory for future companion RFCs.
 - **RFC (runtime patterns)** — [docs/en/rfc-runtime-patterns.md](docs/en/rfc-runtime-patterns.md) —
   what M8Shift keeps, rejects, or defers from runtime/gateway designs.
 - **RFC (contracts and validation)** — [docs/en/rfc-contracts-validation.md](docs/en/rfc-contracts-validation.md) —
