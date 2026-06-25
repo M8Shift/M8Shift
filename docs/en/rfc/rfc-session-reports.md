@@ -1,6 +1,6 @@
 # RFC — Session reports and decision ledger
 
-- **Status:** implemented v1 in v3.18.2
+- **Status:** implemented v1 in v3.18.3
 - **Scope:** read-only session inspection plus optional Markdown report generation
 - **Core invariant:** session reports are derived memory. They never route work, grant
   the pen, mutate the `LOCK`, or replace the append-only turn journal.
@@ -169,8 +169,10 @@ Custom `--output PATH` is allowed only for files under the project root:
 - refuse a parent directory whose real path escapes the project root;
 - refuse reserved M8Shift coordination and distributed script files (`M8SHIFT.md`,
   session/request ledgers, protocol/memory/task files, `.m8shift.lock`, shipped
-  `m8shift*.py` scripts, checksummed kit files, and shipped `examples/` or `scripts/`
-  helper scripts), even when `--force` is provided;
+  `m8shift*.py` scripts, checksummed kit files, and existing files under `examples/`
+  or `scripts/`), even when `--force` is provided;
+- tolerate a missing, malformed, or non-UTF-8 `checksums.sha256` while falling back to
+  the built-in and discovered reserved paths;
 - compare reserved paths after canonicalization that is safe on case-insensitive
   filesystems, so `M8shift.md` cannot bypass the `M8SHIFT.md` guard;
 - write atomically through a temporary file in the same directory and `os.replace`;
