@@ -313,20 +313,27 @@ All tracked Python scripts expose their own `--version` too (`m8shift-i18n.py`,
 `m8shift-worktree.py`, `examples/headless_runner.py`, `scripts/gen_docs.py`, and the
 test runners) and are kept in lockstep with the core version by tests.
 
-**Promotion (refreshing the engine) is deliberate, never automatic:**
+**Stable-version policy.** The dogfooding relay is refreshed at **every stable version**. A stable
+version is a commit or tag where the repo copy has passed the release checks and is safe to use as
+the coordinator. Leaving the frozen relay on an older version is an exception, not the default, and
+the maintainer should record why before continuing work.
+
+**Promotion (refreshing the engine) is deliberate, but mandatory at each stable point:**
 
 1. Edit + **test the repo copy in isolation** (`python3 -m unittest discover -s tests`) — the relay
    keeps running on the frozen, stable version, so a broken WIP edit never wedges coordination.
 2. Commit / tag the repo when it reaches a stable point.
-3. **Promote** only when you want the relay to dogfood the new behavior: `cp m8shift/m8shift.py
-   <relay>/` (after tests pass), then confirm `m8shift.py --version` matches in both locations.
+3. **Promote** the stable engine into the relay: `cp m8shift/m8shift.py <relay>/`, then confirm
+   `m8shift.py --version` matches in both locations and `python3 <relay>/m8shift.py status` still
+   reads the current session.
    - **Backward-compatible change** (docs, messages, new commands, a new *optional* LOCK field):
      promote any time — the in-flight `M8SHIFT.md` keeps working.
    - **Format / protocol-breaking change**: promote **and** reset the relay (`init --force`) so the
      `M8SHIFT.md` is rewritten by the new engine; the prior in-flight file may be incompatible.
 
 So "the tool that coordinates" stays stable and tested while "the tool being developed" is freely
-broken and fixed; the version stamp is the cheap check that the two have not silently diverged.
+broken and fixed; the version stamp plus the stable-version promotion rule prevents the two from
+silently diverging for long.
 
 ## 12. Implemented RFC surfaces & non-goals
 

@@ -280,3 +280,9 @@ une migration ou un incrément de protocole.
 M8Shift est développé avec M8Shift. Pour éviter de casser le relais pendant l'édition de
 `m8shift.py`, le relais de dogfooding tourne depuis une **copie figée** hors dépôt ; le
 dépôt réel est édité seulement après `claim`, puis testé avant `append`.
+
+À chaque **version stable** (commit ou tag ayant passé les tests/release checks), la copie
+figée du relais de dogfooding doit être promue vers cette version stable : copier le
+`m8shift.py` testé dans le répertoire du relais, vérifier que `--version` correspond entre
+la source et le relais, puis vérifier que `status` relit correctement la session en cours.
+Conserver un relais plus ancien est une exception à documenter, pas le fonctionnement nominal.
