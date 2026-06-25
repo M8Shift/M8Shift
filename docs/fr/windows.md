@@ -76,8 +76,8 @@ python m8shift.py append claude --to codex --ask "..." --done "..."
 ```
 
 Si vous n'utilisez pas l'installateur, téléchargez ou copiez d'abord `m8shift.py`
-dans le projet ; copiez `m8shift-worktree.py` à côté seulement si vous utilisez les
-worktrees parallèles isolés.
+dans le projet ; copiez [`m8shift-worktree.py`](../en/rfc-worktree-companion.md)
+à côté seulement si vous utilisez les worktrees parallèles isolés.
 
 `claude` et `codex` sont des noms de roster d'exemple. Remplacez-les par `gemini`,
 `vibe` ou tout agent coopératif qui respecte le protocole du relais.

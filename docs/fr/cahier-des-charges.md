@@ -204,7 +204,7 @@ sequenceDiagram
     B->>M: append --to A
 ```
 
-Le degré 2 existe seulement avec `m8shift-worktree.py` :
+Le degré 2 existe seulement avec [`m8shift-worktree.py`](../en/rfc-worktree-companion.md) :
 
 ```mermaid
 flowchart LR
