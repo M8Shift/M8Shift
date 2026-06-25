@@ -37,11 +37,13 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 
 | Document | Purpose |
 |----------|---------|
+| [rfc-agent-runtime-architecture.md](rfc-agent-runtime-architecture.md) | Future local agent runtime companion architecture around the passive core. |
 | [rfc-claim-check.md](rfc-claim-check.md) | Advisory pre-claim overlap checks. |
 | [rfc-cooperative-turn-request.md](rfc-cooperative-turn-request.md) | Proposed cooperative baton request and operator steering for interactive UI deadlocks. |
 | [rfc-contracts-validation.md](rfc-contracts-validation.md) | Stage 4 contracts, review decisions, and shipped read-only validation. |
 | [rfc-hosted-runtime-control-plane.md](rfc-hosted-runtime-control-plane.md) | Future optional hosted/runtime control plane. |
 | [rfc-i18n-packs.md](rfc-i18n-packs.md) | Build-time language packs and localized single-file variants. |
+| [rfc-input-neutral-patterns.md](rfc-input-neutral-patterns.md) | Neutral runtime pattern inventory curated for future companion RFCs. |
 | [rfc-memory.md](rfc-memory.md) | Shared append-only memory ledger. |
 | [rfc-n-agents.md](rfc-n-agents.md) | N-agent relay model with one shared pen. |
 | [rfc-provider-management.md](rfc-provider-management.md) | Future provider/adapter registry outside the core. |

@@ -379,6 +379,12 @@ run tools, or mutate the `LOCK`.
 
 The remaining future topics are now explicit RFCs:
 
+- [RFC — Agent runtime architecture companion](rfc-agent-runtime-architecture.md):
+  future local runtime/scaffold layer for agent registries, roles, workflows,
+  approvals, artifacts, and reports; explicitly outside the passive core.
+- [RFC input — Neutral runtime patterns inventory](rfc-input-neutral-patterns.md):
+  curated source material for future companion RFCs, with shipped core surfaces
+  separated from deferred runtime patterns.
 - [RFC — Hosted/runtime control plane](rfc-hosted-runtime-control-plane.md):
   optional runtime supervision, lanes, operator inboxes, progress, and notifications
   around the passive core.
