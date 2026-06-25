@@ -191,9 +191,12 @@ loop:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generates the kit here
 ./m8shift.py status                                # lock + last turn (NON-blocking)
+./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # 本地实时监视（只读）
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # 只读的健康/安全/合约检查
 ./m8shift.py contract validate [--strict] [--json] # Stage 4 合约的只读校验
+./m8shift.py history [--limit N] [--oneline] [--json]  # 会话历史（只读）
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
+./m8shift.py next <agent> [--once] [--interval N] [--force]  # 需要时等待，然后 claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
