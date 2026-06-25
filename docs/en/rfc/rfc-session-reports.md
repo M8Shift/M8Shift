@@ -1,6 +1,6 @@
 # RFC — Session reports and decision ledger
 
-- **Status:** proposed
+- **Status:** implemented v1 in v3.18.0
 - **Scope:** read-only session inspection plus optional Markdown report generation
 - **Core invariant:** session reports are derived memory. They never route work, grant
   the pen, mutate the `LOCK`, or replace the append-only turn journal.
@@ -36,7 +36,7 @@ from ordinary handoff chatter. The result is fragile and easy to lose.
 Add a session-report surface that derives a compact, human-readable report from the
 existing session ledger and turn journal.
 
-Proposed commands:
+Shipped commands:
 
 ```bash
 ./m8shift.py session list [--limit N] [--json]

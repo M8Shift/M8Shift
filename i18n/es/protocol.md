@@ -203,6 +203,7 @@ Salvaguarda:
 ./m8shift.py peek <agent>  # última entrega dirigida a <agent> (rc 3 si no es tu turno)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # cronología del relevo (solo lectura)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # historial de sesión (solo lectura)
+./m8shift.py session {list,show,decisions,report} …  # vistas de sesión + informe Markdown opcional
 ./m8shift.py wait <agent> [--once] [--interval N]  # espera tu turno ; --once = 1 comprobación (rc 3 si no es tu turno)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # espera si hace falta, luego claim + peek
 ./m8shift.py claim <agent> [--force]               # TOMA la pluma (exclusivo) — desde tu turno /

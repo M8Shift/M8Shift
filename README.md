@@ -198,7 +198,7 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **RFC (session history)** — [docs/en/rfc/rfc-session-history.md](docs/en/rfc/rfc-session-history.md) —
   session ledger and `history`.
 - **RFC (session reports)** — [docs/en/rfc/rfc-session-reports.md](docs/en/rfc/rfc-session-reports.md) —
-  proposed Markdown reports and decision ledger derived from existing turns.
+  shipped Markdown reports and decision ledger derived from existing turns.
 - **RFC (worktree companion)** — [docs/en/rfc/rfc-worktree-companion.md](docs/en/rfc/rfc-worktree-companion.md) —
   opt-in degree-2 concurrency through isolated git worktrees.
 - **RFC (runtime companion)** — [docs/en/rfc/rfc-runtime-companion.md](docs/en/rfc/rfc-runtime-companion.md) —
@@ -358,6 +358,7 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 |------|--------|---------|----------|
 | N-agent roster, one pen | ✅ Shipped | `init --agents a,b,c…`, directed `append --to <agent>` | all agents can relay; still one writer at a time |
 | Read/handoff observability | ✅ Shipped | `recap`, `peek`, `log`, `history`, `status --json`, `watch` | read-only views; no routing decisions |
+| Session reports | ✅ Shipped | `session list/show/decisions/report`, `M8SHIFT.session-reports/` | derived Markdown memory; no lock mutation, no invented decisions |
 | Advisory pre-claim checks | ✅ Shipped | `claim --check [--files …] [--turns N]` | no pen taken; overlap is advisory |
 | Shared memory and tasks | ✅ Shipped | `remember`, `task add/done/drop/list/show`, recap headlines | append-only ledgers; never enforced by the mutex |
 | Stage 4 contracts | ✅ Shipped | `append --schema stage4.v1 …`, `contract validate`, `doctor --contracts` | typed metadata is validated only on explicit read-only commands |

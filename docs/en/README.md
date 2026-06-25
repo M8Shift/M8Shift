@@ -53,7 +53,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |
 | [rfc-runtime-patterns.md](rfc/rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |
 | [rfc-session-history.md](rfc/rfc-session-history.md) | Session history ledger and `history` command. |
-| [rfc-session-reports.md](rfc/rfc-session-reports.md) | Proposed session reports and decision ledger generated from existing turns. |
+| [rfc-session-reports.md](rfc/rfc-session-reports.md) | Shipped session reports and decision ledger generated from existing turns. |
 | [rfc-shared-tree-degree-gt1.md](rfc/rfc-shared-tree-degree-gt1.md) | Research RFC for true degree > 1 writes in one shared working tree; rejected for the core. |
 | [rfc-stage6-integrations.md](rfc/rfc-stage6-integrations.md) | Stage 6 closure: local integration layer shipped; heavier integrations deferred to post-Stage-6 companions. |
 | [rfc-subturn.md](rfc/rfc-subturn.md) | Rejected `subturn` proposal. |

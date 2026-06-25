@@ -204,6 +204,7 @@ Schutzvorrichtung:
 ./m8shift.py peek <agent>  # letzte an <agent> gerichtete Übergabe (rc 3 wenn nicht dran)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # schreibgeschützte Relais-Timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # Sitzungsverlauf (schreibgeschützt)
+./m8shift.py session {list,show,decisions,report} …  # Sitzungsansichten + optionaler Markdown-Bericht
 ./m8shift.py wait <agent> [--once] [--interval N]  # wartet auf deinen Zug ; --once = 1 Prüfung (rc 3 wenn nicht dran)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wartet bei Bedarf, dann claim + peek
 ./m8shift.py claim <agent> [--force]               # den Stift ÜBERNEHMEN (exklusiv) — aus deinem Zug /
