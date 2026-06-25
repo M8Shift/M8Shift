@@ -19,7 +19,7 @@ import unittest
 ROOT_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = os.path.join(ROOT_SRC, "m8shift.py")
 COMPANION = os.path.join(ROOT_SRC, "m8shift-worktree.py")
-VERSION = "3.13.0"
+VERSION = "3.14.0"
 
 
 def run(args, cwd, env=None):
@@ -115,7 +115,11 @@ class TestWorktreeHappyPath(WTBase):
         self.claim_and_commit("feat-a", "a.txt", "from A\n")
         self.assertEqual(self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex").returncode, 0)
         self.assertEqual(len(self.merge_commits_on("main")), 1)
-        self.core("release", "codex", "--to", "claude")        # pen back to claude
+        self.assertEqual(
+            self.core("release", "codex", "--to", "claude",
+                      "--force", "--reason", "test setup returns integration baton").returncode,
+            0,
+        )
         r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex")   # 2nd time
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("already", (r.stdout + r.stderr).lower())
@@ -129,7 +133,11 @@ class TestWorktreeConflict(WTBase):
         # advance main (not checked out) so f.txt differs from feat-b's base
         self.claim_and_commit("seed", "f.txt", "main side\n")
         self.assertEqual(self.wt("integrate", "seed", "claude", "--into", "main", "--to", "codex").returncode, 0)
-        self.core("release", "codex", "--to", "claude")
+        self.assertEqual(
+            self.core("release", "codex", "--to", "claude",
+                      "--force", "--reason", "test setup returns integration baton").returncode,
+            0,
+        )
         r = self.wt("integrate", "feat-b", "claude", "--into", "main", "--to", "codex")
         self.assertEqual(r.returncode, 1, r.stdout)            # non-zero: integration failed
         integ = os.path.join(self.d, ".m8shift", "worktrees", "_integration")

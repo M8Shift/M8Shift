@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.13.0"
+VERSION = "3.14.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -535,6 +535,36 @@ class TestMutexGuards(CLIBase):
         self.assertEqual(self.lock()["state"], "DONE")
         with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as f:
             self.assertIn("operator recovery", f.read())
+
+    def test_release_refuses_to_bounce_pending_incoming_turn(self):
+        """A no-body release must not silently skip a real handoff addressed to the agent."""
+        self.init()
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex",
+                "--ask", "please review", "--done", "implemented", "--files", "README.md")
+        before = self.md()
+        r = self.cw("release", "codex", "--to", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("latest turn #1 is addressed to codex", r.stdout + r.stderr)
+        self.assertIn("peek codex", r.stdout + r.stderr)
+        self.assertEqual(self.md(), before)
+
+    def test_release_force_can_bounce_pending_turn_with_audit_reason(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex",
+                "--ask", "please review", "--done", "implemented")
+        r0 = self.cw("release", "codex", "--to", "claude", "--force")
+        self.assertNotEqual(r0.returncode, 0)
+        self.assertIn("--reason", r0.stdout + r0.stderr)
+        r = self.cw("release", "codex", "--to", "claude",
+                    "--force", "--reason", "operator decided no codex work")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as f:
+            audit = f.read()
+        self.assertIn("operator decided no codex work", audit)
+        self.assertIn('"pending_turn": "1"', audit)
 
 
 # ───────────────────────────── robustness / inputs ─────────────────────────
@@ -1930,6 +1960,15 @@ class TestAuditFixes(CLIBase):
         self.assertNotIn("you may acquire", s)
         self.assertTrue("DONE" in s or "stop" in s)
 
+    def test_keep_listening_and_unread_release_guardrails_documented(self):
+        self.assertIn("idle` is **not** `DONE`", cowork.PROTOCOL["en"])
+        self.assertIn("keep `wait <you>` armed", cowork.PROTOCOL["en"])
+        self.assertIn("read it before any\nempty handback", cowork.PROTOCOL["en"])
+        s = cowork.stanza_for("claude")
+        self.assertIn("idle` is not `DONE`", s)
+        self.assertIn("keep `./m8shift.py wait\nclaude` armed", s)
+        self.assertIn("Never bounce unread work", s)
+
     def test_version_surface(self):
         # dogfooding skew check: --version, status/recap, M8SHIFT.md banner, status --json carry VERSION
         v = cowork.VERSION
@@ -2001,8 +2040,13 @@ subprocess.check_call([
         self.cw("append", "claude", "--to", "lechat", "--done", "x")   # → AWAITING_LECHAT
         self.assertEqual(self.lock()["holder"], "lechat")
         self.assertNotEqual(self.cw("done", "codex").returncode, 0)     # non-holder refused
-        # the baton owner redirects via release WITHOUT claiming…
-        self.assertEqual(self.cw("release", "lechat", "--to", "codex").returncode, 0)
+        # the baton owner may still redirect without claiming, but an unread incoming
+        # turn requires an explicit audited reason.
+        self.assertEqual(
+            self.cw("release", "lechat", "--to", "codex",
+                    "--force", "--reason", "operator redirects review lane").returncode,
+            0,
+        )
         self.assertEqual(self.lock()["holder"], "codex")
         # …and the new baton owner closes via done WITHOUT claiming
         self.assertEqual(self.cw("done", "codex").returncode, 0)
