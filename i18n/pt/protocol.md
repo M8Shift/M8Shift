@@ -75,8 +75,8 @@ Campos (um `key: value` por linha, fácil de `grep`):
 
 | campo     | valores | significado |
 |-----------|---------|------|
-| `holder`  | um agente ativo \| `none` | quem detém a caneta (padrão `claude`/`codex`) |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | estado atual (`<X>` = um agente ativo, em maiúsculas) |
+| `holder`  | um agente ativo \| `none` | detentor da caneta em `WORKING_*`, agente aguardado em `AWAITING_*`, `none` em `IDLE`, `PAUSED` ou `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | estado atual (`<X>` = um agente ativo, em maiúsculas) |
 | `agents`  | CSV, ex.: `claude,codex` | o par do relay (os dois primeiros declarados); padrão `claude,codex` |
 | `turn`    | inteiro | número do último turno fechado |
 | `since`   | ISO-8601 UTC | desde quando este estado dura |
@@ -85,12 +85,14 @@ Campos (um `key: value` por linha, fácil de `grep`):
 
 > `expires` carrega uma data **apenas** durante `WORKING_*` (um agente está trabalhando,
 > TTL 30 min). Volta a `-` assim que estamos aguardando (`AWAITING_*`, `IDLE`,
-> `DONE`): ninguém detém a caneta, então não há obsolescência a vigiar.
+> `PAUSED`, `DONE`): ninguém detém a caneta, então não há obsolescência a vigiar.
 
 **Lendo os estados** (`<X>` é um agente ativo — por padrão `claude`/`codex`):
 - `AWAITING_<X>` → é a vez de `<X>` jogar (o outro agente aguarda).
 - `WORKING_<X>` → `<X>` detém a caneta e está trabalhando (o outro aguarda, não toca em nada).
 - `IDLE` → ninguém tem a mão, o primeiro que tiver algo a dizer começa.
+- `PAUSED` → a sessão permanece aberta, mas nenhum agente tem trabalho atribuído;
+  retomar apenas quando o usuário der um novo escopo.
 - `DONE` → sessão fechada, nenhum relay adicional esperado.
 
 ---
@@ -132,9 +134,11 @@ loop:
        b. TRABALHE no repositório (enquanto detém a caneta, você sozinho)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    escreve meu turno <turn+1>, state=AWAITING_<OTHER>
-  3. senão (WORKING_<other> ou AWAITING_<other>):
+  3. senão se state == PAUSED:
+       não faça claim; aguarde novo escopo do usuário e retome explicitamente.
+  4. senão (WORKING_<other> ou AWAITING_<other>):
        aguarde ~60 s (wait), volte ao 1
-  4. se state == DONE: saia
+  5. se state == DONE: saia
 ```
 
 Na prática: `claim` **adquire** a caneta (exclusivo), `append` **fecha** seu
@@ -201,7 +205,7 @@ Salvaguarda:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # linha do tempo do relé (somente leitura)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # histórico de sessão (somente leitura)
 ./m8shift.py wait <agent> [--once] [--interval N]  # aguarda sua vez ; --once = 1 verificação (rc 3 se não for sua vez)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # espera se necessário, depois claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # espera se necessário, depois claim + peek
 ./m8shift.py claim <agent> [--force]               # ADQUIRE a caneta (exclusivo) — a partir da sua vez /
                                                   #   IDLE / seu próprio bloqueio ; --force = bloqueio obsoleto SOMENTE
 ./m8shift.py append <agent> --to <other> \
@@ -210,6 +214,8 @@ Salvaguarda:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # anexa uma nota de memória durável (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registro de tarefas advisory (afazeres por agente)
 ./m8shift.py release <agent> --to <other> [--force]  # passa adiante sem corpo (NÃO re-incrementa o turno)

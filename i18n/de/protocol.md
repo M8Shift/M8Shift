@@ -75,8 +75,8 @@ Felder (ein `key: value` pro Zeile, leicht zu `grep`en):
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | ein aktiver Agent \| `none` | wer den Stift hält (standardmäßig `claude`/`codex`) |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | aktueller Zustand (`<X>` = ein aktiver Agent, großgeschrieben) |
+| `holder`  | ein aktiver Agent \| `none` | Stifthalter bei `WORKING_*`, erwarteter Agent bei `AWAITING_*`, `none` bei `IDLE`, `PAUSED` oder `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | aktueller Zustand (`<X>` = ein aktiver Agent, großgeschrieben) |
 | `agents`  | CSV, z. B. `claude,codex` | das Relais-Paar (die ersten beiden deklarierten); standardmäßig `claude,codex` |
 | `turn`    | Ganzzahl | Nummer des letzten abgeschlossenen Zugs |
 | `since`   | ISO-8601 UTC | seit wann dieser Zustand andauert |
@@ -85,12 +85,14 @@ Felder (ein `key: value` pro Zeile, leicht zu `grep`en):
 
 > `expires` trägt **nur** während `WORKING_*` ein Datum (ein Agent arbeitet,
 > TTL 30 Min). Es kehrt zu `-` zurück, sobald gewartet wird (`AWAITING_*`, `IDLE`,
-> `DONE`): niemand hält den Stift, also gibt es keine Veraltung zu überwachen.
+> `PAUSED`, `DONE`): niemand hält den Stift, also gibt es keine Veraltung zu überwachen.
 
 **Die Zustände lesen** (`<X>` ist ein aktiver Agent — standardmäßig `claude`/`codex`):
 - `AWAITING_<X>` → `<X>` ist dran zu spielen (der andere Agent wartet).
 - `WORKING_<X>` → `<X>` hält den Stift und arbeitet (der andere wartet, rührt nichts an).
 - `IDLE` → niemand hat die Hand, der erste, der etwas zu sagen hat, beginnt.
+- `PAUSED` → die Sitzung bleibt offen, aber kein Agent hat eine zugewiesene Aufgabe;
+  fortsetzen erst, wenn der Benutzer einen neuen Scope vorgibt.
 - `DONE` → Sitzung geschlossen, kein weiteres Relais erwartet.
 
 ---
@@ -132,9 +134,11 @@ loop:
        b. WORK im Repository (während du den Stift hältst, du allein)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    schreibt meinen Zug <turn+1>, state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        ~60 s warten (wait), zurück zu 1
-  4. if state == DONE: beenden
+  5. if state == DONE: beenden
 ```
 
 In der Praxis: `claim` **übernimmt** den Stift (exklusiv), `append` **schließt** deinen
@@ -201,7 +205,7 @@ Schutzvorrichtung:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # schreibgeschützte Relais-Timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # Sitzungsverlauf (schreibgeschützt)
 ./m8shift.py wait <agent> [--once] [--interval N]  # wartet auf deinen Zug ; --once = 1 Prüfung (rc 3 wenn nicht dran)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # wartet bei Bedarf, dann claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wartet bei Bedarf, dann claim + peek
 ./m8shift.py claim <agent> [--force]               # den Stift ÜBERNEHMEN (exklusiv) — aus deinem Zug /
                                                   #   IDLE / deiner eigenen Sperre ; --force = NUR veraltete Sperre
 ./m8shift.py append <agent> --to <other> \
@@ -210,6 +214,8 @@ Schutzvorrichtung:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # eine dauerhafte Speichernotiz anhängen (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory Aufgabenliste (To-dos pro Agent)
 ./m8shift.py release <agent> --to <other> [--force]  # übergibt ohne Text (erhöht turn NICHT erneut)

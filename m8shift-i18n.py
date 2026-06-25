@@ -23,7 +23,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.join(HERE, "m8shift.py")
 PACKS_DIR = os.path.join(HERE, "i18n")
-VERSION = "3.16.0"
+VERSION = "3.17.0"
 
 # family -> (dict name, constant prefix, pack file, raw-string?)  — raw must match the EN constant.
 FAMILIES = [

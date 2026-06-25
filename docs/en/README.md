@@ -47,6 +47,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [rfc-input-neutral-patterns.md](rfc/rfc-input-neutral-patterns.md) | Neutral runtime pattern inventory curated for future companion RFCs. |
 | [rfc-memory.md](rfc/rfc-memory.md) | Shared append-only memory ledger. |
 | [rfc-n-agents.md](rfc/rfc-n-agents.md) | N-agent relay model with one shared pen. |
+| [rfc-pause-resume.md](rfc/rfc-pause-resume.md) | Stable `PAUSED` state for open sessions with no active task. |
 | [rfc-provider-management.md](rfc/rfc-provider-management.md) | Shipped local provider/adapter registry outside the core. |
 | [rfc-roster.md](rfc/rfc-roster.md) | Historical configurable roster RFC. |
 | [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |

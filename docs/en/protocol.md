@@ -110,8 +110,8 @@ Fields (one `key: value` per line, easy to `grep`):
 
 | field     | values | meaning |
 |-----------|---------|------|
-| `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*` |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
+| `holder`  | an active agent \| `none` | **pen holder** while `WORKING_*`; **awaited (baton-owner)** agent while `AWAITING_*`; `none` while `IDLE`, `PAUSED`, or `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | current state (`<X>` = an active agent, uppercased) |
 | `agents`  | CSV, e.g. `claude,codex` | the active roster (all declared agents, ≥2); default `claude,codex` |
 | `lang`    | language tag | language of generated files / runtime messages when available |
 | `session` | session id | current session id, also recorded in `M8SHIFT.sessions.jsonl` |
@@ -134,12 +134,14 @@ same metadata and serializes unavailable values as `null`.
 
 > `expires` carries a date **only** during `WORKING_*` (an agent is working,
 > TTL 30 min). It returns to `-` as soon as we are waiting (`AWAITING_*`, `IDLE`,
-> `DONE`): nobody holds the pen, so there is no staleness to watch.
+> `PAUSED`, `DONE`): nobody holds the pen, so there is no staleness to watch.
 
 **Reading the states** (`<X>` is an active agent — by default `claude`/`codex`):
 - `AWAITING_<X>` → it is `<X>`'s turn to play (the other agents wait).
 - `WORKING_<X>` → `<X>` holds the pen and is working (the others wait, touch nothing).
 - `IDLE` → nobody has the hand, the first who has something to say starts.
+- `PAUSED` → the session stays open but no agent has assigned work; resume only
+  when the user gives a new scope.
 - `DONE` → session closed, no further relay expected.
 
 ---
@@ -181,9 +183,11 @@ loop:
        b. WORK in the repository (while you hold the pen, you alone)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    writes my turn <turn+1>, state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        wait ~60 s (wait), go back to 1
-  4. if state == DONE: exit
+  5. if state == DONE: exit
 ```
 
 In practice: `claim` **acquires** the pen (exclusive), `append` **closes** your
@@ -257,7 +261,7 @@ Guardrail:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # wait if needed, then claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
@@ -266,6 +270,8 @@ Guardrail:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py release <agent> --to <other> [--force --reason "why"]  # hand off without a body (does NOT re-increment turn)

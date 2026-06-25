@@ -83,9 +83,11 @@ Deferred / still policy-level:
 | Append requires prior claim | `m8shift.py:2409-2448` | Prevents a non-holder from recording a legitimate turn. |
 | Integration sentinel lockdown | `m8shift.py:2294-2305`, `m8shift-worktree.py:130-158`, `m8shift-worktree.py:161-209` | Prevents public operations from stealing or stranding an in-flight worktree merge. |
 | Runtime sidecars are advisory | `m8shift-runtime.py`, `docs/en/rfc/rfc-runtime-companion.md` | Presence, inbox, idempotency, and progress files never grant the pen and never edit `M8SHIFT.md` directly. |
+| Runtime report path validation | `m8shift-runtime.py report --write`, `tests/test_m8shift.py::TestRuntimeCompanion` | Run/gate ids reject path separators, drive-style colons, and unsafe values before writing under `.m8shift/runs/<run>/report.md`. |
 | Provider argv rendering avoids shells | `m8shift-runtime.py providers render`, `docs/en/rfc/rfc-provider-management.md` | Provider commands are JSON argv arrays with explicit placeholder substitution, not shell strings. |
 | Headless child timeout is bounded | `examples/headless_runner.py`, `docs/en/rfc/rfc-headless-runner-hardening.md` | A stuck provider process can be terminated/killed and audited without stealing the pen. |
 | Cooperative request ledger is non-authoritative | `m8shift.py request-turn/yield-turn/decline-turn/steer-turn`, `M8SHIFT.requests.md` | A request cannot make `claim` succeed; routing changes require explicit holder yield or audited idle steering. |
+| Pause/resume avoids parked pens | `m8shift.py pause/resume`, `doctor` livelock checks | Open/no-work sessions use `PAUSED` with `holder=none`; `claim` remains refused until explicit resume. |
 | Honest limitation documented | `docs/en/specification.md:214-224`, `docs/en/architecture.md:189-193`, `docs/en/architecture.md:410-414` | The project correctly documents that filesystem writes remain cooperative/advisory. |
 
 ## Findings and recommendations

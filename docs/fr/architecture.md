@@ -117,7 +117,11 @@ stateDiagram-v2
     AWAITING_X --> WORKING_X: X claim
     WORKING_X --> WORKING_X: X re-claim (TTL)
     WORKING_X --> WORKING_Y: Y force-claim (X périmé)
+    WORKING_X --> PAUSED: X pause (pas de tâche)
+    AWAITING_X --> PAUSED: X pause (pas de tâche)
+    PAUSED --> AWAITING_X: reprise X
     WORKING_X --> DONE: done
+    PAUSED --> DONE: done
     DONE --> [*]
 ```
 
@@ -355,6 +359,9 @@ invocations successives des agents. « Arrêt » = `done <agent>` (état `DONE`)
   sans claim, passation ni réparation.
 - **Détection de blocage** : `status` signale un verrou **périmé** (`WORKING_*`
   + `now > expires`) → reprise par `claim <soi> --force`.
+- **Parking ouvert sans travail** : si la session doit rester ouverte mais qu'aucun
+  agent n'a de tâche active, le détenteur courant utilise `pause <holder> --reason …` ;
+  `PAUSED` a `holder=none` et exige une reprise explicite `resume <agent> --reason …`.
 
 #### Mode maintenance
 Édition manuelle possible du bloc `LOCK` (format `clé: valeur` trivial) ; en cas
@@ -459,4 +466,5 @@ Le seul paramètre de charge est l'intervalle de poll (`wait --interval N`,
 | **Tour (`TURN`)** | Une prise de parole d'un agent, encadrée `BEGIN`/`END`, immuable une fois close. |
 | **Stanza** | Bloc d'auto-instruction injecté dans `CLAUDE.md`/`AGENTS.md` entre marqueurs `M8SHIFT:STANZA`. |
 | **Verrou périmé** | `WORKING_*` dont `expires` est dépassé → reprenable avec `--force`. |
+| **Session en pause** | État `PAUSED` : session ouverte, aucun détenteur du stylo, attente d'un nouveau scope utilisateur et d'un `resume` explicite. |
 | **TTL** | Durée de validité d'un verrou en travail (30 min). |

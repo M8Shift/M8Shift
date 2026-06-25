@@ -117,7 +117,11 @@ stateDiagram-v2
     AWAITING_X --> WORKING_X: X claims
     WORKING_X --> WORKING_X: X re-claims (refresh TTL)
     WORKING_X --> WORKING_Y: Y force-claims (X stale)
+    WORKING_X --> PAUSED: X pauses (no assigned work)
+    AWAITING_X --> PAUSED: X pauses (no assigned work)
+    PAUSED --> AWAITING_X: resume X
     WORKING_X --> DONE: done
+    PAUSED --> DONE: done
     DONE --> [*]
 ```
 
@@ -350,6 +354,9 @@ agents' successive invocations. "Shutdown" = `done <agent>` (state `DONE`).
   without claiming, handing off, or repairing anything.
 - **Deadlock detection**: `status` flags a **stale** lock (`WORKING_*` + `now >
   expires`) → recovery via `claim <self> --force`.
+- **Open/no-work parking**: when the session must stay open but no agent has active
+  work, the current holder uses `pause <holder> --reason …`; `PAUSED` has
+  `holder=none` and requires explicit `resume <agent> --reason …`.
 
 #### Maintenance mode
 Manual editing of the `LOCK` block is possible (trivial `key: value` format); in
@@ -453,4 +460,5 @@ The only load parameter is the poll interval (`wait --interval N`,
 | **Turn (`TURN`)** | One agent's speaking slot, delimited by `BEGIN`/`END`, immutable once closed. |
 | **Stanza** | Self-instruction block injected into `CLAUDE.md`/`AGENTS.md` between `M8SHIFT:STANZA` markers. |
 | **Stale lock** | A `WORKING_*` whose `expires` has passed → reclaimable with `--force`. |
+| **Paused session** | `PAUSED` lock state: session open, no pen holder, waiting for explicit user scope and `resume`. |
 | **TTL** | Validity duration of a working lock (30 min). |

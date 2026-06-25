@@ -177,8 +177,9 @@ run the CLI, and follow `claim → work → append`.
 
 **Golden rule:** you only work and write **after acquiring the pen via `claim`**
 (`append` is accepted only from `WORKING_<you>`).
-Before stopping, run `status --for <you>`; if the relay is not `DONE`, keep waiting
-or close your own `WORKING_<you>` state with `append`/`done`.
+Before stopping, run `status --for <you>`; if the relay is not `DONE`, keep waiting,
+hand off your own `WORKING_<you>` state with `append`, close it with `done`, or park an
+open/no-work session with `pause`.
 For a passive live view while agents work, leave `./m8shift.py watch --for <you>
 --interval 5` running in a separate terminal; it never claims or changes the relay.
 
@@ -202,6 +203,8 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
   shipped local sidecar companion for presence, operator inbox, progress, and UI-safe waiting.
 - **RFC (cooperative turn request)** — [docs/en/rfc/rfc-cooperative-turn-request.md](docs/en/rfc/rfc-cooperative-turn-request.md) —
   audit-only `request-turn` plus `yield-turn`/`decline-turn`/`steer-turn --force` for interactive UI deadlocks.
+- **RFC (pause/resume)** — [docs/en/rfc/rfc-pause-resume.md](docs/en/rfc/rfc-pause-resume.md) —
+  stable `PAUSED` state for open sessions with no active task.
 - **RFC (agent runtime architecture)** — [docs/en/rfc/rfc-agent-runtime-architecture.md](docs/en/rfc/rfc-agent-runtime-architecture.md) —
   shipped local runtime/scaffold layer for roles, workflows, approvals, provider registry, and reports.
 - **RFC (provider management)** — [docs/en/rfc/rfc-provider-management.md](docs/en/rfc/rfc-provider-management.md) —
@@ -240,9 +243,10 @@ flowchart LR
 
 The lock fields — `holder`, `state`, `agents`, `lang`, `session`, `turn`, `since`,
 `expires`, `note` — are one `key: value` per line (easy to `grep`). `holder` is the pen holder
-while `WORKING_*` / the awaited (baton-owner) agent while `AWAITING_*`, or `none`;
+while `WORKING_*`, the awaited baton-owner while `AWAITING_*`, or `none` while
+`IDLE`, `PAUSED`, or `DONE`;
 `agents` is the active roster (all declared agents, ≥2; default `claude,codex`); states
-are `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE` (`<X>` = an active agent, uppercased). Turns are framed by `M8SHIFT:TURN <n> <agent> BEGIN/END`
+are `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `PAUSED`, `DONE` (`<X>` = an active agent, uppercased). Turns are framed by `M8SHIFT:TURN <n> <agent> BEGIN/END`
 HTML comments (invisible in
 Markdown rendering) and are **immutable** once closed.
 
@@ -346,47 +350,26 @@ competing (M8Shift could even be the lock inside a larger setup).
 ## Roadmap
 
 M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
-[architecture §1.8](docs/en/architecture.md). Two staged steps:
+[architecture §1.8](docs/en/architecture.md). The current roadmap is:
 
-1. **N-agent roster, one pen (shipped)** — declare any roster of ≥2 agents via
-   `m8shift.py init --agents a,b,c…`; **all** of them relay (the holder hands the pen to
-   any other member via `--to`), still **one writer at a time** (degree-1). See
-   [RFC — configurable agent roster](docs/en/rfc/rfc-roster.md).
-2. **N concurrent writers (shipped, opt-in)** — true degree-2 via the **`m8shift-worktree.py`**
-   companion: agents work in **isolated git worktrees in parallel**, and a single serialized
-   **integration pen** merges them crash-safely — `claim`/`done`/`integrate`/`drop`/`status`, with a
-   non-committing `git merge --no-ff --no-commit`, an `integrating:<id>@<sha>` LOCK sentinel that
-   blocks a TTL reclaim mid-merge, and a `--to` handoff on every path (never stuck). The passive
-   degree-1 core stays one-writer-at-a-time; the companion adds the concurrency on top. See
-   [RFC — worktree companion](docs/en/rfc/rfc-worktree-companion.md).
+| Area | Status | Surface | Boundary |
+|------|--------|---------|----------|
+| N-agent roster, one pen | ✅ Shipped | `init --agents a,b,c…`, directed `append --to <agent>` | all agents can relay; still one writer at a time |
+| Read/handoff observability | ✅ Shipped | `recap`, `peek`, `log`, `history`, `status --json`, `watch` | read-only views; no routing decisions |
+| Advisory pre-claim checks | ✅ Shipped | `claim --check [--files …] [--turns N]` | no pen taken; overlap is advisory |
+| Shared memory and tasks | ✅ Shipped | `remember`, `task add/done/drop/list/show`, recap headlines | append-only ledgers; never enforced by the mutex |
+| Stage 4 contracts | ✅ Shipped | `append --schema stage4.v1 …`, `contract validate`, `doctor --contracts` | typed metadata is validated only on explicit read-only commands |
+| Operator-loop guardrails | ✅ Shipped | `next`, `append --wait`, `status --for`, `request-turn/yield-turn/decline-turn/steer-turn` | prevents lost handoffs and UI-routing deadlocks without creating a second pen |
+| Pause / resume | ✅ Shipped | `pause <holder> --reason …`, `resume <agent> --reason …`, `next --resume` | stable open/no-work state: `PAUSED`, `holder=none`, explicit user-scope resume |
+| Local integration layer | ✅ Shipped | installers, checksums, version surfaces, `examples/headless_runner.py`, `m8shift-runtime.py` | local convenience layer; no provider SDK in the core |
+| Degree-2 parallel work | ✅ Shipped, opt-in | [`m8shift-worktree.py`](docs/en/rfc/rfc-worktree-companion.md) | isolated git worktrees; serialized integration pen; core remains degree-1 |
+| Provider/runtime companion | ✅ Shipped v1 | `m8shift-runtime.py init/providers/roles/workflows/approve/report` | host-side config and reports; no secrets, no second routing authority |
+| `subturn` provenance ledger | ❌ Rejected | [rationale](docs/en/rfc/rfc-subturn.md) | redundant with advisory fields and `remember` |
+| Hosted control plane / IDE integrations | 🔭 Future companion | [RFC](docs/en/rfc/rfc-hosted-runtime-control-plane.md) | optional layer outside the passive core |
 
-**Shipped read / handoff surface** — `recap` (session-start briefing: current LOCK + recent
-turns + memory headlines), `peek` (the last handoff addressed to you, parse-free), `log`
-(relay timeline), `history` (session timeline: agents, turns, state, version), `status --json`
-(dashboard-/`watch`-friendly), `doctor --lint --json` and `doctor --security`
-(read-only health/security checks for relay/anchor/runtime drift), **advisory turn fields** on
-`append` (`--branch`/`--commit`/`--tests`/`--next`/`--blocked-on` plus the open
-`--field key=value` `x_*` namespace, surfaced by `peek`, never interpreted), **Stage 4 contract
-validation** — `append --schema stage4.v1 --relation … --decision …`, `contract validate
-[--strict] [--json]`, and `doctor --contracts` (read-only, never routes work), and **shared
-memory** — `m8shift.py remember <agent> "<note>"` appends to a durable, append-only,
-human-curated `M8SHIFT.memory.md` (no pen needed); its headlines lead `recap`'s briefing so an
-agent resumes across sessions; and **`claim <agent> --check [--files …]`** — a read-only
-advisory probe (takes no pen) that reports claim-readiness plus which of your files were touched
-by others since your last turn; and a **tasks board** — `task add/done/drop/list/show` over a
-durable, append-only `M8SHIFT.tasks.md` (no pen needed; `--for`/`--blocked-on` are advisory free
-text, never enforced), with open-task headlines in `recap`.
-
-**Roadmap status** — the core roadmap through Stage 5 is complete: every staged degree-1 surface
-has shipped (see *Shipped* above), Stage 4 read-only validation is now available, **and degree-2
-has shipped too** as the opt-in
-[`m8shift-worktree.py`](docs/en/rfc/rfc-worktree-companion.md) companion (roadmap step 2).
-The last degree-1 candidate, `subturn` (sub-agent fan-out provenance), was deliberately
-**rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn
-durable streaming, so another work-provenance ledger would be redundant surface
-([rationale](docs/en/rfc/rfc-subturn.md)). New ideas are welcome via an RFC under `docs/en/rfc/`.
-RFCs are English-only; localized documentation should link to the canonical English
-RFC instead of maintaining translated copies.
+New ideas are welcome via an RFC under `docs/en/rfc/`. RFCs are English-only;
+localized documentation should link to the canonical English RFC instead of maintaining
+translated copies.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
 disjoint writes inside the shared tree (use the

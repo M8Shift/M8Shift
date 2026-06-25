@@ -74,8 +74,8 @@ Campos (un `key: value` por línea, fácil de `grep`):
 
 | campo     | valores | significado |
 |-----------|---------|------|
-| `holder`  | un agente activo \| `none` | quién tiene la pluma (por defecto `claude`/`codex`) |
-| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `DONE` | estado actual (`<X>` = un agente activo, en mayúsculas) |
+| `holder`  | un agente activo \| `none` | quien tiene la pluma en `WORKING_*`, agente esperado en `AWAITING_*`, `none` en `IDLE`, `PAUSED` o `DONE` |
+| `state`   | `IDLE` \| `WORKING_<X>` \| `AWAITING_<X>` \| `PAUSED` \| `DONE` | estado actual (`<X>` = un agente activo, en mayúsculas) |
 | `agents`  | CSV, p. ej. `claude,codex` | el par de relevo (los dos primeros declarados); por defecto `claude,codex` |
 | `turn`    | entero | número del último turno cerrado |
 | `since`   | ISO-8601 UTC | desde cuándo dura este estado |
@@ -84,12 +84,14 @@ Campos (un `key: value` por línea, fácil de `grep`):
 
 > `expires` lleva una fecha **solo** durante `WORKING_*` (un agente está trabajando,
 > TTL 30 min). Vuelve a `-` en cuanto estamos esperando (`AWAITING_*`, `IDLE`,
-> `DONE`): nadie tiene la pluma, así que no hay obsolescencia que vigilar.
+> `PAUSED`, `DONE`): nadie tiene la pluma, así que no hay obsolescencia que vigilar.
 
 **Lectura de los estados** (`<X>` es un agente activo — por defecto `claude`/`codex`):
 - `AWAITING_<X>` → es el turno de `<X>` de jugar (el otro agente espera).
 - `WORKING_<X>` → `<X>` tiene la pluma y está trabajando (el otro espera, no toca nada).
 - `IDLE` → nadie tiene la mano, el primero que tenga algo que decir empieza.
+- `PAUSED` → la sesión sigue abierta, pero ningún agente tiene trabajo asignado;
+  reanudar solo cuando el usuario dé un nuevo alcance.
 - `DONE` → sesión cerrada, no se espera más relevo.
 
 ---
@@ -131,9 +133,11 @@ loop:
        b. WORK en el repositorio (mientras tienes la pluma, solo tú)
        c. APPEND  : ./m8shift.py append <me> --to <other>
                    escribe mi turno <turn+1>, state=AWAITING_<OTHER>
-  3. else (WORKING_<other> or AWAITING_<other>):
+  3. else if state == PAUSED:
+       do not claim; wait for new user scope, then resume explicitly.
+  4. else (WORKING_<other> or AWAITING_<other>):
        espera ~60 s (wait), vuelve a 1
-  4. if state == DONE: salir
+  5. if state == DONE: salir
 ```
 
 En la práctica: `claim` **toma** la pluma (exclusivo), `append` **cierra** tu
@@ -200,7 +204,7 @@ Salvaguarda:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # cronología del relevo (solo lectura)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # historial de sesión (solo lectura)
 ./m8shift.py wait <agent> [--once] [--interval N]  # espera tu turno ; --once = 1 comprobación (rc 3 si no es tu turno)
-./m8shift.py next <agent> [--once] [--interval N] [--force]  # espera si hace falta, luego claim + peek
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # espera si hace falta, luego claim + peek
 ./m8shift.py claim <agent> [--force]               # TOMA la pluma (exclusivo) — desde tu turno /
                                                   #   IDLE / tu propio bloqueo ; --force = SOLO bloqueo obsoleto
 ./m8shift.py append <agent> --to <other> \
@@ -209,6 +213,8 @@ Salvaguarda:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # añade una nota de memoria duradera (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registro de tareas advisory (pendientes por agente)
 ./m8shift.py release <agent> --to <other> [--force]  # entrega sin cuerpo (NO reincrementa el turno)

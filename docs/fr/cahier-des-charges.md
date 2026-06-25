@@ -90,6 +90,7 @@ le jugement du mainteneur.
 | EF-9 | `init` génère `M8SHIFT.md`, `M8SHIFT.protocol.md` et injecte les ancrages sans dupliquer les strophes. |
 | EF-10 | Les variantes d'ancrage (`agents.md`, `CLAUDE.md`, etc.) sont normalisées ou refusées si ambiguës. |
 | EF-11 | Le roster actif est configurable via `init --agents a,b,c…`; tous les membres peuvent recevoir le bâton. |
+| EF-12 | `pause <holder> --reason` gare une session ouverte sans tâche active en `PAUSED`/`holder=none`; `resume <agent> --reason` ou `next <agent> --resume --reason` assigne explicitement un nouveau périmètre utilisateur avant toute reprise. `doctor` signale les stylos garés en `WORKING_*` et les boucles d'acks. |
 | EF-12 | `peek`, `recap`, `log`, `status --json` et `history` sont des surfaces de lecture. |
 | EF-13 | `remember` ajoute une note durable dans `M8SHIFT.memory.md` sans prendre le stylo. |
 | EF-14 | `task add/done/drop/list/show` maintient un registre append-only `M8SHIFT.tasks.md`. |
@@ -147,8 +148,8 @@ Champs principaux du `LOCK` :
 
 | Champ | Type | Sens |
 |-------|------|------|
-| `holder` | agent actif \| `none` | détenteur du stylo ou agent attendu |
-| `state` | `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `DONE` | état courant |
+| `holder` | agent actif \| `none` | détenteur du stylo (`WORKING_*`), agent attendu (`AWAITING_*`) ou `none` (`IDLE`, `PAUSED`, `DONE`) |
+| `state` | `IDLE`, `WORKING_<X>`, `AWAITING_<X>`, `PAUSED`, `DONE` | état courant |
 | `agents` | CSV | roster actif |
 | `lang` | tag | langue des artefacts générés / messages si disponible |
 | `session` | id optionnel | session courante |
@@ -186,7 +187,7 @@ m8shift.py doctor [--lint] [--json] [--security] [--contracts] [--severity-min i
 m8shift.py contract validate [--strict] [--json] [--all] [--severity-min info|warning|error]
 m8shift.py recap [--turns N] [--memory N] [--tasks N]
 m8shift.py wait <agent> [--once] [--interval N]
-m8shift.py next <agent> [--once] [--interval N] [--force]
+m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason TEXTE]
 m8shift.py claim <agent> [--force]
 m8shift.py claim <agent> --check [--files CSV] [--turns N]
 m8shift.py peek <agent>
@@ -197,6 +198,8 @@ m8shift.py remember <agent> "<note>"
 m8shift.py task add|done|drop|list|show …
 m8shift.py release <agent> --to <autre> [--force --reason TEXTE]
 m8shift.py done <agent> [--force --reason TEXTE]
+m8shift.py pause <holder> --reason TEXTE
+m8shift.py resume <agent> --reason TEXTE
 m8shift.py archive [--keep N]
 ```
 
@@ -269,6 +272,7 @@ La documentation française les référence sans maintenir de copie traduite.
 | [rfc-provider-management.md](../en/rfc/rfc-provider-management.md) | `m8shift-runtime.py providers init/list/show/check/render`, `.m8shift/providers.json` | mapping host-side vers argv sûrs ; aucun SDK fournisseur, secret ou routage cœur |
 | [rfc-headless-runner-hardening.md](../en/rfc/rfc-headless-runner-hardening.md) | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, validation et `run.timeout` | borne les processus headless bloqués sans force-steal |
 | [rfc-cooperative-turn-request.md](../en/rfc/rfc-cooperative-turn-request.md) | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, `M8SHIFT.requests.md` | les demandes ne rendent jamais `claim` légal ; seul yield/steer explicite route, et `steer-turn` refuse `WORKING_*` frais |
+| [rfc-pause-resume.md](../en/rfc/rfc-pause-resume.md) | `PAUSED`, `pause <détenteur> --reason`, `resume <agent> --reason`, `next --resume --reason` | session ouverte sans tâche active : aucun détenteur, reprise seulement sur nouveau scope explicite |
 
 Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc/rfc-contracts-validation.md)
 décrit les contrats de passation typés, décisions de revue explicites (`approve`, `revise`,
