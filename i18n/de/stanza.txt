@@ -1,5 +1,5 @@
 {begin}
-## Co-Work-Relais — eigenständig (keine menschliche Erklärung nötig)
+## M8Shift-Relais — eigenständig (keine menschliche Erklärung nötig)
 
 Du bist **{me}** in diesem Projekt. Sobald eine `M8SHIFT.md` im Wurzelverzeichnis vorhanden ist,
 ist sie deine Koordinationsquelle mit **{other}**: wende `M8SHIFT.protocol.md` an

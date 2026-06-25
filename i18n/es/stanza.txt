@@ -1,5 +1,5 @@
 {begin}
-## Relevo de co-work — autocontenido (no se necesita explicación humana)
+## Relevo M8Shift — autocontenido (no se necesita explicación humana)
 
 Eres **{me}** en este proyecto. En cuanto haya un `M8SHIFT.md` en la raíz,
 es tu fuente de coordinación con **{other}**: aplica `M8SHIFT.protocol.md`

@@ -19,12 +19,6 @@ _Des agents différents. Des rôles différents. Un seul workflow coordonné._
 
 </div>
 
----
-
-> **Anciennement CoWork.** Le projet a été renommé **M8Shift** (« Mate Shift » — *mate* = coéquipier,
-> *shift* = passage du tour). Depuis la **v3.0.0**, l'outil est **M8Shift-only** : le shim `cowork.py`
-> et la compatibilité des fichiers CoWork (dual-read, `migrate-brand`) ont été retirés.
-
 ## Qu'est-ce que M8Shift ?
 
 M8Shift est un **mutex coopératif** pour agents IA. Quand plusieurs agents comme

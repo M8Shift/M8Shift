@@ -38,7 +38,7 @@ Implemented in `m8shift.py` / companions `v3.12.0`:
   `i18n/*/stanza.txt`;
 - `release --force` / `done --force` now require `--reason`, record force metadata in
   `M8SHIFT.sessions.jsonl`, and are surfaced by `doctor --security`;
-- `init --name` rejects line breaks and `M8SHIFT:` / `COWORK:` markers;
+- `init --name` rejects line breaks and reserved relay markers;
 - session JSON parsing catches malformed/deep JSON without traceback;
 - stale internal lock takeover uses a serialized unlink guard, mode `0600`, `O_NOFOLLOW`
   where available, and ownership-token checks before core writes;

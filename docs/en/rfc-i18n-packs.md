@@ -6,7 +6,7 @@
 ## 1. Summary
 
 Today both English and French are baked inline into `m8shift.py` (`MESSAGES = {"en", "fr"}`
-plus four template families `PROTOCOL`/`STANZA`/`COWORK_TPL`/`BRIDGE`, each `{"en", "fr"}`).
+plus four template families for protocol, stanza, seed, and bridge content, each `{"en", "fr"}`).
 Adding a 3rd language means editing the monolith in ~5 places. This RFC externalizes i18n:
 
 - the **committed `m8shift.py` is English-only** — the canonical source and a runnable,
@@ -21,8 +21,8 @@ burden). This formalizes and replaces the existing local `build/assemble.py`.
 
 ## 2. Status quo (what exists)
 
-- Inline `MESSAGES`, and `PROTOCOL_EN/FR`, `STANZA_EN/FR`, `COWORK_EN/FR`, `BRIDGE_EN/FR`, joined
-  into `PROTOCOL/STANZA/COWORK_TPL/BRIDGE = {"en":…, "fr":…}` (m8shift.py).
+- Inline `MESSAGES`, and the English/French protocol, stanza, seed, and bridge constants, joined
+  into the runtime template dictionaries in `m8shift.py`.
 - `build/` already holds the **EN sources** (`protocol.en.md`, `stanza.en.txt`, `seed.en.txt`,
   `bridge.en.txt`) + `assemble.py`, but is **gitignored / local** and the committed file is the
   assembled artifact.
@@ -53,7 +53,7 @@ i18n/fr/
   messages.json     # {key: "value"} — the MESSAGES["fr"] dict, flat JSON (stdlib)
   protocol.md       # PROTOCOL_FR body
   stanza.txt        # STANZA_FR body
-  seed.txt          # COWORK_FR body
+  seed.txt          # M8SHIFT.md seed body
   bridge.txt        # BRIDGE_FR body
 ```
 
@@ -73,7 +73,7 @@ m8shift-i18n.py --check i18n/it                         # validate a pack vs the
 Mechanism (mirrors `assemble.py`, generalized + from external packs):
 1. Read the EN core `m8shift.py`.
 2. For each requested `<lang>`: read its pack; insert a `<LANG>` template constant per family and
-   add a `"<lang>": <LANG>_TPL` entry into each `PROTOCOL/STANZA/COWORK_TPL/BRIDGE` dict, and a
+   add a `"<lang>": <LANG>_TPL` entry into each protocol/stanza/seed/bridge template dict, and a
    `"<lang>": {…}` entry into `MESSAGES`, targeting the existing dict literals via stable anchors
    (e.g. `PROTOCOL = {"en": PROTOCOL_EN}` → add `, "fr": PROTOCOL_FR`).
 3. `ast.parse` the result (syntax gate, as assemble.py already does), write the self-contained file.
@@ -155,14 +155,14 @@ GO-with-additions. Three blockers were reproduced end-to-end; this is the correc
   **soft** (after the fix). The earlier blanket "`--lang fr` falls back to English" was wrong.
 - **No "mirror assemble.py".** It is FR-primary with 100%-stale anchors; the injector is a
   from-scratch **AST-targeted** rewrite: find the `Assign` whose target is
-  `PROTOCOL/STANZA/COWORK_TPL/BRIDGE/MESSAGES` with a `Dict` value, splice by source offset, assert
+  the protocol/stanza/seed/bridge/message dictionaries with a `Dict` value, splice by source offset, assert
   one anchor each. `LANGS = tuple(PROTOCOL)` (single source of truth). The injector **sorts+dedupes**
   langs, builds in one pass, orders each `MESSAGES` sub-dict's keys to the EN order (EN fallback on
   miss), and **refuses a core already carrying a target lang** (idempotent, byte-reproducible).
 - **Pack invariants (§4 amended):** all four template bodies are **required + non-empty** (no runtime
-  per-family fallback for STANZA/COWORK_TPL/BRIDGE — only `messages.json` keys fall back to EN);
+  per-family fallback for stanza/seed/bridge templates — only `messages.json` keys fall back to EN);
   bodies are `str.format` inputs (translator escapes braces; `{begin}`/`{end}` are injected, not
-  inlined); `--check` dry-renders each `stanza.txt`/`seed.txt` and rejects literal `M8SHIFT:`/`COWORK:`
+  inlined); `--check` dry-renders each `stanza.txt`/`seed.txt` and rejects literal reserved relay
   markers or missing `{begin}`/`{end}`.
 - **gen_docs / doc-sync, pack-direct.** `gen_docs.py` writes `docs/en` from the core and
   `docs/<lang>` from `i18n/<lang>/protocol.md` **directly** (never `PROTOCOL[lang]`).
@@ -188,13 +188,12 @@ via `KNOWN_LANGS` membership.
 `ja`, `ru`, `zh-cn`. First pass is **machine-translated**, each pack stamped
 `provenance: machine-translated, review pending` (especially `ja`/`zh-cn`/`ru`).
 
-## 15. Versioning — this lands as v3.0.0 (with the CoWork-compat removal)
+## 15. Versioning — this lands as v3.0.0
 
-The EN-only cutover is breaking, so it ships as **v3.0.0** (major). v3.0.0 also **removes all CoWork
-back-compat** (the deprecated `cowork.py` shim, the `_pick` dual-read, the `(?:COWORK|M8SHIFT)` marker
-union + `OLD_*` constants, `migrate-brand`, the `COWORK_LANG` fallback) → `m8shift.py` becomes
-**M8Shift-only**; "CoWork" survives only as a one-line historical note. This honours the Phase-2
-promise ("removal not before the next major") and dissolves the migrate-brand finding above.
+The EN-only cutover is breaking, so it ships as **v3.0.0** (major). v3.0.0 makes the
+public surface **M8Shift-only** and removes deprecated migration shims and fallback paths. The
+committed `m8shift.py` remains the canonical single-file relay; localized builds are produced by
+the injector.
 
 ---
 

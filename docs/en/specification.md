@@ -279,9 +279,9 @@ clean:
 
 ```text
 Code/
-├── cowork/                 ← the repo (edited here — the real work)
+├── m8shift/                ← the repo (edited here — the real work)
 │   └── m8shift.py           ← source under modification
-└── cowork-relay/           ← relay working directory (outside the repo)
+└── m8shift-relay/          ← relay working directory (outside the repo)
     ├── m8shift.py           ← FROZEN copy = the engine
     ├── M8SHIFT.md           ← coordination journal + LOCK
     ├── M8SHIFT.protocol.md · CLAUDE.md · AGENTS.md
@@ -293,12 +293,12 @@ Code/
 - The anchors live in the relay directory, not the repo root, so **auto-bootstrap does
   not fire**: each agent is pointed manually at the relay's `M8SHIFT.protocol.md` (the
   documented "no project root" case). Discipline is unchanged — an agent edits the repo
-  **only** while holding the pen, and keeps `cowork/m8shift.py` importable (`ast.parse`)
+  **only** while holding the pen, and keeps the repo copy of `m8shift.py` importable (`ast.parse`)
   before each `append`.
 
 This is exactly how the roster work was reviewed: Claude implemented,
 then handed off to Codex for an adversarial review through a frozen relay in
-`cowork-relay/`. A **git worktree** of the repo would *not* decouple the engine (it
+`m8shift-relay/`. A **git worktree** of the repo would *not* decouple the engine (it
 tracks the same branch, so its `m8shift.py` changes on edit) — use a frozen copy.
 
 ### 11.1 Detecting skew & promoting the engine
@@ -318,7 +318,7 @@ test runners) and are kept in lockstep with the core version by tests.
 1. Edit + **test the repo copy in isolation** (`python3 -m unittest discover -s tests`) — the relay
    keeps running on the frozen, stable version, so a broken WIP edit never wedges coordination.
 2. Commit / tag the repo when it reaches a stable point.
-3. **Promote** only when you want the relay to dogfood the new behavior: `cp cowork/m8shift.py
+3. **Promote** only when you want the relay to dogfood the new behavior: `cp m8shift/m8shift.py
    <relay>/` (after tests pass), then confirm `m8shift.py --version` matches in both locations.
    - **Backward-compatible change** (docs, messages, new commands, a new *optional* LOCK field):
      promote any time — the in-flight `M8SHIFT.md` keeps working.

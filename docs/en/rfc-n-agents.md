@@ -190,9 +190,8 @@ reading advisory data back to refuse a write. If wanted, it lives in a separate 
 
 ## 7. Tasks board (core = pure journal; gating lives in the companion)
 
-`M8SHIFT.tasks.md` (brand-derived via `_pick`, so legacy projects use `COWORK.tasks.md`;
-`migrate-brand` renames it): one HTML-comment block per task, same grammar as the LOCK, mutated in
-place under the **same** canonical-root `.m8shift.lock`.
+`M8SHIFT.tasks.md`: one HTML-comment block per task, same grammar as the LOCK, mutated in place
+under the **same** canonical-root `.m8shift.lock`.
 
 ```markdown
 # M8SHIFT · tasks
@@ -233,8 +232,8 @@ gemini → feat/hero-img → .m8shift/worktrees/assets
 ```
 
 **Canonical-root pinning (REQUIRED, fixes the integration-pen blocker).** Historically,
-`HERE = dirname(__file__)` and the module-level coordination paths (`COWORK`, `TASKS`,
-`LOCKFILE`) derived from that script location, so an integrator launched from a worktree
+`HERE = dirname(__file__)` and the module-level coordination paths for the living relay file, tasks
+and lockfile derived from that script location, so an integrator launched from a worktree
 (which contains its own `m8shift.py`) could compute a **different** lockfile and living file
 than one in the main tree → two concurrent merges into `main`. Fix: resolve all coordination
 paths to a **discovered canonical repo root** — the parent of
@@ -299,7 +298,7 @@ refuse a write. If desired it ships in the companion/policy tier, documented as 
 
 Read-only, passive, stdlib, no identity exposure:
 - `recap` — current LOCK + last N turn summaries. *("memory headlines" is dropped from increment 1;
-  it depends on the unbuilt `COWORK.memory.md` roadmap item — add it only once that exists.)*
+  it depends on the unbuilt shared-memory roadmap item — add it only once that exists.)*
 - `peek <me>` — reuse the `cmd_archive` TURN `finditer`, parse each block's `to:` line, print the
   body of the last block where `to == me`; rc 3 if not your turn (reuses `wait --once`'s state check).
 - `log` — relay timeline; `status --json`; `agents` (list + menus); `tasks list`.
@@ -309,8 +308,8 @@ Read-only, passive, stdlib, no identity exposure:
 - Pair = N = 2 — no behavior change for existing two-agent projects **after the §4a edits** (which
   must keep `valid_states`/`load_or_die` byte-identical for the 2-agent case).
 - Turns without advisory fields are valid free relays (`relation: continue` implied).
-- Phase-2 **dual-read** still applies (legacy `COWORK.*` / `COWORK:*`); `roles:`, the tasks file, and
-  worktrees are optional/additive.
+- Historical migration paths are out of scope for this RFC; Stage 3+ documents only the M8Shift
+  surface. `roles:`, the tasks file and worktrees are optional/additive.
 - **Migration:** a project with a stored 3+ roster (extra names declared but inactive in Stage 1)
   must **opt in** to activate them (`agents add` / `init --force`) — increment 2 must NOT silently
   promote stored-inactive names to active. `test_status_shows_active_pair` is rewritten to N-active
@@ -319,7 +318,7 @@ Read-only, passive, stdlib, no identity exposure:
 ## 12. Sequencing (increments) — with review gates
 
 1. **Read commands** — ✅ **SHIPPED** (`recap`, `peek`, `log`, `status --json`; shared
-   `parse_turns` block parser keeps unknown keys verbatim; dual-read of legacy `COWORK:*`).
+   `parse_turns` block parser keeps unknown keys verbatim and preserves reserved relay markers).
 2. **N-agent roster + relay** — ✅ **SHIPPED** (§4a de-pairing: `active_agents()`, `load_or_die`/
    `valid_states`/holder on the full roster, `cmd_init` anchors+ROSTER+BRIDGE on N, `cmd_wait`
    self-excluding stale check naming the real holder, `cmd_status`/`recap`/migrate on N; `stanza_for`
