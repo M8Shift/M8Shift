@@ -19,12 +19,6 @@ English | [Français](docs/README_fr.md)
 
 </div>
 
----
-
-> **Formerly CoWork.** The project was renamed to **M8Shift** (“Mate Shift” — *mate* = teammate,
-> *shift* = handing over the turn). As of **v3.0.0** the tool is **M8Shift-only**: the `cowork.py`
-> shim and the CoWork-file compatibility (dual-read, `migrate-brand`) were removed.
-
 ## What is M8Shift?
 
 M8Shift is a **cooperative mutex** for AI agents. When Claude and Codex work on the

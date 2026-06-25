@@ -86,7 +86,8 @@ Codex answered the open questions; an adversarial panel then pressure-tested the
   manifest under the canonical lock, never core routing.
 
 ### Core change (minimal, opt-in)
-- Add `configure_root(root)` recomputing `COWORK/ARCHIVE/PROTO/MEMORY/TASKS/LOCKFILE`; default stays
+- Add `configure_root(root)` recomputing the living relay, archive, protocol, memory, task and
+  lockfile paths; default stays
   `HERE` unless `$M8SHIFT_ROOT`. **Make `read(path=None)`/`write(text, path=None)` late-bind** (today's
   default args capture the old path — the footgun). Single-tree relay stays **byte-identical**.
 - Companion discovers the canonical root (`$M8SHIFT_ROOT`, else parent of `git rev-parse

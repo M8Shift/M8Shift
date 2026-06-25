@@ -239,7 +239,7 @@ cp /path/to/m8shift.py .          # die einzige benötigte Datei kopieren
 - schreibt `M8SHIFT.protocol.md` (dieses Dokument) und `M8SHIFT.md` (eine frische IDLE-
   Sperre); `M8SHIFT.md` wird **nicht** überschrieben, wenn es bereits existiert (außer mit
   `--force`) → der Zustand des laufenden Relais bleibt erhalten;
-- injiziert **oben** einen "Co-Work-Relais"-Block in **den Anker jedes aktiven Agenten**
+- injiziert **oben** einen "M8Shift-Relais"-Block in **den Anker jedes aktiven Agenten**
   (standardmäßig `CLAUDE.md` und `AGENTS.md`; erstellt, falls fehlend), zwischen
   `M8SHIFT:STANZA`-Markern → **idempotente** Re-Injektion (verschiebt/aktualisiert den Block
   ohne Duplizierung, bestehender Inhalt bleibt erhalten; die vorherige Datei wird gesichert nach

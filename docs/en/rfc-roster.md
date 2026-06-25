@@ -149,7 +149,7 @@ Two hard cases, handled explicitly (not silently):
   `valid_states(roster)` instead of the `VALID_STATES` constant; `load_or_die`
   validates against it; `need_agent` against the roster; `cmd_append` validates
   `--to ∈ roster`; `cmd_init` loops anchor injection over the roster via `ANCHORS`;
-  `agents:` line in the `COWORK_*` LOCK templates. Untouched: `file_lock`, atomic
+  `agents:` line in the generated LOCK templates. Untouched: `file_lock`, atomic
   `write`, `archive`, TTL machinery.
 
 ## 9. Open questions
