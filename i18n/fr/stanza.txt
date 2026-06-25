@@ -1,5 +1,5 @@
 {begin}
-## Co-work relais — auto-suffisant (aucune explication humaine requise)
+## Relais M8Shift — auto-suffisant (aucune explication humaine requise)
 
 Tu es **{me}** dans ce projet. Dès qu'un `M8SHIFT.md` est présent à la racine,
 c'est ta source de coordination avec **{other}** : applique `M8SHIFT.protocol.md`

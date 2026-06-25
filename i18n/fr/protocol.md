@@ -264,10 +264,14 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ## 8. Adoption par tout projet (portabilité)
 
 `m8shift.py` est **auto-suffisant** : il embarque ce protocole, le gabarit de
-`M8SHIFT.md` et les ancrages. Pour adopter le relais dans un projet :
+`M8SHIFT.md` et les ancrages. `init` génère les fichiers de relais, mais il ne
+copie **pas** les scripts dans le projet cible. L'installateur en une ligne s'en
+charge en plaçant `m8shift.py` et le compagnon optionnel `m8shift-worktree.py`
+côte à côte, puis en lançant `init`. Pour une adoption manuelle :
 
 ```bash
-cp /chemin/vers/m8shift.py .      # copier le seul fichier nécessaire
+cp /chemin/vers/m8shift.py .      # relais cœur
+cp /chemin/vers/m8shift-worktree.py . # optionnel : worktrees parallèles isolés
 ./m8shift.py init                 # nom du projet = nom du dossier (sinon --name)
 ```
 
@@ -275,7 +279,7 @@ cp /chemin/vers/m8shift.py .      # copier le seul fichier nécessaire
 - écrit `M8SHIFT.protocol.md` (ce document) et `M8SHIFT.md` (verrou IDLE neuf) ;
   `M8SHIFT.md` n'est **pas** écrasé s'il existe déjà (sauf `--force`) → l'état du
   relais en cours est préservé ;
-- injecte en **tête** un bloc « Co-work relais » dans **l'ancrage de chaque agent
+- injecte en **tête** un bloc « relais M8Shift » dans **l'ancrage de chaque agent
   actif** (par défaut `CLAUDE.md` et `AGENTS.md` ; créés s'ils manquent), entre
   marqueurs `M8SHIFT:STANZA` → ré-injection **idempotente** (déplace/actualise le bloc
   sans dupliquer, contenu existant préservé ; le fichier précédent est sauvegardé dans
