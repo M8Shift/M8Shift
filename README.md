@@ -197,6 +197,8 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **Explanation (philosophy)** — [docs/en/philosophy.md](docs/en/philosophy.md) — why the project exists.
 - **RFC (session history)** — [docs/en/rfc/rfc-session-history.md](docs/en/rfc/rfc-session-history.md) —
   session ledger and `history`.
+- **RFC (session reports)** — [docs/en/rfc/rfc-session-reports.md](docs/en/rfc/rfc-session-reports.md) —
+  proposed Markdown reports and decision ledger derived from existing turns.
 - **RFC (worktree companion)** — [docs/en/rfc/rfc-worktree-companion.md](docs/en/rfc/rfc-worktree-companion.md) —
   opt-in degree-2 concurrency through isolated git worktrees.
 - **RFC (runtime companion)** — [docs/en/rfc/rfc-runtime-companion.md](docs/en/rfc/rfc-runtime-companion.md) —
