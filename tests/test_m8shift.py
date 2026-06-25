@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.18.0"
+VERSION = "3.18.1"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2021,6 +2021,35 @@ class TestSessionReports(CLIBase):
         self.assertNotEqual(outside.returncode, 0)
         self.assertIn("inside the project root", outside.stderr + outside.stdout)
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.d), "escape.md")))
+
+    def test_session_report_refuses_reserved_engine_outputs_even_with_force(self):
+        self._review_session()
+        before_relay = self.md()
+        with open(os.path.join(self.d, "m8shift.py"), encoding="utf-8") as fh:
+            before_script = fh.read()
+
+        for output in (
+            "M8SHIFT.md",
+            "M8SHIFT.sessions.jsonl",
+            "M8SHIFT.protocol.md",
+            ".m8shift.lock",
+            "m8shift.py",
+            "m8shift-runtime.py",
+            "m8shift-worktree.py",
+            "m8shift-i18n.py",
+            "M8SHIFT.session-reports",
+        ):
+            with self.subTest(output=output):
+                r = self.cw(
+                    "session", "report", "current",
+                    "--write", "--output", output, "--force",
+                )
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("reserved M8Shift", r.stderr + r.stdout)
+
+        self.assertEqual(self.md(), before_relay)
+        with open(os.path.join(self.d, "m8shift.py"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), before_script)
 
     def test_session_report_rejects_symlink_output(self):
         self._review_session()

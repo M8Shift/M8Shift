@@ -69,7 +69,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.18.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.18.1"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -2022,6 +2022,38 @@ def render_session_report(session, turns, include_body=False):
     return "\n".join(lines)
 
 
+def reserved_report_output_paths():
+    root = os.path.realpath(os.path.dirname(COWORK) or ".")
+    reserved = {
+        COWORK,
+        ARCHIVE,
+        PROTO,
+        MEMORY,
+        TASKS,
+        SESSIONS,
+        REQUESTS,
+        LOCKFILE,
+        os.path.join(root, "m8shift.py"),
+        os.path.join(root, "m8shift-runtime.py"),
+        os.path.join(root, "m8shift-worktree.py"),
+        os.path.join(root, "m8shift-i18n.py"),
+        os.path.abspath(__file__),
+    }
+    return {os.path.realpath(path) for path in reserved}
+
+
+def reject_reserved_report_output(path):
+    root = os.path.realpath(os.path.dirname(COWORK) or ".")
+    path_real = os.path.realpath(path)
+    reports_real = os.path.realpath(SESSION_REPORTS)
+    if path_real == reports_real or path_real in reserved_report_output_paths():
+        try:
+            label = os.path.relpath(path_real, root)
+        except ValueError:
+            label = path
+        sys.exit(f"refused: report output targets a reserved M8Shift file: {label}")
+
+
 def resolve_report_output(session_id, output=""):
     root = os.path.realpath(os.path.dirname(COWORK) or ".")
     if output:
@@ -2042,12 +2074,14 @@ def resolve_report_output(session_id, output=""):
         sys.exit("refused: report output must stay inside the project root.")
     if os.path.islink(path):
         sys.exit("refused: report output must not be an existing symlink.")
+    reject_reserved_report_output(path)
     return path
 
 
 def write_report_atomic(path, text, force=False):
     parent = os.path.dirname(path) or "."
     os.makedirs(parent, exist_ok=True)
+    reject_reserved_report_output(path)
     if os.path.isdir(path):
         sys.exit("refused: report output is a directory.")
     if os.path.islink(path):

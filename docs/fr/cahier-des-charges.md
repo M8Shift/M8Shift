@@ -91,7 +91,7 @@ le jugement du mainteneur.
 | EF-10 | Les variantes d'ancrage (`agents.md`, `CLAUDE.md`, etc.) sont normalisées ou refusées si ambiguës. |
 | EF-11 | Le roster actif est configurable via `init --agents a,b,c…`; tous les membres peuvent recevoir le bâton. |
 | EF-12 | `pause <holder> --reason` gare une session ouverte sans tâche active en `PAUSED`/`holder=none`; `resume <agent> --reason` ou `next <agent> --resume --reason` assigne explicitement un nouveau périmètre utilisateur avant toute reprise. `doctor` signale les stylos garés en `WORKING_*` et les boucles d'acks. |
-| EF-13 | `session list/show/decisions/report` produit des vues de session et des rapports Markdown à partir des tours et événements existants. L'écriture est explicite, confinée au projet, atomique et ne modifie jamais le `LOCK`. |
+| EF-13 | `session list/show/decisions/report` produit des vues de session et des rapports Markdown à partir des tours et événements existants. L'écriture est explicite, confinée au projet, atomique, refuse les fichiers de coordination/scripts M8Shift même avec `--force`, et ne modifie jamais le `LOCK`. |
 | EF-12 | `peek`, `recap`, `log`, `status --json` et `history` sont des surfaces de lecture. |
 | EF-13 | `remember` ajoute une note durable dans `M8SHIFT.memory.md` sans prendre le stylo. |
 | EF-14 | `task add/done/drop/list/show` maintient un registre append-only `M8SHIFT.tasks.md`. |
@@ -275,7 +275,7 @@ La documentation française les référence sans maintenir de copie traduite.
 | [rfc-headless-runner-hardening.md](../en/rfc/rfc-headless-runner-hardening.md) | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, validation et `run.timeout` | borne les processus headless bloqués sans force-steal |
 | [rfc-cooperative-turn-request.md](../en/rfc/rfc-cooperative-turn-request.md) | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, `M8SHIFT.requests.md` | les demandes ne rendent jamais `claim` légal ; seul yield/steer explicite route, et `steer-turn` refuse `WORKING_*` frais |
 | [rfc-pause-resume.md](../en/rfc/rfc-pause-resume.md) | `PAUSED`, `pause <détenteur> --reason`, `resume <agent> --reason`, `next --resume --reason` | session ouverte sans tâche active : aucun détenteur, reprise seulement sur nouveau scope explicite |
-| [rfc-session-reports.md](../en/rfc/rfc-session-reports.md) | `session list/show/decisions/report`, `M8SHIFT.session-reports/` | mémoire Markdown dérivée ; écriture confinée, aucune mutation du `LOCK` |
+| [rfc-session-reports.md](../en/rfc/rfc-session-reports.md) | `session list/show/decisions/report`, `M8SHIFT.session-reports/` | mémoire Markdown dérivée ; écriture confinée, fichiers M8Shift réservés refusés, aucune mutation du `LOCK` |
 
 Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc/rfc-contracts-validation.md)
 décrit les contrats de passation typés, décisions de revue explicites (`approve`, `revise`,
