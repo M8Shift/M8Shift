@@ -27,7 +27,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.12.1"
+VERSION = "3.13.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -1399,6 +1399,88 @@ class TestAdvisoryFields(CLIBase):
                     self.assertIn(needle, r.stderr, f"{extra}: wrong/garbled message")
                 # rejected before the lock → no real turn written (only the seed's turn 0)
                 self.assertEqual([], [t for t in cowork.parse_turns(self.md()) if t["n"] >= 1])
+
+
+# ───────────── Stage 4: contracts and read-only validation ──────────────────
+
+class TestStage4Contracts(CLIBase):
+    """Stage 4 contract fields remain advisory, but can be validated explicitly."""
+
+    def _append_contract(self, *extra):
+        self.init()
+        self.assertEqual(0, self.cw("claim", "claude").returncode)
+        r = self.cw("append", "claude", "--to", "codex", "--ask", "review",
+                    "--done", "implemented", "--files", "m8shift.py", *extra)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def test_contract_sugar_fields_written_and_validate_clean(self):
+        self._append_contract(
+            "--schema", "stage4.v1",
+            "--role-from", "implementer",
+            "--role-to", "reviewer",
+            "--relation", "review_request",
+            "--requires", "read code and tests",
+            "--expected-output", "approve/revise/reject/waive",
+            "--evidence", "python3 -m unittest discover -s tests",
+            "--permissions", "read_only",
+        )
+        md = self.md()
+        for line in (
+            "- schema: stage4.v1",
+            "- role_from: implementer",
+            "- role_to: reviewer",
+            "- relation: review_request",
+            "- requires: read code and tests",
+            "- expected_output: approve/revise/reject/waive",
+            "- evidence: python3 -m unittest discover -s tests",
+            "- permissions: read_only",
+        ):
+            self.assertIn(line, md)
+        r = self.cw("contract", "validate", "--strict", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["findings"], [])
+
+    def test_contract_validate_warns_by_default_but_strict_fails(self):
+        self._append_contract("--schema", "stage4.v1", "--relation", "review_request")
+        r = self.cw("contract", "validate", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("contract.review_request_incomplete", checks)
+        strict = self.cw("contract", "validate", "--strict", "--json")
+        self.assertEqual(strict.returncode, 1)
+        self.assertFalse(json.loads(strict.stdout)["ok"])
+
+    def test_contract_validate_rejects_invalid_review_decision(self):
+        self._append_contract(
+            "--schema", "stage4.v1",
+            "--relation", "review_result",
+            "--decision", "maybe",
+        )
+        r = self.cw("contract", "validate", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertFalse(out["ok"])
+        self.assertIn("contract.decision_invalid", {f["check"] for f in out["findings"]})
+
+    def test_contract_validate_requires_waiver_reason(self):
+        self._append_contract(
+            "--schema", "stage4.v1",
+            "--relation", "review_result",
+            "--decision", "waive",
+        )
+        r = self.cw("contract", "validate", "--strict", "--json")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("contract.waiver_reason_missing", {f["check"] for f in json.loads(r.stdout)["findings"]})
+
+    def test_doctor_contracts_includes_contract_findings(self):
+        self._append_contract("--schema", "stage4.v1", "--relation", "review_result")
+        r = self.cw("doctor", "--contracts", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("contract.decision_missing", checks)
 
 
 # ───────────── shared memory : remember (pen-free) + recap headlines ─────────

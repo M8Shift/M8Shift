@@ -65,7 +65,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.12.1"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.13.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -83,6 +83,16 @@ AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
 FIELD_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")   # advisory turn-field key: snake_case / x_*
 # Turn fields the engine writes itself (routing) — an advisory field may not shadow them.
 ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff"))
+# Stage 4 contract vocabulary. These fields stay advisory: they are validated only by explicit
+# read-only commands and never feed the mutex, routing, permissions, or claimability.
+CONTRACT_SCHEMA = "stage4.v1"
+CONTRACT_FIELDS = frozenset((
+    "schema", "role_from", "role_to", "relation", "requires", "expected_output",
+    "evidence", "decision", "waiver_reason", "permissions",
+))
+CONTRACT_RELATIONS = frozenset(("handoff", "review_request", "review_result", "escalation"))
+CONTRACT_DECISIONS = frozenset(("approve", "revise", "reject", "waive"))
+CONTRACT_REVIEW_REQUEST_REQUIRED = ("role_to", "requires", "expected_output")
 # Reserved marker prefixes: forbidden in fields, neutralized in bodies.
 RESERVED = ("M8SHIFT:TURN", "M8SHIFT:LOCK", "M8SHIFT:STANZA", "M8SHIFT:TASK")
 # Every char str.splitlines() treats as a line boundary — a single-line field must contain
@@ -1681,6 +1691,112 @@ def doctor_finding(check, severity, message, path="", fix_hint=""):
     return out
 
 
+def contract_finding(turn, check, severity, message, field="", fix_hint=""):
+    """Structured Stage-4 contract diagnostic for one parsed turn.
+
+    Contract validation is read-only. These findings are observability data only: they never feed
+    claimability, routing, permissions, or the semantic pen.
+    """
+    out = doctor_finding(
+        "contract." + check,
+        severity,
+        f"turn #{turn['n']}: {message}",
+        os.path.basename(COWORK),
+        fix_hint,
+    )
+    out["turn"] = turn["n"]
+    out["agent"] = turn["agent"]
+    if field:
+        out["field"] = field
+    return out
+
+
+def turn_has_contract_hint(fields):
+    """Whether a turn carries Stage-4-looking fields, even without `schema=stage4.v1`."""
+    return any(k in fields for k in CONTRACT_FIELDS)
+
+
+def collect_contract_findings(turns):
+    """Read-only Stage-4 validator over parsed turns.
+
+    Only `schema=stage4.v1` activates the full contract rules. Legacy turns are ignored unless
+    they carry Stage-4-looking fields without a schema, in which case validation emits a warning
+    so operators can spot half-written contracts.
+    """
+    findings = []
+    for turn in turns:
+        fields = turn["fields"]
+        schema = fields.get("schema", "")
+        if not schema:
+            if turn_has_contract_hint(fields):
+                findings.append(contract_finding(
+                    turn, "schema_missing", "warning",
+                    "contract-like fields are present but schema is missing.",
+                    "schema",
+                    f"add `schema={CONTRACT_SCHEMA}` or remove the contract fields",
+                ))
+            continue
+        if schema != CONTRACT_SCHEMA:
+            findings.append(contract_finding(
+                turn, "schema_unknown", "error",
+                f"unknown contract schema {schema!r}; expected {CONTRACT_SCHEMA!r}.",
+                "schema",
+            ))
+            continue
+
+        for key in CONTRACT_FIELDS:
+            if key in fields and not fields.get(key, "").strip():
+                findings.append(contract_finding(
+                    turn, "field_empty", "warning",
+                    f"{key} is empty.",
+                    key,
+                ))
+
+        relation = fields.get("relation", "").strip()
+        if not relation:
+            findings.append(contract_finding(
+                turn, "relation_missing", "warning",
+                "schema=stage4.v1 should declare a relation.",
+                "relation",
+            ))
+        elif relation not in CONTRACT_RELATIONS:
+            findings.append(contract_finding(
+                turn, "relation_invalid", "error",
+                f"relation {relation!r} is invalid; expected one of {', '.join(sorted(CONTRACT_RELATIONS))}.",
+                "relation",
+            ))
+
+        if relation == "review_request":
+            for key in CONTRACT_REVIEW_REQUEST_REQUIRED:
+                if not fields.get(key, "").strip():
+                    findings.append(contract_finding(
+                        turn, "review_request_incomplete", "warning",
+                        f"review_request should include {key}.",
+                        key,
+                    ))
+        elif relation == "review_result" and not fields.get("decision", "").strip():
+            findings.append(contract_finding(
+                turn, "decision_missing", "warning",
+                "review_result should include a decision.",
+                "decision",
+            ))
+
+        decision = fields.get("decision", "").strip()
+        if decision and decision not in CONTRACT_DECISIONS:
+            findings.append(contract_finding(
+                turn, "decision_invalid", "error",
+                f"decision {decision!r} is invalid; expected one of {', '.join(sorted(CONTRACT_DECISIONS))}.",
+                "decision",
+            ))
+        if decision == "waive" and not fields.get("waiver_reason", "").strip():
+            findings.append(contract_finding(
+                turn, "waiver_reason_missing", "error",
+                "decision=waive requires waiver_reason.",
+                "waiver_reason",
+            ))
+    return findings
+
+
 def _doctor_anchor_findings(agent, anchor, seen):
     findings = []
     path = os.path.join(HERE, anchor)
@@ -1789,7 +1905,7 @@ def _security_doctor_findings(lk):
     return findings
 
 
-def collect_doctor_findings(security=False):
+def collect_doctor_findings(security=False, contracts=False):
     """Read-only health checks. No file_lock, no write, no force recovery."""
     findings = []
     if not os.path.exists(COWORK):
@@ -2033,12 +2149,21 @@ def collect_doctor_findings(security=False):
                         ))
     if security:
         findings.extend(_security_doctor_findings(lk))
+    if contracts and os.path.exists(COWORK):
+        try:
+            findings.extend(collect_contract_findings(parse_turns(text)))
+        except (OSError, ValueError):
+            # The core LOCK/relay parse findings above already explain the broken file.
+            pass
     return findings
 
 
 def cmd_doctor(args):
     threshold = SEVERITY_RANK[args.severity_min]
-    findings = collect_doctor_findings(security=getattr(args, "security", False))
+    findings = collect_doctor_findings(
+        security=getattr(args, "security", False),
+        contracts=getattr(args, "contracts", False),
+    )
     visible = [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
     ok = not visible
     if args.json:
@@ -2060,6 +2185,46 @@ def cmd_doctor(args):
                 if f.get("fix_hint"):
                     print(f"  fix: {f['fix_hint']}")
     return 1 if args.lint and not ok else 0
+
+
+def contract_visible_findings(findings, severity_min):
+    threshold = SEVERITY_RANK[severity_min]
+    return [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
+
+
+def cmd_contract_validate(args):
+    """Read-only Stage-4 contract validation over the append-only turn journal."""
+    text = load_or_die()
+    turns = parse_turns(text)
+    if getattr(args, "all", False) and os.path.exists(ARCHIVE):
+        turns = parse_turns(read(ARCHIVE)) + turns
+    findings = collect_contract_findings(turns)
+    visible = contract_visible_findings(findings, args.severity_min)
+    strict_ok = not visible
+    non_strict_ok = not any(f["severity"] == "error" for f in visible)
+    ok = strict_ok if args.strict else non_strict_ok
+    if args.json:
+        print(json.dumps({
+            "ok": ok,
+            "strict": bool(args.strict),
+            "m8shift_version": VERSION,
+            "schema": CONTRACT_SCHEMA,
+            "severity_min": args.severity_min,
+            "findings": visible,
+        }, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"m8shift.py v{VERSION}")
+        print("── contract validate ──────────────────")
+        print(f"schema: {CONTRACT_SCHEMA}")
+        if not visible:
+            print("✓ no findings.")
+        else:
+            icon = {"info": "i", "warning": "⚠", "error": "✗"}
+            for f in visible:
+                print(f"{icon.get(f['severity'], '?')} {f['severity']} {f['check']}: {f['message']}")
+                if f.get("fix_hint"):
+                    print(f"  fix: {f['fix_hint']}")
+    return 1 if args.strict and not strict_ok else 0
 
 
 def cmd_recap(args):
@@ -2560,10 +2725,11 @@ def _read_body(spec, *, allow_large=False):
         sys.exit(tr("body_error", e=e))
 
 def collect_advisory_fields(args):
-    """§5 advisory turn fields: sugar flags (branch/commit/tests/next/blocked_on) + the open
+    """Advisory turn fields: §5 sugar flags, Stage-4 contract sugar flags, and the open
     `--field key=value` namespace (x_* and any other key). Returns an ordered [(key, value)]:
     values are clean_field-checked, keys must be snake_case/x_* and may not shadow an
-    engine-managed routing field, no key twice. Pure passthrough — never interpreted."""
+    engine-managed routing field, no key twice. Pure passthrough for routing; Stage-4 fields are
+    checked only by explicit read-only validators."""
     out, seen = [], set()
 
     def add(key, label, value):
@@ -2583,7 +2749,12 @@ def collect_advisory_fields(args):
 
     for key, value in (("branch", args.branch), ("commit", args.commit),
                        ("tests", args.tests), ("next", args.next),
-                       ("blocked_on", args.blocked_on)):
+                       ("blocked_on", args.blocked_on),
+                       ("role_from", args.role_from), ("role_to", args.role_to),
+                       ("relation", args.relation), ("requires", args.requires),
+                       ("expected_output", args.expected_output), ("evidence", args.evidence),
+                       ("decision", args.decision), ("waiver_reason", args.waiver_reason),
+                       ("schema", args.schema), ("permissions", args.permissions)):
         add(key, "--" + key.replace("_", "-"), value)
     for item in args.field:
         key, sep, value = item.partition("=")
@@ -2887,9 +3058,22 @@ def main():
     dr.add_argument("--lint", action="store_true", help="exit 1 on findings at/above --severity-min")
     dr.add_argument("--security", action="store_true",
                     help="include additional security-oriented checks (root, sizes, force events, lock file)")
+    dr.add_argument("--contracts", action="store_true",
+                    help="include Stage-4 contract validation findings")
     dr.add_argument("--severity-min", choices=tuple(SEVERITY_RANK), default="warning",
                     help="threshold for ok/lint (default: warning)")
     dr.set_defaults(fn=cmd_doctor)
+
+    co = sub.add_parser("contract", help="read-only Stage-4 contract tools")
+    co_sub = co.add_subparsers(dest="verb", required=True)
+    cv = co_sub.add_parser("validate", help="validate schema=stage4.v1 turn contracts")
+    cv.add_argument("--strict", action="store_true",
+                    help="exit 1 when findings at/above --severity-min are present")
+    cv.add_argument("--json", action="store_true", help="machine-readable contract findings")
+    cv.add_argument("--all", action="store_true", help="include archived turns")
+    cv.add_argument("--severity-min", choices=tuple(SEVERITY_RANK), default="info",
+                    help="threshold for displayed findings (default: info)")
+    cv.set_defaults(fn=cmd_contract_validate)
 
     rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns + memory + tasks")
     rc.add_argument("--turns", type=int, default=6)
@@ -2955,6 +3139,17 @@ def main():
     a.add_argument("--tests", default="")
     a.add_argument("--next", default="")
     a.add_argument("--blocked-on", dest="blocked_on", default="")
+    # Stage 4 contract sugar flags. These serialize to the same advisory turn fields as --field.
+    a.add_argument("--role-from", dest="role_from", default="")
+    a.add_argument("--role-to", dest="role_to", default="")
+    a.add_argument("--relation", default="")
+    a.add_argument("--requires", default="")
+    a.add_argument("--expected-output", dest="expected_output", default="")
+    a.add_argument("--evidence", default="")
+    a.add_argument("--decision", default="")
+    a.add_argument("--waiver-reason", dest="waiver_reason", default="")
+    a.add_argument("--schema", default="")
+    a.add_argument("--permissions", default="")
     a.add_argument("--field", action="append", default=[], metavar="KEY=VALUE",
                    help="advisory turn field, repeatable (KEY snake_case or x_*)")
     a.set_defaults(fn=cmd_append)
