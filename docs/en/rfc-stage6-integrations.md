@@ -27,7 +27,8 @@ Already shipped or available today:
   validation, and loop guardrails;
 - `m8shift-worktree.py`: optional isolated worktree companion for parallel feature
   work with serialized integration;
-- `examples/headless_runner.py`: reference pattern for headless loops and heartbeat;
+- `examples/headless_runner.py`: reference headless runner with heartbeat, `--once`,
+  `M8SHIFT_RUN_ID`, and local `.m8shift/runtime/runs.jsonl` lifecycle events;
 - documentation and website pages for quickstart, VS Code-style UI operation,
   Linux/macOS/Windows, worktree toolbox, limitations, roadmap, and security notes;
 - RFCs for runtime companion, hosted/runtime control plane, provider management, and
@@ -110,15 +111,23 @@ alias m8w='python3 m8shift.py watch --interval 5 --for'
 
 ### 6C — Headless runner hardening
 
+**Status:** partially shipped as a reference runner.
+
 **What remains:**
 
-- turn `examples/headless_runner.py` from reference example into a supported companion
-  or documented recipe;
-- define a stable run-plan format;
-- record run ids in advisory turn fields such as `x_run_id`;
+- decide whether `examples/headless_runner.py` graduates from reference example to supported
+  companion;
+- define a stable run-plan format beyond static `--cmd` argv;
 - improve failure modes: claimed-but-no-append, repeated heartbeat without progress,
   interrupted process, and stale lane;
 - add tests around runner behavior without invoking real provider CLIs.
+
+**Already shipped:**
+
+- `--once` for testable/supervised single-turn execution;
+- `M8SHIFT_RUN_ID` passed to the child process so agents can append `x_run_id`;
+- append-only `.m8shift/runtime/runs.jsonl` lifecycle events;
+- heartbeat TTL refresh while the child process runs.
 
 **Value added:**
 

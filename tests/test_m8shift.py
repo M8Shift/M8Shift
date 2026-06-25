@@ -1958,6 +1958,40 @@ class TestAuditFixes(CLIBase):
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertIn(v, r.stdout)
 
+    def test_headless_runner_once_writes_run_ledger_and_env_run_id(self):
+        self.init()
+        runner = os.path.join(REPO, "examples", "headless_runner.py")
+        code = """
+import os
+import subprocess
+import sys
+run_id = os.environ["M8SHIFT_RUN_ID"]
+with open("runner-run-id.txt", "w", encoding="utf-8") as f:
+    f.write(run_id)
+subprocess.check_call([sys.executable, "m8shift.py", "claim", "claude"])
+subprocess.check_call([
+    sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
+    "--ask", "review", "--done", "runner ok", "--field", "x_run_id=" + run_id,
+])
+"""
+        r = subprocess.run(
+            [sys.executable, runner, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--start-on-idle", "--once",
+             "--interval", "1", "--max-retries", "1", "--cmd", sys.executable, "-c", code],
+            cwd=self.d, capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.d, "runner-run-id.txt"), encoding="utf-8") as f:
+            run_id = f.read()
+        self.assertRegex(run_id, r"^\d{8}T\d{6}Z-claude-[0-9a-f]{8}$")
+        self.assertIn(f"- x_run_id: {run_id}", self.md())
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        self.assertEqual([row["event"] for row in rows], ["run.started", "run.ended"])
+        self.assertEqual(rows[0]["run_id"], run_id)
+        self.assertEqual(rows[1]["status"], "ok")
+        self.assertEqual(rows[1]["relay_state"], "AWAITING_CODEX")
+
     def test_done_release_are_baton_owner_ops(self):
         # #4: in AWAITING_*, `holder` is the baton owner; done/release act for them WITHOUT an
         # active claim (append, the work write, still needs the pen). A non-holder is refused.

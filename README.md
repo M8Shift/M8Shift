@@ -64,7 +64,7 @@ every surface where Claude Code or Codex run, and it adds **zero credentials**.
 
 | Surface | Works? | Notes |
 |---------|--------|-------|
-| Terminal / CLI | ✅ | headless (`claude -p`, `codex exec`, cron) can be **fully automated** — see [`examples/headless_runner.py`](examples/headless_runner.py) |
+| Terminal / CLI | ✅ | headless (`claude -p`, `codex exec`, cron) can be **fully automated** — see [`examples/headless_runner.py`](examples/headless_runner.py), which emits `M8SHIFT_RUN_ID` and `.m8shift/runtime/runs.jsonl` lifecycle events |
 | Desktop app (Mac/Windows) | ✅ | interactive: a human resumes each agent between turns |
 | VS Code / JetBrains (IDE) | ✅ | same as desktop |
 | Web (claude.ai/code) | ✅ | anywhere the agent can run a shell and read its anchor |
@@ -283,8 +283,9 @@ Verified by the tests and by multi-agent review:
   wrapping `wait → relaunch the agent → claim` — a host integration, not a change to
   the mutex. A system notification/webhook can *signal* a turn but cannot *wake* the AI
   by itself. An example runner is provided:
-  [`examples/headless_runner.py`](examples/headless_runner.py). A proposed runtime
-  companion design is documented in
+  [`examples/headless_runner.py`](examples/headless_runner.py). It supports `--once`,
+  manual TTL heartbeat, `M8SHIFT_RUN_ID`, and local `.m8shift/runtime/runs.jsonl`
+  lifecycle events. A broader runtime companion design is documented in
   [docs/en/rfc-runtime-companion.md](docs/en/rfc-runtime-companion.md).
 - **Cooperative, N-agent, advisory** — see the
   [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, one
