@@ -76,7 +76,7 @@ l'arbitrage. Voir [philosophie.md](philosophie.md).
 
 Voir [cahier des charges](cahier-des-charges.md) §4–5. En synthèse : exclusion
 mutuelle, atomicité, autonomie des agents, robustesse, historique borné,
-observabilité, historique de sessions, affichage local des dates, i18n et
+observabilité, historique de sessions, affichage des dates locales préfixé par le fuseau, i18n et
 parallélisme optionnel par worktrees.
 
 ### 1.6 Architecture applicative cible
@@ -290,8 +290,8 @@ Le contrat d'implémentation est suivi dans
 
 180 tests, sans dépendance Python externe : unitaires (fonctions pures et parseurs) +
 non-régression CLI en sous-processus isolé (modèle claim→append, mutex, roster N-agent,
-ancrages canoniques/override, mémoire, tâches, historique de sessions, affichage local
-des dates, archive, doctor, compagnon worktree, robustesse, anti-injection, schéma LOCK).
+ancrages canoniques/override, mémoire, tâches, historique de sessions, affichage des dates
+locales préfixé par le fuseau, archive, doctor, compagnon worktree, robustesse, anti-injection, schéma LOCK).
 Commande :
 `python3 -m unittest discover -s tests`.
 
@@ -301,7 +301,8 @@ Commande :
   (roster actif) / `--lang <langue incluse>` / `--force`.
 - **Encodage** : UTF-8 partout (lecture/écriture explicites).
 - **Fuseaux** : tous les horodatages stockés sont en **UTC** ISO-8601 (`...Z`) ;
-  les commandes humaines affichent aussi l'heure locale, les sorties JSON restent en UTC.
+  les commandes humaines affichent aussi l'heure locale préfixée par le nom/offset de
+  fuseau quand disponible (sinon `local`), les sorties JSON restent en UTC.
 - **Journalisation** : sortie standard (messages `✓`/`refus`/`…`), pas de fichier de log.
 
 ### 2.5 Politique de branches & versionnement

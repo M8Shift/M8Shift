@@ -245,7 +245,8 @@ Markdown rendering) and are **immutable** once closed.
 
 Timestamps are stored in UTC (`...Z`) for stable cross-agent comparisons. Human-facing
 commands (`status`, `recap`, `history`, `task show`, and `m8shift-worktree.py status`) also
-print the user's local time next to UTC; JSON output stays canonical UTC.
+print the user's local time next to UTC, prefixed by the timezone name/offset when
+available (otherwise `local`); JSON output stays canonical UTC.
 `status` also derives display-only `started` and `duration` lines from the session
 ledger; `status --json` exposes them as `session_started_at`,
 `session_duration_seconds`, and `session_duration` (`null` when unavailable).

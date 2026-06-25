@@ -75,8 +75,8 @@ the human maintainer remains the arbiter. See [philosophy.md](philosophy.md).
 ### 1.5 Requirements
 
 See [specification](specification.md) §4–5. In summary: mutual exclusion, atomicity,
-agent autonomy, robustness, bounded history, observability, session history, local-time
-display, i18n, and optional worktree-based parallelism.
+agent autonomy, robustness, bounded history, observability, session history,
+timezone-prefixed local-time display, i18n, and optional worktree-based parallelism.
 
 ### 1.6 Target application architecture
 
@@ -285,7 +285,7 @@ implementation contract is tracked in
 180 tests, with no external Python dependency: unit tests (pure functions and parsers)
 plus CLI regression tests in isolated subprocesses (claim→append model, mutex,
 N-agent concurrency with a single winner, canonical/override anchors, memory, tasks,
-session history, local-time display, archive, doctor, worktree companion, robustness,
+session history, timezone-prefixed local-time display, archive, doctor, worktree companion, robustness,
 anti-injection, LOCK schema). Command:
 `python3 -m unittest discover -s tests`.
 
@@ -295,7 +295,8 @@ anti-injection, LOCK schema). Command:
   (active roster) / `--lang <bundled-code>` / `--force`.
 - **Encoding**: UTF-8 everywhere (explicit on read/write).
 - **Time zones**: all stored timestamps are **UTC** ISO-8601 (`...Z`); human-facing
-  commands also display the user's local time next to UTC, while JSON stays UTC-only.
+  commands also display the user's local time next to UTC, prefixed by the timezone
+  name/offset when available (otherwise `local`), while JSON stays UTC-only.
 - **Logging**: standard output (`✓`/`refused`/`…` messages), no log file.
 
 ### 2.5 Branching & versioning policy

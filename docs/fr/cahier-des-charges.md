@@ -95,7 +95,7 @@ le jugement du mainteneur.
 | EF-15 | `claim --check` sonde les chevauchements de fichiers sans prendre le stylo. |
 | EF-16 | `doctor` signale les dérives de santé sans réparer ni forcer le verrou ; `doctor --security` ajoute les contrôles de racine effective, taille de registres, événements forcés et fichier lock. |
 | EF-17 | `history` affiche une entrée par session : id, début/fin, état, agents, tours, version. |
-| EF-18 | Les sorties humaines affichent UTC + heure locale ; `status` dérive aussi `started`/`duration` depuis `M8SHIFT.sessions.jsonl` en lecture seule ; les sorties JSON restent en UTC canonique. |
+| EF-18 | Les sorties humaines affichent UTC + heure locale préfixée par le nom/offset de fuseau quand disponible (sinon `local`) ; `status` dérive aussi `started`/`duration` depuis `M8SHIFT.sessions.jsonl` en lecture seule ; les sorties JSON restent en UTC canonique. |
 | EF-19 | `m8shift-worktree.py` permet le degré 2 optionnel : travail parallèle en worktrees isolés, intégration sérialisée. |
 | EF-20 | Les garde-fous de boucle empêchent les sorties prématurées : `status --for <agent>` indique l'action suivante et `append --wait` reste bloqué après passation jusqu'au prochain tour du même agent ou `DONE`. |
 | EF-21 | `watch [--for agent]` fournit une vue live locale, en lecture seule, de `status` ; elle ne claim pas, ne passe pas la main et ne force aucune récupération. |
@@ -150,7 +150,8 @@ Champs principaux du `LOCK` :
 | `integrating` | sentinelle optionnelle | merge worktree en cours |
 
 Les timestamps sont stockés en UTC (`...Z`). Les commandes humaines affichent aussi
-l'heure locale ; les sorties JSON restent en UTC.
+l'heure locale préfixée par le nom/offset de fuseau quand disponible (sinon `local`) ;
+les sorties JSON restent en UTC.
 
 `status` dérive aussi deux lignes de session en lecture seule depuis
 `M8SHIFT.sessions.jsonl` quand c'est possible : `started` (début de session) et
@@ -234,7 +235,7 @@ La documentation française les référence sans maintenir de copie traduite.
 | [rfc-claim-check.md](../en/rfc-claim-check.md) | `claim --check` | lecture seule, aucune acquisition de stylo |
 | [rfc-tasks.md](../en/rfc-tasks.md) | `task add/done/drop/list/show` + `M8SHIFT.tasks.md` | état replié à la lecture, jamais imposé au mutex |
 | [rfc-session-history.md](../en/rfc-session-history.md) | `history` + `M8SHIFT.sessions.jsonl` | observabilité de session, pas de claimabilité |
-| [rfc-runtime-patterns.md](../en/rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine | diagnostics et formatteurs read-only |
+| [rfc-runtime-patterns.md](../en/rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine préfixée par le fuseau | diagnostics et formatteurs read-only |
 | garde-fou opérateur | `next <agent>`, `status --for <agent>`, `append --wait` | aide à rester dans la boucle ; `next` ne mute qu'en faisant le `claim` normal |
 | [rfc-worktree-companion.md](../en/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
@@ -266,7 +267,7 @@ suppression automatique de worktrees, dépendances tierces.
   python3 -m unittest discover -s tests
   ```
 - Couverture actuelle : cœur, roster N-agent, ancrages, archive, mémoire, tâches,
-  historique de sessions, affichage local des dates, doctor, i18n, version lockstep,
+  historique de sessions, affichage des dates locales préfixé par le fuseau, doctor, i18n, version lockstep,
   et compagnon worktree.
 - `docs/en/protocol.md` et `docs/fr/protocole.md` sont générés depuis les sources de
   protocole et testés en synchronisation.
