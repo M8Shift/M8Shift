@@ -243,6 +243,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py peek <agent>  # dernière passation adressée à <agent> (rc 3 si pas ton tour)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # timeline du relais (lecture seule)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # historique de session (lecture seule)
+./m8shift.py session {list,show,decisions,report} …  # vues de session + rapport Markdown optionnel
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # attend si besoin, puis claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /

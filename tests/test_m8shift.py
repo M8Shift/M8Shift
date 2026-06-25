@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.17.0"
+VERSION = "3.18.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -1945,6 +1945,102 @@ class TestHistory(CLIBase):
         r = self.cw("doctor")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("sessions.jsonl_invalid", r.stdout)
+
+
+class TestSessionReports(CLIBase):
+    """Session reports are derived read-only memory, with explicit safe writes."""
+
+    def _review_session(self):
+        self.init()
+        sid = self.lock()["session"]
+        self.turn("claude", "codex", done="drafted feature", files="src/a.py,docs/a.md")
+        self.cw("claim", "codex")
+        r = self.cw(
+            "append", "codex", "--to", "claude",
+            "--ask", "merge",
+            "--done", "reviewed feature",
+            "--files", "tests/test_a.py",
+            "--schema", "stage4.v1",
+            "--relation", "review_result",
+            "--decision", "approve",
+            "--evidence", "tests passed",
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return sid
+
+    def test_session_show_decisions_and_report_are_read_only(self):
+        sid = self._review_session()
+        before = self.md()
+
+        listed = json.loads(self.cw("session", "list", "--json").stdout)
+        self.assertEqual(listed["current_session"], sid)
+        self.assertEqual(listed["sessions"][0]["session_id"], sid)
+
+        shown = json.loads(self.cw("session", "show", "current", "--json").stdout)
+        self.assertEqual(shown["session"]["session_id"], sid)
+        self.assertEqual(len(shown["turns"]), 2)
+        self.assertNotIn("body", shown["turns"][0])
+
+        decisions = json.loads(self.cw("session", "decisions", "current", "--json").stdout)
+        self.assertEqual(decisions["decisions"][0]["decision"], "approve")
+        self.assertEqual(decisions["decisions"][0]["relation"], "review_result")
+        self.assertEqual(decisions["decisions"][0]["evidence"], "tests passed")
+
+        report = self.cw("session", "report", "current")
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertIn("M8Shift session report", report.stdout)
+        self.assertIn("This report is derived project memory", report.stdout)
+        self.assertIn("| 2 | codex | approve | review_result | tests passed |", report.stdout)
+        self.assertEqual(self.md(), before)
+
+    def test_session_report_write_refuses_overwrite_then_force_replaces(self):
+        sid = self._review_session()
+        r = self.cw("session", "report", "current", "--write")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(self.d, "M8SHIFT.session-reports", sid + ".md")
+        self.assertTrue(os.path.exists(path))
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("review_result", fh.read())
+
+        again = self.cw("session", "report", "current", "--write")
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("already exists", again.stderr + again.stdout)
+
+        forced = self.cw("session", "report", "current", "--write", "--force")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+
+    def test_session_report_rejects_unsafe_session_ids_and_outputs(self):
+        self._review_session()
+        for bad in ("..", "../escape", "/tmp/m8shift-session-pwned", "C:escape", r"safe\escape"):
+            with self.subTest(bad=bad):
+                r = self.cw("session", "report", bad, "--write")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("unsafe session id", r.stderr + r.stdout)
+
+        outside = self.cw("session", "report", "current", "--write", "--output", "../escape.md")
+        self.assertNotEqual(outside.returncode, 0)
+        self.assertIn("inside the project root", outside.stderr + outside.stdout)
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.d), "escape.md")))
+
+    def test_session_report_rejects_symlink_output(self):
+        self._review_session()
+        target = os.path.join(self.d, "outside.md")
+        link = os.path.join(self.d, "linked-report.md")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("outside\n")
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink not available")
+        r = self.cw("session", "report", "current", "--write", "--output", "linked-report.md", "--force")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("symlink", r.stderr + r.stdout)
+
+    def test_session_decisions_do_not_infer_from_free_text(self):
+        self.init()
+        self.turn("claude", "codex", done="approved in prose only")
+        out = self.cw("session", "decisions", "current").stdout
+        self.assertIn("None recorded", out)
 
 
 # ───────────── regressions from the Codex audit round (v3.x) ────────────────

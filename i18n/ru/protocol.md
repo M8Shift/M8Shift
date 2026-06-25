@@ -203,6 +203,7 @@ loop:
 ./m8shift.py peek <agent>  # последняя передача для <agent> (rc 3, если не ваш ход)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # лента реле (только для чтения)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # история сессии (только для чтения)
+./m8shift.py session {list,show,decisions,report} …  # просмотры сессии + необязательный Markdown-отчёт
 ./m8shift.py wait <agent> [--once] [--interval N]  # ожидает вашего хода ; --once = 1 проверка (rc 3, если не ваш ход)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # ждёт при необходимости, затем claim + peek
 ./m8shift.py claim <agent> [--force]               # ЗАХВАТИТЬ перо (эксклюзивно) — из вашего хода /

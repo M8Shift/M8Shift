@@ -202,6 +202,7 @@ loop:
 ./m8shift.py peek <agent>  # <agent> 宛の最後のハンドオフ（自分の番でなければ rc 3）
 ./m8shift.py log [--limit N] [--all] [--oneline]  # リレーのタイムライン（読み取り専用）
 ./m8shift.py history [--limit N] [--oneline] [--json]  # セッション履歴（読み取り専用）
+./m8shift.py session {list,show,decisions,report} …  # セッション表示 + 任意のMarkdownレポート
 ./m8shift.py wait <agent> [--once] [--interval N]  # あなたの番を待つ ; --once = 1回チェック（あなたの番でなければ rc 3）
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # 必要なら待機し、claim + peek
 ./m8shift.py claim <agent> [--force]               # ペンを取得（排他的）— あなたの番 /

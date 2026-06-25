@@ -201,6 +201,7 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **RFC (durcissement headless runner)** — [docs/en/rfc/rfc-headless-runner-hardening.md](../docs/en/rfc/rfc-headless-runner-hardening.md) _(en)_ — validation, dry-run, timeout de tour et audit des timeouts.
 - **RFC (demande coopérative de tour)** — [docs/en/rfc/rfc-cooperative-turn-request.md](../docs/en/rfc/rfc-cooperative-turn-request.md) _(en)_ — `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force` pour les blocages d'UI interactives.
 - **RFC (pause/reprise)** — [docs/en/rfc/rfc-pause-resume.md](../docs/en/rfc/rfc-pause-resume.md) _(en)_ — état stable `PAUSED` pour session ouverte sans tâche active.
+- **RFC (rapports de session)** — [docs/en/rfc/rfc-session-reports.md](../docs/en/rfc/rfc-session-reports.md) _(en)_ — rapports Markdown et décisions dérivés des tours existants.
 - **RFC (contrats et validation)** — [docs/en/rfc/rfc-contracts-validation.md](../docs/en/rfc/rfc-contracts-validation.md) _(en)_ — Stage 4 livré : passations typées, décisions de revue, flags dédiés, `contract validate` et `doctor --contracts`.
 - **RFC (plan de contrôle runtime/hébergé)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](../docs/en/rfc/rfc-hosted-runtime-control-plane.md) _(en)_ — supervision optionnelle hors cœur.
 - **RFC (gestion des fournisseurs)** — [docs/en/rfc/rfc-provider-management.md](../docs/en/rfc/rfc-provider-management.md) _(en)_ — registre futur d'adaptateurs pour Claude, Codex, Gemini, Vibe et autres agents coopératifs.

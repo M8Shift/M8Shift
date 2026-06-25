@@ -260,6 +260,7 @@ Guardrail:
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
+./m8shift.py session {list,show,decisions,report} …  # read-only session views + optional Markdown report
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /

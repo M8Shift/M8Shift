@@ -201,6 +201,7 @@ loop:
 ./m8shift.py peek <agent>  # 发给 <agent> 的最后一次交接（不是你的轮次则 rc 3）
 ./m8shift.py log [--limit N] [--all] [--oneline]  # 中继时间线（只读）
 ./m8shift.py history [--limit N] [--oneline] [--json]  # 会话历史（只读）
+./m8shift.py session {list,show,decisions,report} …  # 会话视图 + 可选 Markdown 报告
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # 需要时等待，然后 claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /

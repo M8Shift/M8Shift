@@ -204,6 +204,7 @@ Salvaguarda:
 ./m8shift.py peek <agent>  # última passagem endereçada a <agent> (rc 3 se não for sua vez)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # linha do tempo do relé (somente leitura)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # histórico de sessão (somente leitura)
+./m8shift.py session {list,show,decisions,report} …  # vistas de sessão + relatório Markdown opcional
 ./m8shift.py wait <agent> [--once] [--interval N]  # aguarda sua vez ; --once = 1 verificação (rc 3 se não for sua vez)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # espera se necessário, depois claim + peek
 ./m8shift.py claim <agent> [--force]               # ADQUIRE a caneta (exclusivo) — a partir da sua vez /
