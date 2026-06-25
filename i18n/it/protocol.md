@@ -195,6 +195,9 @@ Garanzia:
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # monitor live locale, sola lettura
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # controlli salute/sicurezza/contratti in sola lettura
 ./m8shift.py contract validate [--strict] [--json] # validazione dei contratti Stage 4 in sola lettura
+./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # briefing in sola lettura: LOCK + ultimi turni + memoria + task
+./m8shift.py peek <agent>  # ultima consegna indirizzata a <agent> (rc 3 se non è il tuo turno)
+./m8shift.py log [--limit N] [--all] [--oneline]  # timeline del relay (sola lettura)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # cronologia di sessione (sola lettura)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # attende se serve, poi claim + peek
@@ -202,6 +205,8 @@ Garanzia:
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # closes your turn + hands off
+./m8shift.py remember <agent> "<note>"  # aggiunge una nota di memoria durevole (advisory)
+./m8shift.py task {add,done,drop,list,show} …  # registro task advisory (to-do per agente)
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
 ./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)

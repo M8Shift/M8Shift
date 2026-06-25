@@ -195,6 +195,9 @@ loop:
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # локальный live-монитор, только для чтения
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # проверки состояния/безопасности/контрактов только для чтения
 ./m8shift.py contract validate [--strict] [--json] # проверка контрактов Stage 4 только для чтения
+./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # сводка только для чтения: LOCK + последние ходы + память + задачи
+./m8shift.py peek <agent>  # последняя передача для <agent> (rc 3, если не ваш ход)
+./m8shift.py log [--limit N] [--all] [--oneline]  # лента реле (только для чтения)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # история сессии (только для чтения)
 ./m8shift.py wait <agent> [--once] [--interval N]  # ожидает вашего хода ; --once = 1 проверка (rc 3, если не ваш ход)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # ждёт при необходимости, затем claim + peek
@@ -202,6 +205,8 @@ loop:
                                                   #   IDLE / вашей собственной блокировки ; --force = ТОЛЬКО устаревшая блокировка
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # закрывает ваш ход + передаёт
+./m8shift.py remember <agent> "<note>"  # добавить долговременную заметку памяти (advisory)
+./m8shift.py task {add,done,drop,list,show} …  # журнал задач advisory (дела по агентам)
 ./m8shift.py release <agent> --to <other> [--force]  # передаёт без тела (НЕ инкрементирует turn повторно)
 ./m8shift.py done <agent> [--force]                 # закрывает сессию (state=DONE)
 ./m8shift.py archive [--keep N]                     # очищает старые закрытые ходы (никогда ход #0)

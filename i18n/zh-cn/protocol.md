@@ -194,6 +194,9 @@ loop:
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # 本地实时监视（只读）
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # 只读的健康/安全/合约检查
 ./m8shift.py contract validate [--strict] [--json] # Stage 4 合约的只读校验
+./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # 只读简报：LOCK + 最近的轮次 + 记忆 + 任务
+./m8shift.py peek <agent>  # 发给 <agent> 的最后一次交接（不是你的轮次则 rc 3）
+./m8shift.py log [--limit N] [--all] [--oneline]  # 中继时间线（只读）
 ./m8shift.py history [--limit N] [--oneline] [--json]  # 会话历史（只读）
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # 需要时等待，然后 claim + peek
@@ -201,6 +204,8 @@ loop:
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # closes your turn + hands off
+./m8shift.py remember <agent> "<note>"  # 追加一条持久记忆笔记（advisory）
+./m8shift.py task {add,done,drop,list,show} …  # advisory 任务清单（按代理的待办）
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
 ./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)

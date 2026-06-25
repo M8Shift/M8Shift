@@ -240,6 +240,9 @@ Guardrail:
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
 ./m8shift.py contract validate [--strict] [--json] # read-only Stage-4 contract validation
+./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # read-only briefing: LOCK + last turns + memory + tasks
+./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
+./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # wait if needed, then claim + peek
@@ -247,6 +250,8 @@ Guardrail:
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-] [--allow-large-body] [--wait]  # closes your turn + hands off
+./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
+./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py release <agent> --to <other> [--force --reason "why"]  # hand off without a body (does NOT re-increment turn)
 ./m8shift.py done <agent> [--force --reason "why"]  # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)

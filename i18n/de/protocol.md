@@ -196,6 +196,9 @@ Schutzvorrichtung:
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # lokaler Live-Monitor, schreibgeschützt
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # schreibgeschützte Gesundheits-/Sicherheits-/Vertragsprüfungen
 ./m8shift.py contract validate [--strict] [--json] # schreibgeschützte Validierung der Stage-4-Verträge
+./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # schreibgeschütztes Briefing: LOCK + letzte Züge + Speicher + Aufgaben
+./m8shift.py peek <agent>  # letzte an <agent> gerichtete Übergabe (rc 3 wenn nicht dran)
+./m8shift.py log [--limit N] [--all] [--oneline]  # schreibgeschützte Relais-Timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # Sitzungsverlauf (schreibgeschützt)
 ./m8shift.py wait <agent> [--once] [--interval N]  # wartet auf deinen Zug ; --once = 1 Prüfung (rc 3 wenn nicht dran)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # wartet bei Bedarf, dann claim + peek
@@ -203,6 +206,8 @@ Schutzvorrichtung:
                                                   #   IDLE / deiner eigenen Sperre ; --force = NUR veraltete Sperre
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # schließt deinen Zug ab + übergibt
+./m8shift.py remember <agent> "<note>"  # eine dauerhafte Speichernotiz anhängen (advisory)
+./m8shift.py task {add,done,drop,list,show} …  # advisory Aufgabenliste (To-dos pro Agent)
 ./m8shift.py release <agent> --to <other> [--force]  # übergibt ohne Text (erhöht turn NICHT erneut)
 ./m8shift.py done <agent> [--force]                 # schließt die Sitzung (state=DONE)
 ./m8shift.py archive [--keep N]                     # alte abgeschlossene Züge bereinigen (niemals Zug #0)
