@@ -392,10 +392,14 @@ Guardrail:
 ## 8. Adoption by any project (portability)
 
 `m8shift.py` is **self-sufficient**: it embeds this protocol, the `M8SHIFT.md`
-template and the anchors. To adopt the relay in a project:
+template and the anchors. `init` generates relay files, but it does **not** copy
+scripts into the target project. The one-line installer handles that by placing
+`m8shift.py` and the optional `m8shift-worktree.py` toolbox next to each other,
+then running `init`. For manual adoption:
 
 ```bash
-cp /path/to/m8shift.py .          # copy the only file needed
+cp /path/to/m8shift.py .          # core relay
+cp /path/to/m8shift-worktree.py . # optional: isolated parallel worktrees
 ./m8shift.py init                 # project name = folder name (otherwise --name)
 ```
 
@@ -403,7 +407,7 @@ cp /path/to/m8shift.py .          # copy the only file needed
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE
   lock); `M8SHIFT.md` is **not** overwritten if it already exists (except with
   `--force`) → the state of the ongoing relay is preserved;
-- injects at the **top** a "Co-work relay" block into **each active agent's anchor**
+- injects at the **top** a "M8Shift relay" block into **each active agent's anchor**
   (by default `CLAUDE.md` and `AGENTS.md`; created if missing), between
   `M8SHIFT:STANZA` markers → **idempotent** re-injection (moves/updates the block
   without duplicating, existing content preserved; the prior file is backed up to
@@ -453,7 +457,7 @@ Codex reference: https://developers.openai.com/codex/guides/agents-md
 """
 
 STANZA_EN = """{begin}
-## Co-work relay — self-contained (no human explanation needed)
+## M8Shift relay — self-contained (no human explanation needed)
 
 You are **{me}** in this project. As soon as a `M8SHIFT.md` is present at the root,
 it is your source of coordination with **{other}**: apply `M8SHIFT.protocol.md`

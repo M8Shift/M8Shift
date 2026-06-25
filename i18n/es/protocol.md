@@ -228,7 +228,7 @@ cp /path/to/m8shift.py .          # copia el único archivo necesario
 - escribe `M8SHIFT.protocol.md` (este documento) y `M8SHIFT.md` (un bloqueo IDLE
   nuevo); `M8SHIFT.md` **no** se sobrescribe si ya existe (excepto con
   `--force`) → el estado del relevo en curso se conserva;
-- inyecta en la **parte superior** un bloque "Co-work relay" en **el anclaje de cada agente activo**
+- inyecta en la **parte superior** un bloque "M8Shift relay" en **el anclaje de cada agente activo**
   (por defecto `CLAUDE.md` y `AGENTS.md`; creado si falta), entre
   los marcadores `M8SHIFT:STANZA` → reinyección **idempotente** (mueve/actualiza el bloque
   sin duplicar, el contenido existente se conserva; el archivo previo se respalda en

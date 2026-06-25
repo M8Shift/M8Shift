@@ -80,6 +80,32 @@ appel, aucun verrouillage propriétaire.
 
 ## Installation
 
+Installation locale en une ligne pour macOS/Linux/Git Bash :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --verify --agents claude,codex
+```
+
+L'installateur télécharge `m8shift.py` et la boîte à outils `m8shift-worktree.py`
+dans le répertoire courant, vérifie les deux fichiers avec `checksums.sha256`,
+puis lance `python3 m8shift.py init --agents claude,codex`. Pas de `sudo`, pas de
+modification du PATH global, pas de service en arrière-plan.
+
+Pour une release épinglée, récupérez l'installateur depuis le tag et utilisez la
+même ref pour les fichiers téléchargés :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/vX.Y.Z/install.sh | \
+  bash -s -- --ref vX.Y.Z --verify --agents claude,codex
+```
+
+Limite de sécurité : `--verify` contrôle les fichiers téléchargés avec le manifeste
+`checksums.sha256` de la ref choisie. Cela détecte une corruption ou une incohérence.
+Pour une confiance hors bande face à une origine compromise, épinglez des digests
+relus avec `--sha256 FILE:HEX` ou utilisez un tag de release signé.
+
+Installation manuelle :
+
 ```bash
 cp m8shift.py /mon/projet/           # le SEUL fichier dont vous avez besoin
 cd /mon/projet
@@ -103,7 +129,7 @@ variante. Utilisez `--agents a,b,c…` pour choisir le **roster actif** (défaut
 n'importe quel autre membre via `--to`, toujours avec un seul écrivain à la fois.
 
 **Sous Windows ?** Aucune dépendance (stdlib uniquement) — lancez via WSL, Git Bash,
-ou `python m8shift.py <cmd>` dans PowerShell. Voir [Lancer sous Windows](../docs/fr/windows.md).
+ou `python m8shift.py <cmd>` dans PowerShell. Voir [Lancer sous Windows](fr/windows.md).
 
 **Depuis un fork / clone ?** M8Shift tient en un fichier — hébergez-le sur n'importe quel
 Git ou GitLab : `git clone https://gitlab.example.com/you/M8Shift.git`, puis

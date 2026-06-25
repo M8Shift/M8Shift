@@ -22,11 +22,13 @@ wsl --install            # once; reboot if prompted
 Then, inside the WSL shell (Ubuntu, …):
 
 ```bash
-cp m8shift.py /your/project/
 cd /your/project
-python3 m8shift.py init
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --verify --agents claude,codex
 python3 m8shift.py status
 ```
+
+The installer downloads `m8shift.py` plus the optional `m8shift-worktree.py`
+toolbox, verifies them against `checksums.sha256`, then runs `init`.
 
 WSL gives a true POSIX filesystem (real `O_EXCL`, `chmod`, atomic `rename`), so
 behavior is identical to Linux.
@@ -37,7 +39,7 @@ Install **Git for Windows** (ships Git Bash + git). In Git Bash:
 
 ```bash
 cd /c/Users/you/project
-python m8shift.py init        # use `python`, not ./m8shift.py
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --verify --agents claude,codex
 python m8shift.py status
 ```
 
@@ -52,6 +54,10 @@ python m8shift.py init
 python m8shift.py claim claude
 python m8shift.py append claude --to codex --ask "..." --done "..."
 ```
+
+Native PowerShell does not run the Bash installer. Download or copy
+`m8shift.py` into the project first; copy `m8shift-worktree.py` next to it only
+if you need isolated parallel worktrees.
 
 `claude` and `codex` are example roster names. Replace them with `gemini`, `vibe`,
 or any cooperative agent that follows the relay protocol.
