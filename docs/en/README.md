@@ -37,16 +37,17 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 
 | Document | Purpose |
 |----------|---------|
-| [rfc-agent-runtime-architecture.md](rfc/rfc-agent-runtime-architecture.md) | Future local agent runtime companion architecture around the passive core. |
+| [rfc-agent-runtime-architecture.md](rfc/rfc-agent-runtime-architecture.md) | Shipped local runtime scaffold for roles, workflows, approvals, providers, and reports. |
 | [rfc-claim-check.md](rfc/rfc-claim-check.md) | Advisory pre-claim overlap checks. |
 | [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | Shipped cooperative baton request and operator steering for interactive UI deadlocks. |
 | [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | Stage 4 contracts, review decisions, and shipped read-only validation. |
+| [rfc-headless-runner-hardening.md](rfc/rfc-headless-runner-hardening.md) | Shipped reference runner hardening: validation, dry-run, timeout, and audit events. |
 | [rfc-hosted-runtime-control-plane.md](rfc/rfc-hosted-runtime-control-plane.md) | Future optional hosted/runtime control plane. |
 | [rfc-i18n-packs.md](rfc/rfc-i18n-packs.md) | Build-time language packs and localized single-file variants. |
 | [rfc-input-neutral-patterns.md](rfc/rfc-input-neutral-patterns.md) | Neutral runtime pattern inventory curated for future companion RFCs. |
 | [rfc-memory.md](rfc/rfc-memory.md) | Shared append-only memory ledger. |
 | [rfc-n-agents.md](rfc/rfc-n-agents.md) | N-agent relay model with one shared pen. |
-| [rfc-provider-management.md](rfc/rfc-provider-management.md) | Future provider/adapter registry outside the core. |
+| [rfc-provider-management.md](rfc/rfc-provider-management.md) | Shipped local provider/adapter registry outside the core. |
 | [rfc-roster.md](rfc/rfc-roster.md) | Historical configurable roster RFC. |
 | [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |
 | [rfc-runtime-patterns.md](rfc/rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |

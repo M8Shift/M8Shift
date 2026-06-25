@@ -67,7 +67,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.15.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.16.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -2313,16 +2313,16 @@ def collect_doctor_findings(security=False, contracts=False):
         gitignore = os.path.join(os.path.dirname(COWORK), ".gitignore")
         try:
             ignored = os.path.exists(gitignore) and any(
-                line.strip() == ".m8shift/" for line in read(gitignore).splitlines()
+                line.strip() in {".m8shift/", ".m8shift/runtime/"} for line in read(gitignore).splitlines()
             )
         except OSError:
             ignored = False
         if not ignored:
             findings.append(doctor_finding(
                 "runtime.gitignore_missing", "warning",
-                ".m8shift/runtime exists but .m8shift/ is not gitignored.",
+                ".m8shift/runtime exists but is not gitignored.",
                 ".gitignore",
-                "add `.m8shift/` to .gitignore",
+                "add `.m8shift/runtime/` or `.m8shift/` to .gitignore",
             ))
         for root, _, files in os.walk(runtime_dir):
             for name in files:

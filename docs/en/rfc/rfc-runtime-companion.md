@@ -285,20 +285,22 @@ Minimum checks:
 
 ## Minimal v1 status
 
-Shipped in v3.15.0:
+Shipped incrementally:
 
-1. **Read-only watch loop**: `watch <agent>`, `presence.json`, lane ownership,
+1. **Read-only watch loop** (v3.15.0): `watch <agent>`, `presence.json`, lane ownership,
    exact resume prompt.
-2. **Operator inbox**: `operator <agent> --mode followup|collect|interrupt|status`.
-3. **Progress log**: `progress <agent> --run ID <note>` and `status-runtime`.
-4. **Doctor**: local health checks and one-runtime-per-agent warnings.
-5. **Idempotency keys**: duplicate suppression for companion-originated actions.
+2. **Operator inbox** (v3.15.0): `operator <agent> --mode followup|collect|interrupt|status`.
+3. **Progress log** (v3.15.0): `progress <agent> --run ID <note>` and `status-runtime`.
+4. **Doctor** (v3.15.0): local health checks and one-runtime-per-agent warnings.
+5. **Idempotency keys** (v3.15.0): duplicate suppression for companion-originated actions.
+6. **Runtime scaffold** (v3.16.0): `init`, `roles`, `workflows`, `approve`, `report`.
+7. **Provider registry** (v3.16.0): `providers init/list/show/check/render`.
 
 Deferred:
 
-- **Headless wrapper**: optional `run <agent> --exec ...` with post-run verification.
-  The repo already ships `examples/headless_runner.py`; folding that lifecycle into
-  `m8shift-runtime.py run` remains a future companion increment.
+- **Integrated headless `run` wrapper**: the repo ships the hardened
+  `examples/headless_runner.py`; folding that lifecycle into `m8shift-runtime.py run`
+  remains a future companion increment.
 
 No v1 feature may require changing the core `LOCK` format.
 

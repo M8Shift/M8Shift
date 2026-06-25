@@ -398,6 +398,9 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
 | [rfc-stage6-integrations.md](rfc/rfc-stage6-integrations.md) | **Stage 6 local integration layer** | Bash/PowerShell installers, `checksums.sha256`, versioned distributed scripts, `watch`, site/docs sync, and `examples/headless_runner.py` with `M8SHIFT_RUN_ID`, heartbeat, and `.m8shift/runtime/runs.jsonl`. | Shipped local convenience layer around the passive core; provider/IDE/MCP/control-plane integrations remain optional companions. |
 | [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | **Runtime companion v1** | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`; `.m8shift/runtime/{presence.json,progress.jsonl,idempotency.jsonl,inbox/*.jsonl}`. | Local advisory sidecars only; no direct `M8SHIFT.md` edits and no second pen authority. |
+| [rfc-agent-runtime-architecture.md](rfc/rfc-agent-runtime-architecture.md) | **Agent runtime architecture companion v1** | `m8shift-runtime.py init`, `roles`, `workflows`, `approve`, `report`; `.m8shift/{roles,workflows,policies,runs}`. | Local scaffold and reports only; removable without breaking the core relay. |
+| [rfc-provider-management.md](rfc/rfc-provider-management.md) | **Provider management v1** | `m8shift-runtime.py providers init/list/show/check/render`; `.m8shift/providers.json`. | Host-side mapping from roster names to safe argv arrays; no provider SDK, secrets, or core routing authority. |
+| [rfc-headless-runner-hardening.md](rfc/rfc-headless-runner-hardening.md) | **Headless runner hardening** | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, argument validation, and `run.timeout` events. | Bounds stuck provider processes while preserving post-run validation and no force-steal rule. |
 | [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | **Cooperative turn request** | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, and append-only `M8SHIFT.requests.md`. | Requests never make `claim` succeed; only explicit yield/force-steer changes routing, and `steer-turn` refuses fresh `WORKING_*`. |
 
 ### 12.2 Stage 4 contract surface
@@ -413,9 +416,6 @@ run tools, or mutate the `LOCK`.
 
 The remaining future topics are now explicit RFCs:
 
-- [RFC — Agent runtime architecture companion](rfc/rfc-agent-runtime-architecture.md):
-  future local runtime/scaffold layer for agent registries, roles, workflows,
-  approvals, artifacts, and reports; explicitly outside the passive core.
 - [RFC input — Neutral runtime patterns inventory](rfc/rfc-input-neutral-patterns.md):
   curated source material for future companion RFCs, with shipped core surfaces
   separated from deferred runtime patterns.

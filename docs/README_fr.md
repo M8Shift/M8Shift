@@ -195,6 +195,9 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **RFC (historique de sessions)** — [docs/en/rfc/rfc-session-history.md](../docs/en/rfc/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
 - **RFC (compagnon worktree)** — [docs/en/rfc/rfc-worktree-companion.md](../docs/en/rfc/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
 - **RFC (compagnon runtime)** — [docs/en/rfc/rfc-runtime-companion.md](../docs/en/rfc/rfc-runtime-companion.md) _(en)_ — compagnon local livré : présence, inbox opérateur, progression et diagnostics.
+- **RFC (architecture runtime agent)** — [docs/en/rfc/rfc-agent-runtime-architecture.md](../docs/en/rfc/rfc-agent-runtime-architecture.md) _(en)_ — scaffold local livré : rôles, workflows, approvals, providers et rapports.
+- **RFC (gestion des fournisseurs)** — [docs/en/rfc/rfc-provider-management.md](../docs/en/rfc/rfc-provider-management.md) _(en)_ — registry local livré pour mapper les identités d'agents vers des commandes argv sûres.
+- **RFC (durcissement headless runner)** — [docs/en/rfc/rfc-headless-runner-hardening.md](../docs/en/rfc/rfc-headless-runner-hardening.md) _(en)_ — validation, dry-run, timeout de tour et audit des timeouts.
 - **RFC (demande coopérative de tour)** — [docs/en/rfc/rfc-cooperative-turn-request.md](../docs/en/rfc/rfc-cooperative-turn-request.md) _(en)_ — `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force` pour les blocages d'UI interactives.
 - **RFC (contrats et validation)** — [docs/en/rfc/rfc-contracts-validation.md](../docs/en/rfc/rfc-contracts-validation.md) _(en)_ — Stage 4 livré : passations typées, décisions de revue, flags dédiés, `contract validate` et `doctor --contracts`.
 - **RFC (plan de contrôle runtime/hébergé)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](../docs/en/rfc/rfc-hosted-runtime-control-plane.md) _(en)_ — supervision optionnelle hors cœur.
