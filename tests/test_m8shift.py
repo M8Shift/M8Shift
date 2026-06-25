@@ -2336,27 +2336,36 @@ class TestChecksumsManifest(unittest.TestCase):
 
 
 class TestProtocolPackCommandCoverage(unittest.TestCase):
-    """Every localized protocol pack must reference the canonical section-7 command set,
-    so a newer command is not silently missing from a pack. English (PROTOCOL["en"]) is
-    the canonical source; the localized packs are the on-demand i18n/<lang>/protocol.md."""
+    """Every protocol pack's section-7 reference must document the real shipped CLI command
+    set, derived from `m8shift.py --help` (the actual argparse parser), so a new subcommand
+    cannot be silently missing from a localized pack. English (PROTOCOL["en"]) is canonical;
+    the localized packs are i18n/<lang>/protocol.md (fr is a pack too, not bundled)."""
 
-    CANONICAL = ("init", "status", "watch", "doctor", "contract validate", "history",
-                 "wait", "next", "claim", "append", "release", "done", "archive")
-    PACKS = ("de", "es", "it", "ja", "pt", "ru", "zh-cn")
+    PACKS = ("fr", "de", "es", "it", "ja", "pt", "ru", "zh-cn")
+    # commands documented one verb deeper than the bare top-level subcommand
+    SUBVERB = {"contract": "contract validate"}
 
-    def test_english_core_has_canonical_commands(self):
-        for cmd in self.CANONICAL:
+    @classmethod
+    def _cli_commands(cls):
+        out = subprocess.run([sys.executable, os.path.join(REPO, "m8shift.py"), "--help"],
+                             capture_output=True, text=True).stdout
+        tokens = re.search(r"\{([a-z0-9,_-]+)\}", out).group(1).split(",")
+        return [cls.SUBVERB.get(t, t) for t in tokens]
+
+    def test_english_core_documents_all_cli_commands(self):
+        for cmd in self._cli_commands():
             self.assertIn(f"m8shift.py {cmd}", cowork.PROTOCOL["en"],
-                          f"EN core protocol is missing the canonical command {cmd!r}")
+                          f"EN core protocol does not document shipped CLI command {cmd!r}")
 
-    def test_localized_packs_have_canonical_commands(self):
+    def test_packs_document_all_cli_commands(self):
+        commands = self._cli_commands()
         for lang in self.PACKS:
             with open(os.path.join(REPO, "i18n", lang, "protocol.md"), encoding="utf-8") as fh:
                 pack = fh.read()
-            for cmd in self.CANONICAL:
+            for cmd in commands:
                 with self.subTest(lang=lang, cmd=cmd):
                     self.assertIn(f"m8shift.py {cmd}", pack,
-                                  f"{lang} protocol pack is missing the canonical command {cmd!r}")
+                                  f"{lang} pack does not document shipped CLI command {cmd!r}")
 
 
 if __name__ == "__main__":

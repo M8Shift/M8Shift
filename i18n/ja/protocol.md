@@ -194,6 +194,9 @@ loop:
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # ローカルのライブ監視（読み取り専用）
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # ヘルス/セキュリティ/契約の読み取り専用診断
 ./m8shift.py contract validate [--strict] [--json] # Stage 4 契約の読み取り専用検証
+./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # 読み取り専用の要約：LOCK + 直近のターン + メモリ + タスク
+./m8shift.py peek <agent>  # <agent> 宛の最後のハンドオフ（自分の番でなければ rc 3）
+./m8shift.py log [--limit N] [--all] [--oneline]  # リレーのタイムライン（読み取り専用）
 ./m8shift.py history [--limit N] [--oneline] [--json]  # セッション履歴（読み取り専用）
 ./m8shift.py wait <agent> [--once] [--interval N]  # あなたの番を待つ ; --once = 1回チェック（あなたの番でなければ rc 3）
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # 必要なら待機し、claim + peek
@@ -201,6 +204,8 @@ loop:
                                                   #   IDLE / 自分自身のロックから ; --force = 古いロックのみ
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # ターンを閉じて引き継ぐ
+./m8shift.py remember <agent> "<note>"  # 永続的なメモリのメモを追記（advisory）
+./m8shift.py task {add,done,drop,list,show} …  # advisory なタスク台帳（エージェントごとの ToDo）
 ./m8shift.py release <agent> --to <other> [--force]  # 本文なしで引き継ぐ（ターンを再インクリメントしない）
 ./m8shift.py done <agent> [--force]                 # セッションを閉じる（state=DONE）
 ./m8shift.py archive [--keep N]                     # 古い閉じたターンを削除（ターン #0 は決して削除しない）

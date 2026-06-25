@@ -235,12 +235,18 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # surveillance locale live, lecture seule
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # diagnostics santé/sécurité/contrats en lecture seule
 ./m8shift.py contract validate [--strict] [--json] # validation read-only des contrats Stage 4
+./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # briefing lecture seule : LOCK + derniers tours + mémoire + tâches
+./m8shift.py peek <agent>  # dernière passation adressée à <agent> (rc 3 si pas ton tour)
+./m8shift.py log [--limit N] [--all] [--oneline]  # timeline du relais (lecture seule)
+./m8shift.py history [--limit N] [--oneline] [--json]  # historique de session (lecture seule)
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # attend si besoin, puis claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
                                                   #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
 ./m8shift.py append <agent> --to <autre> \
      --ask "..." --done "..." [--files a,b] [--body fichier.md|-] [--allow-large-body] [--wait]  # clôt ton tour + passe la main
+./m8shift.py remember <agent> "<note>"  # ajoute une note mémoire durable (advisory)
+./m8shift.py task {add,done,drop,list,show} …  # registre de tâches advisory (todos par agent)
 ./m8shift.py release <agent> --to <autre> [--force --reason "pourquoi"]  # repasser la main sans corps
 ./m8shift.py done <agent> [--force --reason "pourquoi"]  # clore la session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge les vieux tours clôturés (jamais le tour #0)
