@@ -192,6 +192,8 @@ Salvaguarda:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)genera el kit aquí
 ./m8shift.py status                                # bloqueo + último turno (NO bloqueante)
+./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # comprobaciones de salud/seguridad/contratos en solo lectura
+./m8shift.py contract validate [--strict] [--json] # validación de los contratos Stage 4 en solo lectura
 ./m8shift.py wait <agent> [--once] [--interval N]  # espera tu turno ; --once = 1 comprobación (rc 3 si no es tu turno)
 ./m8shift.py claim <agent> [--force]               # TOMA la pluma (exclusivo) — desde tu turno /
                                                   #   IDLE / tu propio bloqueo ; --force = SOLO bloqueo obsoleto

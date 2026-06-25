@@ -192,6 +192,8 @@ loop:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (пере)создаёт набор здесь
 ./m8shift.py status                                # блокировка + последний ход (НЕблокирующая)
+./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # проверки состояния/безопасности/контрактов только для чтения
+./m8shift.py contract validate [--strict] [--json] # проверка контрактов Stage 4 только для чтения
 ./m8shift.py wait <agent> [--once] [--interval N]  # ожидает вашего хода ; --once = 1 проверка (rc 3, если не ваш ход)
 ./m8shift.py claim <agent> [--force]               # ЗАХВАТИТЬ перо (эксклюзивно) — из вашего хода /
                                                   #   IDLE / вашей собственной блокировки ; --force = ТОЛЬКО устаревшая блокировка

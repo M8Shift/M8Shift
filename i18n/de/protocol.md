@@ -193,6 +193,8 @@ Schutzvorrichtung:
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generiert das Kit hier
 ./m8shift.py status                                # Sperre + letzter Zug (NICHT-blockierend)
+./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # schreibgeschützte Gesundheits-/Sicherheits-/Vertragsprüfungen
+./m8shift.py contract validate [--strict] [--json] # schreibgeschützte Validierung der Stage-4-Verträge
 ./m8shift.py wait <agent> [--once] [--interval N]  # wartet auf deinen Zug ; --once = 1 Prüfung (rc 3 wenn nicht dran)
 ./m8shift.py claim <agent> [--force]               # den Stift ÜBERNEHMEN (exklusiv) — aus deinem Zug /
                                                   #   IDLE / deiner eigenen Sperre ; --force = NUR veraltete Sperre
