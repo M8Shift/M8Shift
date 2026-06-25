@@ -1,6 +1,6 @@
 # RFC — Stage 4 contracts and validation
 
-- **Status:** implementation specification, not fully shipped
+- **Status:** implemented in v3.13.0 as a read-only validation surface
 - **Scope:** typed handoff metadata, explicit review decisions, and validation commands
 - **Core invariant:** one shared pen; contracts never grant a second writer
 
@@ -130,12 +130,13 @@ These flags must serialize to the same plain turn fields as `--field`.
 
 Validation is explicit and read-only by default.
 
-Proposed commands:
+Implemented commands:
 
 ```bash
 python3 m8shift.py contract validate
 python3 m8shift.py contract validate --strict
 python3 m8shift.py contract validate --json
+python3 m8shift.py contract validate --all
 python3 m8shift.py doctor --contracts
 ```
 
@@ -230,7 +231,7 @@ The implementation must preserve:
 
 ## 12. Acceptance tests
 
-Implementation is acceptable when tests cover:
+Implementation is covered when tests cover:
 
 - valid Stage 4 review request;
 - valid Stage 4 review result;
@@ -245,9 +246,8 @@ Implementation is acceptable when tests cover:
 
 ## 13. Phasing
 
-1. **4A — documentation and schema vocabulary.** This RFC, architecture notes,
-   and examples.
-2. **4B — read-only validator.** `contract validate` and `doctor --contracts`.
-3. **4C — ergonomic append flags.** Dedicated sugar flags mapped to turn fields.
-4. **4D — companion integration.** Optional host/UI companion may enforce project
+1. **4A — documentation and schema vocabulary.** Shipped.
+2. **4B — read-only validator.** Shipped as `contract validate` and `doctor --contracts`.
+3. **4C — ergonomic append flags.** Shipped as dedicated sugar flags mapped to turn fields.
+4. **4D — companion integration.** Still optional: a host/UI companion may enforce project
    policy, but the single-file core remains advisory and passive.

@@ -1,6 +1,6 @@
 # RFC — Stage 6 integrations: remaining work and value
 
-- **Status:** planning RFC, not implemented
+- **Status:** partially implemented; remaining work tracked below
 - **Scope:** integrations around M8Shift: packaging, IDE surfaces, MCP, headless
   runners, provider adapters, local notifications, and optional runtime/control
   planes
@@ -23,7 +23,8 @@ recommended implementation order.
 Already shipped or available today:
 
 - `m8shift.py` core relay: one pen, N-agent roster, directed handoffs, history,
-  memory, task ledger, doctor, `status --json`, `watch`, and loop guardrails;
+  memory, task ledger, doctor, `status --json`, `watch`, Stage-4 contract
+  validation, and loop guardrails;
 - `m8shift-worktree.py`: optional isolated worktree companion for parallel feature
   work with serialized integration;
 - `examples/headless_runner.py`: reference pattern for headless loops and heartbeat;
@@ -39,8 +40,8 @@ not on changing the core mutex.
 
 | Candidate | Value | Effort | Risk | Decision |
 |-----------|-------|--------|------|----------|
-| Release artifacts and install recipes | High | Low | Low | Do first |
-| Local watch/status UX improvements | High | Low | Low | Continue incrementally |
+| Release artifacts and install recipes | High | Low | Low | Mostly shipped; tag/public release remains |
+| Local watch/status UX improvements | High | Low | Low | Shipped; continue incrementally |
 | Headless runner hardening | High | Medium | Medium | Do next |
 | Provider registry | High | Medium | Medium | Do after runner contract |
 | IDE status panel / task integration | Medium | Medium | Medium | Do as thin local integration |
@@ -55,14 +56,20 @@ not on changing the core mutex.
 
 ### 6A — Release artifacts and install recipes
 
+**Status:** mostly shipped.
+
 **What remains:**
 
-- tagged releases;
-- downloadable `m8shift.py`, `m8shift-i18n.py`, `m8shift-worktree.py`;
-- checksums;
-- short install snippets for Linux, macOS, Windows;
-- optional "copy both core + worktree toolbox" recipe;
-- explicit upgrade recipe and version-skew check.
+- public release artifacts generated from a signed/reviewed tag.
+
+**Already shipped:**
+
+- downloadable tracked scripts;
+- `checksums.sha256`;
+- Linux/macOS shell installer;
+- Windows PowerShell installer;
+- worktree toolbox install/copy recipes;
+- version surfaces on all distributed scripts.
 
 **Value added:**
 
@@ -78,9 +85,10 @@ not on changing the core mutex.
 
 ### 6B — Local operator UX
 
+**Status:** shipped as a local read-only core command.
+
 **What remains:**
 
-- document `watch` in the site roadmap and CLI reference if not already mirrored;
 - provide recommended terminal layouts for multi-agent sessions;
 - add example shell aliases:
 

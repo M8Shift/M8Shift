@@ -208,7 +208,7 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **RFC (runtime patterns)** — [docs/en/rfc-runtime-patterns.md](docs/en/rfc-runtime-patterns.md) —
   what M8Shift keeps, rejects, or defers from runtime/gateway designs.
 - **RFC (contracts and validation)** — [docs/en/rfc-contracts-validation.md](docs/en/rfc-contracts-validation.md) —
-  Stage 4 implementation spec for typed handoffs, review decisions, and read-only validation.
+  Stage 4 typed handoffs, review decisions, sugar flags, `contract validate`, and `doctor --contracts`.
 - **RFC (future runtime/control plane)** — [docs/en/rfc-hosted-runtime-control-plane.md](docs/en/rfc-hosted-runtime-control-plane.md) —
   optional hosted/local runtime supervision outside the passive core.
 - **RFC (provider management)** — [docs/en/rfc-provider-management.md](docs/en/rfc-provider-management.md) —
@@ -361,7 +361,9 @@ turns + memory headlines), `peek` (the last handoff addressed to you, parse-free
 (dashboard-/`watch`-friendly), `doctor --lint --json` and `doctor --security`
 (read-only health/security checks for relay/anchor/runtime drift), **advisory turn fields** on
 `append` (`--branch`/`--commit`/`--tests`/`--next`/`--blocked-on` plus the open
-`--field key=value` `x_*` namespace, surfaced by `peek`, never interpreted), and **shared
+`--field key=value` `x_*` namespace, surfaced by `peek`, never interpreted), **Stage 4 contract
+validation** — `append --schema stage4.v1 --relation … --decision …`, `contract validate
+[--strict] [--json]`, and `doctor --contracts` (read-only, never routes work), and **shared
 memory** — `m8shift.py remember <agent> "<note>"` appends to a durable, append-only,
 human-curated `M8SHIFT.memory.md` (no pen needed); its headlines lead `recap`'s briefing so an
 agent resumes across sessions; and **`claim <agent> --check [--files …]`** — a read-only
@@ -370,8 +372,9 @@ by others since your last turn; and a **tasks board** — `task add/done/drop/li
 durable, append-only `M8SHIFT.tasks.md` (no pen needed; `--for`/`--blocked-on` are advisory free
 text, never enforced), with open-task headlines in `recap`.
 
-**Roadmap status** — the roadmap is complete: every staged degree-1 surface has shipped (see
-*Shipped* above), **and degree-2 has shipped too** as the opt-in
+**Roadmap status** — the core roadmap through Stage 5 is complete: every staged degree-1 surface
+has shipped (see *Shipped* above), Stage 4 read-only validation is now available, **and degree-2
+has shipped too** as the opt-in
 [`m8shift-worktree.py`](docs/en/rfc-worktree-companion.md) companion (roadmap step 2).
 The last degree-1 candidate, `subturn` (sub-agent fan-out provenance), was deliberately
 **rejected** — §5 advisory fields cover at-append provenance and `remember` covers mid-turn

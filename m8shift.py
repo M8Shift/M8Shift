@@ -368,7 +368,8 @@ Guardrail:
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py status [--for <agent>]                # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
-./m8shift.py doctor [--lint] [--json] [--security] # read-only health/lint/security checks (never repairs or steals the pen)
+./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
+./m8shift.py contract validate [--strict] [--json] # read-only Stage-4 contract validation
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # wait if needed, then claim + peek

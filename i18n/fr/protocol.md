@@ -233,7 +233,8 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py init [--name PROJET] [--agents a,b,c…] [--lang <code>] [--force]  # (re)génère le kit ici
 ./m8shift.py status [--for <agent>]                # verrou + dernier tour + action suivante
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # surveillance locale live, lecture seule
-./m8shift.py doctor [--lint] [--json] [--security] # diagnostics santé/sécurité en lecture seule
+./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # diagnostics santé/sécurité/contrats en lecture seule
+./m8shift.py contract validate [--strict] [--json] # validation read-only des contrats Stage 4
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)
 ./m8shift.py next <agent> [--once] [--interval N] [--force]  # attend si besoin, puis claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIERS le stylo (exclusif) — depuis ton tour /
