@@ -1,6 +1,6 @@
 # Cahier des charges — M8Shift
 
-> **Statut** : `Courant` · **Version** : protocole v1 · **Dernière revue** : 2026-06-24
+> **Statut** : `Courant` · **Version** : protocole v1 · **Dernière revue** : 2026-06-25
 >
 > Traduction synthétique de la spécification anglaise. La référence exhaustive reste
 > [docs/en/specification.md](../en/specification.md).
@@ -10,7 +10,7 @@
 ## 1. Objet
 
 M8Shift permet à un **roster actif de deux agents IA ou plus** (Claude, Codex,
-Gemini, Le Chat, …) de travailler sur un même dépôt **sans s'écraser**. Le cœur
+Gemini, Vibe, …) de travailler sur un même dépôt **sans s'écraser**. Le cœur
 coordonne les agents via un fichier partagé `M8SHIFT.md` et un **stylo unique** :
 un seul agent écrit dans l'arbre partagé à la fois.
 
@@ -37,6 +37,7 @@ un agent ; le cœur reste passif.
 | Diagnostic `doctor`, `status --json`, `history --json` | Réparation automatique ou vol du stylo |
 | Compagnon optionnel `m8shift-worktree.py` | Auto-merge opaque / suppression automatique de worktrees |
 | i18n par variantes mono-fichier générées | Paquet multi-fichiers obligatoire |
+| Couche locale Stage 6 : installateurs, checksums, `watch`, runner headless de référence | SDK fournisseurs, plan de contrôle hébergé, runtime IDE/MCP/orchestrateur dans le cœur |
 
 ## 3. Acteurs
 
@@ -99,6 +100,9 @@ le jugement du mainteneur.
 | EF-19 | `m8shift-worktree.py` permet le degré 2 optionnel : travail parallèle en worktrees isolés, intégration sérialisée. |
 | EF-20 | Les garde-fous de boucle empêchent les sorties prématurées : `status --for <agent>` indique l'action suivante et `append --wait` reste bloqué après passation jusqu'au prochain tour du même agent ou `DONE`. |
 | EF-21 | `watch [--for agent]` fournit une vue live locale, en lecture seule, de `status` ; elle ne claim pas, ne passe pas la main et ne force aucune récupération. |
+| EF-22 | Les contrats Stage 4 sont acceptés sur `append` via flags dédiés et/ou `--field`; `contract validate` et `doctor --contracts` les valident en lecture seule. |
+| EF-23 | La couche d'installation locale fournit recettes de copie/téléchargement, `checksums.sha256`, installateurs Bash/PowerShell et surfaces `--version`; la vérification est activée par défaut, `--no-verify` est un opt-out explicite. |
+| EF-24 | `examples/headless_runner.py` est un runner local de référence pour une voie headless : il attend/claim via le cœur, lance une commande statique, rafraîchit le TTL avant expiration, transmet `M8SHIFT_RUN_ID` et écrit `.m8shift/runtime/runs.jsonl`. |
 
 ## 6. Exigences non fonctionnelles
 
@@ -113,6 +117,7 @@ le jugement du mainteneur.
 | ENF-7 **i18n** | Le cœur distribué est anglais ; les variantes localisées sont générées par `m8shift-i18n.py` depuis `i18n/<lang>/`. |
 | ENF-8 **Libre et open source** | M8Shift est libre et open source sous licence Apache 2.0 ; l'état de coordination reste dans des fichiers projet ordinaires et le source peut être audité, copié, modifié et redistribué selon cette licence. |
 | ENF-9 **Version visible** | Tous les scripts Python suivis exposent `--version` et restent en lockstep. |
+| ENF-10 **Frontière d'intégration** | Les intégrations Stage 6 sont des couches locales de commodité autour du cœur passif. Les installateurs peuvent télécharger/copier et vérifier ; le runner de référence peut lancer une commande fournie par l'utilisateur ; les couches fournisseurs/IDE/MCP/plan de contrôle restent des compagnons optionnels, jamais une autorité de routage du cœur. |
 
 ## 7. Modèle de données
 
@@ -125,6 +130,8 @@ flowchart TB
     TASK["M8SHIFT.tasks.md<br/>événements tâches"]
     SESS["M8SHIFT.sessions.jsonl<br/>start/done/reset"]
     ANCH["CLAUDE.md / AGENTS.md / …<br/>strophes"]
+    RUN["examples/headless_runner.py<br/>runner local de référence"]
+    RT[".m8shift/runtime/runs.jsonl<br/>cycle de vie des runs"]
 
     CLI --> LOCK
     CLI --> ARCH
@@ -132,6 +139,8 @@ flowchart TB
     CLI --> TASK
     CLI --> SESS
     CLI --> ANCH
+    RUN -->|wait / claim / lance un tour| CLI
+    RUN -->|événements run| RT
 ```
 
 Champs principaux du `LOCK` :
@@ -161,13 +170,20 @@ les sorties JSON restent en UTC.
 sérialisées en `null`. Ces métadonnées ne pilotent jamais la claimabilité, le TTL ni
 le routage.
 
+Le sidecar local optionnel `.m8shift/runtime/` est généré par des intégrations comme
+`examples/headless_runner.py`. Son `runs.jsonl` journalise le cycle de vie
+(`run.started`, `run.heartbeat`, `run.ended`, …) et peut être inspecté par `doctor`,
+mais supprimer `.m8shift/runtime/` ne corrompt jamais `M8SHIFT.md`, le journal de tours
+ni la claimabilité.
+
 ## 8. Interface CLI
 
 ```text
 m8shift.py init [--name X] [--agents a,b,c…] [--lang code] [--force]
 m8shift.py status [--for agent] [--json]
 m8shift.py watch [--for agent] [--interval N] [--clear] [--changes-only]
-m8shift.py doctor [--lint] [--json] [--security] [--severity-min info|warning|error]
+m8shift.py doctor [--lint] [--json] [--security] [--contracts] [--severity-min info|warning|error]
+m8shift.py contract validate [--strict] [--json] [--all] [--severity-min info|warning|error]
 m8shift.py recap [--turns N] [--memory N] [--tasks N]
 m8shift.py wait <agent> [--once] [--interval N]
 m8shift.py next <agent> [--once] [--interval N] [--force]
@@ -176,7 +192,7 @@ m8shift.py claim <agent> --check [--files CSV] [--turns N]
 m8shift.py peek <agent>
 m8shift.py log [--limit N] [--all] [--oneline]
 m8shift.py history [--limit N] [--oneline] [--json]
-m8shift.py append <agent> --to <autre> --ask … --done … [--files …] [--body f|-] [--allow-large-body] [--wait]
+m8shift.py append <agent> --to <autre> --ask … --done … [--files …] [--body f|-] [--allow-large-body] [--wait] [--branch/--commit/--tests/--next/--blocked-on …] [--schema/--relation/--role-from/--role-to/--requires/--expected-output/--evidence/--decision/--waiver-reason/--permissions …] [--field k=v]
 m8shift.py remember <agent> "<note>"
 m8shift.py task add|done|drop|list|show …
 m8shift.py release <agent> --to <autre> [--force --reason TEXTE]
@@ -218,6 +234,11 @@ flowchart LR
 
 - M8Shift ne verrouille pas physiquement le système de fichiers du dépôt ; la sécurité
   repose sur la discipline `claim → travail → append`.
+- `init` initialise l'état M8Shift et les ancrages dans le projet courant. Il ne copie
+  pas `m8shift.py`, `m8shift-worktree.py`, les variantes de langue ni les installateurs
+  dans un répertoire cible ; le déploiement des scripts relève des recettes de copie/
+  téléchargement ou des installateurs Bash/PowerShell, qui peuvent vérifier
+  `checksums.sha256`.
 - Un agent malveillant ou une édition manuelle peut contourner le modèle ; une raison
   `--force` est une trace d'audit, pas une autorisation cryptographique.
 - Les UI interactives doivent être relancées par un humain ou par un compagnon externe.
@@ -231,15 +252,18 @@ La documentation française les référence sans maintenir de copie traduite.
 
 | Source | Surface livrée | Règle de périmètre |
 |--------|----------------|--------------------|
+| [rfc-roster.md](../en/rfc/rfc-roster.md) / [rfc-n-agents.md](../en/rfc/rfc-n-agents.md) | `init --agents a,b,c…`, passations dirigées `--to <agent>` | généralise le duo initial sans changer le stylo unique |
 | [rfc-memory.md](../en/rfc/rfc-memory.md) | `remember` + `M8SHIFT.memory.md` | registre append-only, jamais utilisé pour router |
 | [rfc-claim-check.md](../en/rfc/rfc-claim-check.md) | `claim --check` | lecture seule, aucune acquisition de stylo |
 | [rfc-tasks.md](../en/rfc/rfc-tasks.md) | `task add/done/drop/list/show` + `M8SHIFT.tasks.md` | état replié à la lecture, jamais imposé au mutex |
 | [rfc-session-history.md](../en/rfc/rfc-session-history.md) | `history` + `M8SHIFT.sessions.jsonl` | observabilité de session, pas de claimabilité |
 | [rfc-runtime-patterns.md](../en/rfc/rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine préfixée par le fuseau | diagnostics et formatteurs read-only |
+| [rfc-i18n-packs.md](../en/rfc/rfc-i18n-packs.md) | `m8shift-i18n.py --langs … --into DIR`, `init --lang` sur variantes générées | les packs sont des entrées de build, pas des dépendances runtime |
 | garde-fou opérateur | `next <agent>`, `status --for <agent>`, `append --wait` | aide à rester dans la boucle ; `next` ne mute qu'en faisant le `claim` normal |
 | [rfc-worktree-companion.md](../en/rfc/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
 | [rfc-contracts-validation.md](../en/rfc/rfc-contracts-validation.md) | `contract validate`, `doctor --contracts`, flags contrat `append` | validation read-only ; ne route pas le travail et ne donne pas de permissions |
+| [rfc-stage6-integrations.md](../en/rfc/rfc-stage6-integrations.md) | installateurs Bash/PowerShell, `checksums.sha256`, scripts versionnés, `watch`, runner headless avec `M8SHIFT_RUN_ID` et `.m8shift/runtime/runs.jsonl` | couche locale livrée autour du cœur passif ; fournisseurs/IDE/MCP/plan de contrôle restent optionnels |
 
 Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc/rfc-contracts-validation.md)
 décrit les contrats de passation typés, décisions de revue explicites (`approve`, `revise`,
@@ -248,6 +272,9 @@ avertissements ou erreurs strictes lorsque l'opérateur le demande, mais elle ne
 travail, ne donne pas de permissions, ne lance pas d'outils et ne mute pas le `LOCK`.
 
 Surfaces futures documentées :
+[RFC — Requête coopérative de tour](../en/rfc/rfc-cooperative-turn-request.md)
+pour request/yield/decline/steer dans les blocages d'UI interactives, non implémentée
+dans le cœur à ce stade ;
 [RFC — Plan de contrôle runtime / hébergé](../en/rfc/rfc-hosted-runtime-control-plane.md)
 pour présence, voies, inbox opérateur, progression et notifications hors cœur ;
 [RFC — Gestion des fournisseurs](../en/rfc/rfc-provider-management.md) pour associer les
@@ -266,8 +293,9 @@ suppression automatique de worktrees, dépendances tierces.
   python3 -m unittest discover -s tests
   ```
 - Couverture actuelle : cœur, roster N-agent, ancrages, archive, mémoire, tâches,
-  historique de sessions, affichage des dates locales préfixé par le fuseau, doctor, i18n, version lockstep,
-  et compagnon worktree.
+  historique de sessions, affichage des dates locales préfixé par le fuseau, doctor,
+  contrats Stage 4, `watch`, i18n, version lockstep, installateur avec vérification
+  par défaut, runner headless de référence, sidecar runtime et compagnon worktree.
 - `docs/en/protocol.md` et `docs/fr/protocole.md` sont générés depuis les sources de
   protocole et testés en synchronisation.
 

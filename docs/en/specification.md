@@ -1,12 +1,12 @@
 # Specification — M8Shift
 
-> **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-06-24
+> **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-06-25
 
 ---
 
 ## 1. Object
 
-`m8shift.py` lets an **active roster of ≥2 AI agents** (e.g. Claude, Codex, …) work on the same repository
+`m8shift.py` lets an **active roster of ≥2 AI agents** (e.g. Claude, Codex, Gemini, Vibe, …) work on the same repository
 **without stepping on each other**, coordinating through a **single shared
 file** `M8SHIFT.md`, in strict alternation (cooperative mutex). The system must be
 **portable to any project** and **usable by the agents without a human having to
@@ -21,6 +21,7 @@ human still nudges each agent to resume between turns — see §8.
 | Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion) |
 | Anti-deadlock via TTL, bounded archiving | Resident daemon, persistent queue |
 | `CLAUDE.md` / `AGENTS.md` anchors | Authentication / encryption of the state file |
+| Local Stage-6 integration layer: installers, checksums, `watch`, reference headless runner | Provider SDKs, hosted control plane, IDE/MCP/orchestrator runtimes inside the core |
 
 ## 3. Actors
 
@@ -86,6 +87,9 @@ flowchart LR
 | EF-15 | Human-facing timestamp output keeps canonical UTC (`...Z`) and adds the user's local time prefixed by the timezone name/offset when available (otherwise `local`); `status` also derives read-only session `started`/`duration` metadata from `M8SHIFT.sessions.jsonl`; machine-readable JSON remains canonical UTC only. | `test_display_time_keeps_utc_and_adds_timezone_prefixed_local_time`, `test_display_duration`, `test_status_and_recap_show_timezone_prefixed_local_time`, `test_status_json`, `test_status_shows_timezone_prefixed_local_time` |
 | EF-16 | Operator-loop guardrails keep agents from stopping mid-relay: `status --for <agent>` prints/serializes the next safe action, `next <agent>` claims + peeks when ready, `append --wait` blocks after handoff until the caller's next turn or `DONE`, and plain `release` cannot silently skip a pending turn addressed to the caller. | `test_status_for_prints_and_serializes_next_action`, `test_append_wait_blocks_until_agent_turn_returns`, `test_release_refuses_to_bounce_pending_incoming_turn` |
 | EF-17 | `watch [--for agent]` is a foreground, read-only live view over `status`: it can refresh a terminal automatically, but never claims, hands off, repairs, or force-recovers. | `test_watch_once_is_read_only_and_shows_next_action`, `test_watch_interval_invalid_clean_exit` |
+| EF-18 | Stage-4 contract metadata is accepted on `append` via dedicated flags and/or `--field`; `contract validate` and `doctor --contracts` validate it read-only, with strict mode failing malformed `schema=stage4.v1` turns only when explicitly requested. | `test_contract_sugar_fields_written_and_validate_clean`, `test_contract_validate_warns_by_default_but_strict_fails`, `test_doctor_contracts_includes_contract_findings` |
+| EF-19 | The local install layer ships copy/download recipes, `checksums.sha256`, Bash and PowerShell installers, and version surfaces for distributed scripts. Verification is enabled by default and `--no-verify` is an explicit opt-out. | `test_default_verifies_and_rejects_tampered`, `test_no_verify_skips`, `test_verify_flag_still_verifies`, `test_manifest_matches_files` |
+| EF-20 | `examples/headless_runner.py` is a reference local runner for one headless agent lane: it waits/claims through the core, launches one static command, refreshes the TTL heartbeat before expiry, passes `M8SHIFT_RUN_ID`, and appends lifecycle events to `.m8shift/runtime/runs.jsonl`. | `test_headless_runner_once_writes_run_ledger_and_env_run_id`, `test_headless_runner_reads_m8shift_lock` |
 
 ## 5. Non-functional requirements
 
@@ -101,6 +105,7 @@ flowchart LR
 | ENF-8 **Internationalization (i18n)** | The shipped `m8shift.py` is **English-only**; localized single-file variants are built from `i18n/<lang>/` packs with `m8shift-i18n.py`. `init --lang <code>` selects a bundled language (recorded in the LOCK `lang` field); `$M8SHIFT_LANG` overrides the runtime message language. `m8shift-i18n.py --name` must remain a basename inside `--into`. |
 | ENF-9 **Zero credentials / any surface** | `m8shift.py` makes **no network call** and needs **no API key, token or account**; it relies entirely on the host agents' own auth. It runs on every Claude Code / Codex surface (terminal/CLI, desktop app, IDE/VS Code, web) — interactive UIs need a human nudge between turns, a headless CLI loop automates fully. |
 | ENF-10 **Free and open source** | M8Shift is free and open source under the Apache License 2.0; the coordination state stays in ordinary project files and the source can be audited, copied, modified and redistributed under that license. |
+| ENF-11 **Integration boundary** | Stage-6 integrations are local convenience layers around the passive core. Installers may download/copy scripts and verify checksums; the reference runner may launch a user-supplied command; future provider/IDE/MCP/control-plane layers stay optional companions and must not become core routing authority. |
 
 > **i18n authoring (note).** The shipped `m8shift.py` is **English-only** (the canonical
 > source of every message key and template). Other languages live as packs under
@@ -126,6 +131,8 @@ flowchart TD
     Sessions["M8SHIFT.sessions.jsonl<br/>append-only session events"]
     Anchors["CLAUDE.md / AGENTS.md / ...<br/>agent auto-load anchors"]
     Companion["m8shift-worktree.py<br/>optional degree-2 companion"]
+    Runner["examples/headless_runner.py<br/>reference local runner"]
+    Runtime[".m8shift/runtime/runs.jsonl<br/>generated run lifecycle"]
 
     CLI -->|routes only here| Lock
     CLI -->|archive| Archive
@@ -134,6 +141,8 @@ flowchart TD
     CLI -->|init/done/reset events| Sessions
     CLI -->|init stanza| Anchors
     Companion -->|serialized integration pen| Lock
+    Runner -->|wait / claim / launch one turn| CLI
+    Runner -->|run events| Runtime
 ```
 
 ### 6.1 The `LOCK` block
@@ -167,6 +176,11 @@ session). The same metadata is exposed by `status --json` as
 values are serialized as `null` in JSON. This metadata never feeds claimability, TTL
 expiry, or routing.
 
+The optional local runtime sidecar `.m8shift/runtime/` is generated by integrations
+such as `examples/headless_runner.py`. Its `runs.jsonl` records run lifecycle events
+(`run.started`, `run.heartbeat`, `run.ended`, …) and may be inspected by `doctor`, but
+deleting `.m8shift/runtime/` never corrupts `M8SHIFT.md`, the turn log, or claimability.
+
 ### 6.2 State machine
 
 Legitimate transitions:
@@ -185,11 +199,12 @@ stateDiagram-v2
 
 ## 7. Command-line interface
 
-`init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json]` · `watch [--for agent] [--interval N] [--clear] [--changes-only]` · `doctor [--lint] [--json] [--security] [--severity-min …]` ·
+`init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json]` · `watch [--for agent] [--interval N] [--clear] [--changes-only]` · `doctor [--lint] [--json] [--security] [--contracts] [--severity-min …]` ·
+`contract validate [--strict] [--json] [--all] [--severity-min …]` ·
 `recap [--turns N] [--memory N] [--tasks N]` ·
 `wait <agent> [--once] [--interval N]` · `next <agent> [--once] [--interval N] [--force]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
 `peek <agent>` · `log [--limit N] [--all] [--oneline]` · `history [--limit N] [--oneline] [--json]` ·
-`append <agent> --to <other> --ask … --done … [--files …] [--body f|-] [--allow-large-body] [--wait] [--branch/--commit/--tests/--next/--blocked-on …] [--field k=v]` ·
+`append <agent> --to <other> --ask … --done … [--files …] [--body f|-] [--allow-large-body] [--wait] [--branch/--commit/--tests/--next/--blocked-on …] [--schema/--relation/--role-from/--role-to/--requires/--expected-output/--evidence/--decision/--waiver-reason/--permissions …] [--field k=v]` ·
 `release <agent> --to <other> [--force --reason TEXT]` (no-body handoff; refuses a pending incoming
 turn unless forced with an audited reason) · `done <agent> [--force --reason TEXT]` · `archive [--keep N]` ·
 `remember <agent> "<note>"` · `task add|done|drop <agent> … | task list|show …`
@@ -210,6 +225,11 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   notification/webhook can *signal* a turn but cannot *wake* the AI by itself. The
   proposed host-side answer is a separate runtime companion for queues, presence,
   progress, and operator inboxes; see [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md).
+- **Installer vs `init` boundary**: `init` initializes M8Shift state and anchors in the
+  current project. It does **not** copy `m8shift.py`, `m8shift-worktree.py`, language
+  variants, or installers into a target directory. Script deployment is handled by
+  explicit copy/download recipes or the Bash/PowerShell installers, which can also
+  verify `checksums.sha256`.
 - **Work-window exclusivity**: guaranteed by `claim` (exclusive acquisition of
   `WORKING_<self>`) + `append` restricted to `WORKING_<self>`. It relies on the
   **discipline** claim→work→append; M8Shift cannot lock the file system, so an
@@ -245,7 +265,9 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
 
 - `tests/test_m8shift.py` suite (unit + non-regression: claim model, one-pen mutex,
   N-agent relay, canonical/override anchors, configurable roster, advisory turn fields,
-  shared memory, `claim --check`, tasks board, archive, robustness, anti-injection),
+  shared memory, `claim --check`, tasks board, archive, robustness, anti-injection,
+  Stage-4 contract validation, `watch`, installer checksum verification, reference
+  headless runner lifecycle, runtime sidecar health),
   `python3 -m unittest discover -s tests`, with no external Python dependency (the
   Git integration test is skipped if Git is absent).
 - Multi-agent adversarial verification + 3 successive Codex reviews, each finding
@@ -362,15 +384,18 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | RFC / source | Feature | Surface | Charter |
 |--------------|---------|---------|---------|
 | [rfc-memory.md](rfc/rfc-memory.md) | **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | Dumb, file-ordered ledger; `remember` never calls `set_lock`, so memory can never feed mutex/routing. |
+| [rfc-roster.md](rfc/rfc-roster.md) / [rfc-n-agents.md](rfc/rfc-n-agents.md) | **N-agent directed roster** | `init --agents a,b,c…`; `--to <agent>` directed handoffs to any other active roster member; generated anchors for known agents and `AGENTS.md` fallback for unknown cooperative agents. | Generalizes the original pair without changing the one-pen mutex; every turn still has one holder and one target. |
 | [rfc-claim-check.md](rfc/rfc-claim-check.md) | **Advisory pre-claim check** | `claim <agent> --check [--files CSV] [--turns N]` reports readiness and exact file overlap with recent turns. | Takes no pen, mutates nothing; overlap never changes rc or feeds routing. |
 | [rfc-tasks.md](rfc/rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
 | [rfc-session-history.md](rfc/rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
 | [rfc-runtime-patterns.md](rfc/rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| [rfc-i18n-packs.md](rfc/rfc-i18n-packs.md) | **Localized single-file variants** | `m8shift-i18n.py --langs … --into DIR` builds self-contained language variants from `i18n/<lang>/` packs; `init --lang` records the generated language in `LOCK`. | Runtime stays single-file and self-contained; packs are build inputs, not runtime dependencies. |
 | Operator live view | **Passive monitoring** | `watch [--for <agent>] [--interval N] [--clear] [--changes-only]` repeats the status view in a terminal. | Foreground/read-only loop only; no daemon, no notification, no `claim`, no force recovery. |
 | Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |
 | [rfc-worktree-companion.md](rfc/rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
 | [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
+| [rfc-stage6-integrations.md](rfc/rfc-stage6-integrations.md) | **Stage 6 local integration layer** | Bash/PowerShell installers, `checksums.sha256`, versioned distributed scripts, `watch`, site/docs sync, and `examples/headless_runner.py` with `M8SHIFT_RUN_ID`, heartbeat, and `.m8shift/runtime/runs.jsonl`. | Shipped local convenience layer around the passive core; provider/IDE/MCP/control-plane integrations remain optional companions. |
 
 ### 12.2 Stage 4 contract surface
 
@@ -394,6 +419,9 @@ The remaining future topics are now explicit RFCs:
 - [RFC — Hosted/runtime control plane](rfc/rfc-hosted-runtime-control-plane.md):
   optional runtime supervision, lanes, operator inboxes, progress, and notifications
   around the passive core.
+- [RFC — Cooperative turn request and operator steering](rfc/rfc-cooperative-turn-request.md):
+  proposed audit-only request/yield/decline/steer flow for interactive UI deadlocks;
+  not implemented in the core yet.
 - [RFC — Provider management](rfc/rfc-provider-management.md): optional mapping from
   roster identities (`claude`, `codex`, `gemini`, `vibe`, …) to host provider
   commands, capabilities, and policies.
