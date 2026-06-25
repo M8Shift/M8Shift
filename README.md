@@ -79,7 +79,7 @@ vendor lock-in.
 One-line local install for macOS/Linux/WSL/Git Bash:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --verify --agents claude,codex
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
 ```
 
 Native Windows PowerShell:
@@ -98,7 +98,7 @@ downloaded files:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/vX.Y.Z/install.sh | \
-  bash -s -- --ref vX.Y.Z --verify --agents claude,codex
+  bash -s -- --ref vX.Y.Z --agents claude,codex
 ```
 
 ```powershell
@@ -106,9 +106,9 @@ $env:M8SHIFT_INSTALL_REF = "vX.Y.Z"
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/vX.Y.Z/install.ps1 | iex
 ```
 
-Security boundary: Bash `--verify` and PowerShell's default verification check
-downloaded files against the `checksums.sha256` manifest from the selected ref. That
-catches corruption or mismatch. For out-of-band trust against a compromised origin,
+Security boundary: Bash and PowerShell both verify downloaded files by default
+(`--no-verify` opts out) against the `checksums.sha256` manifest from the selected ref.
+That catches corruption or mismatch. For out-of-band trust against a compromised origin,
 pin reviewed digests with `--sha256 FILE:HEX` or use a signed release tag.
 
 Manual install:
