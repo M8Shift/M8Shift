@@ -269,7 +269,17 @@ if [ -z "$CHECKSUMS_URL" ]; then
   CHECKSUMS_URL="$BASE_URL/checksums.sha256"
 fi
 
-if [ "$VERIFY_DOWNLOADS" = "1" ]; then
+# Manual --sha256 pins are self-sufficient: when they cover every file we will download,
+# skip the manifest so out-of-band pinning works even against a mirror with no manifest.
+pins_cover_downloads() {
+  printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift.py$' || return 1
+  if [ "$WITH_WORKTREE" -eq 1 ]; then
+    printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-worktree.py$' || return 1
+  fi
+  return 0
+}
+
+if [ "$VERIFY_DOWNLOADS" = "1" ] && ! pins_cover_downloads; then
   checksums_tmp="$TARGET_DIR/.checksums.sha256.tmp.$$"
   rm -f "$checksums_tmp"
   if [ -f "$CHECKSUMS_URL" ]; then
