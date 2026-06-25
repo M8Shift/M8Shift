@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Tests M8Shift — unitaires (fonctions pures) + non-régression (CLI, bord à bord).
+"""M8Shift tests — unit tests (pure functions) + regression tests (CLI end to end).
 
-Lancer :  python3 -m unittest discover -s tests        (depuis la racine du repo)
-   ou  :  python3 tests/test_m8shift.py
+Run:  python3 -m unittest discover -s tests        (from the repository root)
+  or:  python3 tests/test_m8shift.py
 
-Modèle : `claim` est obligatoire et exclusif avant de travailler ; `append` n'est
-accepté que depuis `WORKING_<agent>`. Les tests CLI copient `m8shift.py` dans un
-dossier temporaire isolé et l'exécutent en sous-processus — comme un agent.
-Les tests gardent l'alias interne `cowork` uniquement pour réduire le bruit historique.
-Chaque non-régression cible un bug corrigé (NR-n) ou une garantie du CDC.
-Stdlib uniquement.
+Model: `claim` is mandatory and exclusive before work; `append` is accepted only
+from `WORKING_<agent>`. CLI tests copy `m8shift.py` into an isolated temporary
+directory and run it as a subprocess — like an agent would.
+Tests keep the internal `cowork` alias only to reduce historical noise.
+Each regression test targets a fixed bug (NR-n) or a specification guarantee.
+Standard library only.
 """
 import json
 import os
@@ -25,12 +25,12 @@ from unittest import mock
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since v3.0.0)
 sys.path.insert(0, REPO)
-import m8shift as cowork  # noqa: E402  (import après ajustement du sys.path)
+import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
 VERSION = "3.12.0"
 
 
-# ───────────────────────────── unitaires : fonctions pures ──────────────────
+# ───────────────────────────── unit tests: pure functions ───────────────────
 
 class TestPureFunctions(unittest.TestCase):
     def test_other(self):
@@ -44,7 +44,7 @@ class TestPureFunctions(unittest.TestCase):
     def test_parse_iso_empty(self):
         self.assertIsNone(cowork.parse_iso("-"))
         self.assertIsNone(cowork.parse_iso(""))
-        self.assertIsNone(cowork.parse_iso("pas une date"))
+        self.assertIsNone(cowork.parse_iso("not a date"))
 
     def test_display_time_keeps_utc_and_adds_local_label(self):
         out = cowork.display_time("2026-06-24T13:52:46Z")
@@ -61,8 +61,8 @@ class TestPureFunctions(unittest.TestCase):
         self.assertEqual(cowork.display_duration(-1), "00h 00m 00s")
 
     def test_lock_roundtrip(self):
-        text = ("avant\n" + cowork.LOCK_BEGIN + "\nholder:   none\nstate:    IDLE\n"
-                "turn:     0\n" + cowork.LOCK_END + "\naprès\n")
+        text = ("before\n" + cowork.LOCK_BEGIN + "\nholder:   none\nstate:    IDLE\n"
+                "turn:     0\n" + cowork.LOCK_END + "\nafter\n")
         lk = cowork.get_lock(text)
         self.assertEqual(lk["state"], "IDLE")
         self.assertEqual(lk["turn"], "0")
@@ -71,8 +71,8 @@ class TestPureFunctions(unittest.TestCase):
         self.assertEqual(lk2["holder"], "claude")
         self.assertEqual(lk2["state"], "WORKING_CLAUDE")
         self.assertEqual(lk2["turn"], "2")
-        self.assertIn("avant", out)
-        self.assertIn("après", out)
+        self.assertIn("before", out)
+        self.assertIn("after", out)
 
     def test_stanza_for(self):
         s = cowork.stanza_for("claude")
@@ -80,11 +80,11 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIn(cowork.STANZA_END, s)
         self.assertIn("claude", s)
         self.assertIn("AWAITING_CLAUDE", s)
-        self.assertIn("codex", s)  # mentionne l'autre agent
+        self.assertIn("codex", s)  # mentions the other agent
 
     def test_stanza_does_not_overpromise_autonomy(self):
-        """La stanza (lue par l'agent) ne promet plus l'autonomie totale et porte la
-        réserve UI : `wait` ne réveille pas l'UI de chat."""
+        """The stanza read by the agent no longer overpromises full autonomy and
+        carries the UI caveat: `wait` does not wake the chat UI."""
         s = cowork.stanza_for("claude")
         self.assertNotIn("no human help required", s)
         self.assertIn("does not wake your UI", s)
@@ -116,13 +116,13 @@ class TestPureFunctions(unittest.TestCase):
         for rel, expected in cases:
             path = os.path.join(REPO, rel)
             if not os.path.exists(path):
-                self.skipTest(f"{rel} absent")
+                self.skipTest(f"{rel} missing")
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), expected,
-                                 f"{rel} a divergé — régénère (scripts/gen_docs.py).")
+                                 f"{rel} diverged — regenerate it with scripts/gen_docs.py.")
 
     def test_ambiguous_anchor_variants_refused(self):
-        """Deux variantes sur un FS sensible sont refusées sans choix arbitraire."""
+        """Two variants on a case-sensitive filesystem are refused without an arbitrary choice."""
         with mock.patch.object(cowork.os, "listdir",
                                return_value=["AGENTS.md", "agents.md"]):
             with self.assertRaises(SystemExit):
@@ -148,7 +148,7 @@ class TestPureFunctions(unittest.TestCase):
         self.assertEqual([e["event"] for e in events], ["start", "done"])
 
 
-# ───────────────────────────── base CLI (sous-processus isolé) ──────────────
+# ───────────────────────────── CLI base (isolated subprocess) ───────────────
 
 class CLIBase(unittest.TestCase):
     def setUp(self):
@@ -230,7 +230,7 @@ class InjectedFRBase(CLIBase):
         shutil.copy(self._enfr, os.path.join(self.d, "m8shift.py"))
 
 
-# ───────────────────────────── non-régression : init / portabilité ─────────
+# ───────────────────────────── regression: init / portability ───────────────
 
 class TestInit(CLIBase):
     def test_init_creates_kit(self):
@@ -244,8 +244,8 @@ class TestInit(CLIBase):
         self.assertIn("session", r.stdout)
 
     def test_init_project_name(self):
-        self.init("--name", "Mon Super Projet")
-        self.assertIn("# M8Shift · Mon Super Projet", self.md())
+        self.init("--name", "My Great Project")
+        self.assertIn("# M8Shift · My Great Project", self.md())
 
     def test_init_project_name_rejects_lock_marker_injection(self):
         bad = "x\n<!-- M8SHIFT:LOCK:BEGIN -->\nholder: evil\nstate: WORKING_EVIL\n"
@@ -255,9 +255,9 @@ class TestInit(CLIBase):
         self.assertNotIn("Traceback", r.stderr)
 
     def test_missing_agents_bridges_existing_claude_instructions(self):
-        """Un projet Claude-only devient utilisable par Codex sans action manuelle."""
+        """A Claude-only project becomes usable by Codex without manual action."""
         with open(os.path.join(self.d, "CLAUDE.md"), "w", encoding="utf-8") as f:
-            f.write("# Instructions partagées\n\nREGLE-METIER\n")
+            f.write("# Shared instructions\n\nBUSINESS-RULE\n")
 
         r = self.init()
 
@@ -268,51 +268,51 @@ class TestInit(CLIBase):
         self.assertIn("automatic bridge", r.stdout)
 
     def test_existing_agents_does_not_receive_claude_bridge(self):
-        """Des instructions Codex existantes restent autonomes et inchangées."""
+        """Existing Codex instructions stay autonomous and unchanged."""
         with open(os.path.join(self.d, "CLAUDE.md"), "w", encoding="utf-8") as f:
             f.write("# Instructions Claude\n")
         with open(os.path.join(self.d, "AGENTS.md"), "w", encoding="utf-8") as f:
-            f.write("# Instructions Codex\n\nREGLE-CODEX\n")
+            f.write("# Instructions Codex\n\nCODEX-RULE\n")
 
         self.init()
 
         with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
             agents = f.read()
-        self.assertIn("REGLE-CODEX", agents)
+        self.assertIn("CODEX-RULE", agents)
         self.assertNotIn(cowork.BRIDGE["en"].strip(), agents)
 
     def test_reinit_idempotent_preserves_content(self):
-        """NR-idempotence : ré-init ne duplique pas la stanza, préserve contenu + état."""
+        """NR-idempotence: re-init does not duplicate the stanza and preserves content + state."""
         claude = os.path.join(self.d, "CLAUDE.md")
         with open(claude, "w", encoding="utf-8") as f:
-            f.write("# CLAUDE.md\n\nCONSIGNE-PROJET-UNIQUE\n")
+            f.write("# CLAUDE.md\n\nUNIQUE-PROJECT-INSTRUCTION\n")
         self.init()
         self.turn("claude", "codex")
         self.assertEqual(self.lock()["turn"], "1")
-        self.init()  # 2e init, sans --force
+        self.init()  # second init, without --force
         with open(claude, encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("CONSIGNE-PROJET-UNIQUE", content)
+        self.assertIn("UNIQUE-PROJECT-INSTRUCTION", content)
         self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
-        self.assertEqual(self.lock()["turn"], "1")  # M8SHIFT.md préservé
+        self.assertEqual(self.lock()["turn"], "1")  # M8SHIFT.md preserved
 
     def test_anchor_case_insensitive_no_duplicate(self):
-        """NR-7 : une variante unique est réutilisée/normalisée sans doublon."""
+        """NR-7: a single variant is reused/normalized without duplication."""
         with open(os.path.join(self.d, "claude.md"), "w", encoding="utf-8") as f:
-            f.write("# claude.md\n\nGARDE-MOI\n")
+            f.write("# claude.md\n\nKEEP-ME\n")
         r = self.init()
         anchors = [f for f in os.listdir(self.d) if f.lower() == "claude.md"]
         self.assertEqual(len(anchors), 1, anchors)
         with open(os.path.join(self.d, anchors[0]), encoding="utf-8") as f:
-            self.assertIn("GARDE-MOI", f.read())
-        self.assertIn(anchors[0], r.stdout)  # le nom rapporté est le nom réel on-disk
+            self.assertIn("KEEP-ME", f.read())
+        self.assertIn(anchors[0], r.stdout)  # reported name is the real on-disk name
 
     def test_codex_anchor_is_canonical_on_case_sensitive_fs(self):
-        """NR-D : `agents.md` doit rester auto-chargeable par le chemin `AGENTS.md`."""
+        """NR-D: `agents.md` must remain auto-loadable through the `AGENTS.md` path."""
         lower = os.path.join(self.d, "agents.md")
         canonical = os.path.join(self.d, "AGENTS.md")
         with open(lower, "w", encoding="utf-8") as f:
-            f.write("# consignes existantes\n\nGARDE-CODEX\n")
+            f.write("# existing instructions\n\nKEEP-CODEX\n")
         self.init()
 
         self.assertTrue(os.path.exists(canonical))
@@ -320,12 +320,12 @@ class TestInit(CLIBase):
         self.assertEqual(variants, ["AGENTS.md"])
         with open(canonical, encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("GARDE-CODEX", content)
+        self.assertIn("KEEP-CODEX", content)
         self.assertIn(cowork.STANZA_BEGIN, content)
 
-    @unittest.skipUnless(shutil.which("git"), "git absent")
+    @unittest.skipUnless(shutil.which("git"), "git missing")
     def test_tracked_anchor_case_rename_updates_git_index(self):
-        """NR-G : un agents.md suivi devient AGENTS.md dans l'index, même sur macOS."""
+        """NR-G: a tracked agents.md becomes AGENTS.md in the index, including on macOS."""
         def git(*args):
             return subprocess.run(
                 ["git", *args], cwd=self.d, capture_output=True, text=True,
@@ -335,7 +335,7 @@ class TestInit(CLIBase):
         self.assertEqual(git("config", "user.email", "test@example.invalid").returncode, 0)
         self.assertEqual(git("config", "user.name", "cowork test").returncode, 0)
         with open(os.path.join(self.d, "agents.md"), "w", encoding="utf-8") as f:
-            f.write("# consignes suivies\n")
+            f.write("# tracked instructions\n")
         self.assertEqual(git("add", "agents.md").returncode, 0)
         self.assertEqual(git("commit", "-qm", "fixture").returncode, 0)
 
@@ -346,23 +346,23 @@ class TestInit(CLIBase):
         self.assertNotIn("agents.md", tracked)
 
     def test_stanza_is_moved_to_anchor_start(self):
-        """NR-E : la stanza reste avant le contenu utilisateur, y compris après ré-init."""
+        """NR-E: the stanza stays before user content, including after re-init."""
         claude = os.path.join(self.d, "CLAUDE.md")
         with open(claude, "w", encoding="utf-8") as f:
-            f.write("# Contenu projet\n\nGARDE-MOI\n")
+            f.write("# Project content\n\nKEEP-ME\n")
         self.init()
         self.init()
         with open(claude, encoding="utf-8") as f:
             content = f.read()
         self.assertTrue(content.startswith(cowork.STANZA_BEGIN))
         self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
-        self.assertIn("GARDE-MOI", content)
+        self.assertIn("KEEP-ME", content)
 
     def test_codex_override_also_receives_stanza(self):
-        """NR-F : AGENTS.override.md masque AGENTS.md, donc les deux sont synchronisés."""
+        """NR-F: AGENTS.override.md masks AGENTS.md, so both are synchronized."""
         override = os.path.join(self.d, "AGENTS.override.md")
         with open(override, "w", encoding="utf-8") as f:
-            f.write("# Override temporaire\n\nGARDE-OVERRIDE\n")
+            f.write("# Temporary override\n\nKEEP-OVERRIDE\n")
 
         r = self.init()
 
@@ -372,7 +372,7 @@ class TestInit(CLIBase):
             self.assertTrue(content.startswith(cowork.STANZA_BEGIN), name)
             self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
         with open(override, encoding="utf-8") as f:
-            self.assertIn("GARDE-OVERRIDE", f.read())
+            self.assertIn("KEEP-OVERRIDE", f.read())
         self.assertIn("Codex override active", r.stdout)
 
     def test_init_force_resets_lock(self):
@@ -384,58 +384,58 @@ class TestInit(CLIBase):
         self.assertEqual(self.lock()["state"], "IDLE")
 
     def test_init_backs_up_modified_anchor(self):
-        """init sauvegarde le contenu pré-init d'un ancrage existant avant de le modifier."""
+        """init backs up pre-init content from an existing anchor before modifying it."""
         claude = os.path.join(self.d, "CLAUDE.md")
-        original = "# Mes instructions\n\nGARDE-MOI\n"
+        original = "# My instructions\n\nKEEP-ME\n"
         with open(claude, "w", encoding="utf-8") as f:
             f.write(original)
         self.init()
         bak = claude + ".m8shift.bak"
-        self.assertTrue(os.path.exists(bak), "backup .m8shift.bak attendu")
+        self.assertTrue(os.path.exists(bak), "expected backup .m8shift.bak")
         with open(bak, encoding="utf-8") as f:
-            self.assertEqual(f.read(), original)  # contenu d'origine intact
+            self.assertEqual(f.read(), original)  # original content intact
         with open(claude, encoding="utf-8") as f:
             cur = f.read()
-        self.assertIn(cowork.STANZA_BEGIN, cur)   # vivant = stanza + contenu préservé
-        self.assertIn("GARDE-MOI", cur)
+        self.assertIn(cowork.STANZA_BEGIN, cur)   # live file = stanza + preserved content
+        self.assertIn("KEEP-ME", cur)
 
     def test_fresh_anchor_has_no_backup(self):
-        """Un ancrage CRÉÉ par init (inexistant avant) ne génère pas de .m8shift.bak."""
+        """An anchor CREATED by init (missing beforehand) does not create .m8shift.bak."""
         self.init()
         self.assertFalse(os.path.exists(os.path.join(self.d, "CLAUDE.md.m8shift.bak")))
 
     def test_write_preserves_file_mode(self):
-        """NR-C : réécrire un ancrage ne doit pas casser ses permissions (mkstemp=0600)."""
+        """NR-C: rewriting an anchor must not break its permissions (mkstemp=0600)."""
         self.init()
         claude = os.path.join(self.d, "CLAUDE.md")
         os.chmod(claude, 0o644)
-        self.init("--force")  # réinjecte la stanza → réécrit CLAUDE.md
+        self.init("--force")  # reinjects the stanza and rewrites CLAUDE.md
         self.assertEqual(os.stat(claude).st_mode & 0o777, 0o644)
 
 
-# ───────────────────────────── modèle claim → travail → append ─────────────
+# ───────────────────────────── claim → work → append model ─────────────────
 
 class TestClaimModel(CLIBase):
     def test_append_requires_claim_from_idle(self):
-        """NR-bloquant : append depuis IDLE (sans claim) est refusé."""
+        """Blocking NR: append from IDLE (without claim) is refused."""
         self.init()
         r = self.cw("append", "claude", "--to", "codex", "--ask", "x", "--done", "y")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("pen", (r.stdout + r.stderr).lower())
         self.assertNotIn("Traceback", r.stderr)
-        self.assertEqual(self.lock()["turn"], "0")  # aucun tour écrit
+        self.assertEqual(self.lock()["turn"], "0")  # no turn written
 
     def test_append_requires_claim_from_awaiting(self):
-        """Même après un handoff, l'agent destinataire doit claim avant d'append."""
+        """Even after a handoff, the recipient agent must claim before appending."""
         self.init()
         self.turn("claude", "codex")  # → AWAITING_CODEX
         r = self.cw("append", "codex", "--to", "claude", "--ask", "x", "--done", "y")
-        self.assertNotEqual(r.returncode, 0)  # codex n'a pas encore claim
+        self.assertNotEqual(r.returncode, 0)  # codex has not claimed yet
 
     def test_claim_exclusive_sequential(self):
         self.init()
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
-        self.assertNotEqual(self.cw("claim", "codex").returncode, 0)  # claude tient le stylo
+        self.assertNotEqual(self.cw("claim", "codex").returncode, 0)  # claude holds the pen
 
     def test_handoff_increments_and_alternates(self):
         self.init()
@@ -450,9 +450,9 @@ class TestClaimModel(CLIBase):
 
     def test_append_out_of_turn_refused(self):
         self.init()
-        self.turn("claude", "codex")  # claude a déjà passé la main
+        self.turn("claude", "codex")  # claude already handed off
         r = self.cw("append", "claude", "--to", "codex", "--ask", "x", "--done", "y")
-        self.assertNotEqual(r.returncode, 0)  # claude ne tient plus le stylo
+        self.assertNotEqual(r.returncode, 0)  # claude no longer holds the pen
 
     def test_body_stdin_inserted(self):
         self.init()
@@ -461,11 +461,11 @@ class TestClaimModel(CLIBase):
         self.assertIn("CORPS-LIBRE-XYZ", self.md())
 
 
-# ───────────────────────────── mutex / garde-fous ──────────────────────────
+# ───────────────────────────── mutex / guardrails ───────────────────────────
 
 class TestMutexGuards(CLIBase):
     def test_force_refused_on_fresh_lock(self):
-        """NR-1 : claim --force ne vole pas un verrou non périmé."""
+        """NR-1: claim --force does not steal a non-stale lock."""
         self.init()
         self.cw("claim", "claude")
         r = self.cw("claim", "codex", "--force")
@@ -473,7 +473,7 @@ class TestMutexGuards(CLIBase):
         self.assertEqual(self.lock()["holder"], "claude")
 
     def test_force_accepted_on_stale_lock(self):
-        """NR-1 (suite) : claim --force reprend un verrou périmé."""
+        """NR-1 (continued): claim --force reclaims a stale lock."""
         self.init()
         self.cw("claim", "claude")
         self.set_expires_past()
@@ -483,7 +483,7 @@ class TestMutexGuards(CLIBase):
         self.assertIn("stale", self.lock()["note"])
 
     def test_reclaim_own_lock_refreshes(self):
-        """NR-4 : le détenteur peut reprendre son propre verrou (refresh TTL)."""
+        """NR-4: the holder can reclaim its own lock (TTL refresh)."""
         self.init()
         self.cw("claim", "claude")
         r = self.cw("claim", "claude")
@@ -492,7 +492,7 @@ class TestMutexGuards(CLIBase):
         self.assertNotEqual(self.lock()["expires"], "-")
 
     def test_self_handoff_refused(self):
-        """NR-3 : --to ne peut pas viser soi-même."""
+        """NR-3: --to cannot target self."""
         self.init()
         r = self.cw("append", "claude", "--to", "claude", "--ask", "x", "--done", "y")
         self.assertNotEqual(r.returncode, 0)
@@ -500,7 +500,7 @@ class TestMutexGuards(CLIBase):
         self.assertNotEqual(r.returncode, 0)
 
     def test_release_done_require_holder(self):
-        """NR-2 : release/done refusés si tu ne tiens pas le stylo."""
+        """NR-2: release/done are refused if you do not hold the pen."""
         self.init()
         self.cw("claim", "claude")
         self.assertNotEqual(self.cw("release", "codex", "--to", "claude").returncode, 0)
@@ -520,11 +520,11 @@ class TestMutexGuards(CLIBase):
             self.assertIn("operator recovery", f.read())
 
 
-# ───────────────────────────── robustesse / entrées ────────────────────────
+# ───────────────────────────── robustness / inputs ─────────────────────────
 
 class TestRobustness(CLIBase):
     def test_body_missing_no_traceback(self):
-        """NR-5 : --body fichier inexistant → sortie propre, pas de traceback."""
+        """NR-5: missing --body file yields a clean exit, not a traceback."""
         self.init()
         before = self.md().count("M8SHIFT:TURN")
         r = self.cw("append", "claude", "--to", "codex", "--ask", "x", "--done", "y",
@@ -579,7 +579,7 @@ class TestRobustness(CLIBase):
         self.assertIn("corrupted", r.stdout + r.stderr)
 
     def test_malformed_lock_schema_clean_exit(self):
-        """NR-A : valeur LOCK invalide (turn non entier) → sortie propre, pas de traceback."""
+        """NR-A: invalid LOCK value (non-integer turn) yields a clean exit, not a traceback."""
         self.init()
         p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
@@ -605,7 +605,7 @@ class TestRobustness(CLIBase):
         self.assertNotIn("Traceback", r.stderr)
 
     def test_body_marker_neutralized(self):
-        """Injection via --body : le faux marqueur ne passe pas pour un tour."""
+        """Injection via --body: the fake marker is not parsed as a turn."""
         self.init()
         r = self.turn("claude", "codex", body="blah M8SHIFT:TURN 999 claude BEGIN blah")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -625,7 +625,7 @@ class TestRobustness(CLIBase):
 
 class TestArchive(CLIBase):
     def test_archive_preserves_system_turn0(self):
-        """NR-6 : archive ne déplace jamais le tour système #0."""
+        """NR-6: archive never moves system turn #0."""
         self.init()
         agents = ["claude", "codex"]
         for n in range(6):
@@ -651,8 +651,8 @@ class TestWait(CLIBase):
         self.init()
         self.assertEqual(self.cw("wait", "codex", "--once").returncode, 0)  # IDLE → claimable
         self.turn("claude", "codex")                                        # → AWAITING_CODEX
-        self.assertEqual(self.cw("wait", "codex", "--once").returncode, 0)  # son tour
-        self.assertEqual(self.cw("wait", "claude", "--once").returncode, 3)  # pas son tour
+        self.assertEqual(self.cw("wait", "codex", "--once").returncode, 0)  # its turn
+        self.assertEqual(self.cw("wait", "claude", "--once").returncode, 3)  # not its turn
 
     def test_wait_once_stale_lock_unblocks(self):
         self.init()
@@ -680,14 +680,14 @@ class TestWatch(CLIBase):
         self.assertIn("--interval", r.stdout + r.stderr)
 
 
-# ───────────────────────────── concurrence ─────────────────────────────────
+# ───────────────────────────── concurrency ─────────────────────────────────
 
 class TestConcurrency(CLIBase):
     def test_concurrent_claim_claude_vs_codex_single_winner(self):
-        """NR-bloquant : N claim claude + N claim codex simultanés depuis IDLE
-        → un seul AGENT acquiert (exclusivité), l'autre est totalement exclu ;
-        aucun crash, pas de lock résiduel. (Le détenteur peut re-claim = refresh,
-        donc plusieurs process du MÊME agent peuvent réussir : c'est attendu.)"""
+        """Blocking NR: N claim claude + N claim codex run simultaneously from IDLE
+        → only one AGENT acquires (exclusivity), the other is fully excluded;
+        no crash, no residual lock. The holder may re-claim as a refresh, so
+        several processes from the SAME agent may succeed: this is expected."""
         self.init()
         cmds = ([["claim", "claude"]] * 8) + ([["claim", "codex"]] * 8)
         procs = [
@@ -698,9 +698,9 @@ class TestConcurrency(CLIBase):
         outs = [p.communicate() for p in procs]
         claude_wins = sum(1 for c, p in zip(cmds, procs) if c[1] == "claude" and p.returncode == 0)
         codex_wins = sum(1 for c, p in zip(cmds, procs) if c[1] == "codex" and p.returncode == 0)
-        # exactement un agent gagne ; l'autre n'acquiert jamais (mutuelle exclusion)
+        # exactly one agent wins; the other never acquires (mutual exclusion)
         self.assertEqual(min(claude_wins, codex_wins), 0,
-                         f"les deux agents ont acquis : claude={claude_wins} codex={codex_wins}")
+                         f"both agents acquired: claude={claude_wins} codex={codex_wins}")
         self.assertGreater(max(claude_wins, codex_wins), 0)
         for out, err in outs:
             self.assertNotIn("Traceback", out + err)
@@ -710,11 +710,11 @@ class TestConcurrency(CLIBase):
         self.assertFalse(os.path.exists(os.path.join(self.d, ".cowork.lock")))
 
     def test_stale_internal_lock_reclaimed(self):
-        """Un .cowork.lock abandonné (mtime ancien) est repris, pas de blocage."""
+        """An abandoned .cowork.lock (old mtime) is reclaimed without blocking."""
         self.init()
         lockp = os.path.join(self.d, ".cowork.lock")
         with open(lockp, "w", encoding="utf-8") as f:
-            f.write("999999:0")  # process fantôme
+            f.write("999999:0")  # phantom process
         old = time.time() - (cowork.LOCK_STALE_S + 30)
         os.utime(lockp, (old, old))
         r = self.cw("claim", "claude")
@@ -733,7 +733,7 @@ class TestI18n(CLIBase):
         self.assertIn("pen taken", r.stdout)
 
     def test_lang_field_in_schema(self):
-        """Un champ lang invalide est rejeté proprement (pas de traceback)."""
+        """An invalid lang field is rejected cleanly, without a traceback."""
         self.init()
         p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
@@ -749,12 +749,12 @@ class TestI18n(CLIBase):
 
 class TestRoster(CLIBase):
     def test_default_writes_agents_field(self):
-        """Sans --agents, le couple par défaut claude,codex est consigné."""
+        """Without --agents, the default claude,codex pair is recorded."""
         self.init()
         self.assertEqual(self.lock().get("agents"), "claude,codex")
 
     def test_custom_pair_field_and_anchors(self):
-        """--agents claude,gemini : champ consigné + ancrage GEMINI.md, pas d'AGENTS.md."""
+        """--agents claude,gemini: field recorded + GEMINI.md anchor, no AGENTS.md."""
         r = self.init("--agents", "claude,gemini")
         self.assertEqual(self.lock().get("agents"), "claude,gemini")
         self.assertTrue(os.path.exists(os.path.join(self.d, "CLAUDE.md")))
@@ -764,11 +764,11 @@ class TestRoster(CLIBase):
             content = f.read()
         self.assertTrue(content.startswith(cowork.STANZA_BEGIN))
         self.assertIn("gemini", content)
-        # codex hors couple → son ancrage n'est pas créé
+        # codex is outside the pair, so its anchor is not created
         self.assertFalse(os.path.exists(os.path.join(self.d, "AGENTS.md")))
 
     def test_custom_pair_full_relay(self):
-        """Un couple non-défaut relaie réellement (claim/append/alternance)."""
+        """A non-default pair really relays (claim/append/alternation)."""
         self.init("--agents", "claude,gemini")
         self.assertEqual(self.cw("claim", "gemini").returncode, 0)
         r = self.cw("append", "gemini", "--to", "claude", "--ask", "x", "--done", "y")
@@ -776,7 +776,7 @@ class TestRoster(CLIBase):
         lk = self.lock()
         self.assertEqual(lk["state"], "AWAITING_CLAUDE")
         self.assertEqual(lk["turn"], "1")
-        # codex n'est pas dans le roster → rejeté proprement
+        # codex is outside the roster, so it is rejected cleanly
         rc = self.cw("claim", "codex")
         self.assertNotEqual(rc.returncode, 0)
         self.assertNotIn("Traceback", rc.stderr)
@@ -797,24 +797,24 @@ class TestRoster(CLIBase):
                                  "--ask", "x", "--done", "z").returncode, 0)
 
     def test_agents_field_survives_claim(self):
-        """Le champ agents (roster complet) est préservé par un claim (set_lock)."""
+        """The agents field (full roster) is preserved by claim (set_lock)."""
         self.init("--agents", "claude,codex,lechat")
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
         self.assertEqual(self.lock().get("agents"), "claude,codex,lechat")
 
     def test_bad_roster_single_name_refused(self):
-        """--agents avec un seul nom est refusé proprement."""
+        """--agents with a single name is rejected cleanly."""
         r = self.cw("init", "--agents", "claude")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("two", (r.stdout + r.stderr).lower())
 
     def test_unknown_agent_anchor_best_effort(self):
-        """Un agent sans ancrage connu : init réussit + avertit (best effort, Q5)."""
+        """Agent with no known anchor: init succeeds + warns (best effort, Q5)."""
         r = self.init("--agents", "claude,zzz")
         self.assertIn("anchor", r.stdout.lower())
         self.assertFalse(os.path.exists(os.path.join(self.d, "zzz.md")))
-        # il peut tout de même relayer (amorçage manuel) :
+        # it can still relay with manual bootstrap:
         self.assertEqual(self.cw("claim", "zzz").returncode, 0)
 
     def test_status_shows_active_pair(self):
@@ -825,34 +825,34 @@ class TestRoster(CLIBase):
         self.assertIn("claude,codex", r.stdout)
 
     def test_reinit_preserves_existing_roster(self):
-        """Sans --force, ré-init préserve le roster du M8SHIFT.md vivant."""
+        """Without --force, re-init preserves the roster from the live M8SHIFT.md."""
         self.init("--agents", "claude,gemini")
-        r = self.init()  # ré-init sans --agents ni --force
+        r = self.init()  # re-init without --agents or --force
         self.assertEqual(self.lock().get("agents"), "claude,gemini")
 
     def test_reinit_same_roster_idempotent(self):
-        """Ré-init avec le MÊME roster (sans --force) réussit, idempotent."""
+        """Re-init with the SAME roster (without --force) succeeds and is idempotent."""
         self.init("--agents", "claude,gemini")
-        self.init("--agents", "claude,gemini")  # même couple → OK
+        self.init("--agents", "claude,gemini")  # same pair, OK
         self.assertEqual(self.lock().get("agents"), "claude,gemini")
 
     def test_reinit_different_roster_refused_without_force(self):
-        """Ré-init avec un roster DIFFÉRENT (sans --force) est refusé proprement."""
+        """Re-init with a DIFFERENT roster (without --force) is rejected cleanly."""
         self.init("--agents", "claude,codex")
         r = self.cw("init", "--agents", "claude,gemini")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("--force", r.stdout + r.stderr)
-        self.assertEqual(self.lock().get("agents"), "claude,codex")  # inchangé
+        self.assertEqual(self.lock().get("agents"), "claude,codex")  # unchanged
 
     def test_reinit_force_replaces_roster(self):
-        """--force réécrit M8SHIFT.md avec le nouveau roster."""
+        """--force rewrites M8SHIFT.md with the new roster."""
         self.init("--agents", "claude,gemini")
         self.init("--agents", "claude,codex", "--force")
         self.assertEqual(self.lock().get("agents"), "claude,codex")
 
     def test_collision_codex_then_lechat(self):
-        """codex,lechat : codex possède AGENTS.md, lechat est averti (collision)."""
+        """codex,lechat: codex owns AGENTS.md, lechat is warned (collision)."""
         r = self.init("--agents", "codex,lechat")
         with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
             agents = f.read()
@@ -861,77 +861,77 @@ class TestRoster(CLIBase):
         self.assertIn("already used", r.stdout)
 
     def test_collision_lechat_then_codex(self):
-        """NR-collision (ordre) : lechat possède AGENTS.md, codex (branche dédiée) averti."""
+        """NR-collision (order): lechat owns AGENTS.md, codex (dedicated branch) is warned."""
         r = self.init("--agents", "lechat,codex")
         self.assertNotIn("Traceback", r.stderr)
         with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
             agents = f.read()
         self.assertEqual(agents.count(cowork.STANZA_BEGIN), 1)
-        self.assertIn("You are **lechat**", agents)  # le 1er gagne, pas d'écrasement
+        self.assertIn("You are **lechat**", agents)  # the first one wins, no overwrite
         self.assertIn("already used", r.stdout)
 
     def test_copilot_unmapped_best_effort(self):
-        """copilot (ancrage imbriqué) hors étape 1 : non mappé → avertissement, pas de fichier."""
+        """copilot (nested anchor) outside stage 1: unmapped → warning, no file."""
         r = self.init("--agents", "claude,copilot")
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("no known anchor", r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.d, ".github")))
-        # copilot reste un membre du roster : il peut relayer (amorçage manuel)
+        # copilot stays a roster member: it can relay with manual bootstrap
         self.assertEqual(self.cw("claim", "copilot").returncode, 0)
 
     def test_init_rejects_invalid_stored_roster_without_force(self):
-        """init sans --force échoue sur un `agents:` stocké invalide (pas de préservation)."""
+        """init without --force fails on an invalid stored `agents:` field (no preservation)."""
         self.init()
         p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
             t = f.read()
         with open(p, "w", encoding="utf-8") as f:
             f.write(t.replace("agents:   claude,codex", "agents:   claude,codex,@@"))
-        r = self.cw("init")  # sans --force → refuse de préserver la corruption
+        r = self.cw("init")  # without --force, refuses to preserve corruption
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("invalid LOCK", r.stdout + r.stderr)
-        r2 = self.cw("init", "--force")  # --force répare / re-sème
+        r2 = self.cw("init", "--force")  # --force repairs / re-seeds
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertEqual(self.lock().get("agents"), "claude,codex")
 
     def test_generated_protocol_is_pair_agnostic(self):
-        """Le protocole généré ne fige plus l'identité claude/codex : ouverture, holder,
-        états, commentaire TURN et schéma d'amorçage tous génériques."""
+        """The generated protocol no longer hard-codes the claude/codex identity:
+        opening, holder, states, TURN comment, and bootstrap diagram are all generic."""
         self.init("--agents", "gemini,lechat")
         with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
             proto = f.read()
-        # plus aucune affirmation exclusive claude/codex
-        self.assertNotIn("either `claude` or `codex`", proto)         # §0 identité
+        # no more exclusive claude/codex assertion
+        self.assertNotIn("either `claude` or `codex`", proto)         # §0 identity
         self.assertNotIn("`claude` \\| `codex` \\| `none`", proto)    # holder enum
         self.assertNotIn("# claude | codex", proto)                   # commentaire TURN
-        self.assertNotIn("WORKING_CLAUDE", proto)                     # énum d'états figée
-        self.assertNotIn("(Claude) + AGENTS.md (Codex)", proto)       # schéma d'amorçage
+        self.assertNotIn("WORKING_CLAUDE", proto)                     # fixed state enum
+        self.assertNotIn("(Claude) + AGENTS.md (Codex)", proto)       # bootstrap diagram
         self.assertNotIn("block into `CLAUDE.md` and", proto)         # §8 bullet d'injection
-        # formulations génériques présentes (N-agent, plus de "two active agents" figé)
+        # generic wording is present (N-agent, no fixed "two active agents")
         self.assertNotIn("two active agents", proto)
         self.assertIn("active agents", proto)
         self.assertIn("roster", proto)
         self.assertIn("an active agent", proto)
-        self.assertIn("each active agent's anchor", proto)            # §8 bullet générique
+        self.assertIn("each active agent's anchor", proto)            # generic §8 bullet
         self.assertIn("WORKING_<X>", proto)
-        # la bannière du M8SHIFT.md généré ne fige plus le couple non plus
+        # generated M8SHIFT.md banner no longer hard-codes the pair either
         md = self.md()
         self.assertNotIn("Claude ⇄ Codex", md)
         self.assertIn("multi-agent relay", md)
-        # le protocole généré ne promet plus l'autonomie totale + porte la réserve UI
+        # generated protocol no longer overpromises full autonomy and carries the UI caveat
         self.assertNotIn("operate without human help", proto)
         self.assertIn("does not wake your chat UI", proto)
 
     def test_invalid_token_in_agents_rejected(self):
-        """NR-token : un token --agents mal formé est rejeté, pas filtré en silence."""
+        """NR-token: a malformed --agents token is rejected, not silently filtered."""
         r = self.cw("init", "--agents", "claude,@@,codex")
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("Traceback", r.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
 
     def test_invalid_token_in_lock_rejected(self):
-        """NR-token (LOCK) : un roster stocké partiellement invalide est rejeté."""
+        """NR-token (LOCK): a partially invalid stored roster is rejected."""
         self.init()
         p = os.path.join(self.d, "M8SHIFT.md")
         with open(p, encoding="utf-8") as f:
@@ -944,7 +944,7 @@ class TestRoster(CLIBase):
         self.assertIn("invalid LOCK", r.stdout + r.stderr)
 
     def test_hyphen_name_visible_and_archivable(self):
-        """NR-hyphen : un agent `foo-bar` est reconnu par status ET archive (regex TURN)."""
+        """NR-hyphen: an agent `foo-bar` is recognized by status AND archive (TURN regex)."""
         self.init("--agents", "foo-bar,baz")
         self.assertEqual(self.cw("claim", "foo-bar").returncode, 0)
         r = self.cw("append", "foo-bar", "--to", "baz", "--ask", "x", "--done", "y")
@@ -959,7 +959,7 @@ class TestRoster(CLIBase):
             self.assertIn("M8SHIFT:TURN 1 foo-bar", f.read())
 
     def test_bootstrap_text_uses_active_pair(self):
-        """NR-bootstrap : les textes générés nomment le couple actif, pas claude/codex."""
+        """NR-bootstrap: generated texts name the active pair, not claude/codex."""
         r = self.init("--agents", "gemini,lechat")
         self.assertIn("claim gemini", r.stdout)
         self.assertNotIn("claim claude", r.stdout)
@@ -1207,15 +1207,19 @@ class TestNAgentRelay(CLIBase):
 
 
 
-# ───────────────── i18n FR : sur un build en+fr (injecteur) ─────────────────
+# ───────────────── i18n FR: on an en+fr injected build ──────────────────────
 
 class TestI18nFR(InjectedFRBase):
     def test_init_lang_fr_generates_french(self):
         self.init("--lang", "fr")
         self.assertEqual(self.lock().get("lang"), "fr")
+        with open(os.path.join(REPO, "i18n", "fr", "protocol.md"), encoding="utf-8") as f:
+            expected_heading = f.readline().strip()
+        with open(os.path.join(REPO, "i18n", "fr", "messages.json"), encoding="utf-8") as f:
+            claim_prefix = json.load(f)["claim_ok"].split("{agent}", 1)[0]
         with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
-            self.assertIn("Protocole de relais", f.read())
-        self.assertIn("verrou pris", self.cw("claim", "claude").stdout)
+            self.assertIn(expected_heading, f.read())
+        self.assertIn(claim_prefix, self.cw("claim", "claude").stdout)
 
     def test_localized_seed_turn0_is_well_formed(self):
         # the single-line done: fix must hold in the localized seed too (all packs)
@@ -1228,10 +1232,12 @@ class TestI18nFR(InjectedFRBase):
         """$M8SHIFT_LANG forces the runtime language even if the LOCK says en."""
         self.init()  # lang: en
         env = dict(os.environ, M8SHIFT_LANG="fr")
+        with open(os.path.join(REPO, "i18n", "fr", "messages.json"), encoding="utf-8") as f:
+            claim_prefix = json.load(f)["claim_ok"].split("{agent}", 1)[0]
         r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
                            cwd=self.d, capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("verrou pris", r.stdout)
+        self.assertIn(claim_prefix, r.stdout)
 
     def test_bare_en_core_refuses_lang_fr(self):
         """The EN-only repo core (not this build) hard-errors `--lang fr` (argparse choices)."""
@@ -1244,7 +1250,7 @@ class TestI18nFR(InjectedFRBase):
         self.assertIn("invalid choice", r.stderr)
 
 
-# ───────────── injecteur i18n : packs + build multi-langues ─────────────────
+# ───────────── i18n injector: packs + multi-language build ──────────────────
 
 class TestInjector(unittest.TestCase):
     """m8shift-i18n.py — pack validation + multi-language build invariants."""
@@ -1259,7 +1265,7 @@ class TestInjector(unittest.TestCase):
 
     def test_all_repo_packs_pass_check(self):
         langs = self._packs()
-        self.assertTrue(langs, "aucun pack i18n/")
+        self.assertTrue(langs, "no i18n pack found")
         for lang in langs:
             r = subprocess.run([sys.executable, self.INJ, "--check", lang],
                                capture_output=True, text=True)
@@ -1275,7 +1281,7 @@ class TestInjector(unittest.TestCase):
                 continue
             with open(mp, encoding="utf-8") as f:
                 msgs = json.load(f)
-            self.assertTrue(set(msgs) <= set(en), f"{lang}: clés inconnues")
+            self.assertTrue(set(msgs) <= set(en), f"{lang}: unknown keys")
             for k, v in msgs.items():
                 en_ph = set(re.findall(r"\{(\w+)\}", en[k]))
                 try:
@@ -1287,7 +1293,7 @@ class TestInjector(unittest.TestCase):
         """Build en+fr+es and run a Spanish relay (regression: incremental dict splicing
         lost its EN-only anchor after the first language → only single-lang builds worked)."""
         if not all(os.path.isdir(os.path.join(self.I18N, l)) for l in ("fr", "es")):
-            self.skipTest("packs fr/es absents")
+            self.skipTest("fr/es packs missing")
         d = tempfile.mkdtemp(prefix="m8shift-multi-")
         self.addCleanup(shutil.rmtree, d, True)
         r = subprocess.run([sys.executable, self.INJ, "--langs", "fr,es", "--into", d],
@@ -1314,7 +1320,7 @@ class TestInjector(unittest.TestCase):
                 self.assertIn("--name", r.stderr)
 
 
-# ───────────── §5 : champs de tour avisés (passthrough) ─────────────────────
+# ───────────── §5: advisory turn fields (passthrough) ───────────────────────
 
 class TestAdvisoryFields(CLIBase):
     """§5 advisory turn fields: sugar flags + the open `--field key=value` namespace,
@@ -1484,7 +1490,7 @@ class TestMemory(CLIBase):
 
     def test_unicode_note_roundtrips(self):
         self.init()
-        note = "décision: éviter les accents cassés — café"
+        note = "decision: keep unicode safe — snowman ☃"
         self.cw("remember", "claude", note)
         self.assertEqual(cowork.parse_memory(self._mem())[-1]["note"], note)
 
@@ -1721,7 +1727,7 @@ class TestTasks(CLIBase):
 
     def test_recap_tasks_tail_and_absent(self):
         self.init()
-        self.assertNotIn("open task", self.cw("recap").stdout)      # absent → no section
+        self.assertNotIn("open task", self.cw("recap").stdout)      # missing → no section
         self.cw("task", "add", "claude", "todo one")
         out = self.cw("recap").stdout
         self.assertIn("open task", out)
@@ -1812,7 +1818,7 @@ class TestHistory(CLIBase):
         self.assertIn("sessions.jsonl_invalid", r.stdout)
 
 
-# ───────────── régressions du round d'audit Codex (v3.x) ────────────────────
+# ───────────── regressions from the Codex audit round (v3.x) ────────────────
 
 class TestAuditFixes(CLIBase):
     """Regressions for the Codex audit: claim --check DONE, seed turn-0 format, the headless
