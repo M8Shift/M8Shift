@@ -104,7 +104,7 @@ le jugement du mainteneur.
 
 | ID | Exigence |
 |----|----------|
-| ENF-1 **Portabilité** | Python 3.8+, stdlib uniquement, Linux/macOS/Windows, chemins avec espaces ou accents. |
+| ENF-1 **Portabilité** | Python 3.8+, stdlib uniquement, Linux/macOS/Windows (WSL, Git Bash, installateur PowerShell natif ou `python m8shift.py` natif), chemins avec espaces ou accents. |
 | ENF-2 **Atomicité** | Toute écriture passe par fichier temporaire unique + `os.replace`, sous verrou inter-process `.m8shift.lock`. |
 | ENF-3 **Lisibilité** | LOCK et tours restent du texte simple, versionnable et grep-able. |
 | ENF-4 **Robustesse** | Entrées invalides et LOCK corrompu sortent proprement, sans traceback ni état partiellement écrit. |
