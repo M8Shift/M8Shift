@@ -211,7 +211,7 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 > RFCs are maintained in English under `docs/en/rfc/`. **Numbers are assigned in
 > creation order and are permanent** — a number never tracks *implementation* order.
 > For example RFC 010 was authored 10th (2026-06-24) but its patterns shipped last, in
-> v3.21–v3.26 (2026-06-26); renumbering would break cross-links, git history, and
+> v3.21–v3.27 (2026-06-26); renumbering would break cross-links, git history, and
 > issue/MR references, so an RFC keeps its birth number even when implemented much
 > later (or never). Dates below are the implementation date (`—` when not
 > implemented).
@@ -227,7 +227,7 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 | 007 | [Subturn](docs/en/rfc/007-rfc-subturn.md) | Sub-turn streaming proposal | rejected | — | rejected by adversarial panel |
 | 008 | [Worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) | Degree-2 worktree parallelism + serialized integration | implemented v1 | v3.5.0 · 2026-06-24 | `m8shift-worktree.py`; core `LOCK` as integration pen |
 | 009 | [Runtime companion](docs/en/rfc/009-rfc-runtime-companion.md) | Local presence / inbox / progress / diagnostics | implemented v1 | v3.15.0 · 2026-06-25 | `m8shift-runtime.py` companion |
-| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | Pattern filter: retained / rejected / deferred | accepted (filter) | v3.21–v3.26 · 2026-06-26 | 6 retained shipped; 13 rejected; 6 deferred → RFC 024–029 |
+| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | Pattern filter: retained / rejected / deferred | accepted (filter) | v3.21–v3.27 · 2026-06-26 | 6 retained shipped; 13 rejected; RFC 024/025 baselined |
 | 011 | [Session history](docs/en/rfc/011-rfc-session-history.md) | Session history ledger + `history` | implemented | v3.7.0 · 2026-06-24 | `M8SHIFT.sessions.jsonl` |
 | 012 | [Contracts validation](docs/en/rfc/012-rfc-contracts-validation.md) | Stage-4 contracts + read-only validation | implemented | v3.13.0 · 2026-06-25 | read-only validation surface |
 | 013 | [Hosted runtime control plane](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | Future hosted / runtime control plane | future / not impl. | — | optional layer outside the passive core |
@@ -241,8 +241,8 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 | 021 | [Pause resume](docs/en/rfc/021-rfc-pause-resume.md) | Stable `PAUSED` state for idle sessions | implemented v1 | v3.17.0 · 2026-06-25 | core `PAUSED` + `pause` / `resume` |
 | 022 | [Session reports](docs/en/rfc/022-rfc-session-reports.md) | Session reports + decision ledger | implemented v1 | v3.18.3 · 2026-06-26 | `report` generated from existing turns |
 | 023 | [Agent token footprint](docs/en/rfc/023-rfc-agent-token-footprint.md) | Cut the mandatory protocol read | implemented (Phase 1) | v3.19.0 · 2026-06-26 | split `protocol.md` / `protocol-reference.md` |
-| 024 | [Doctor split](docs/en/rfc/024-rfc-doctor-split.md) | Split core doctor vs companion diagnostics | draft | — | deferred from RFC 010 |
-| 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | Runtime status over core + sidecars | draft | — | deferred from RFC 010 |
+| 024 | [Doctor split](docs/en/rfc/024-rfc-doctor-split.md) | Split core doctor vs companion diagnostics | baseline impl. | v3.27.0 · 2026-06-26 | core doctor owns relay hygiene; runtime doctor owns sidecar diagnostics |
+| 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | Runtime status over core + sidecars | baseline impl. | v3.27.0 · 2026-06-26 | `status-runtime [--brief] [--json]`; JSON contract remains separate |
 | 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | Bound / prune runtime sidecar ledgers | baseline impl. · policy draft | v3.26.0 · 2026-06-26 | baseline `retention prune --keep N`; policy still draft |
 | 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | Local notifications for handoffs / stale turns | draft | — | deferred from RFC 010 |
 | 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | Safe headless command templates | draft | — | deferred from RFC 010 |

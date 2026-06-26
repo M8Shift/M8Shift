@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.26.0"
+VERSION = "3.27.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2183,6 +2183,10 @@ class TestSessionReports(CLIBase):
             "M8SHIFT.SESSIONS.JSONL",
             "M8SHIFT.protocol.md",
             "M8SHIFT.Protocol.MD",
+            "M8SHIFT.protocol-reference.md",
+            "M8SHIFT.Protocol-Reference.MD",
+            "M8SHIFT.requests.md",
+            "M8SHIFT.Requests.MD",
             ".m8shift.lock",
             ".M8shift.lock",
             "m8shift.py",
@@ -2633,6 +2637,74 @@ class TestCooperativeTurnRequest(CLIBase):
         js = json.loads(self.cw("status", "--for", "claude", "--json").stdout)
         self.assertEqual(js["turn_requests"], [])
 
+    def test_doctor_warns_on_invalid_request_ledger(self):
+        self.init()
+        with open(os.path.join(self.d, "M8SHIFT.requests.md"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "# M8Shift · cooperative turn requests\n\n"
+                "<!-- M8SHIFT:REQUEST 1 BEGIN -->\n"
+                "- id: 1\n"
+                "- kind: bogus\n"
+                "- status: open\n"
+                "- from: claude\n"
+                "- to: codex\n"
+                "<!-- M8SHIFT:REQUEST 1 END -->\n"
+                "<!-- M8SHIFT:REQUEST 2 BEGIN -->\n"
+                "- id: 2\n"
+                "- kind: turn_request\n"
+                "- status: open\n"
+                "- actor: claude\n"
+                "- from: claude\n"
+                "- to: codex\n"
+                "<!-- M8SHIFT:REQUEST 3 END -->\n"
+                "<!-- M8SHIFT:REQUEST 4 BEGIN -->\n"
+                "- id: 4\n"
+                "- kind: yield_turn\n"
+                "- status: accepted\n"
+                "- actor: codex\n"
+                "- from: claude\n"
+                "- to: codex\n"
+                "<!-- M8SHIFT:REQUEST 4 END -->\n"
+            )
+        findings = json.loads(self.cw("doctor", "--json").stdout)["findings"]
+        checks = {f["check"] for f in findings}
+        self.assertIn("requests.markers_invalid", checks)
+        self.assertIn("requests.event_invalid", checks)
+        self.assertIn("requests.sequence_invalid", checks)
+
+    def test_doctor_warns_on_duplicate_request_answer(self):
+        self.init()
+        with open(os.path.join(self.d, "M8SHIFT.requests.md"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "# M8Shift · cooperative turn requests\n\n"
+                "<!-- M8SHIFT:REQUEST 1 BEGIN -->\n"
+                "- id: 1\n"
+                "- kind: turn_request\n"
+                "- status: open\n"
+                "- actor: claude\n"
+                "- from: claude\n"
+                "- to: codex\n"
+                "<!-- M8SHIFT:REQUEST 1 END -->\n"
+                "<!-- M8SHIFT:REQUEST 1 BEGIN -->\n"
+                "- id: 1\n"
+                "- kind: yield_turn\n"
+                "- status: accepted\n"
+                "- actor: codex\n"
+                "- from: claude\n"
+                "- to: codex\n"
+                "<!-- M8SHIFT:REQUEST 1 END -->\n"
+                "<!-- M8SHIFT:REQUEST 1 BEGIN -->\n"
+                "- id: 1\n"
+                "- kind: decline_turn\n"
+                "- status: declined\n"
+                "- actor: codex\n"
+                "- from: claude\n"
+                "- to: codex\n"
+                "<!-- M8SHIFT:REQUEST 1 END -->\n"
+            )
+        findings = json.loads(self.cw("doctor", "--json").stdout)["findings"]
+        self.assertIn("requests.sequence_invalid", {f["check"] for f in findings})
+
     def test_steer_turn_requires_force_and_refuses_working_holder(self):
         self._handoff_to_codex()
         self.cw("request-turn", "claude", "--to", "codex", "--reason", "operator active")
@@ -2762,12 +2834,34 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(progress[0]["schema"], "m8shift.runtime.event.v1")
         self.assertEqual(progress[0]["source"]["tool"], "m8shift-runtime.py")
         self.assertEqual(progress[0]["payload"]["message"], "reading")
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "schema": "m8shift.runtime.event.v1",
+                "event": "run.started",
+                "type": "run.started",
+                "agent": "claude",
+                "run_id": "r1",
+                "ts": "2026-06-26T12:00:00Z",
+            }) + "\n")
 
         status = json.loads(self.rt("status-runtime", "claude", "--json").stdout)
         self.assertEqual(status["runtime_version"], cowork.VERSION)
         self.assertEqual(status["runtime_findings"], [])
         self.assertEqual(status["runtime"]["claude"]["inbox_count"], 1)
         self.assertEqual(status["runtime"]["claude"]["last_progress"]["message"], "reading")
+        self.assertEqual(status["runtime"]["claude"]["last_run_event"]["event"], "run.started")
+        full = self.rt("status-runtime", "claude")
+        self.assertEqual(full.returncode, 0, full.stderr)
+        self.assertIn("last run: run.started r1", full.stdout)
+        brief = self.rt("status-runtime", "claude", "--brief")
+        self.assertEqual(brief.returncode, 0, brief.stderr)
+        full_lines = full.stdout.splitlines()
+        brief_lines = brief.stdout.splitlines()
+        self.assertGreater(len(full_lines), len(brief_lines))
+        for line in brief_lines:
+            self.assertIn(line, full_lines)
+        self.assertNotIn("last progress", brief.stdout)
+        self.assertNotIn("last run", brief.stdout)
         doctor = json.loads(self.rt("doctor", "--json").stdout)
         self.assertTrue(doctor["ok"])
 
@@ -2807,6 +2901,30 @@ class TestRuntimeCompanion(CLIBase):
         status = self.rt("status-runtime", "codex", "--json")
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(self.md(), before)
+
+    def test_status_runtime_discovers_agents_without_presence(self):
+        self.init()
+        self.assertEqual(self.rt("progress", "claude", "--run", "run1", "reading").returncode, 0)
+        runtime_dir = os.path.join(self.d, ".m8shift", "runtime")
+        with open(os.path.join(runtime_dir, "runs.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "schema": "m8shift.runtime.event.v1",
+                "event": "run.started",
+                "type": "run.started",
+                "agent": "codex",
+                "run_id": "run2",
+                "ts": "2026-06-26T12:00:00Z",
+            }) + "\n")
+
+        status = self.rt("status-runtime", "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        runtime = json.loads(status.stdout)["runtime"]
+        self.assertIn("claude", runtime)
+        self.assertIn("codex", runtime)
+        self.assertEqual(runtime["claude"]["last_progress"]["message"], "reading")
+        self.assertEqual(runtime["codex"]["last_run_event"]["event"], "run.started")
+        self.assertIsNone(runtime["claude"]["presence"])
+        self.assertIsNone(runtime["codex"]["presence"])
 
     def test_runtime_no_progress_warns_blocks_and_progress_resets(self):
         self.init()
@@ -3210,6 +3328,24 @@ class TestChecksumsManifest(unittest.TestCase):
             with open(os.path.join(REPO, name), "rb") as f2:
                 actual = hashlib.sha256(f2.read()).hexdigest()
             self.assertEqual(actual, expected, f"stale checksum for {name}")
+
+
+class TestRepositoryHygiene(unittest.TestCase):
+    """Repository-local coordination files are generated dogfood state, not public artifacts."""
+
+    def test_generated_relay_files_are_gitignored(self):
+        with open(os.path.join(REPO, ".gitignore"), encoding="utf-8") as fh:
+            ignored = {line.strip() for line in fh if line.strip() and not line.startswith("#")}
+        for rel in (
+            "M8SHIFT.md",
+            "M8SHIFT.protocol.md",
+            "M8SHIFT.protocol-reference.md",
+            "M8SHIFT.requests.md",
+            "M8SHIFT.sessions.jsonl",
+            ".m8shift/",
+        ):
+            with self.subTest(rel=rel):
+                self.assertIn(rel, ignored)
 
 
 class TestProtocolPackCommandCoverage(unittest.TestCase):
