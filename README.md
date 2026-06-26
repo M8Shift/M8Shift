@@ -197,16 +197,19 @@ open/no-work session with `pause`.
 
 ## 📚 Documentation
 
-Docs follow the [Diátaxis](https://diataxis.fr/) framework:
+Docs follow the [Diátaxis](https://diataxis.fr/) framework. Start with the
+published bilingual site, or use the repository-local docs when working from a
+clone.
 
-- **English documentation index** — [docs/en/README.md](docs/en/README.md) — all English docs in one place.
-- **Tutorial** — [docs/en/tutorial.md](docs/en/tutorial.md) — learn the relay step by step.
-- **How-to (VS Code)** — [docs/en/vscode-guide.md](docs/en/vscode-guide.md) — run the relay with a Claude/Codex-style pair or any active roster.
-- **How-to (Windows)** — [docs/en/windows.md](docs/en/windows.md) — run on Windows (WSL / Git Bash / native).
-- **Reference (protocol)** — [docs/en/protocol.md](docs/en/protocol.md) — the shared protocol, states and rules.
-- **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
-- **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
-- **Explanation (philosophy)** — [docs/en/philosophy.md](docs/en/philosophy.md) — why the project exists.
+| Category | English | Français |
+|----------|---------|----------|
+| **Live site** | [m8shift.ai](https://m8shift.ai/) | [m8shift.ai/fr](https://m8shift.ai/fr/) |
+| **Documentation index** | [docs/en/README.md](docs/en/README.md) | [docs/fr/README.md](docs/fr/README.md) |
+| **Getting started** | [tutorial](docs/en/tutorial.md) · [VS Code guide](docs/en/vscode-guide.md) · [Windows](docs/en/windows.md) | [tutoriel](docs/fr/tutoriel.md) · [guide VS Code](docs/fr/guide-vscode.md) · [Windows](docs/fr/windows.md) |
+| **Reference** | [protocol](docs/en/protocol.md) · [protocol reference](docs/en/protocol-reference.md) · [specification](docs/en/specification.md) · [agents guide](docs/en/agents-guide.md) | [protocole](docs/fr/protocole.md) · [cahier des charges](docs/fr/cahier-des-charges.md) |
+| **Explanation** | [architecture](docs/en/architecture.md) · [philosophy](docs/en/philosophy.md) · [security audit](docs/en/security-audit.md) · [stage-2 rationale](docs/en/stage2-rationale.md) | [architecture](docs/fr/architecture.md) · [philosophie](docs/fr/philosophie.md) |
+| **RFCs** | [RFC index](docs/en/README.md#rfcs) · [RFC directory](docs/en/rfc/) | RFCs are English-only; French docs link to the canonical English RFCs. |
+
 > [!NOTE]
 > RFCs are maintained in English under `docs/en/rfc/`. **Numbers are assigned in
 > creation order and are permanent** — a number never tracks *implementation* order.
