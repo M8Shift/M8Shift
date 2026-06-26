@@ -1,6 +1,6 @@
 # RFC — Runtime/gateway patterns: retained, rejected, and why
 
-**Status:** proposed design filter · **Target:** M8Shift core + optional companions ·
+**Status:** accepted design filter · **Target:** M8Shift core + optional companions ·
 **Source review:** runtime/gateway designs, the M8Shift website comparison chapter,
 and the official docs for OpenClaw, LangGraph, AutoGen, Microsoft Agent Framework,
 CrewAI, OpenHands, OpenAI Agents SDK, Dify, and n8n AI workflows. The recurring
@@ -22,6 +22,30 @@ The core distinction:
 So the question is not "should M8Shift become a gateway?". It should not. The useful
 question is: which operational patterns can improve M8Shift without turning the
 passive relay into a runtime?
+
+## Ratification outcome
+
+The filter below is accepted as the post-Stage-6 design boundary:
+
+- **14 retained patterns are adopted as design seeds**, not as immediate implementation scope:
+  doctor/lint checks; foreground status watch; presence/heartbeat; per-agent lane ownership;
+  operator inbox modes; run lifecycle ids; progress log; loop/no-progress detection; idempotency keys;
+  canonical run plans; bounded sidecar ledgers; safe transcript/recap normalization;
+  action-sensitive memory guidance; and workboard concepts as a companion-only idea.
+- **13 rejected patterns stay rejected** for the core: gateway daemon/WebSocket protocol; pairing,
+  device tokens, scopes, and auth roles; multi-channel message connectors; provider/model routing;
+  tool sandbox/execution approval framework; plugin architecture; SQLite/database-backed state;
+  semantic/vector memory and autonomous summarization; autonomous workboard dispatcher; automatic UI
+  wake guarantees; path-scoped shared-tree leases; durable queue as core authority; and automatic
+  force recovery.
+- **6 deferred topics are split into dedicated draft RFCs** so they can be designed independently:
+  [024 doctor split](024-rfc-doctor-split.md), [025 status-runtime](025-rfc-status-runtime.md),
+  [026 sidecar retention](026-rfc-sidecar-retention.md), [027 notifications](027-rfc-notifications.md),
+  [028 headless command templates](028-rfc-headless-command-templates.md), and
+  [029 m8shift-board](029-rfc-m8shift-board.md).
+- **Implementation order is accepted as backlog order** for the retained runtime work:
+  core-safe diagnostics → runtime sidecars → lane ownership → no-progress detection → headless plan →
+  retention. This RFC does not implement those backlog items by itself.
 
 ## Decision rule
 

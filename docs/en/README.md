@@ -55,7 +55,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [007-rfc-subturn.md](rfc/007-rfc-subturn.md) | Rejected `subturn` proposal. |
 | [008-rfc-worktree-companion.md](rfc/008-rfc-worktree-companion.md) | Implemented v1 opt-in worktree companion for degree-2 parallel work and serialized integration. |
 | [009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |
-| [010-rfc-runtime-patterns.md](rfc/010-rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |
+| [010-rfc-runtime-patterns.md](rfc/010-rfc-runtime-patterns.md) | Accepted runtime/gateway pattern filter: retained, rejected, and deferred. |
 | [011-rfc-session-history.md](rfc/011-rfc-session-history.md) | Session history ledger and `history` command. |
 | [012-rfc-contracts-validation.md](rfc/012-rfc-contracts-validation.md) | Stage 4 contracts, review decisions, and shipped read-only validation. |
 | [013-rfc-hosted-runtime-control-plane.md](rfc/013-rfc-hosted-runtime-control-plane.md) | Future optional hosted/runtime control plane. |
@@ -69,3 +69,9 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [021-rfc-pause-resume.md](rfc/021-rfc-pause-resume.md) | Stable `PAUSED` state for open sessions with no active task. |
 | [022-rfc-session-reports.md](rfc/022-rfc-session-reports.md) | Shipped session reports and decision ledger generated from existing turns. |
 | [023-rfc-agent-token-footprint.md](rfc/023-rfc-agent-token-footprint.md) | Implemented Phase 1: cuts the mandatory protocol read by splitting an operational core from on-demand reference. |
+| [024-rfc-doctor-split.md](rfc/024-rfc-doctor-split.md) | Draft split between core doctor checks and runtime companion diagnostics. |
+| [025-rfc-status-runtime.md](rfc/025-rfc-status-runtime.md) | Draft runtime status composition over core status plus presence/progress sidecars. |
+| [026-rfc-sidecar-retention.md](rfc/026-rfc-sidecar-retention.md) | Draft retention and archive policy for runtime sidecars. |
+| [027-rfc-notifications.md](rfc/027-rfc-notifications.md) | Draft local notification mechanisms for handoffs and stale turns. |
+| [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | Draft safe headless command templates for cooperative CLIs. |
+| [029-rfc-m8shift-board.md](rfc/029-rfc-m8shift-board.md) | Draft richer companion workboard concept outside the core task board. |

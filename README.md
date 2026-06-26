@@ -208,7 +208,7 @@ RFCs are maintained in English under `docs/en/rfc/`:
 | 007 | [Subturn](docs/en/rfc/007-rfc-subturn.md) | rejected |
 | 008 | [Worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) | implemented v1 |
 | 009 | [Runtime companion](docs/en/rfc/009-rfc-runtime-companion.md) | implemented v3.15.0 |
-| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | proposed (design filter) |
+| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | accepted design filter |
 | 011 | [Session history](docs/en/rfc/011-rfc-session-history.md) | implemented v3.7.0 |
 | 012 | [Contracts validation](docs/en/rfc/012-rfc-contracts-validation.md) | implemented v3.13.0 |
 | 013 | [Hosted runtime control plane](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | future / not implemented |
@@ -222,6 +222,12 @@ RFCs are maintained in English under `docs/en/rfc/`:
 | 021 | [Pause resume](docs/en/rfc/021-rfc-pause-resume.md) | implemented v3.17.0 |
 | 022 | [Session reports](docs/en/rfc/022-rfc-session-reports.md) | implemented v3.18.3 |
 | 023 | [Agent token footprint](docs/en/rfc/023-rfc-agent-token-footprint.md) | implemented (Phase 1) |
+| 024 | [Doctor split](docs/en/rfc/024-rfc-doctor-split.md) | draft |
+| 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | draft |
+| 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | draft |
+| 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | draft |
+| 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | draft |
+| 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | draft |
 
 ## How it works
 
