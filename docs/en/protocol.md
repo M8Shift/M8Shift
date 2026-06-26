@@ -6,7 +6,7 @@ alternation (one pen, mutex) with periodic polling. Identical in every project.
 Read it **once at session start** when you see a `M8SHIFT.md` at the project root;
 you are one of the agents in the `agents:` field — identify yourself by your anchor.
 For the full command reference and project-adoption details, see
-[`M8SHIFT.protocol-reference.md`](M8SHIFT.protocol-reference.md) (read on demand).
+[`protocol-reference.md`](protocol-reference.md) (read on demand).
 
 ---
 
@@ -155,4 +155,4 @@ re-read by the loop. Session starts/closes live in `M8SHIFT.sessions.jsonl` (fol
 
 No network, no daemon, no authority escalation: M8Shift is passive and never calls an
 AI. For the full command reference (`status`/`recap`/`watch`/`request-turn`/…) and
-project-adoption/bootstrap details, see `M8SHIFT.protocol-reference.md`.
+project-adoption/bootstrap details, see `protocol-reference.md`.
