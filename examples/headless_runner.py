@@ -45,7 +45,7 @@ import uuid
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.23.0"
+VERSION = "3.24.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
