@@ -209,6 +209,8 @@ Salvaguarda:
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # espera se necessário, depois claim + peek
 ./m8shift.py claim <agent> [--force]               # ADQUIRE a caneta (exclusivo) — a partir da sua vez /
                                                   #   IDLE / seu próprio bloqueio ; --force = bloqueio obsoleto SOMENTE
+./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
+./m8shift.py guard <agent>        # alias for may-i-write
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # fecha seu turno + passa adiante
 ./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)

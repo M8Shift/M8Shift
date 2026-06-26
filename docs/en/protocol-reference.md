@@ -86,6 +86,8 @@ same metadata and serializes unavailable values as `null`.
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY
+./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
+./m8shift.py guard <agent>        # alias for may-i-write
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-] [--allow-large-body] [--wait]  # closes your turn + hands off
 ./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
@@ -103,6 +105,9 @@ same metadata and serializes unavailable values as `null`.
 
 - **`claim` first**: you must hold the pen (`WORKING_<you>`) to `append`.
   `claim` is **exclusive** (a single winner if several agents try together).
+- **Hard pre-write guard**: `may-i-write <you>` (alias: `guard <you>`) is read-only
+  and exits 0 only when `holder=<you>`, `state=WORKING_<YOU>`, and the lock has not
+  expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB

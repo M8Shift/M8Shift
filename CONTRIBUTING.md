@@ -61,3 +61,8 @@ python3 scripts/gen_docs.py
 
 Branch per change; keep `main` green. Don't commit relay artefacts (`M8SHIFT.md`,
 `.m8shift.lock`, `CLAUDE.md`, `AGENTS.md`, …) — they are gitignored.
+
+When a repo is coordinated through M8Shift, run `./m8shift.py may-i-write <agent>` (or
+the alias `guard <agent>`) before scripted writes or commits. It exits 0 only while
+that agent holds a non-expired `WORKING_<AGENT>` lock; any other rc means stop and
+follow the printed next action.

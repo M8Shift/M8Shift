@@ -524,6 +524,33 @@ class TestClaimModel(CLIBase):
 # ───────────────────────────── mutex / guardrails ───────────────────────────
 
 class TestMutexGuards(CLIBase):
+    def test_may_i_write_requires_current_valid_pen(self):
+        self.init()
+        before = self.md()
+        idle = self.cw("may-i-write", "claude")
+        self.assertEqual(idle.returncode, 3)
+        self.assertIn("STOP", idle.stdout)
+        self.assertEqual(self.md(), before)
+
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        ok = self.cw("may-i-write", "claude")
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIn("may write", ok.stdout)
+        no = self.cw("may-i-write", "codex")
+        self.assertEqual(no.returncode, 3)
+        self.assertIn("holder=claude", no.stdout)
+
+    def test_may_i_write_refuses_expired_own_lock_and_guard_aliases_it(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.set_expires_past()
+        r = self.cw("may-i-write", "claude")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("expired lock", r.stdout)
+        alias = self.cw("guard", "claude")
+        self.assertEqual(alias.returncode, 3)
+        self.assertIn("STOP", alias.stdout)
+
     def test_force_refused_on_fresh_lock(self):
         """NR-1: claim --force does not steal a non-stale lock."""
         self.init()
