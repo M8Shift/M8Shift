@@ -185,9 +185,11 @@ such as `m8shift-runtime.py` and `examples/headless_runner.py`. `runtime init`
 scaffolds `presence.json`, `runs.jsonl`, `progress.jsonl`, `idempotency.jsonl`,
 `approvals.jsonl`, and `inbox/*.jsonl`; runtime JSONL rows use the
 `m8shift.runtime.event.v1` envelope with `source`, `relay`, and `payload` fields.
-Invalid sidecar JSON/JSONL is reported as a runtime diagnostic finding instead of a
-core parse failure. Deleting `.m8shift/runtime/` never corrupts `M8SHIFT.md`, the turn
-log, or claimability.
+`presence.json` is also the advisory per-agent lane ledger: a fresh lane refuses a
+second managed runtime for the same agent identity, and stale takeover requires the
+explicit `--takeover-stale` flag. Invalid sidecar JSON/JSONL is reported as a runtime
+diagnostic finding instead of a core parse failure. Deleting `.m8shift/runtime/`
+never corrupts `M8SHIFT.md`, the turn log, or claimability.
 
 ### 6.2 State machine
 
@@ -412,7 +414,7 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
 | [012-rfc-contracts-validation.md](rfc/012-rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
 | [017-rfc-stage6-integrations.md](rfc/017-rfc-stage6-integrations.md) | **Stage 6 local integration layer** | Bash/PowerShell installers, `checksums.sha256`, versioned distributed scripts, `watch`, site/docs sync, and `examples/headless_runner.py` with `M8SHIFT_RUN_ID`, heartbeat, and enveloped `.m8shift/runtime/runs.jsonl` lifecycle events. | Shipped local convenience layer around the passive core; provider/IDE/MCP/control-plane integrations remain optional companions. |
-| [009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md) | **Runtime companion v1** | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`; `.m8shift/runtime/{presence.json,runs.jsonl,progress.jsonl,idempotency.jsonl,approvals.jsonl,inbox/*.jsonl}` with `m8shift.runtime.event.v1` rows and stale-presence diagnostics. | Local advisory sidecars only; invalid/deleted sidecars are diagnostic-only; no direct `M8SHIFT.md` edits and no second pen authority. |
+| [009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md) | **Runtime companion v1** | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`; `.m8shift/runtime/{presence.json,runs.jsonl,progress.jsonl,idempotency.jsonl,approvals.jsonl,inbox/*.jsonl}` with `m8shift.runtime.event.v1` rows, per-agent lane ownership, and stale-presence diagnostics. | Local advisory sidecars only; invalid/deleted sidecars are diagnostic-only; stale lane takeover is explicit and never grants the core pen; no direct `M8SHIFT.md` edits and no second pen authority. |
 | [018-rfc-agent-runtime-architecture.md](rfc/018-rfc-agent-runtime-architecture.md) | **Agent runtime architecture companion v1** | `m8shift-runtime.py init`, `roles`, `workflows`, `approve`, `report`; `.m8shift/{roles,workflows,policies,runs}`. | Local scaffold and reports only; removable without breaking the core relay. |
 | [014-rfc-provider-management.md](rfc/014-rfc-provider-management.md) | **Provider management v1** | `m8shift-runtime.py providers init/list/show/check/render`; `.m8shift/providers.json`. | Host-side mapping from roster names to safe argv arrays; no provider SDK, secrets, or core routing authority. |
 | [020-rfc-headless-runner-hardening.md](rfc/020-rfc-headless-runner-hardening.md) | **Headless runner hardening** | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, argument validation, and `run.timeout` events. | Bounds stuck provider processes while preserving post-run validation and no force-steal rule. |

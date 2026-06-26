@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.22.0"
+VERSION = "3.23.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2721,6 +2721,43 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(status["runtime"]["claude"]["last_progress"]["message"], "reading")
         doctor = json.loads(self.rt("doctor", "--json").stdout)
         self.assertTrue(doctor["ok"])
+
+    def test_runtime_lane_takeover_requires_stale_presence(self):
+        self.init()
+        before = self.md()
+        first = self.rt("watch", "codex", "--session", "codex-ui-1", "--once", "--json")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        presence_path = os.path.join(self.d, ".m8shift", "runtime", "presence.json")
+        with open(presence_path, encoding="utf-8") as fh:
+            presence = json.load(fh)
+        presence["codex"]["pid"] = os.getpid()
+        with open(presence_path, "w", encoding="utf-8") as fh:
+            json.dump(presence, fh)
+
+        second = self.rt("watch", "codex", "--session", "codex-ui-2", "--once")
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("already owned", second.stderr)
+        premature = self.rt("watch", "codex", "--session", "codex-ui-2", "--takeover-stale", "--once")
+        self.assertNotEqual(premature.returncode, 0)
+        self.assertIn("still fresh", premature.stderr)
+
+        presence["codex"]["last_seen"] = "2000-01-01T00:00:00Z"
+        with open(presence_path, "w", encoding="utf-8") as fh:
+            json.dump(presence, fh)
+        implicit = self.rt("watch", "codex", "--session", "codex-ui-2", "--once")
+        self.assertNotEqual(implicit.returncode, 0)
+        self.assertIn("--takeover-stale", implicit.stderr)
+        takeover = self.rt("watch", "codex", "--session", "codex-ui-2", "--takeover-stale", "--once", "--json")
+        self.assertEqual(takeover.returncode, 0, takeover.stderr)
+        row = json.loads(takeover.stdout)["presence"]
+        self.assertEqual(row["session_id"], "codex-ui-2")
+        self.assertEqual(row["takeover_from"], "codex-ui-1")
+        self.assertEqual(self.md(), before)
+
+        os.remove(presence_path)
+        status = self.rt("status-runtime", "codex", "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(self.md(), before)
 
     def test_runtime_init_providers_roles_workflows_and_report(self):
         self.init("--agents", "claude,codex,gemini")

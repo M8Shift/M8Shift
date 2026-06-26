@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.22.0"
+VERSION = "3.23.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -175,7 +175,9 @@ core relay.
 
 Runtime JSONL sidecars use the `m8shift.runtime.event.v1` envelope. Invalid or
 deleted sidecars are diagnostics, not core relay failures. The runtime companion
-never edits `M8SHIFT.md` directly and never owns the pen.
+uses `presence.json` as one advisory lane per agent identity: a fresh lane blocks a
+second managed runtime, and stale takeover must be explicit. It never edits
+`M8SHIFT.md` directly and never owns the pen.
 """
 
 
@@ -416,18 +418,27 @@ def relay_runtime_state(lk, agent):
     return "waiting"
 
 
-def update_presence(core, agent, session_id, mode, state, run_id="", stale_after=300, force=False):
+def update_presence(core, agent, session_id, mode, state, run_id="", stale_after=300, takeover_stale=False):
     validate_agent(core, agent)
     presence = read_json(PRESENCE, {})
     existing = presence.get(agent)
-    if (existing and existing.get("session_id") != session_id
-            and fresh_presence(existing, stale_after) and not force):
-        sys.exit(
-            f"m8shift-runtime: lane {agent!r} is already owned by session "
-            f"{existing.get('session_id')!r}; rerun with --force after verifying it is stale"
-        )
+    takeover_from = ""
+    if existing and existing.get("session_id") != session_id:
+        owner = existing.get("session_id") or "<unknown>"
+        is_fresh = fresh_presence(existing, stale_after)
+        if not takeover_stale:
+            sys.exit(
+                f"m8shift-runtime: lane {agent!r} is already owned by session "
+                f"{owner!r}; rerun with --takeover-stale only after it is stale"
+            )
+        if is_fresh:
+            sys.exit(
+                f"m8shift-runtime: lane {agent!r} is still fresh for session "
+                f"{owner!r}; takeover refused"
+            )
+        takeover_from = owner
     _, lk = load_status(core)
-    presence[agent] = {
+    row = {
         "schema": PRESENCE_SCHEMA,
         "session_id": session_id,
         "run_id": run_id,
@@ -443,6 +454,10 @@ def update_presence(core, agent, session_id, mode, state, run_id="", stale_after
         "m8shift_version": getattr(core, "VERSION", ""),
         "runtime_version": VERSION,
     }
+    if takeover_from:
+        row["takeover_from"] = takeover_from
+        row["takeover_at"] = row["last_seen"]
+    presence[agent] = row
     atomic_write_json(PRESENCE, presence)
     return presence[agent]
 
@@ -466,7 +481,8 @@ def cmd_watch(args):
         state = relay_runtime_state(lk, agent)
         row = update_presence(
             core, agent, session_id, "ui-watch", state,
-            run_id=run_id, stale_after=args.stale_after, force=args.force,
+            run_id=run_id, stale_after=args.stale_after,
+            takeover_stale=args.takeover_stale or args.force,
         )
         prompt = ""
         if lk.get("state") in ("IDLE", f"AWAITING_{agent.upper()}"):
@@ -1000,7 +1016,9 @@ def main():
     w.add_argument("--interval", type=int, default=5)
     w.add_argument("--stale-after", type=int, default=300)
     w.add_argument("--once", action="store_true")
-    w.add_argument("--force", action="store_true", help="take over a fresh lane after human verification")
+    w.add_argument("--takeover-stale", action="store_true",
+                   help="explicitly take over a different session only when its lane is stale")
+    w.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     w.add_argument("--json", action="store_true")
     w.set_defaults(fn=cmd_watch)
 
