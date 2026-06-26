@@ -45,7 +45,7 @@ import uuid
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.18.3"
+VERSION = "3.19.0"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 
