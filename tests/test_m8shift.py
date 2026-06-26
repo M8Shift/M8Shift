@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.23.0"
+VERSION = "3.24.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2757,6 +2757,65 @@ class TestRuntimeCompanion(CLIBase):
         os.remove(presence_path)
         status = self.rt("status-runtime", "codex", "--json")
         self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(self.md(), before)
+
+    def test_runtime_no_progress_warns_blocks_and_progress_resets(self):
+        self.init()
+        before = self.md()
+        base_args = (
+            "watch", "codex", "--session", "codex-ui-1", "--run", "run1",
+            "--no-progress-warn-after", "60", "--no-progress-block-after", "120",
+            "--once", "--json",
+        )
+        first = self.rt(*base_args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload["presence"]["no_progress_status"], "ok")
+        self.assertEqual(payload["runtime_findings"], [])
+
+        presence_path = os.path.join(self.d, ".m8shift", "runtime", "presence.json")
+        with open(presence_path, encoding="utf-8") as fh:
+            presence = json.load(fh)
+        presence["codex"]["no_progress_since"] = "2000-01-01T00:00:00Z"
+        with open(presence_path, "w", encoding="utf-8") as fh:
+            json.dump(presence, fh)
+
+        warn = self.rt(
+            "watch", "codex", "--session", "codex-ui-1", "--run", "run1",
+            "--no-progress-warn-after", "60", "--no-progress-block-after", "999999999",
+            "--once", "--json",
+        )
+        self.assertEqual(warn.returncode, 0, warn.stderr)
+        warn_payload = json.loads(warn.stdout)
+        self.assertEqual(warn_payload["presence"]["no_progress_status"], "warning")
+        self.assertIn("runtime.no_progress", {f["check"] for f in warn_payload["runtime_findings"]})
+        self.assertNotIn("claim --force", warn.stdout)
+        self.assertNotIn("steer-turn", warn.stdout)
+
+        with open(presence_path, encoding="utf-8") as fh:
+            presence = json.load(fh)
+        presence["codex"]["no_progress_since"] = "2000-01-01T00:00:00Z"
+        with open(presence_path, "w", encoding="utf-8") as fh:
+            json.dump(presence, fh)
+        blocked = self.rt(*base_args)
+        self.assertEqual(blocked.returncode, 2, blocked.stderr)
+        blocked_payload = json.loads(blocked.stdout)
+        self.assertEqual(blocked_payload["presence"]["no_progress_status"], "blocked")
+        self.assertIn("runtime.no_progress", {f["check"] for f in blocked_payload["runtime_findings"]})
+        self.assertNotIn("claim --force", blocked.stdout)
+        self.assertNotIn("steer-turn", blocked.stdout)
+
+        status = json.loads(self.rt("status-runtime", "codex", "--json").stdout)
+        self.assertIn("runtime.no_progress", {f["check"] for f in status["runtime_findings"]})
+        doctor = json.loads(self.rt("doctor", "--json").stdout)
+        self.assertIn("runtime.no_progress", {f["check"] for f in doctor["findings"]})
+
+        self.assertEqual(self.rt("progress", "codex", "--run", "run1", "advanced").returncode, 0)
+        reset = self.rt(*base_args)
+        self.assertEqual(reset.returncode, 0, reset.stderr)
+        reset_payload = json.loads(reset.stdout)
+        self.assertEqual(reset_payload["presence"]["no_progress_status"], "ok")
+        self.assertEqual(reset_payload["runtime_findings"], [])
         self.assertEqual(self.md(), before)
 
     def test_runtime_init_providers_roles_workflows_and_report(self):

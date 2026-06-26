@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.23.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.24.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -462,6 +462,10 @@ must never change claimability or reinterpret `M8SHIFT.md`.
 `presence.json`: a second managed runtime for the same agent is refused while the
 lane is fresh, and takeover requires the explicit `--takeover-stale` flag after the
 record is stale. Lane ownership never grants or steals the core pen.
+With `--no-progress-warn-after` / `--no-progress-block-after`, `watch` can also
+warn or stop its own companion loop when neither `progress.jsonl` nor `runs.jsonl`
+advances for the current run. It emits `runtime.no_progress` findings and a recovery
+hint; it never runs force recovery automatically.
 
 `init`:
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE

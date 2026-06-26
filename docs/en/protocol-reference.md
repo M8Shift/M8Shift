@@ -165,6 +165,10 @@ must never change claimability or reinterpret `M8SHIFT.md`.
 `presence.json`: a second managed runtime for the same agent is refused while the
 lane is fresh, and takeover requires the explicit `--takeover-stale` flag after the
 record is stale. Lane ownership never grants or steals the core pen.
+With `--no-progress-warn-after` / `--no-progress-block-after`, `watch` can also
+warn or stop its own companion loop when neither `progress.jsonl` nor `runs.jsonl`
+advances for the current run. It emits `runtime.no_progress` findings and a recovery
+hint; it never runs force recovery automatically.
 
 `init`:
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE
