@@ -199,29 +199,29 @@ RFCs are maintained in English under `docs/en/rfc/`:
 
 | № | RFC | Status |
 |----:|-----|--------|
-| 001 | [Roster](docs/en/rfc/001-rfc-roster.md) | — |
-| 002 | [N agents](docs/en/rfc/002-rfc-n-agents.md) | shipped |
+| 001 | [Roster](docs/en/rfc/001-rfc-roster.md) | historical / superseded |
+| 002 | [N agents](docs/en/rfc/002-rfc-n-agents.md) | historical / implemented |
 | 003 | [I18n packs](docs/en/rfc/003-rfc-i18n-packs.md) | proposed |
-| 004 | [Memory](docs/en/rfc/004-rfc-memory.md) | shipped |
-| 005 | [Claim check](docs/en/rfc/005-rfc-claim-check.md) | shipped |
-| 006 | [Tasks](docs/en/rfc/006-rfc-tasks.md) | shipped |
+| 004 | [Memory](docs/en/rfc/004-rfc-memory.md) | shipped v3.2.0 |
+| 005 | [Claim check](docs/en/rfc/005-rfc-claim-check.md) | shipped v3.3.0 |
+| 006 | [Tasks](docs/en/rfc/006-rfc-tasks.md) | shipped v3.4.0 |
 | 007 | [Subturn](docs/en/rfc/007-rfc-subturn.md) | rejected |
 | 008 | [Worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) | proposed |
-| 009 | [Runtime companion](docs/en/rfc/009-rfc-runtime-companion.md) | shipped |
-| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | proposed |
-| 011 | [Session history](docs/en/rfc/011-rfc-session-history.md) | — |
-| 012 | [Contracts validation](docs/en/rfc/012-rfc-contracts-validation.md) | shipped |
-| 013 | [Hosted runtime control plane](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | shipped |
-| 014 | [Provider management](docs/en/rfc/014-rfc-provider-management.md) | shipped |
-| 015 | [Shared tree degree gt1](docs/en/rfc/015-rfc-shared-tree-degree-gt1.md) | rejected |
-| 016 | [Cooperative turn request](docs/en/rfc/016-rfc-cooperative-turn-request.md) | shipped |
-| 017 | [Stage6 integrations](docs/en/rfc/017-rfc-stage6-integrations.md) | shipped |
-| 018 | [Agent runtime architecture](docs/en/rfc/018-rfc-agent-runtime-architecture.md) | shipped |
-| 019 | [Input neutral patterns](docs/en/rfc/019-rfc-input-neutral-patterns.md) | shipped |
-| 020 | [Headless runner hardening](docs/en/rfc/020-rfc-headless-runner-hardening.md) | shipped |
-| 021 | [Pause resume](docs/en/rfc/021-rfc-pause-resume.md) | shipped |
-| 022 | [Session reports](docs/en/rfc/022-rfc-session-reports.md) | shipped |
-| 023 | [Agent token footprint](docs/en/rfc/023-rfc-agent-token-footprint.md) | shipped |
+| 009 | [Runtime companion](docs/en/rfc/009-rfc-runtime-companion.md) | implemented v3.15.0 |
+| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | proposed (design filter) |
+| 011 | [Session history](docs/en/rfc/011-rfc-session-history.md) | implemented v3.7.0 |
+| 012 | [Contracts validation](docs/en/rfc/012-rfc-contracts-validation.md) | implemented v3.13.0 |
+| 013 | [Hosted runtime control plane](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | future / not implemented |
+| 014 | [Provider management](docs/en/rfc/014-rfc-provider-management.md) | implemented v3.16.0 |
+| 015 | [Shared tree degree gt1](docs/en/rfc/015-rfc-shared-tree-degree-gt1.md) | rejected (research) |
+| 016 | [Cooperative turn request](docs/en/rfc/016-rfc-cooperative-turn-request.md) | implemented v3.15.0 |
+| 017 | [Stage6 integrations](docs/en/rfc/017-rfc-stage6-integrations.md) | implemented (Stage 6) |
+| 018 | [Agent runtime architecture](docs/en/rfc/018-rfc-agent-runtime-architecture.md) | implemented v3.16.0 |
+| 019 | [Input neutral patterns](docs/en/rfc/019-rfc-input-neutral-patterns.md) | curated input / not impl |
+| 020 | [Headless runner hardening](docs/en/rfc/020-rfc-headless-runner-hardening.md) | implemented v3.16.0 |
+| 021 | [Pause resume](docs/en/rfc/021-rfc-pause-resume.md) | implemented v3.17.0 |
+| 022 | [Session reports](docs/en/rfc/022-rfc-session-reports.md) | implemented v3.18.3 |
+| 023 | [Agent token footprint](docs/en/rfc/023-rfc-agent-token-footprint.md) | implemented (Phase 1) |
 
 ## How it works
 
