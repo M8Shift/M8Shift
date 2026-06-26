@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.22.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.23.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -458,6 +458,10 @@ gitignored runtime sidecars under `.m8shift/runtime/` (`presence.json`,
 the `m8shift.runtime.event.v1` envelope with `source`, `relay`, and `payload`
 metadata. Invalid or deleted runtime sidecars are diagnostic findings only; they
 must never change claimability or reinterpret `M8SHIFT.md`.
+`m8shift-runtime.py watch` also owns one advisory lane per agent identity in
+`presence.json`: a second managed runtime for the same agent is refused while the
+lane is fresh, and takeover requires the explicit `--takeover-stale` flag after the
+record is stale. Lane ownership never grants or steals the core pen.
 
 `init`:
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE

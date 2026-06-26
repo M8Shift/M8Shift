@@ -163,10 +163,12 @@ sessions can both treat `claim codex` as a refresh. A lane owner prevents this.
 **Where it belongs:** runtime companion only.
 
 **Rule:** one active runtime owner per agent lane (`codex`, `claude`, …). Other processes
-can read status but must queue or refuse managed actions.
+can read status but must queue or refuse managed actions. A different runtime may take
+over only with an explicit stale-lane takeover after the current lane record is no
+longer fresh.
 
 **Boundary:** this is instance-level runtime safety. It must not change the core identity
-model.
+model, grant the pen, or steal a fresh lane.
 
 ### 5. Operator inbox modes — KEEP
 
