@@ -71,7 +71,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [023-rfc-agent-token-footprint.md](rfc/023-rfc-agent-token-footprint.md) | Implemented Phase 1: cuts the mandatory protocol read by splitting an operational core from on-demand reference. |
 | [024-rfc-doctor-split.md](rfc/024-rfc-doctor-split.md) | Draft split between core doctor checks and runtime companion diagnostics. |
 | [025-rfc-status-runtime.md](rfc/025-rfc-status-runtime.md) | Draft runtime status composition over core status plus presence/progress sidecars. |
-| [026-rfc-sidecar-retention.md](rfc/026-rfc-sidecar-retention.md) | Draft retention and archive policy for runtime sidecars. |
+| [026-rfc-sidecar-retention.md](rfc/026-rfc-sidecar-retention.md) | Baseline fixed-count sidecar pruning is shipped; richer retention policy remains draft. |
 | [027-rfc-notifications.md](rfc/027-rfc-notifications.md) | Draft local notification mechanisms for handoffs and stale turns. |
 | [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | Draft safe headless command templates for cooperative CLIs. |
 | [029-rfc-m8shift-board.md](rfc/029-rfc-m8shift-board.md) | Draft richer companion workboard concept outside the core task board. |
