@@ -225,7 +225,7 @@ sequenceDiagram
     B->>M: append --to A
 ```
 
-Le degré 2 existe seulement avec [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md) :
+Le degré 2 existe seulement avec [`m8shift-worktree.py`](../en/rfc/008-rfc-worktree-companion.md) :
 
 ```mermaid
 flowchart LR
@@ -257,40 +257,40 @@ La documentation française les référence sans maintenir de copie traduite.
 
 | Source | Surface livrée | Règle de périmètre |
 |--------|----------------|--------------------|
-| [rfc-roster.md](../en/rfc/rfc-roster.md) / [rfc-n-agents.md](../en/rfc/rfc-n-agents.md) | `init --agents a,b,c…`, passations dirigées `--to <agent>` | généralise le duo initial sans changer le stylo unique |
-| [rfc-memory.md](../en/rfc/rfc-memory.md) | `remember` + `M8SHIFT.memory.md` | registre append-only, jamais utilisé pour router |
-| [rfc-claim-check.md](../en/rfc/rfc-claim-check.md) | `claim --check` | lecture seule, aucune acquisition de stylo |
-| [rfc-tasks.md](../en/rfc/rfc-tasks.md) | `task add/done/drop/list/show` + `M8SHIFT.tasks.md` | état replié à la lecture, jamais imposé au mutex |
-| [rfc-session-history.md](../en/rfc/rfc-session-history.md) | `history` + `M8SHIFT.sessions.jsonl` | observabilité de session, pas de claimabilité |
-| [rfc-runtime-patterns.md](../en/rfc/rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine préfixée par le fuseau | diagnostics et formatteurs read-only |
-| [rfc-i18n-packs.md](../en/rfc/rfc-i18n-packs.md) | `m8shift-i18n.py --langs … --into DIR`, `init --lang` sur variantes générées | les packs sont des entrées de build, pas des dépendances runtime |
+| [001-rfc-roster.md](../en/rfc/001-rfc-roster.md) / [002-rfc-n-agents.md](../en/rfc/002-rfc-n-agents.md) | `init --agents a,b,c…`, passations dirigées `--to <agent>` | généralise le duo initial sans changer le stylo unique |
+| [004-rfc-memory.md](../en/rfc/004-rfc-memory.md) | `remember` + `M8SHIFT.memory.md` | registre append-only, jamais utilisé pour router |
+| [005-rfc-claim-check.md](../en/rfc/005-rfc-claim-check.md) | `claim --check` | lecture seule, aucune acquisition de stylo |
+| [006-rfc-tasks.md](../en/rfc/006-rfc-tasks.md) | `task add/done/drop/list/show` + `M8SHIFT.tasks.md` | état replié à la lecture, jamais imposé au mutex |
+| [011-rfc-session-history.md](../en/rfc/011-rfc-session-history.md) | `history` + `M8SHIFT.sessions.jsonl` | observabilité de session, pas de claimabilité |
+| [010-rfc-runtime-patterns.md](../en/rfc/010-rfc-runtime-patterns.md) | `recap`, `peek`, `log`, `status --json`, `doctor`, heure locale humaine préfixée par le fuseau | diagnostics et formatteurs read-only |
+| [003-rfc-i18n-packs.md](../en/rfc/003-rfc-i18n-packs.md) | `m8shift-i18n.py --langs … --into DIR`, `init --lang` sur variantes générées | les packs sont des entrées de build, pas des dépendances runtime |
 | garde-fou opérateur | `next <agent>`, `status --for <agent>`, `append --wait` | aide à rester dans la boucle ; `next` ne mute qu'en faisant le `claim` normal |
-| [rfc-worktree-companion.md](../en/rfc/rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
+| [008-rfc-worktree-companion.md](../en/rfc/008-rfc-worktree-companion.md) | `m8shift-worktree.py` | vrai parallèle seulement hors cœur, puis intégration sérialisée |
 | [protocole courant](protocole.md) | champs consultatifs `append` (`branch`, `commit`, `tests`, `next`, `blocked-on`, `x_*`) | transmis au destinataire, jamais interprétés par le moteur |
-| [rfc-contracts-validation.md](../en/rfc/rfc-contracts-validation.md) | `contract validate`, `doctor --contracts`, flags contrat `append` | validation read-only ; ne route pas le travail et ne donne pas de permissions |
-| [rfc-stage6-integrations.md](../en/rfc/rfc-stage6-integrations.md) | installateurs Bash/PowerShell, `checksums.sha256`, scripts versionnés, `watch`, runner headless avec `M8SHIFT_RUN_ID` et `.m8shift/runtime/runs.jsonl` | couche locale livrée autour du cœur passif ; fournisseurs/IDE/MCP/plan de contrôle restent optionnels |
-| [rfc-runtime-companion.md](../en/rfc/rfc-runtime-companion.md) | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`, sidecars `.m8shift/runtime/` | compagnon local consultatif ; aucune autorité de stylo et aucune écriture directe dans `M8SHIFT.md` |
-| [rfc-agent-runtime-architecture.md](../en/rfc/rfc-agent-runtime-architecture.md) | `m8shift-runtime.py init`, `roles`, `workflows`, `approve`, `report` | scaffold local et rapports ; supprimable sans casser le relais cœur |
-| [rfc-provider-management.md](../en/rfc/rfc-provider-management.md) | `m8shift-runtime.py providers init/list/show/check/render`, `.m8shift/providers.json` | mapping host-side vers argv sûrs ; aucun SDK fournisseur, secret ou routage cœur |
-| [rfc-headless-runner-hardening.md](../en/rfc/rfc-headless-runner-hardening.md) | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, validation et `run.timeout` | borne les processus headless bloqués sans force-steal |
-| [rfc-cooperative-turn-request.md](../en/rfc/rfc-cooperative-turn-request.md) | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, `M8SHIFT.requests.md` | les demandes ne rendent jamais `claim` légal ; seul yield/steer explicite route, et `steer-turn` refuse `WORKING_*` frais |
-| [rfc-pause-resume.md](../en/rfc/rfc-pause-resume.md) | `PAUSED`, `pause <détenteur> --reason`, `resume <agent> --reason`, `next --resume --reason` | session ouverte sans tâche active : aucun détenteur, reprise seulement sur nouveau scope explicite |
-| [rfc-session-reports.md](../en/rfc/rfc-session-reports.md) | `session list/show/decisions/report`, `M8SHIFT.session-reports/` | mémoire Markdown dérivée ; écriture confinée, fichiers M8Shift réservés refusés même par variante de casse, aucune mutation du `LOCK` |
+| [012-rfc-contracts-validation.md](../en/rfc/012-rfc-contracts-validation.md) | `contract validate`, `doctor --contracts`, flags contrat `append` | validation read-only ; ne route pas le travail et ne donne pas de permissions |
+| [017-rfc-stage6-integrations.md](../en/rfc/017-rfc-stage6-integrations.md) | installateurs Bash/PowerShell, `checksums.sha256`, scripts versionnés, `watch`, runner headless avec `M8SHIFT_RUN_ID` et `.m8shift/runtime/runs.jsonl` | couche locale livrée autour du cœur passif ; fournisseurs/IDE/MCP/plan de contrôle restent optionnels |
+| [009-rfc-runtime-companion.md](../en/rfc/009-rfc-runtime-companion.md) | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`, sidecars `.m8shift/runtime/` | compagnon local consultatif ; aucune autorité de stylo et aucune écriture directe dans `M8SHIFT.md` |
+| [018-rfc-agent-runtime-architecture.md](../en/rfc/018-rfc-agent-runtime-architecture.md) | `m8shift-runtime.py init`, `roles`, `workflows`, `approve`, `report` | scaffold local et rapports ; supprimable sans casser le relais cœur |
+| [014-rfc-provider-management.md](../en/rfc/014-rfc-provider-management.md) | `m8shift-runtime.py providers init/list/show/check/render`, `.m8shift/providers.json` | mapping host-side vers argv sûrs ; aucun SDK fournisseur, secret ou routage cœur |
+| [020-rfc-headless-runner-hardening.md](../en/rfc/020-rfc-headless-runner-hardening.md) | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, validation et `run.timeout` | borne les processus headless bloqués sans force-steal |
+| [016-rfc-cooperative-turn-request.md](../en/rfc/016-rfc-cooperative-turn-request.md) | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, `M8SHIFT.requests.md` | les demandes ne rendent jamais `claim` légal ; seul yield/steer explicite route, et `steer-turn` refuse `WORKING_*` frais |
+| [021-rfc-pause-resume.md](../en/rfc/021-rfc-pause-resume.md) | `PAUSED`, `pause <détenteur> --reason`, `resume <agent> --reason`, `next --resume --reason` | session ouverte sans tâche active : aucun détenteur, reprise seulement sur nouveau scope explicite |
+| [022-rfc-session-reports.md](../en/rfc/022-rfc-session-reports.md) | `session list/show/decisions/report`, `M8SHIFT.session-reports/` | mémoire Markdown dérivée ; écriture confinée, fichiers M8Shift réservés refusés même par variante de casse, aucune mutation du `LOCK` |
 
-Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc/rfc-contracts-validation.md)
+Surface livrée : [RFC — Contrats et validation Stage 4](../en/rfc/012-rfc-contracts-validation.md)
 décrit les contrats de passation typés, décisions de revue explicites (`approve`, `revise`,
 `reject`, `waive`) et commandes de validation read-only. La validation peut signaler des
 avertissements ou erreurs strictes lorsque l'opérateur le demande, mais elle ne route pas le
 travail, ne donne pas de permissions, ne lance pas d'outils et ne mute pas le `LOCK`.
 
 Surfaces futures documentées :
-[RFC — Plan de contrôle runtime / hébergé](../en/rfc/rfc-hosted-runtime-control-plane.md)
+[RFC — Plan de contrôle runtime / hébergé](../en/rfc/013-rfc-hosted-runtime-control-plane.md)
 pour la supervision hébergée et les notifications hors cœur ; la présence locale,
 l'inbox opérateur, la progression et les diagnostics locaux sont déjà couverts par
 `m8shift-runtime.py` ;
-[RFC — Gestion des fournisseurs](../en/rfc/rfc-provider-management.md) pour associer les
+[RFC — Gestion des fournisseurs](../en/rfc/014-rfc-provider-management.md) pour associer les
 identités du roster (`claude`, `codex`, `gemini`, `vibe`, …) aux commandes et
-capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](../en/rfc/rfc-shared-tree-degree-gt1.md)
+capacités hôte ; [RFC — Écritures de degré > 1 dans un même working tree](../en/rfc/015-rfc-shared-tree-degree-gt1.md)
 comme sujet de recherche rejeté pour le cœur, remplacé en pratique par les worktrees isolés.
 
 Les idées rejetées restent documentées comme non-goals : daemon, notifications push

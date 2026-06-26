@@ -1,6 +1,6 @@
 # Stage 2 — Design rationale & rejected alternatives
 
-Companion to [rfc-n-agents.md](rfc/rfc-n-agents.md). This records the *design discussion* behind the
+Companion to [002-rfc-n-agents.md](rfc/002-rfc-n-agents.md). This records the *design discussion* behind the
 Stage-2 RFC: the architectural choices, **why** each was made, and **what was rejected and why**.
 The RFC is the spec; this is the reasoning and the discarded paths, so a future contributor does
 not re-open settled questions or re-introduce a rejected idea.

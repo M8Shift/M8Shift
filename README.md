@@ -195,33 +195,33 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
 - **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
 - **Explanation (philosophy)** — [docs/en/philosophy.md](docs/en/philosophy.md) — why the project exists.
-- **RFC (session history)** — [docs/en/rfc/rfc-session-history.md](docs/en/rfc/rfc-session-history.md) —
+- **RFC (session history)** — [docs/en/rfc/011-rfc-session-history.md](docs/en/rfc/011-rfc-session-history.md) —
   session ledger and `history`.
-- **RFC (session reports)** — [docs/en/rfc/rfc-session-reports.md](docs/en/rfc/rfc-session-reports.md) —
+- **RFC (session reports)** — [docs/en/rfc/022-rfc-session-reports.md](docs/en/rfc/022-rfc-session-reports.md) —
   shipped Markdown reports and decision ledger derived from existing turns.
-- **RFC (worktree companion)** — [docs/en/rfc/rfc-worktree-companion.md](docs/en/rfc/rfc-worktree-companion.md) —
+- **RFC (worktree companion)** — [docs/en/rfc/008-rfc-worktree-companion.md](docs/en/rfc/008-rfc-worktree-companion.md) —
   opt-in degree-2 concurrency through isolated git worktrees.
-- **RFC (runtime companion)** — [docs/en/rfc/rfc-runtime-companion.md](docs/en/rfc/rfc-runtime-companion.md) —
+- **RFC (runtime companion)** — [docs/en/rfc/009-rfc-runtime-companion.md](docs/en/rfc/009-rfc-runtime-companion.md) —
   shipped local sidecar companion for presence, operator inbox, progress, and UI-safe waiting.
-- **RFC (cooperative turn request)** — [docs/en/rfc/rfc-cooperative-turn-request.md](docs/en/rfc/rfc-cooperative-turn-request.md) —
+- **RFC (cooperative turn request)** — [docs/en/rfc/016-rfc-cooperative-turn-request.md](docs/en/rfc/016-rfc-cooperative-turn-request.md) —
   audit-only `request-turn` plus `yield-turn`/`decline-turn`/`steer-turn --force` for interactive UI deadlocks.
-- **RFC (pause/resume)** — [docs/en/rfc/rfc-pause-resume.md](docs/en/rfc/rfc-pause-resume.md) —
+- **RFC (pause/resume)** — [docs/en/rfc/021-rfc-pause-resume.md](docs/en/rfc/021-rfc-pause-resume.md) —
   stable `PAUSED` state for open sessions with no active task.
-- **RFC (agent runtime architecture)** — [docs/en/rfc/rfc-agent-runtime-architecture.md](docs/en/rfc/rfc-agent-runtime-architecture.md) —
+- **RFC (agent runtime architecture)** — [docs/en/rfc/018-rfc-agent-runtime-architecture.md](docs/en/rfc/018-rfc-agent-runtime-architecture.md) —
   shipped local runtime/scaffold layer for roles, workflows, approvals, provider registry, and reports.
-- **RFC (provider management)** — [docs/en/rfc/rfc-provider-management.md](docs/en/rfc/rfc-provider-management.md) —
+- **RFC (provider management)** — [docs/en/rfc/014-rfc-provider-management.md](docs/en/rfc/014-rfc-provider-management.md) —
   shipped local provider registry for cooperative agent identities and safe argv rendering.
-- **RFC (headless runner hardening)** — [docs/en/rfc/rfc-headless-runner-hardening.md](docs/en/rfc/rfc-headless-runner-hardening.md) —
+- **RFC (headless runner hardening)** — [docs/en/rfc/020-rfc-headless-runner-hardening.md](docs/en/rfc/020-rfc-headless-runner-hardening.md) —
   validation, dry-run, turn timeout, child termination, and timeout audit events.
-- **RFC input (neutral runtime patterns)** — [docs/en/rfc/rfc-input-neutral-patterns.md](docs/en/rfc/rfc-input-neutral-patterns.md) —
+- **RFC input (neutral runtime patterns)** — [docs/en/rfc/019-rfc-input-neutral-patterns.md](docs/en/rfc/019-rfc-input-neutral-patterns.md) —
   curated pattern inventory for future companion RFCs.
-- **RFC (runtime patterns)** — [docs/en/rfc/rfc-runtime-patterns.md](docs/en/rfc/rfc-runtime-patterns.md) —
+- **RFC (runtime patterns)** — [docs/en/rfc/010-rfc-runtime-patterns.md](docs/en/rfc/010-rfc-runtime-patterns.md) —
   what M8Shift keeps, rejects, or defers from runtime/gateway designs.
-- **RFC (contracts and validation)** — [docs/en/rfc/rfc-contracts-validation.md](docs/en/rfc/rfc-contracts-validation.md) —
+- **RFC (contracts and validation)** — [docs/en/rfc/012-rfc-contracts-validation.md](docs/en/rfc/012-rfc-contracts-validation.md) —
   Stage 4 typed handoffs, review decisions, sugar flags, `contract validate`, and `doctor --contracts`.
-- **RFC (future runtime/control plane)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](docs/en/rfc/rfc-hosted-runtime-control-plane.md) —
+- **RFC (future runtime/control plane)** — [docs/en/rfc/013-rfc-hosted-runtime-control-plane.md](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) —
   optional hosted/local runtime supervision outside the passive core.
-- **RFC (shared-tree degree > 1)** — [docs/en/rfc/rfc-shared-tree-degree-gt1.md](docs/en/rfc/rfc-shared-tree-degree-gt1.md) —
+- **RFC (shared-tree degree > 1)** — [docs/en/rfc/015-rfc-shared-tree-degree-gt1.md](docs/en/rfc/015-rfc-shared-tree-degree-gt1.md) —
   research RFC; rejected for the core in favor of isolated worktrees.
 
 ## How it works
@@ -365,10 +365,10 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 | Operator-loop guardrails | ✅ Shipped | `next`, `append --wait`, `status --for`, `request-turn/yield-turn/decline-turn/steer-turn` | prevents lost handoffs and UI-routing deadlocks without creating a second pen |
 | Pause / resume | ✅ Shipped | `pause <holder> --reason …`, `resume <agent> --reason …`, `next --resume` | stable open/no-work state: `PAUSED`, `holder=none`, explicit user-scope resume |
 | Local integration layer | ✅ Shipped | installers, checksums, version surfaces, `examples/headless_runner.py`, `m8shift-runtime.py` | local convenience layer; no provider SDK in the core |
-| Degree-2 parallel work | ✅ Shipped, opt-in | [`m8shift-worktree.py`](docs/en/rfc/rfc-worktree-companion.md) | isolated git worktrees; serialized integration pen; core remains degree-1 |
+| Degree-2 parallel work | ✅ Shipped, opt-in | [`m8shift-worktree.py`](docs/en/rfc/008-rfc-worktree-companion.md) | isolated git worktrees; serialized integration pen; core remains degree-1 |
 | Provider/runtime companion | ✅ Shipped v1 | `m8shift-runtime.py init/providers/roles/workflows/approve/report` | host-side config and reports; no secrets, no second routing authority |
-| `subturn` provenance ledger | ❌ Rejected | [rationale](docs/en/rfc/rfc-subturn.md) | redundant with advisory fields and `remember` |
-| Hosted control plane / IDE integrations | 🔭 Future companion | [RFC](docs/en/rfc/rfc-hosted-runtime-control-plane.md) | optional layer outside the passive core |
+| `subturn` provenance ledger | ❌ Rejected | [rationale](docs/en/rfc/007-rfc-subturn.md) | redundant with advisory fields and `remember` |
+| Hosted control plane / IDE integrations | 🔭 Future companion | [RFC](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | optional layer outside the passive core |
 
 New ideas are welcome via an RFC under `docs/en/rfc/`. RFCs are English-only;
 localized documentation should link to the canonical English RFC instead of maintaining
@@ -376,7 +376,7 @@ translated copies.
 
 **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
 disjoint writes inside the shared tree (use the
-[opt-in worktree companion](docs/en/rfc/rfc-worktree-companion.md) instead); a
+[opt-in worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) instead); a
 background daemon / autonomous watcher / push-notifier; running git, builds or APIs (needs auth +
 network → an orchestrator); third-party deps or a multi-file package; and "smart"
 *derived* memory (dedup / summarize / prune) — the ledger stays a dumb, human-curated
