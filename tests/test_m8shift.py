@@ -303,6 +303,17 @@ class TestInit(CLIBase):
         self.assertEqual(lk["turn"], "0")
         self.assertIn("session", r.stdout)
 
+    def test_init_writes_commit_msg_hook_template(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        self.assertTrue(os.path.exists(hook), hook)
+        with open(hook, encoding="utf-8") as f:
+            body = f.read()
+        self.assertIn("Coordinated-With: M8Shift vX.Y.Z", body)
+        self.assertIn("M8SHIFT_ROOT", body)
+        if os.name != "nt":
+            self.assertTrue(os.access(hook, os.X_OK), "hook template should be executable")
+
     def test_init_project_name(self):
         self.init("--name", "My Great Project")
         self.assertIn("# M8Shift · My Great Project", self.md())
@@ -2310,6 +2321,54 @@ class TestAuditFixes(CLIBase):
         self.assertIn(f"v{v}", self.cw("recap").stdout.splitlines()[0])
         self.assertIn(v, self.md())                                   # stamped in the M8SHIFT.md banner
         self.assertEqual(json.loads(self.cw("status", "--json").stdout)["m8shift_version"], v)
+
+    def test_commit_msg_hook_injects_coordinated_with_from_m8shift_root(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject\n\nBody.\n\nCo-Authored-By: Claude <noreply@example.invalid>\n")
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            trailer = f"Coordinated-With: M8Shift v{cowork.VERSION}"
+            self.assertIn(trailer, body)
+            self.assertLess(body.index("Co-Authored-By:"), body.index("Coordinated-With:"))
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                self.assertEqual(f.read().count("Coordinated-With:"), 1)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_skips_without_configured_relay(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            original = "subject only\n"
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write(original)
+            env = os.environ.copy()
+            env.pop("M8SHIFT_ROOT", None)
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
 
     def test_distributed_scripts_version_surface(self):
         # Every tracked Python script carries the same explicit version surface as m8shift.py.

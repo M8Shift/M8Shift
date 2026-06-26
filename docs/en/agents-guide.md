@@ -108,8 +108,12 @@ releasable at all times.
   personal/forge identity.
 - **No leaked traces.** No internal host/forge addresses, local user paths, or legacy
   project names in committed content or history of public mirrors.
-- **Signed-off collaboration.** Commit messages end with the agreed
+- **Signed-off collaboration.** Commit messages include the agreed
   `Co-Authored-By:` trailer.
+- **Dogfooding provenance.** Commits coordinated through M8Shift carry
+  `Coordinated-With: M8Shift vX.Y.Z`, where `vX.Y.Z` is the active relay engine
+  version. Use the generated `.m8shift/hooks/commit-msg` template and set
+  `M8SHIFT_ROOT` when the relay lives outside the repo being changed.
 - **No relay artefacts committed.** `M8SHIFT.md`, `M8SHIFT.archive.md`,
   `.m8shift.lock`, and other generated relay state stay out of the repo.
 
