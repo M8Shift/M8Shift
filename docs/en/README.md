@@ -21,6 +21,7 @@ M8Shift is **free and open source**, released under the
 | [protocol.md](protocol.md) | Shared relay protocol — operational core (first read; states, rules, work loop). |
 | [protocol-reference.md](protocol-reference.md) | On-demand reference: mental model, full command reference, project adoption. |
 | [specification.md](specification.md) | Full functional and non-functional specification. |
+| [agents-guide.md](agents-guide.md) | What is expected of AI agents: collaboration, branch/MR workflow, and the code-quality bar. |
 
 ## Explanation
 
