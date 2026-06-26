@@ -69,8 +69,8 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [021-rfc-pause-resume.md](rfc/021-rfc-pause-resume.md) | Stable `PAUSED` state for open sessions with no active task. |
 | [022-rfc-session-reports.md](rfc/022-rfc-session-reports.md) | Shipped session reports and decision ledger generated from existing turns. |
 | [023-rfc-agent-token-footprint.md](rfc/023-rfc-agent-token-footprint.md) | Implemented Phase 1: cuts the mandatory protocol read by splitting an operational core from on-demand reference. |
-| [024-rfc-doctor-split.md](rfc/024-rfc-doctor-split.md) | Draft split between core doctor checks and runtime companion diagnostics. |
-| [025-rfc-status-runtime.md](rfc/025-rfc-status-runtime.md) | Draft runtime status composition over core status plus presence/progress sidecars. |
+| [024-rfc-doctor-split.md](rfc/024-rfc-doctor-split.md) | Baseline split between core doctor checks and runtime companion diagnostics. |
+| [025-rfc-status-runtime.md](rfc/025-rfc-status-runtime.md) | Baseline runtime status composition over core status plus presence/progress/inbox/run sidecars. |
 | [026-rfc-sidecar-retention.md](rfc/026-rfc-sidecar-retention.md) | Baseline fixed-count sidecar pruning is shipped; richer retention policy remains draft. |
 | [027-rfc-notifications.md](rfc/027-rfc-notifications.md) | Draft local notification mechanisms for handoffs and stale turns. |
 | [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | Draft safe headless command templates for cooperative CLIs. |

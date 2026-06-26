@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """m8shift-runtime.py — optional local runtime companion for M8Shift.
 
-The companion records local presence, operator messages, and progress sidecars
-under `.m8shift/runtime/`. It never edits `M8SHIFT.md` directly and never becomes
+The companion records local presence, operator messages, progress, and run lifecycle
+sidecars under `.m8shift/runtime/`. It never edits `M8SHIFT.md` directly and never becomes
 an authority for the pen; all routing remains owned by `m8shift.py`.
 """
 import argparse
@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.26.0"
+VERSION = "3.27.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1065,7 +1065,20 @@ def runtime_summary(agent=""):
     progress, err = read_jsonl_diagnostic(PROGRESS)
     if err:
         findings.append({"severity": "warning", "check": "runtime.jsonl", "message": err})
-    agents = [agent] if agent else sorted(presence)
+    runs, err = read_jsonl_diagnostic(RUNS)
+    if err:
+        findings.append({"severity": "warning", "check": "runtime.jsonl", "message": err})
+    if agent:
+        agents = [agent]
+    else:
+        discovered = set(presence)
+        discovered.update(row.get("agent") for row in progress if row.get("agent"))
+        discovered.update(row.get("agent") for row in runs if row.get("agent"))
+        if os.path.isdir(INBOX_DIR):
+            for name in os.listdir(INBOX_DIR):
+                if name.endswith(".jsonl"):
+                    discovered.add(name[:-6])
+        agents = sorted(ag for ag in discovered if AGENT_RE.fullmatch(ag))
     out = {}
     for ag in agents:
         inbox_path = os.path.join(INBOX_DIR, f"{ag}.jsonl")
@@ -1073,6 +1086,7 @@ def runtime_summary(agent=""):
         if err:
             findings.append({"severity": "warning", "check": "runtime.inbox", "message": err})
         last_progress = next((row for row in reversed(progress) if row.get("agent") == ag), None)
+        last_run_event = next((row for row in reversed(runs) if row.get("agent") == ag), None)
         pres = presence.get(ag)
         if isinstance(pres, dict):
             finding = no_progress_finding(ag, pres)
@@ -1083,6 +1097,7 @@ def runtime_summary(agent=""):
             "presence_stale": isinstance(pres, dict) and not fresh_presence(pres, pres.get("stale_after_seconds", 300)),
             "inbox_count": len(inbox),
             "last_progress": last_progress,
+            "last_run_event": last_run_event,
         }
     return out, findings
 
@@ -1109,8 +1124,11 @@ def cmd_status_runtime(args):
             f"{ag}: presence={pres.get('state', '-')} session={pres.get('session_id', '-')} "
             f"inbox={data.get('inbox_count', 0)}"
         )
-        if data.get("last_progress"):
+        if not args.brief and data.get("last_progress"):
             print(f"  last progress: {data['last_progress'].get('message')} ({data['last_progress'].get('ts')})")
+        if not args.brief and data.get("last_run_event"):
+            row = data["last_run_event"]
+            print(f"  last run: {row.get('event', row.get('type', '-'))} {row.get('run_id', '')} ({row.get('ts', '-')})")
     return 0
 
 
@@ -1259,6 +1277,7 @@ def main():
 
     sr = sub.add_parser("status-runtime", help="show relay status plus runtime sidecars")
     sr.add_argument("agent", nargs="?")
+    sr.add_argument("--brief", action="store_true", help="compact human output; ignored with --json")
     sr.add_argument("--json", action="store_true")
     sr.set_defaults(fn=cmd_status_runtime)
 

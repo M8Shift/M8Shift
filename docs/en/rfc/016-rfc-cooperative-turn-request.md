@@ -207,6 +207,9 @@ The companion must still call the same core commands. It must not bypass `LOCK`.
   `WORKING_<from>`.
 - `status --for` and `next` show open requests without making routing decisions.
 - Every request and answer is append-only and auditable.
+- `doctor` reports malformed request markers, invalid request events, request
+  answer events without a prior `turn_request`, or more than one answer for the same
+  request read-only; it never repairs the ledger or makes a request claimable.
 - Existing `claim`, `append`, `release`, `done`, `wait`, and stale-lock semantics remain
   unchanged.
 
