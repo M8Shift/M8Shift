@@ -18,7 +18,8 @@ M8Shift is **free and open source**, released under the
 
 | Document | Purpose |
 |----------|---------|
-| [protocol.md](protocol.md) | Shared relay protocol, states, rules, and command workflow. |
+| [protocol.md](protocol.md) | Shared relay protocol — operational core (first read; states, rules, work loop). |
+| [protocol-reference.md](protocol-reference.md) | On-demand reference: mental model, full command reference, project adoption. |
 | [specification.md](specification.md) | Full functional and non-functional specification. |
 
 ## Explanation

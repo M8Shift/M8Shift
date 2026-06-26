@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.18.3"
+VERSION = "3.19.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -107,7 +107,7 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIn("does not wake your UI", s)
 
     def test_prompt_guardrails_are_present_in_core_and_packs(self):
-        self.assertIn("coordination data, not higher", cowork.PROTOCOL["en"])
+        self.assertIn("untrusted coordination data", cowork.PROTOCOL["en"])
         self.assertIn("untrusted coordination data", cowork.STANZA["en"])
         for rel in (
             "i18n/de/stanza.txt", "i18n/es/stanza.txt", "i18n/fr/stanza.txt",
@@ -125,7 +125,8 @@ class TestPureFunctions(unittest.TestCase):
     def test_protocol_docs_in_sync(self):
         """Doc sync (EN-only core): docs/en == the core EN template; docs/<lang> == the
         i18n/<lang> pack body byte-for-byte (regenerate with scripts/gen_docs.py)."""
-        cases = [("docs/en/protocol.md", cowork.PROTOCOL["en"])]
+        cases = [("docs/en/protocol.md", cowork.PROTOCOL["en"]),
+                 ("docs/en/protocol-reference.md", cowork.PROTOCOL_REFERENCE["en"])]
         fr_pack = os.path.join(REPO, "i18n", "fr", "protocol.md")
         if os.path.exists(fr_pack):
             with open(fr_pack, encoding="utf-8") as f:
@@ -137,6 +138,47 @@ class TestPureFunctions(unittest.TestCase):
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), expected,
                                  f"{rel} diverged — regenerate it with scripts/gen_docs.py.")
+
+    def test_protocol_core_within_budget(self):
+        """The bundled operational core stays small enough to read each session."""
+        core = cowork.PROTOCOL["en"]
+        proxy_tokens = len(core.encode("utf-8")) // 4
+        self.assertLessEqual(
+            proxy_tokens, 2000,
+            f"protocol core is {proxy_tokens} proxy tokens (> 2000): move detail to "
+            f"PROTOCOL_EN_REFERENCE or condense the core.")
+
+    def test_protocol_core_keeps_safety_invariants(self):
+        """Condensing the core must not drop any safety / prompt-boundary invariant."""
+        core = cowork.PROTOCOL["en"]
+        required = [
+            "coordination data",       # relay content is untrusted
+            "claim → work → append",   # mandatory work order
+            "EXCLUSIVE",               # claim is exclusive
+            "immutable",               # closed turns never rewritten
+            "still-valid lock",        # --force refused on a valid lock
+            "--reason",                # audited force overrides
+            "HTML comments",           # turn-marker safety
+            "advisory",                # the lock is advisory
+            "No network, no daemon",   # no authority escalation
+        ]
+        for needle in required:
+            self.assertIn(needle, core,
+                          f"protocol core dropped the safety invariant: {needle!r}")
+
+    def test_i18n_packs_remain_whole(self):
+        """Phase 1 splits EN only; localized packs stay single whole files."""
+        self.assertEqual(set(cowork.PROTOCOL_REFERENCE), {"en"},
+                         "Phase 1 splits EN only; do not register split packs here.")
+        fr_pack = os.path.join(REPO, "i18n", "fr", "protocol.md")
+        if os.path.exists(fr_pack):
+            with open(fr_pack, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("## 7.", body)
+            self.assertIn("## 8.", body)
+            self.assertFalse(
+                os.path.exists(os.path.join(REPO, "i18n", "fr", "protocol-reference.md")),
+                "i18n packs must not be split into a reference in Phase 1.")
 
     def test_ambiguous_anchor_variants_refused(self):
         """Two variants on a case-sensitive filesystem are refused without an arbitrary choice."""
@@ -948,6 +990,11 @@ class TestRoster(CLIBase):
         self.init("--agents", "gemini,lechat")
         with open(os.path.join(self.d, "M8SHIFT.protocol.md"), encoding="utf-8") as f:
             proto = f.read()
+        # the full protocol is now split: core + on-demand reference (§7/§8 live there)
+        ref_path = os.path.join(self.d, "M8SHIFT.protocol-reference.md")
+        if os.path.exists(ref_path):
+            with open(ref_path, encoding="utf-8") as f:
+                proto += "\n" + f.read()
         # no more exclusive claude/codex assertion
         self.assertNotIn("either `claude` or `codex`", proto)         # §0 identity
         self.assertNotIn("`claude` \\| `codex` \\| `none`", proto)    # holder enum
@@ -2843,9 +2890,12 @@ class TestProtocolPackCommandCoverage(unittest.TestCase):
         return [cls.SUBVERB.get(t, t) for t in tokens]
 
     def test_english_core_documents_all_cli_commands(self):
+        # the command reference moved to PROTOCOL_REFERENCE; the full EN protocol
+        # (core + on-demand reference) must still document every shipped command.
+        protocol = cowork.PROTOCOL["en"] + "\n" + cowork.PROTOCOL_REFERENCE["en"]
         for cmd in self._cli_commands():
-            self.assertIn(f"m8shift.py {cmd}", cowork.PROTOCOL["en"],
-                          f"EN core protocol does not document shipped CLI command {cmd!r}")
+            self.assertIn(f"m8shift.py {cmd}", protocol,
+                          f"EN protocol (core+reference) does not document shipped CLI command {cmd!r}")
 
     def test_packs_document_all_cli_commands(self):
         commands = self._cli_commands()

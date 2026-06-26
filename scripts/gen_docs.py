@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import m8shift  # noqa: E402
 
-VERSION = "3.18.3"
+VERSION = "3.19.0"
 
 
 def main(argv=None):
@@ -27,7 +27,10 @@ def main(argv=None):
     p.parse_args(argv)
 
     # (relative doc path, source text)
-    targets = [("docs/en/protocol.md", m8shift.PROTOCOL["en"])]
+    targets = [
+        ("docs/en/protocol.md", m8shift.PROTOCOL["en"]),
+        ("docs/en/protocol-reference.md", m8shift.PROTOCOL_REFERENCE["en"]),
+    ]
     fr_pack = os.path.join(ROOT, "i18n", "fr", "protocol.md")
     if os.path.isfile(fr_pack):
         targets.append(("docs/fr/protocole.md", open(fr_pack, encoding="utf-8").read()))
