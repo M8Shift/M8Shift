@@ -447,7 +447,7 @@ All companion-generated JSONL events SHOULD use one envelope:
   },
   "source": {
     "tool": "m8shift-runtime.py",
-    "version": "3.19.0"
+    "version": "<runtime version>"
   },
   "idempotency_key": "",
   "payload": {}

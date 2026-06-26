@@ -154,6 +154,14 @@ cp /path/to/m8shift-runtime.py .  # optional: local presence/inbox/progress comp
 ./m8shift.py init                 # project name = folder name (otherwise --name)
 ```
 
+`m8shift-runtime.py init` is separate from the core `init`: it scaffolds optional,
+gitignored runtime sidecars under `.m8shift/runtime/` (`presence.json`,
+`runs.jsonl`, `progress.jsonl`, `idempotency.jsonl`, `approvals.jsonl`,
+`inbox/*.jsonl`) plus local provider/role/workflow files. Runtime JSONL events use
+the `m8shift.runtime.event.v1` envelope with `source`, `relay`, and `payload`
+metadata. Invalid or deleted runtime sidecars are diagnostic findings only; they
+must never change claimability or reinterpret `M8SHIFT.md`.
+
 `init`:
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE
   lock); `M8SHIFT.md` is **not** overwritten if it already exists (except with
