@@ -191,6 +191,7 @@ empty handback** (`next <you>` or `claim <you>` + `peek <you>`). `release <you> 
 incoming turn unless you pass `--force --reason TEXT` (audited). Normal flow is
 `peek` → do the work/analysis → `append`.
 
+> [!NOTE]
 > Interactive UI note: a human resumes you between turns — `wait` blocks a process,
 > it does not wake your chat UI. Fully hands-off relays need a headless runner.
 
