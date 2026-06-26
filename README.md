@@ -206,7 +206,7 @@ RFCs are maintained in English under `docs/en/rfc/`:
 | 005 | [Claim check](docs/en/rfc/005-rfc-claim-check.md) | shipped v3.3.0 |
 | 006 | [Tasks](docs/en/rfc/006-rfc-tasks.md) | shipped v3.4.0 |
 | 007 | [Subturn](docs/en/rfc/007-rfc-subturn.md) | rejected |
-| 008 | [Worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) | proposed |
+| 008 | [Worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) | implemented v1 |
 | 009 | [Runtime companion](docs/en/rfc/009-rfc-runtime-companion.md) | implemented v3.15.0 |
 | 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | proposed (design filter) |
 | 011 | [Session history](docs/en/rfc/011-rfc-session-history.md) | implemented v3.7.0 |
