@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.20.0"
+VERSION = "3.21.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -1205,6 +1205,62 @@ class TestReadCommands(CLIBase):
         self.assertEqual(r.returncode, 1)
         findings = json.loads(r.stdout)["findings"]
         self.assertIn("lock.stale_working", {f["check"] for f in findings})
+
+    def test_doctor_lint_override_stanza_out_of_sync(self):
+        with open(os.path.join(self.d, "AGENTS.override.md"), "w", encoding="utf-8") as f:
+            f.write("# Temporary override\n")
+        self.init()
+        p = os.path.join(self.d, "AGENTS.override.md")
+        with open(p, encoding="utf-8") as f:
+            text = f.read()
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text.replace(cowork.STANZA_BEGIN, cowork.STANZA_BEGIN + "\nMUTATED", 1))
+        r = self.cw("doctor", "--lint", "--json")
+        self.assertEqual(r.returncode, 1)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("anchor.override_out_of_sync", checks)
+
+    def test_doctor_lint_file_lock_malformed(self):
+        self.init()
+        with open(os.path.join(self.d, ".m8shift.lock"), "wb") as f:
+            f.write(b"not-a-valid-token")
+        r = self.cw("doctor", "--lint", "--json")
+        self.assertEqual(r.returncode, 1)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("file_lock.malformed", checks)
+
+    def test_doctor_lint_status_json_project_root_hint(self):
+        self.init()
+        sub = os.path.join(self.d, "subdir")
+        os.mkdir(sub)
+        r = subprocess.run(
+            [sys.executable, os.path.join("..", "m8shift.py"), "doctor", "--lint", "--json"],
+            cwd=sub, capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 1)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("status.cwd_mismatch", checks)
+
+    def test_doctor_lint_multiple_open_session_identity(self):
+        self.init()
+        extra_sid = "20260626T120000Z-deadbeef"
+        row = {
+            "event": "start",
+            "session_id": extra_sid,
+            "at": "2026-06-26T12:00:00Z",
+            "started_at": "2026-06-26T12:00:00Z",
+            "agents": "claude,codex",
+            "project": "test",
+            "lang": "en",
+            "turn_start": 0,
+            "m8shift_version": cowork.VERSION,
+        }
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+        r = self.cw("doctor", "--lint", "--json")
+        self.assertEqual(r.returncode, 1)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("sessions.multiple_open_identity", checks)
 
     def test_doctor_security_warns_on_oversized_ledger(self):
         self.init()
