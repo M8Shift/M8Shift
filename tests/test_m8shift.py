@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.21.0"
+VERSION = "3.22.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2360,6 +2360,10 @@ subprocess.check_call([
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as f:
             rows = [json.loads(line) for line in f if line.strip()]
         self.assertEqual([row["event"] for row in rows], ["run.started", "run.ended"])
+        self.assertTrue(all(row["schema"] == "m8shift.runtime.event.v1" for row in rows))
+        self.assertEqual(rows[0]["source"]["tool"], "headless_runner.py")
+        self.assertIn("relay", rows[0])
+        self.assertIn("payload", rows[0])
         self.assertEqual(rows[0]["run_id"], run_id)
         self.assertEqual(rows[1]["status"], "ok")
         self.assertEqual(rows[1]["relay_state"], "AWAITING_CODEX")
@@ -2678,6 +2682,8 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(self.md(), before)
         payload = json.loads(r.stdout)
         self.assertEqual(payload["presence"]["state"], "blocked")
+        self.assertEqual(payload["presence"]["schema"], "m8shift.runtime.presence.v1")
+        self.assertEqual(payload["presence"]["stale_after_seconds"], 300)
         self.assertIn("next claude", payload["resume_prompt"])
 
         presence_path = os.path.join(self.d, ".m8shift", "runtime", "presence.json")
@@ -2697,9 +2703,20 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(second.returncode, 0)
         self.assertIn("duplicate ignored", second.stdout)
         self.assertEqual(self.rt("progress", "claude", "--run", "r1", "reading").returncode, 0)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "inbox", "claude.jsonl"), encoding="utf-8") as fh:
+            inbox = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(inbox[0]["schema"], "m8shift.runtime.event.v1")
+        self.assertEqual(inbox[0]["payload"]["mode"], "followup")
+        self.assertEqual(inbox[0]["payload"]["required_behavior"], "Deliver after the current safe point.")
+        with open(os.path.join(self.d, ".m8shift", "runtime", "progress.jsonl"), encoding="utf-8") as fh:
+            progress = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(progress[0]["schema"], "m8shift.runtime.event.v1")
+        self.assertEqual(progress[0]["source"]["tool"], "m8shift-runtime.py")
+        self.assertEqual(progress[0]["payload"]["message"], "reading")
 
         status = json.loads(self.rt("status-runtime", "claude", "--json").stdout)
         self.assertEqual(status["runtime_version"], cowork.VERSION)
+        self.assertEqual(status["runtime_findings"], [])
         self.assertEqual(status["runtime"]["claude"]["inbox_count"], 1)
         self.assertEqual(status["runtime"]["claude"]["last_progress"]["message"], "reading")
         doctor = json.loads(self.rt("doctor", "--json").stdout)
@@ -2711,6 +2728,9 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         created = json.loads(r.stdout)["created"]
         self.assertIn(".m8shift/providers.json", created)
+        self.assertIn(".m8shift/runtime/presence.json", created)
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "inbox")))
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "roles", "implementer.md")))
 
         plist = json.loads(self.rt("providers", "list", "--json").stdout)
@@ -2733,6 +2753,32 @@ class TestRuntimeCompanion(CLIBase):
         report = json.loads(self.rt("report", "run1", "--json").stdout)
         self.assertEqual(report["progress"][0]["message"], "reading")
         self.assertEqual(report["approvals"][0]["decision"], "approved")
+        self.assertEqual(report["progress"][0]["schema"], "m8shift.runtime.event.v1")
+        self.assertEqual(report["approvals"][0]["schema"], "m8shift.runtime.event.v1")
+
+    def test_runtime_sidecars_invalid_or_deleted_do_not_touch_core(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("init").returncode, 0)
+        runtime_dir = os.path.join(self.d, ".m8shift", "runtime")
+        with open(os.path.join(runtime_dir, "progress.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("{bad json}\n")
+        status = self.rt("status-runtime", "claude", "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertIn("runtime.jsonl", {f["check"] for f in payload["runtime_findings"]})
+        doctor = json.loads(self.rt("doctor", "--json").stdout)
+        self.assertIn("runtime.jsonl", {f["check"] for f in doctor["findings"]})
+        report = self.rt("report", "run1", "--json")
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertIn("runtime.jsonl", {f["check"] for f in json.loads(report.stdout)["runtime_findings"]})
+        self.assertEqual(self.md(), before)
+
+        shutil.rmtree(runtime_dir)
+        status2 = self.rt("status-runtime", "claude", "--json")
+        self.assertEqual(status2.returncode, 0, status2.stderr)
+        self.assertEqual(json.loads(status2.stdout)["runtime_findings"], [])
+        self.assertEqual(self.md(), before)
         write = self.rt("report", "run1", "--write")
         self.assertEqual(write.returncode, 0, write.stderr)
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runs", "run1", "report.md")))
