@@ -53,7 +53,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [005-rfc-claim-check.md](rfc/005-rfc-claim-check.md) | Advisory pre-claim overlap checks. |
 | [006-rfc-tasks.md](rfc/006-rfc-tasks.md) | Shared append-only task board. |
 | [007-rfc-subturn.md](rfc/007-rfc-subturn.md) | Rejected `subturn` proposal. |
-| [008-rfc-worktree-companion.md](rfc/008-rfc-worktree-companion.md) | Opt-in worktree companion for degree-2 parallel work and serialized integration. |
+| [008-rfc-worktree-companion.md](rfc/008-rfc-worktree-companion.md) | Implemented v1 opt-in worktree companion for degree-2 parallel work and serialized integration. |
 | [009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |
 | [010-rfc-runtime-patterns.md](rfc/010-rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |
 | [011-rfc-session-history.md](rfc/011-rfc-session-history.md) | Session history ledger and `history` command. |
