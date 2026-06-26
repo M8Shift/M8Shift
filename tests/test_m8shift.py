@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.25.0"
+VERSION = "3.26.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2865,6 +2865,54 @@ class TestRuntimeCompanion(CLIBase):
         reset_payload = json.loads(reset.stdout)
         self.assertEqual(reset_payload["presence"]["no_progress_status"], "ok")
         self.assertEqual(reset_payload["runtime_findings"], [])
+        self.assertEqual(self.md(), before)
+
+    def test_runtime_retention_prunes_and_archives_ledgers_without_core_mutation(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("init").returncode, 0)
+        runtime_dir = os.path.join(self.d, ".m8shift", "runtime")
+        runs_path = os.path.join(runtime_dir, "runs.jsonl")
+        progress_path = os.path.join(runtime_dir, "progress.jsonl")
+        with open(runs_path, "w", encoding="utf-8") as fh:
+            for i in range(5):
+                fh.write(json.dumps({"event": "run.test", "n": i}) + "\n")
+        with open(progress_path, "w", encoding="utf-8") as fh:
+            for i in range(4):
+                fh.write(json.dumps({"type": "progress", "n": i}) + "\n")
+
+        r = self.rt("retention", "prune", "--keep", "2", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["policy"], "basic_fixed_count")
+        with open(runs_path, encoding="utf-8") as fh:
+            runs = [json.loads(line)["n"] for line in fh if line.strip()]
+        with open(progress_path, encoding="utf-8") as fh:
+            progress = [json.loads(line)["n"] for line in fh if line.strip()]
+        self.assertEqual(runs, [3, 4])
+        self.assertEqual(progress, [2, 3])
+        with open(os.path.join(runtime_dir, "archive", "runs.jsonl"), encoding="utf-8") as fh:
+            archived_runs = [json.loads(line)["n"] for line in fh if line.strip()]
+        with open(os.path.join(runtime_dir, "archive", "progress.jsonl"), encoding="utf-8") as fh:
+            archived_progress = [json.loads(line)["n"] for line in fh if line.strip()]
+        self.assertEqual(archived_runs, [0, 1, 2])
+        self.assertEqual(archived_progress, [0, 1])
+        self.assertEqual(self.md(), before)
+
+    def test_runtime_retention_handles_invalid_ledgers_gracefully(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("init").returncode, 0)
+        runs_path = os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl")
+        with open(runs_path, "w", encoding="utf-8") as fh:
+            fh.write("{bad json}\n")
+        r = self.rt("retention", "prune", "--keep", "1", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertIn("runtime.jsonl", {f["check"] for f in payload["findings"]})
+        with open(runs_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "{bad json}\n")
         self.assertEqual(self.md(), before)
 
     def test_runtime_init_providers_roles_workflows_and_report(self):

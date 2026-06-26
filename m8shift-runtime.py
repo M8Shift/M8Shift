@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.25.0"
+VERSION = "3.26.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -178,7 +178,9 @@ deleted sidecars are diagnostics, not core relay failures. The runtime companion
 uses `presence.json` as one advisory lane per agent identity: a fresh lane blocks a
 second managed runtime, and stale takeover must be explicit. Optional no-progress
 thresholds warn or block only the companion loop when progress/run events stop. It
-never edits `M8SHIFT.md` directly and never owns the pen.
+also provides `retention prune --keep N` for basic fixed-count JSONL pruning, with
+older rows archived under `.m8shift/runtime/archive/` by default. It never edits
+`M8SHIFT.md` directly and never owns the pen.
 """
 
 
@@ -265,6 +267,24 @@ def append_jsonl(path, row):
     ensure_runtime_dirs()
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def append_jsonl_rows(path, rows):
+    if not rows:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def atomic_write_jsonl(path, rows):
+    ensure_runtime_dirs()
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    os.replace(tmp, path)
 
 
 def read_jsonl(path):
@@ -960,6 +980,83 @@ def cmd_report(args):
     return 0
 
 
+def runtime_ledger_paths():
+    paths = [RUNS, PROGRESS, IDEMPOTENCY, APPROVALS]
+    if os.path.isdir(INBOX_DIR):
+        for name in sorted(os.listdir(INBOX_DIR)):
+            if name.endswith(".jsonl"):
+                paths.append(os.path.join(INBOX_DIR, name))
+    return paths
+
+
+def archive_path_for(path):
+    rel = os.path.relpath(path, RUNTIME_DIR).replace(os.sep, "--")
+    return os.path.join(RUNTIME_DIR, "archive", rel)
+
+
+def prune_runtime_ledger(path, keep, archive=True):
+    label = os.path.relpath(path, HERE)
+    rows, err = read_jsonl_diagnostic(path)
+    if err:
+        return {
+            "path": label,
+            "before": None,
+            "after": None,
+            "pruned": 0,
+            "archived_to": "",
+            "finding": {"severity": "warning", "check": "runtime.jsonl", "message": err},
+        }
+    before = len(rows)
+    if before <= keep:
+        return {"path": label, "before": before, "after": before, "pruned": 0, "archived_to": ""}
+    cut = before - keep
+    pruned = rows[:cut]
+    kept = rows[cut:]
+    archived_to = ""
+    if archive and pruned:
+        archive_path = archive_path_for(path)
+        append_jsonl_rows(archive_path, pruned)
+        archived_to = os.path.relpath(archive_path, HERE)
+    atomic_write_jsonl(path, kept)
+    return {"path": label, "before": before, "after": len(kept), "pruned": len(pruned), "archived_to": archived_to}
+
+
+def cmd_retention_prune(args):
+    if args.keep < 0:
+        sys.exit("m8shift-runtime: --keep must be >= 0")
+    ensure_runtime_dirs()
+    findings = []
+    ledgers = []
+    for path in runtime_ledger_paths():
+        result = prune_runtime_ledger(path, args.keep, archive=not args.no_archive)
+        finding = result.pop("finding", None)
+        if finding:
+            findings.append(finding)
+        ledgers.append(result)
+    payload = {
+        "ok": not any(f["severity"] == "error" for f in findings),
+        "keep": args.keep,
+        "archive": not args.no_archive,
+        "ledgers": ledgers,
+        "findings": findings,
+        "runtime_version": VERSION,
+        "policy": "basic_fixed_count",
+        "future_policy_rfc": "docs/en/rfc/026-rfc-sidecar-retention.md",
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0 if payload["ok"] else 1
+    print(f"m8shift-runtime.py v{VERSION}")
+    print("── runtime retention prune ─────────────")
+    for row in ledgers:
+        print(f"{row['path']}: {row['before']} → {row['after']} (pruned {row['pruned']})")
+        if row.get("archived_to"):
+            print(f"  archived: {row['archived_to']}")
+    for finding in findings:
+        print(f"{finding['severity']} {finding['check']}: {finding['message']}")
+    return 0 if payload["ok"] else 1
+
+
 def runtime_summary(agent=""):
     findings = []
     presence, err = read_json_diagnostic(PRESENCE, {})
@@ -1224,6 +1321,15 @@ def main():
     rp.add_argument("--json", action="store_true")
     rp.add_argument("--write", action="store_true", help="write .m8shift/runs/<run>/report.md")
     rp.set_defaults(fn=cmd_report)
+
+    retention = sub.add_parser("retention", help="bounded runtime sidecar retention")
+    ret_sub = retention.add_subparsers(dest="verb", required=True)
+    rprune = ret_sub.add_parser("prune", help="prune runtime JSONL ledgers to a fixed row cap")
+    rprune.add_argument("--keep", type=int, default=1000, help="rows to retain per ledger (default: 1000)")
+    rprune.add_argument("--no-archive", action="store_true",
+                        help="discard pruned rows instead of appending them under .m8shift/runtime/archive/")
+    rprune.add_argument("--json", action="store_true")
+    rprune.set_defaults(fn=cmd_retention_prune)
 
     args = p.parse_args()
     sys.exit(args.fn(args))

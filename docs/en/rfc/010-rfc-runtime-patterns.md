@@ -301,9 +301,17 @@ system and does not trust process exit status as proof of relay progress.
 
 **Where it belongs:** runtime/worktree companions.
 
-**Pattern:** cap retained events or provide `archive`/`prune` for runtime JSONL files.
+**Implemented v1 pattern:** `m8shift-runtime.py retention prune --keep N
+[--no-archive]` caps runtime JSONL ledgers to the newest `N` rows. By default,
+older rows are appended under `.m8shift/runtime/archive/` before the source ledger
+is rewritten.
+
+**Deferred policy:** fixed-count pruning is the shipped baseline. Age-based
+policies, summaries before deletion, per-ledger caps, and operator defaults remain
+tracked in [026-rfc-sidecar-retention.md](026-rfc-sidecar-retention.md).
 
 **Boundary:** never prune `M8SHIFT.md` outside the existing core `archive` command.
+Malformed runtime JSONL is reported as a diagnostic and left untouched.
 
 ### 12. Safe transcript / recap normalization — KEEP, NARROW
 
