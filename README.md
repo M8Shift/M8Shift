@@ -195,39 +195,44 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
 - **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
 - **Explanation (philosophy)** — [docs/en/philosophy.md](docs/en/philosophy.md) — why the project exists.
-RFCs are maintained in English under `docs/en/rfc/`:
+RFCs are maintained in English under `docs/en/rfc/`. **Numbers are assigned in
+creation order and are permanent** — a number never tracks *implementation* order.
+For example RFC 010 was authored 10th (2026-06-24) but its patterns shipped last, in
+v3.21–v3.26 (2026-06-26); renumbering would break cross-links, git history, and
+issue/MR references, so an RFC keeps its birth number even when implemented much later
+(or never). Dates below are the implementation date (`—` when not implemented).
 
-| № | RFC | Status |
-|----:|-----|--------|
-| 001 | [Roster](docs/en/rfc/001-rfc-roster.md) | historical / superseded |
-| 002 | [N agents](docs/en/rfc/002-rfc-n-agents.md) | historical / implemented |
-| 003 | [I18n packs](docs/en/rfc/003-rfc-i18n-packs.md) | proposed |
-| 004 | [Memory](docs/en/rfc/004-rfc-memory.md) | shipped v3.2.0 |
-| 005 | [Claim check](docs/en/rfc/005-rfc-claim-check.md) | shipped v3.3.0 |
-| 006 | [Tasks](docs/en/rfc/006-rfc-tasks.md) | shipped v3.4.0 |
-| 007 | [Subturn](docs/en/rfc/007-rfc-subturn.md) | rejected |
-| 008 | [Worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) | implemented v1 |
-| 009 | [Runtime companion](docs/en/rfc/009-rfc-runtime-companion.md) | implemented v3.15.0 |
-| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | accepted design filter |
-| 011 | [Session history](docs/en/rfc/011-rfc-session-history.md) | implemented v3.7.0 |
-| 012 | [Contracts validation](docs/en/rfc/012-rfc-contracts-validation.md) | implemented v3.13.0 |
-| 013 | [Hosted runtime control plane](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | future / not implemented |
-| 014 | [Provider management](docs/en/rfc/014-rfc-provider-management.md) | implemented v3.16.0 |
-| 015 | [Shared tree degree gt1](docs/en/rfc/015-rfc-shared-tree-degree-gt1.md) | rejected (research) |
-| 016 | [Cooperative turn request](docs/en/rfc/016-rfc-cooperative-turn-request.md) | implemented v3.15.0 |
-| 017 | [Stage6 integrations](docs/en/rfc/017-rfc-stage6-integrations.md) | implemented (Stage 6) |
-| 018 | [Agent runtime architecture](docs/en/rfc/018-rfc-agent-runtime-architecture.md) | implemented v3.16.0 |
-| 019 | [Input neutral patterns](docs/en/rfc/019-rfc-input-neutral-patterns.md) | curated input / not impl |
-| 020 | [Headless runner hardening](docs/en/rfc/020-rfc-headless-runner-hardening.md) | implemented v3.16.0 |
-| 021 | [Pause resume](docs/en/rfc/021-rfc-pause-resume.md) | implemented v3.17.0 |
-| 022 | [Session reports](docs/en/rfc/022-rfc-session-reports.md) | implemented v3.18.3 |
-| 023 | [Agent token footprint](docs/en/rfc/023-rfc-agent-token-footprint.md) | implemented (Phase 1) |
-| 024 | [Doctor split](docs/en/rfc/024-rfc-doctor-split.md) | draft |
-| 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | draft |
-| 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | baseline implemented; policy draft |
-| 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | draft |
-| 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | draft |
-| 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | draft |
+| № | RFC | Description | Status | Implemented | How |
+|----:|-----|-------------|--------|-------------|-----|
+| 001 | [Roster](docs/en/rfc/001-rfc-roster.md) | Configurable agent roster (early design) | historical / superseded | v2.1.0 · 2026-06-22 | superseded by RFC 002 |
+| 002 | [N agents](docs/en/rfc/002-rfc-n-agents.md) | N-agent relay with one shared pen | historical / implemented | v2.4.0 · 2026-06-23 | one-pen routing (`append --to`) |
+| 003 | [I18n packs](docs/en/rfc/003-rfc-i18n-packs.md) | Build-time language packs (EN core + 8) | shipped | v3.0.0 · 2026-06-23 | AST injector `m8shift-i18n.py` |
+| 004 | [Memory](docs/en/rfc/004-rfc-memory.md) | Shared append-only memory ledger | shipped | v3.2.0 · 2026-06-23 | `remember` / `recap`, pen-free |
+| 005 | [Claim check](docs/en/rfc/005-rfc-claim-check.md) | Advisory pre-claim overlap check | shipped | v3.3.0 · 2026-06-23 | `claim --check`, read-only |
+| 006 | [Tasks](docs/en/rfc/006-rfc-tasks.md) | Shared append-only task board | shipped | v3.4.0 · 2026-06-23 | `task` event-log, pen-free |
+| 007 | [Subturn](docs/en/rfc/007-rfc-subturn.md) | Sub-turn streaming proposal | rejected | — | rejected by adversarial panel |
+| 008 | [Worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) | Degree-2 worktree parallelism + serialized integration | implemented v1 | v3.5.0 · 2026-06-24 | `m8shift-worktree.py`; core `LOCK` as integration pen |
+| 009 | [Runtime companion](docs/en/rfc/009-rfc-runtime-companion.md) | Local presence / inbox / progress / diagnostics | implemented v1 | v3.15.0 · 2026-06-25 | `m8shift-runtime.py` companion |
+| 010 | [Runtime patterns](docs/en/rfc/010-rfc-runtime-patterns.md) | Pattern filter: retained / rejected / deferred | accepted (filter) | v3.21–v3.26 · 2026-06-26 | 6 retained shipped; 13 rejected; 6 deferred → RFC 024–029 |
+| 011 | [Session history](docs/en/rfc/011-rfc-session-history.md) | Session history ledger + `history` | implemented | v3.7.0 · 2026-06-24 | `M8SHIFT.sessions.jsonl` |
+| 012 | [Contracts validation](docs/en/rfc/012-rfc-contracts-validation.md) | Stage-4 contracts + read-only validation | implemented | v3.13.0 · 2026-06-25 | read-only validation surface |
+| 013 | [Hosted runtime control plane](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | Future hosted / runtime control plane | future / not impl. | — | optional layer outside the passive core |
+| 014 | [Provider management](docs/en/rfc/014-rfc-provider-management.md) | Local provider / adapter registry | implemented v1 | v3.16.0 · 2026-06-25 | `m8shift-runtime.py` providers |
+| 015 | [Shared tree degree gt1](docs/en/rfc/015-rfc-shared-tree-degree-gt1.md) | True degree > 1 writes in one tree | rejected (research) | — | rejected for the core |
+| 016 | [Cooperative turn request](docs/en/rfc/016-rfc-cooperative-turn-request.md) | Cooperative baton request + operator steering | implemented | v3.15.0 · 2026-06-25 | core baton request |
+| 017 | [Stage6 integrations](docs/en/rfc/017-rfc-stage6-integrations.md) | Stage-6 closure: local integration layer | implemented | Stage 6 · 2026-06-25 | local layer; heavier integrations deferred |
+| 018 | [Agent runtime architecture](docs/en/rfc/018-rfc-agent-runtime-architecture.md) | Local scaffold: roles / workflows / approvals / reports | implemented v1 | v3.16.0 · 2026-06-25 | `m8shift-runtime.py` scaffold |
+| 019 | [Input neutral patterns](docs/en/rfc/019-rfc-input-neutral-patterns.md) | Neutral runtime-pattern inventory | curated input / not impl. | — | reference for future RFCs |
+| 020 | [Headless runner hardening](docs/en/rfc/020-rfc-headless-runner-hardening.md) | Reference runner: validation / dry-run / timeout / audit | implemented v1 | v3.16.0 · 2026-06-25 | `examples/headless_runner.py` |
+| 021 | [Pause resume](docs/en/rfc/021-rfc-pause-resume.md) | Stable `PAUSED` state for idle sessions | implemented v1 | v3.17.0 · 2026-06-25 | core `PAUSED` + `pause` / `resume` |
+| 022 | [Session reports](docs/en/rfc/022-rfc-session-reports.md) | Session reports + decision ledger | implemented v1 | v3.18.3 · 2026-06-26 | `report` generated from existing turns |
+| 023 | [Agent token footprint](docs/en/rfc/023-rfc-agent-token-footprint.md) | Cut the mandatory protocol read | implemented (Phase 1) | v3.19.0 · 2026-06-26 | split `protocol.md` / `protocol-reference.md` |
+| 024 | [Doctor split](docs/en/rfc/024-rfc-doctor-split.md) | Split core doctor vs companion diagnostics | draft | — | deferred from RFC 010 |
+| 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | Runtime status over core + sidecars | draft | — | deferred from RFC 010 |
+| 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | Bound / prune runtime sidecar ledgers | baseline impl. · policy draft | v3.26.0 · 2026-06-26 | baseline `retention prune --keep N`; policy still draft |
+| 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | Local notifications for handoffs / stale turns | draft | — | deferred from RFC 010 |
+| 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | Safe headless command templates | draft | — | deferred from RFC 010 |
+| 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | Richer companion workboard outside core | draft | — | deferred from RFC 010 |
 
 ## How it works
 
