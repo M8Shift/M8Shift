@@ -101,7 +101,7 @@ The first implementation can use the existing generic field channel:
 python3 m8shift.py append codex --to claude \
   --ask "review the implementation" \
   --done "implemented stage 4 docs" \
-  --files "docs/en/rfc/rfc-contracts-validation.md" \
+  --files "docs/en/rfc/012-rfc-contracts-validation.md" \
   --field schema=stage4.v1 \
   --field role_from=implementer \
   --field role_to=reviewer \

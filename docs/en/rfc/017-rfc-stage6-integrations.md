@@ -167,7 +167,7 @@ and broader workflow/control-plane layers.
 **What remains:**
 
 - implement or prototype a gitignored provider config, as specified by
-  [rfc-provider-management.md](rfc-provider-management.md);
+  [014-rfc-provider-management.md](014-rfc-provider-management.md);
 - map roster identities to commands and capabilities;
 - distinguish `interactive`, `headless`, and `hybrid` surfaces;
 - render commands as argv arrays, never shell strings;
@@ -345,11 +345,11 @@ Post-Stage-6 acceptance (deferred companions, §4B) is **not** required for this
 
 This RFC is an umbrella for Stage 6. It does not replace:
 
-- [rfc-runtime-companion.md](rfc-runtime-companion.md): shipped local runtime companion v1;
-- [rfc-hosted-runtime-control-plane.md](rfc-hosted-runtime-control-plane.md): broader
+- [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md): shipped local runtime companion v1;
+- [013-rfc-hosted-runtime-control-plane.md](013-rfc-hosted-runtime-control-plane.md): broader
   hosted/runtime control-plane boundary;
-- [rfc-provider-management.md](rfc-provider-management.md): provider adapter registry;
-- [rfc-cooperative-turn-request.md](rfc-cooperative-turn-request.md): cooperative baton
+- [014-rfc-provider-management.md](014-rfc-provider-management.md): provider adapter registry;
+- [016-rfc-cooperative-turn-request.md](016-rfc-cooperative-turn-request.md): cooperative baton
   negotiation for interactive UI deadlocks.
 
 Stage 6 implements the low-risk local adoption layer first; hosted or provider-running

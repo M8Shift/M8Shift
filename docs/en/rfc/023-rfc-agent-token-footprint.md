@@ -1,6 +1,6 @@
 # RFC — Reducing the per-session agent token footprint
 
-- **Status:** proposed (revised after Codex review, turn 3)
+- **Status:** implemented (Phase 1) in b85cc9c
 - **Scope:** cut the tokens M8Shift makes each agent read per session by splitting
   the bundled protocol into a first-read operational core plus an on-demand
   reference, without changing the one-pen mutex, the turn journal, or any command

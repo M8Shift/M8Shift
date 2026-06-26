@@ -2,10 +2,10 @@
 
 **Status:** implemented v1 in v3.15.0 · **Target:** separate companion tool · **Builds on:**
 [specification.md](../specification.md) §8, [vscode-guide.md](../vscode-guide.md), and
-[rfc-worktree-companion.md](rfc-worktree-companion.md) §8c · **Inspiration:**
+[008-rfc-worktree-companion.md](008-rfc-worktree-companion.md) §8c · **Inspiration:**
 runtime command queues, steering modes, presence, run lifecycle, and progress drafts.
 The retained/rejected runtime pattern inventory is tracked separately in
-[rfc-runtime-patterns.md](rfc-runtime-patterns.md).
+[010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md).
 
 ## Goal
 

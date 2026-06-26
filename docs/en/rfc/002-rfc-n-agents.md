@@ -2,7 +2,7 @@
 
 - **Status:** Historical / implemented, now superseded by the current
   [specification](../specification.md) and [architecture](../architecture.md)
-- **Supersedes scope of:** [RFC — configurable agent pair](rfc-roster.md) (Stage 1, shipped)
+- **Supersedes scope of:** [RFC — configurable agent pair](001-rfc-roster.md) (Stage 1, shipped)
 - **Prior art:** the `m8shift-vscode-multiagent-kit` (RFC-MA-001/002/003) — this RFC
   *reconciles* that design with M8Shift's single-file / passive / stdlib / degree-1 identity.
 - **Rationale & rejected alternatives:** [stage2-rationale.md](../stage2-rationale.md) — why each

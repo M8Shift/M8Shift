@@ -5,11 +5,11 @@
   plane remains future.
 - **Scope:** local runtime/scaffold layer around M8Shift for roles, workflows, runs,
   permissions, approvals, and artifacts
-- **Related RFCs:** [rfc-runtime-companion.md](rfc-runtime-companion.md),
-  [rfc-stage6-integrations.md](rfc-stage6-integrations.md),
-  [rfc-provider-management.md](rfc-provider-management.md),
-  [rfc-hosted-runtime-control-plane.md](rfc-hosted-runtime-control-plane.md),
-  [rfc-contracts-validation.md](rfc-contracts-validation.md)
+- **Related RFCs:** [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md),
+  [017-rfc-stage6-integrations.md](017-rfc-stage6-integrations.md),
+  [014-rfc-provider-management.md](014-rfc-provider-management.md),
+  [013-rfc-hosted-runtime-control-plane.md](013-rfc-hosted-runtime-control-plane.md),
+  [012-rfc-contracts-validation.md](012-rfc-contracts-validation.md)
 - **Core invariant:** `m8shift.py` remains a single-file, stdlib-only, passive
   coordination relay. It owns `LOCK`, turns, claimability, and the one-pen mutex.
 

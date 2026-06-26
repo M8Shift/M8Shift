@@ -1,9 +1,11 @@
 # RFC — Runtime/gateway patterns: retained, rejected, and why
 
 **Status:** proposed design filter · **Target:** M8Shift core + optional companions ·
-**Source review:** runtime/gateway designs, especially command queues, steering,
-presence, run lifecycle, doctor/lint, loop detection, gateway protocols, workboards,
-and agent supervisor modules.
+**Source review:** runtime/gateway designs, the M8Shift website comparison chapter,
+and the official docs for OpenClaw, LangGraph, AutoGen, Microsoft Agent Framework,
+CrewAI, OpenHands, OpenAI Agents SDK, Dify, and n8n AI workflows. The recurring
+patterns are command queues, steering, presence, run lifecycle, doctor/lint, loop
+detection, gateway protocols, workboards, and agent supervisor modules.
 
 ## Goal
 
@@ -35,6 +37,41 @@ Keep a pattern only if all of this is true:
 
 Reject a pattern when it would make the core a runtime, an orchestrator, a policy
 engine, or a database-backed platform.
+
+## Comparison-derived feature map
+
+Snapshot date: 2026-06-26. The M8Shift website comparison chapter frames most named
+tools as adjacent runtimes or automation platforms, not direct replacements for a
+repository-local mutex. This table records what can be transposed into M8Shift and what
+must stay out.
+
+| Tool | Feature signals reviewed | Recoverable / transposable | Not transposable | Why |
+|------|--------------------------|----------------------------|------------------|-----|
+| [OpenClaw](https://docs.openclaw.ai/) | Self-hosted gateway, chat channels, sessions, routing, memory, multi-agent routing, Web Control UI, mobile nodes. | Local adapter ideas: presence, exact resume prompts, operator inbox writes, channel allowlists as external adapter policy. | Channel connectors, gateway as session/routing source of truth, device actions, background daemon in core. | M8Shift can be called by a gateway, but the `LOCK` remains the only repo coordination authority. |
+| [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) | Low-level orchestration runtime with durable execution, persistence, streaming, human-in-the-loop, memory, observability, deployment. | Sidecar run state, event logs, progress streaming, human intervention modes, resumable run reports. | Graph engine, model/tool runtime, persistent graph state deciding who writes next, deployment platform. | The useful part is operational traceability; routing must still be explicit handoff state. |
+| [AutoGen](https://github.com/microsoft/autogen) | Multi-agent application framework, autonomous or human-assisted conversations, now maintenance-mode with Microsoft Agent Framework as successor. | Role/handoff vocabulary and transcript-to-report display patterns. | Conversation runtime, model clients, chat transcript as source of truth, new feature dependency. | It is historical input; new implementation choices should follow maintained patterns or M8Shift primitives. |
+| [Microsoft Agent Framework](https://learn.microsoft.com/en-us/agent-framework/overview/) | Agents, workflows, state management, context providers, middleware, MCP clients, telemetry, graph workflows. | Simple workflow schemas, provider registry checks, policy/approval records, middleware-like diagnostics in `doctor`. | .NET/Python app framework, Azure/Foundry dependency, MCP execution, telemetry platform. | These belong to host applications; M8Shift can only record local contracts and diagnostics. |
+| [CrewAI](https://docs.crewai.com/) | Agents, crews, flows, tools, memory, knowledge, guardrails, observability, automations, sequential/hierarchical/hybrid processes. | Role contracts, lightweight workflow steps, advisory process metadata, validation/guardrails as read-only checks. | Crew executor, knowledge/memory store, automation triggers, tool runtime in core. | M8Shift can clarify responsibilities but must not dispatch crews or run tools. |
+| [OpenHands](https://www.openhands.dev/) | Autonomous coding-agent platform, isolated sandboxes, cloud/VM/local execution, parallel agents, GitHub/Slack/PagerDuty triggers, audit/RBAC/budget controls. | Isolated-worktree pattern, run evidence, artifacts, reports, external trigger receipts. | Sandbox platform, autonomous PR/Slack/PagerDuty actions, enterprise RBAC, cost guardrails. | This is the closest domain overlap, but M8Shift is the shared-repo coordination primitive underneath. |
+| [OpenAI Agents SDK](https://developers.openai.com/api/docs/guides/agents) | `Agent` + `Runner` manage turns, tools, guardrails, handoffs, sessions, state, and observability; handoffs delegate to specialists. | Handoff metadata, role/contract fields, guardrail results as explicit evidence, provider argv templates. | SDK runner loop, model/tool execution, sessions as routing authority, guardrails that mutate the `LOCK`. | The SDK can run agents; M8Shift can record repo handoffs around file mutations. |
+| [Dify](https://github.com/langgenius/dify) | Visual workflows, RAG pipelines, model/provider support, Prompt IDE, agent tools, logs, APIs. | Workflow-file shape ideas, external trigger provenance, report fields for logs and evidence. | Visual canvas, RAG/knowledge base, model management, API publishing. | These are product/app platform features, not repository mutex features. |
+| [n8n AI workflows](https://docs.n8n.io/advanced-ai/) | Automation workflows, AI nodes, LangChain concepts, MCP server, workflow templates, chat trigger, human-in-the-loop for tool calls. | External-trigger adapter contract, idempotency keys, local operator messages, human fallback semantics. | Connector runtime, code-node execution, MCP server, full workflow engine. | n8n may start a job that calls M8Shift; M8Shift must not become n8n. |
+
+## Codebase fit check
+
+Several transposable patterns are already partially shipped. Future specs should build on
+these surfaces instead of adding parallel mechanisms.
+
+| Pattern family | Current code surface | Spec implication |
+|----------------|----------------------|------------------|
+| Read-only health and status | `m8shift.py doctor`, `status --json`, `watch`, `recap`, `peek`, `log` | New diagnostics should extend `doctor` or runtime doctor, never auto-repair by default. |
+| Handoff contracts | `append --ask/--done/--files`, Stage-4 advisory fields, `contract validate` | Runtime/adapter evidence should serialize as advisory fields or reports, not change claimability. |
+| Runtime presence and progress | `m8shift-runtime.py watch`, `progress`, `status-runtime`, `.m8shift/runtime/*.jsonl` | Competitor-style live state belongs in removable runtime sidecars. |
+| Operator messages | `m8shift-runtime.py operator --mode status/followup/collect/interrupt` | Channel or automation adapters should write inbox rows, not arbitrary chat into `M8SHIFT.md`. |
+| Provider mapping | `m8shift-runtime.py providers init/list/show/check/render` | Host launch commands stay argv arrays outside the core and outside secrets. |
+| Roles and workflows | `m8shift-runtime.py init`, `roles`, `workflows` | Keep workflows linear/declarative until a separate RFC proves graph semantics are needed. |
+| Approvals and reports | `m8shift-runtime.py approve`, `report`; core `session report` | Approval is evidence for humans and adapters, not an authorization system for the core. |
+| Isolated parallel coding | `m8shift-worktree.py claim/done/status/integrate/drop` | Parallelism remains worktree-based with serialized integration. |
 
 ## Retained patterns
 
@@ -361,6 +398,143 @@ handoff remains `AWAITING_<agent>`.
 could steal valid work during slow tests or UI stalls.
 
 **Allowed substitute:** detect stale locks and print the exact recovery command.
+
+## Spec seeds from transposable patterns
+
+These are starter specs, not implementation commitments. They define the narrow shape
+that future companion RFCs should use if they consume ideas from the comparison set.
+
+### A. Runtime event envelope v1
+
+All companion-generated JSONL events SHOULD use one envelope:
+
+```json
+{
+  "schema": "m8shift.runtime.event.v1",
+  "type": "progress",
+  "ts": "2026-06-26T12:00:00Z",
+  "agent": "codex",
+  "session_id": "codex-ui-1",
+  "run_id": "20260626T120000Z-codex-a1b2c3",
+  "relay": {
+    "state": "WORKING_CODEX",
+    "holder": "codex",
+    "turn": 12
+  },
+  "source": {
+    "tool": "m8shift-runtime.py",
+    "version": "3.19.0"
+  },
+  "idempotency_key": "",
+  "payload": {}
+}
+```
+
+Rules:
+
+- `schema`, `type`, `ts`, and `source.tool` are REQUIRED.
+- `agent` MUST be a roster identity when the event is agent-scoped.
+- `run_id` MUST NOT become the relay sequence; `LOCK.turn` remains canonical.
+- Invalid sidecar JSON/JSONL is a diagnostic finding, not a core parse failure.
+- Deleting `.m8shift/runtime/` MUST NOT corrupt or reinterpret `M8SHIFT.md`.
+
+### B. External runtime adapter contract
+
+Any OpenClaw, n8n, Dify, OpenHands, LangGraph, CrewAI, Agent Framework, or Agents SDK
+adapter that mutates repository files MUST follow this contract:
+
+1. Read `status --json` or `status-runtime --json`.
+2. Acquire the pen with `m8shift.py next <agent>` or `claim <agent>` before file writes.
+3. Record long work with runtime `progress`; do not stream partial work into the relay
+   journal.
+4. Finish with `append <agent> --to <next-agent>` and concrete `--done`, `--files`,
+   and evidence fields.
+5. If the host process fails after claiming, report the stuck state and print a recovery
+   command. Do not auto-force.
+
+Adapters MAY use `m8shift-runtime.py providers render` to build argv arrays. They MUST
+NOT shell-expand provider commands from untrusted strings.
+
+### C. Workflow file v1
+
+Workflow definitions SHOULD stay linear and local:
+
+```json
+{
+  "schema": "m8shift.workflow.v1",
+  "id": "default-code-review",
+  "steps": [
+    {"id": "plan", "role": "coordinator", "next": "implement"},
+    {"id": "implement", "role": "implementer", "next": "review"},
+    {"id": "review", "role": "reviewer", "next": "final"},
+    {"id": "final", "role": "coordinator", "next": ""}
+  ]
+}
+```
+
+Rules:
+
+- The workflow file MAY guide prompts, reports, or role selection.
+- The workflow file MUST NOT make `claim` succeed or fail.
+- Branching, concurrency, retries, timers, and triggers require a separate RFC.
+- A workflow step describes responsibility, not a model/provider.
+
+### D. Approval gate records v1
+
+Approval records are local evidence:
+
+```json
+{
+  "type": "approval",
+  "run_id": "20260626T120000Z-codex-a1b2c3",
+  "gate_id": "approve-push",
+  "by": "human",
+  "decision": "approved",
+  "reason": "Maintainer approved pushing the release branch.",
+  "ts": "2026-06-26T12:10:00Z"
+}
+```
+
+Rules:
+
+- Approval decisions MAY be summarized in run/session reports.
+- Approval decisions MUST NOT execute the approved action.
+- Approval decisions MUST NOT grant repository write ownership.
+- `rejected` and `waived` are first-class decisions so reports can explain why work
+  stopped or continued under human responsibility.
+
+### E. Operator inbox delivery v1
+
+Operator messages stay outside `M8SHIFT.md` until an agent chooses to act on them.
+
+Modes:
+
+| Mode | Required behavior |
+|------|-------------------|
+| `status` | Ask for progress only; no scope change. |
+| `followup` | Deliver after the current safe point. |
+| `collect` | Accumulate notes before the next turn or summary. |
+| `interrupt` | Ask the active runtime to summarize and hand off safely. |
+
+Rules:
+
+- Adapters SHOULD attach an idempotency key for repeated external webhooks.
+- `interrupt` MUST NOT steal a fresh `WORKING_*` pen.
+- The receiving agent MAY cite inbox content in its next `append --ask/--done` or report,
+  but the inbox row is not itself a relay turn.
+
+### F. Run report minimum fields v1
+
+Any generated run report SHOULD include:
+
+- run id, agent, provider entry, start/end timestamps, and final status;
+- relay state before and after execution;
+- changed files as reported by the final handoff;
+- progress notes and approval decisions;
+- tests/checks run by the host agent, if reported;
+- failures, timeouts, stale-presence findings, and recovery command hints.
+
+Reports are evidence. They MUST NOT be parsed by the core to decide routing.
 
 ## Deferred / separate RFC
 
