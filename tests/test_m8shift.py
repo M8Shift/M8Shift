@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.19.0"
+VERSION = "3.20.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -1071,6 +1071,17 @@ class TestReadCommands(CLIBase):
         self.turn("claude", "codex", done="did A", files="a.py,b.py")
         self.turn("codex", "claude", done="did B", files="c.py")  # ends AWAITING_CLAUDE
 
+    def _assert_strict_subsequence(self, brief, full):
+        full_lines = full.splitlines()
+        brief_lines = brief.splitlines()
+        self.assertLess(len(brief_lines), len(full_lines), brief)
+        pos = 0
+        for line in brief_lines:
+            try:
+                pos = full_lines.index(line, pos) + 1
+            except ValueError:
+                self.fail(f"brief line is not in default output: {line!r}\nbrief={brief}\nfull={full}")
+
     def test_status_json(self):
         self._seed()
         r = self.cw("status", "--json")
@@ -1096,6 +1107,39 @@ class TestReadCommands(CLIBase):
         self.assertRegex(status, r"duration\s+(\d+d )?\d\dh \d\dm \d\ds")
         self.assertRegex(recap, r"since\s+\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  " + TZ_PREFIXED_TIME_RE)
         self.assertIn("expires  -", status)
+
+    def test_status_brief_is_strict_subset_and_default_stays_full(self):
+        self._seed()
+        full = self.cw("status", "--for", "claude").stdout
+        brief = self.cw("status", "--for", "claude", "--brief").stdout
+        self._assert_strict_subsequence(brief, full)
+        self.assertIn("── LOCK", full)
+        self.assertIn("  lang", full)
+        self.assertIn("  session", full)
+        self.assertIn("  started", full)
+        self.assertIn("  duration", full)
+        self.assertIn("  note", full)
+        self.assertIn("last turn", full)
+        for dropped in ("── LOCK", "  lang", "  session", "  started", "  duration", "  note", "last turn"):
+            self.assertNotIn(dropped, brief)
+        for kept in ("m8shift.py v", "  holder", "  state", "  agents", "  turn", "  since", "  expires", "  next"):
+            self.assertIn(kept, brief)
+
+    def test_recap_brief_is_strict_subset_and_default_stays_full(self):
+        self._seed()
+        full = self.cw("recap", "--turns", "2").stdout
+        brief = self.cw("recap", "--turns", "2", "--brief").stdout
+        self._assert_strict_subsequence(brief, full)
+        self.assertIn("── LOCK", full)
+        self.assertIn("  session", full)
+        self.assertIn("  expires", full)
+        self.assertIn("  note", full)
+        self.assertIn("last 2 turn(s)", full)
+        for dropped in ("── LOCK", "  session", "  expires", "  note", "last 2 turn(s)"):
+            self.assertNotIn(dropped, brief)
+        for kept in ("m8shift.py v", "  holder", "  state", "  agents", "  turn", "  since",
+                     "#1 claude -> codex: did A", "#2 codex -> claude: did B"):
+            self.assertIn(kept, brief)
 
     def test_status_session_metadata_degrades_without_ledger(self):
         self.init()

@@ -92,6 +92,7 @@ flowchart LR
 | EF-20 | `examples/headless_runner.py` is a reference local runner for one headless agent lane: it waits/claims through the core, launches one static command, refreshes the TTL heartbeat before expiry, passes `M8SHIFT_RUN_ID`, and appends lifecycle events to `.m8shift/runtime/runs.jsonl`. | `test_headless_runner_once_writes_run_ledger_and_env_run_id`, `test_headless_runner_reads_m8shift_lock` |
 | EF-21 | `pause <holder> --reason` parks an open session with no active task as `PAUSED`/`holder=none`; `resume <agent> --reason` or `next <agent> --resume --reason` explicitly assigns new user scope before any claim can proceed. `doctor` warns on parked `WORKING_*` notes and ack-bounce livelocks. | `test_pause_parks_session_and_resume_is_explicit`, `test_pause_requires_current_holder_and_release_refuses_paused`, `test_doctor_warns_when_working_note_parks_the_pen` |
 | EF-22 | `session list/show/decisions/report` derives session views and Markdown reports from existing turns and session events. Report writes are explicit, path-confined, atomic, reject reserved M8Shift coordination/distributed-script files even with `--force` and case variants, and never mutate the `LOCK`; structured decisions are extracted only from `schema=stage4.v1 relation=review_result decision=approve|revise|reject|waive`. | `TestSessionReports` |
+| EF-23 | `status --brief` and `recap --brief` provide compact human output as a strict subset of the default human output, with no new information and no default-output change. `status --brief` keeps version, holder/state/agents/turn/since/expires and next-action lines; `recap --brief` keeps version, holder/state/agents/turn/since and recent turn summaries. | `test_status_brief_is_strict_subset_and_default_stays_full`, `test_recap_brief_is_strict_subset_and_default_stays_full` |
 
 ## 5. Non-functional requirements
 
@@ -205,9 +206,9 @@ stateDiagram-v2
 
 ## 7. Command-line interface
 
-`init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json]` · `watch [--for agent] [--interval N] [--clear] [--changes-only]` · `doctor [--lint] [--json] [--security] [--contracts] [--severity-min …]` ·
+`init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json] [--brief]` · `watch [--for agent] [--interval N] [--clear] [--changes-only]` · `doctor [--lint] [--json] [--security] [--contracts] [--severity-min …]` ·
 `contract validate [--strict] [--json] [--all] [--severity-min …]` ·
-`recap [--turns N] [--memory N] [--tasks N]` ·
+`recap [--turns N] [--memory N] [--tasks N] [--brief]` ·
 `wait <agent> [--once] [--interval N]` · `next <agent> [--once] [--interval N] [--force] [--resume --reason TEXT]` · `claim <agent> [--force]` · `claim <agent> --check [--files CSV] [--turns N]` ·
 `peek <agent>` · `log [--limit N] [--all] [--oneline]` · `history [--limit N] [--oneline] [--json]` ·
 `session list|show|decisions|report …` ·
@@ -398,7 +399,7 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [006-rfc-tasks.md](rfc/006-rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
 | [011-rfc-session-history.md](rfc/011-rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
 | [022-rfc-session-reports.md](rfc/022-rfc-session-reports.md) | **Session reports** | `session list/show/decisions/report`, `M8SHIFT.session-reports/<session-id>.md`. | Derived project memory; optional writes are path-confined, reject M8Shift coordination/distributed-script targets including case variants, and never mutate the `LOCK`. |
-| [010-rfc-runtime-patterns.md](rfc/010-rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| [010-rfc-runtime-patterns.md](rfc/010-rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `recap --brief`, `peek`, `log`, `status --json`, `status --brief`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; brief output is a strict subset of the default human output; no repair, no routing decisions. |
 | [003-rfc-i18n-packs.md](rfc/003-rfc-i18n-packs.md) | **Localized single-file variants** | `m8shift-i18n.py --langs … --into DIR` builds self-contained language variants from `i18n/<lang>/` packs; `init --lang` records the generated language in `LOCK`. | Runtime stays single-file and self-contained; packs are build inputs, not runtime dependencies. |
 | Operator live view | **Passive monitoring** | `watch [--for <agent>] [--interval N] [--clear] [--changes-only]` repeats the status view in a terminal. | Foreground/read-only loop only; no daemon, no notification, no `claim`, no force recovery. |
 | Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |

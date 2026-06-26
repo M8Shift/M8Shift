@@ -73,11 +73,11 @@ same metadata and serializes unavailable values as `null`.
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
-./m8shift.py status [--for <agent>]                # lock + last turn + optional next-action hint
+./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
 ./m8shift.py contract validate [--strict] [--json] # read-only Stage-4 contract validation
-./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # read-only briefing: LOCK + last turns + memory + tasks
+./m8shift.py recap [--turns N] [--memory N] [--tasks N] [--brief]  # read-only briefing: LOCK + last turns + memory + tasks
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
@@ -113,6 +113,15 @@ same metadata and serializes unavailable values as `null`.
 - **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
   **without** `--once` blocks until your turn — do not use it if you must return
   control to your loop in the meantime.
+- **Brief read output**: `status --brief` and `recap --brief` are human-output-only
+  compact modes. They are strict subsets of the default human output: no new fields,
+  no default-output change. `status --brief` keeps the version line, `holder`,
+  `state`, `agents`, `turn`, `since`, `expires`, and the `next` action (plus stale
+  or request hints when present); it drops framing, `lang`, `session`, `started`,
+  `duration`, `note`, and the last-turn footer. `recap --brief` keeps the version
+  line, `holder`, `state`, `agents`, `turn`, `since`, and recent turn summaries; it
+  drops framing, `session`, `expires`, `note`, section headings, memory headlines,
+  and task headlines.
 - **Live operator view**: `watch --for <you> --interval 5` repeats the same
   read-only status view so a terminal can show relay evolution without manually
   re-running `status`. It is a foreground/passive monitor: no `claim`, no handoff,
