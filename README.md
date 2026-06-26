@@ -224,7 +224,7 @@ RFCs are maintained in English under `docs/en/rfc/`:
 | 023 | [Agent token footprint](docs/en/rfc/023-rfc-agent-token-footprint.md) | implemented (Phase 1) |
 | 024 | [Doctor split](docs/en/rfc/024-rfc-doctor-split.md) | draft |
 | 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | draft |
-| 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | draft |
+| 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | baseline implemented; policy draft |
 | 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | draft |
 | 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | draft |
 | 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | draft |
