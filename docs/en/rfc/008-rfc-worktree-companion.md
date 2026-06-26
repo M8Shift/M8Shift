@@ -1,6 +1,6 @@
 # RFC — Worktree companion (§8): degree-2 concurrency, opt-in
 
-**Status:** proposed (co-design kickoff) · **Targets:** a separate companion tool · **Builds on:**
+**Status:** implemented v1 · **Surface:** `m8shift-worktree.py` opt-in companion · **Builds on:**
 [002-rfc-n-agents.md](002-rfc-n-agents.md) §8/§8c (the settled model) · **Co-designed:** Claude ⇄ Codex via the relay
 
 ## Goal
@@ -181,6 +181,24 @@ already-applied merge; unconditional `--to` handoff on every non-crash post-clai
 for sentinel-TTL, token-loss, double-integrate, conflict-abort, and committed-but-unhanded retry.
 
 ## v1 implementation notes & failure modes (`m8shift-worktree.py`)
+
+RFC 008 v1 is implemented by `m8shift-worktree.py` and the minimal core support in `m8shift.py`.
+The implemented surface is intentionally limited to `claim`, `done`, `integrate`, `drop`, and `status`.
+The shipped acceptance boundary is:
+
+- **Lock-order / no-double-merge guard:** the companion flips the canonical `LOCK` under the shared
+  file lock, stamps a first-class `integrating: <id>@<sha>` sentinel, verifies the lock token is still
+  owned, then releases the file lock before running git. The core refuses `claim --force`,
+  `release --force`, `done --force`, and normal `append` while a valid sentinel is present.
+- **Integrate target / merge contract:** integration happens in `.m8shift/worktrees/_integration`,
+  `--into` must name a local branch, foreign checked-out targets are refused before claiming, and
+  merge failures abort the uncommitted merge before handing off with `blocked_on=<reason>:<id>`.
+- **No-stuck-WORKING:** every non-crash post-claim path finalizes by clearing `integrating` and handing
+  off via `--to`; already-applied retries are idempotent and finalize instead of double-merging.
+- **Hygiene:** companion worktrees live under ignored `.m8shift/worktrees/`, ids and branch names are
+  path-safe, and the companion makes no network calls.
+
+Deterministic coverage lives in `tests/test_worktree.py` and `tests/test_m8shift.py::TestStage8Core`.
 
 - **`--into` must be a local branch.** Integration *advances a branch*, so `--into` is validated as a
   local branch ref (`git show-ref --verify refs/heads/<into>`) **before claiming** — a commit / tag /
