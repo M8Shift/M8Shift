@@ -21,6 +21,19 @@ import m8shift  # noqa: E402
 VERSION = "3.19.0"
 
 
+def render_doc(rel, body):
+    """Render embedded runtime text as repository documentation.
+
+    The runtime core points from generated `M8SHIFT.protocol.md` to generated
+    `M8SHIFT.protocol-reference.md`. In `docs/en/`, the mirror is named
+    `protocol-reference.md`; keep the generated runtime files unchanged while making
+    repository links navigable.
+    """
+    if rel == "docs/en/protocol.md":
+        return body.replace("M8SHIFT.protocol-reference.md", "protocol-reference.md")
+    return body
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="gen_docs.py", description=__doc__.splitlines()[0])
     p.add_argument("--version", action="version", version=f"gen_docs.py {VERSION}")
@@ -36,6 +49,7 @@ def main(argv=None):
         targets.append(("docs/fr/protocole.md", open(fr_pack, encoding="utf-8").read()))
 
     for rel, body in targets:
+        body = render_doc(rel, body)
         path = os.path.join(ROOT, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:

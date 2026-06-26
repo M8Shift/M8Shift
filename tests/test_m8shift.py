@@ -125,7 +125,8 @@ class TestPureFunctions(unittest.TestCase):
     def test_protocol_docs_in_sync(self):
         """Doc sync (EN-only core): docs/en == the core EN template; docs/<lang> == the
         i18n/<lang> pack body byte-for-byte (regenerate with scripts/gen_docs.py)."""
-        cases = [("docs/en/protocol.md", cowork.PROTOCOL["en"]),
+        cases = [("docs/en/protocol.md", cowork.PROTOCOL["en"].replace(
+                    "M8SHIFT.protocol-reference.md", "protocol-reference.md")),
                  ("docs/en/protocol-reference.md", cowork.PROTOCOL_REFERENCE["en"])]
         fr_pack = os.path.join(REPO, "i18n", "fr", "protocol.md")
         if os.path.exists(fr_pack):
