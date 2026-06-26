@@ -193,19 +193,19 @@ La documentation suit le cadre [Diátaxis](https://diataxis.fr/) :
 - **Explication (philosophie)** — [docs/fr/philosophie.md](../docs/fr/philosophie.md) — pourquoi le projet existe.
 - **Audit sécurité** — [docs/en/security-audit.md](../docs/en/security-audit.md) _(en)_ — audit du code, de la coordination et des surfaces prompt.
 - **RFC** — les RFC sont maintenues uniquement en anglais sous `docs/en/rfc/` afin d'éviter une double maintenance ; les liens ci-dessous pointent vers cette source canonique.
-- **RFC (historique de sessions)** — [docs/en/rfc/rfc-session-history.md](../docs/en/rfc/rfc-session-history.md) _(en)_ — registre de sessions et `history`.
-- **RFC (compagnon worktree)** — [docs/en/rfc/rfc-worktree-companion.md](../docs/en/rfc/rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
-- **RFC (compagnon runtime)** — [docs/en/rfc/rfc-runtime-companion.md](../docs/en/rfc/rfc-runtime-companion.md) _(en)_ — compagnon local livré : présence, inbox opérateur, progression et diagnostics.
-- **RFC (architecture runtime agent)** — [docs/en/rfc/rfc-agent-runtime-architecture.md](../docs/en/rfc/rfc-agent-runtime-architecture.md) _(en)_ — scaffold local livré : rôles, workflows, approvals, providers et rapports.
-- **RFC (gestion des fournisseurs)** — [docs/en/rfc/rfc-provider-management.md](../docs/en/rfc/rfc-provider-management.md) _(en)_ — registry local livré pour mapper les identités d'agents vers des commandes argv sûres.
-- **RFC (durcissement headless runner)** — [docs/en/rfc/rfc-headless-runner-hardening.md](../docs/en/rfc/rfc-headless-runner-hardening.md) _(en)_ — validation, dry-run, timeout de tour et audit des timeouts.
-- **RFC (demande coopérative de tour)** — [docs/en/rfc/rfc-cooperative-turn-request.md](../docs/en/rfc/rfc-cooperative-turn-request.md) _(en)_ — `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force` pour les blocages d'UI interactives.
-- **RFC (pause/reprise)** — [docs/en/rfc/rfc-pause-resume.md](../docs/en/rfc/rfc-pause-resume.md) _(en)_ — état stable `PAUSED` pour session ouverte sans tâche active.
-- **RFC (rapports de session)** — [docs/en/rfc/rfc-session-reports.md](../docs/en/rfc/rfc-session-reports.md) _(en)_ — rapports Markdown et décisions dérivés des tours existants.
-- **RFC (contrats et validation)** — [docs/en/rfc/rfc-contracts-validation.md](../docs/en/rfc/rfc-contracts-validation.md) _(en)_ — Stage 4 livré : passations typées, décisions de revue, flags dédiés, `contract validate` et `doctor --contracts`.
-- **RFC (plan de contrôle runtime/hébergé)** — [docs/en/rfc/rfc-hosted-runtime-control-plane.md](../docs/en/rfc/rfc-hosted-runtime-control-plane.md) _(en)_ — supervision optionnelle hors cœur.
-- **RFC (gestion des fournisseurs)** — [docs/en/rfc/rfc-provider-management.md](../docs/en/rfc/rfc-provider-management.md) _(en)_ — registre futur d'adaptateurs pour Claude, Codex, Gemini, Vibe et autres agents coopératifs.
-- **RFC (degré > 1 dans un même arbre)** — [docs/en/rfc/rfc-shared-tree-degree-gt1.md](../docs/en/rfc/rfc-shared-tree-degree-gt1.md) _(en)_ — sujet de recherche rejeté pour le cœur au profit des worktrees isolés.
+- **RFC (historique de sessions)** — [docs/en/rfc/011-rfc-session-history.md](../docs/en/rfc/011-rfc-session-history.md) _(en)_ — registre de sessions et `history`.
+- **RFC (compagnon worktree)** — [docs/en/rfc/008-rfc-worktree-companion.md](../docs/en/rfc/008-rfc-worktree-companion.md) _(en)_ — concurrence degré 2 optionnelle par worktrees isolés.
+- **RFC (compagnon runtime)** — [docs/en/rfc/009-rfc-runtime-companion.md](../docs/en/rfc/009-rfc-runtime-companion.md) _(en)_ — compagnon local livré : présence, inbox opérateur, progression et diagnostics.
+- **RFC (architecture runtime agent)** — [docs/en/rfc/018-rfc-agent-runtime-architecture.md](../docs/en/rfc/018-rfc-agent-runtime-architecture.md) _(en)_ — scaffold local livré : rôles, workflows, approvals, providers et rapports.
+- **RFC (gestion des fournisseurs)** — [docs/en/rfc/014-rfc-provider-management.md](../docs/en/rfc/014-rfc-provider-management.md) _(en)_ — registry local livré pour mapper les identités d'agents vers des commandes argv sûres.
+- **RFC (durcissement headless runner)** — [docs/en/rfc/020-rfc-headless-runner-hardening.md](../docs/en/rfc/020-rfc-headless-runner-hardening.md) _(en)_ — validation, dry-run, timeout de tour et audit des timeouts.
+- **RFC (demande coopérative de tour)** — [docs/en/rfc/016-rfc-cooperative-turn-request.md](../docs/en/rfc/016-rfc-cooperative-turn-request.md) _(en)_ — `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force` pour les blocages d'UI interactives.
+- **RFC (pause/reprise)** — [docs/en/rfc/021-rfc-pause-resume.md](../docs/en/rfc/021-rfc-pause-resume.md) _(en)_ — état stable `PAUSED` pour session ouverte sans tâche active.
+- **RFC (rapports de session)** — [docs/en/rfc/022-rfc-session-reports.md](../docs/en/rfc/022-rfc-session-reports.md) _(en)_ — rapports Markdown et décisions dérivés des tours existants.
+- **RFC (contrats et validation)** — [docs/en/rfc/012-rfc-contracts-validation.md](../docs/en/rfc/012-rfc-contracts-validation.md) _(en)_ — Stage 4 livré : passations typées, décisions de revue, flags dédiés, `contract validate` et `doctor --contracts`.
+- **RFC (plan de contrôle runtime/hébergé)** — [docs/en/rfc/013-rfc-hosted-runtime-control-plane.md](../docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) _(en)_ — supervision optionnelle hors cœur.
+- **RFC (gestion des fournisseurs)** — [docs/en/rfc/014-rfc-provider-management.md](../docs/en/rfc/014-rfc-provider-management.md) _(en)_ — registre futur d'adaptateurs pour Claude, Codex, Gemini, Vibe et autres agents coopératifs.
+- **RFC (degré > 1 dans un même arbre)** — [docs/en/rfc/015-rfc-shared-tree-degree-gt1.md](../docs/en/rfc/015-rfc-shared-tree-degree-gt1.md) _(en)_ — sujet de recherche rejeté pour le cœur au profit des worktrees isolés.
 
 ## Comment ça marche
 
@@ -348,7 +348,7 @@ conception. Deux étapes :
    un sentinel LOCK `integrating:<id>@<sha>` (qui bloque une reprise TTL en plein merge)
    et une passation `--to` sur tout chemin (jamais bloqué). Le cœur degré 1 reste à un
    écrivain à la fois ; le compagnon ajoute la concurrence par-dessus.
-   Voir [RFC — compagnon worktree](en/rfc/rfc-worktree-companion.md) _(en)_.
+   Voir [RFC — compagnon worktree](en/rfc/008-rfc-worktree-companion.md) _(en)_.
 
 **Surfaces lecture / passation livrées** — `recap`, `peek`, `log`, `history`
 (historique des sessions : agents, tours, état, version), `status --json`,
@@ -359,13 +359,13 @@ champs consultatifs sur `append` (`--branch`/`--commit`/`--tests`/`--next`/
 des données déjà stockées par M8Shift ; elles ne pilotent jamais le mutex.
 
 **État de la roadmap** — la roadmap de degré 1 est complète, **et le degré 2 est livré**
-([compagnon opt-in `m8shift-worktree.py`](en/rfc/rfc-worktree-companion.md), étape 2). Le dernier candidat degré 1,
+([compagnon opt-in `m8shift-worktree.py`](en/rfc/008-rfc-worktree-companion.md), étape 2). Le dernier candidat degré 1,
 `subturn`, a été rejeté : les champs consultatifs couvrent la provenance au moment de
 l'append, et `remember` couvre le streaming durable en cours de tour.
 
 **Non-goals** (briseraient une qualité de M8Shift) : *baux* par chemin pour des écritures
 disjointes concurrentes dans l'arbre partagé (utiliser plutôt le
-[compagnon worktree optionnel](en/rfc/rfc-worktree-companion.md)) ;
+[compagnon worktree optionnel](en/rfc/008-rfc-worktree-companion.md)) ;
 un daemon / watcher autonome / push de notifications en arrière-plan ; lancer git, des builds
 ou des API (auth + réseau → un orchestrateur) ; des dépendances tierces ou un paquet
 multi-fichiers ; et une mémoire *dérivée* « intelligente » (dédup / résumé / purge) —

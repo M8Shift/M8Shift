@@ -78,7 +78,7 @@ python m8shift.py append claude --to codex --ask "..." --done "..."
 ```
 
 Si vous n'utilisez pas l'installateur, téléchargez ou copiez d'abord `m8shift.py`
-dans le projet ; copiez [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md)
+dans le projet ; copiez [`m8shift-worktree.py`](../en/rfc/008-rfc-worktree-companion.md)
 à côté seulement si vous utilisez les worktrees parallèles isolés.
 
 `claude` et `codex` sont des noms de roster d'exemple. Remplacez-les par `gemini`,

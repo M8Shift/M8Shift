@@ -4,7 +4,7 @@
 >
 > Cette page reflète le modèle v3 courant : roster actif de ≥2 agents, stylo unique
 > dans le cœur (degré 1), registres append-only/read-only, historique de sessions,
-> packs i18n, compagnon optionnel [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md) pour la concurrence par
+> packs i18n, compagnon optionnel [`m8shift-worktree.py`](../en/rfc/008-rfc-worktree-companion.md) pour la concurrence par
 > worktrees isolés (degré 2), et compagnon local `m8shift-runtime.py` pour les sidecars
 > présence/inbox/progression. Pour les règles commande par commande, voir
 > [protocole.md](protocole.md) et [cahier-des-charges.md](cahier-des-charges.md).
@@ -102,7 +102,7 @@ flowchart TB
 **Composants** : (a) le bloc `LOCK` = automate d'état ; (b) le journal de tours
 append-only ; (c) les ancrages porteurs de la *strophe* d'auto-instruction ;
 (d) la CLI `m8shift.py` ; (e) les registres passifs (`memory`, `tasks`, `sessions`, `requests`) ;
-(f) le compagnon optionnel [`m8shift-worktree.py`](../en/rfc/rfc-worktree-companion.md) ;
+(f) le compagnon optionnel [`m8shift-worktree.py`](../en/rfc/008-rfc-worktree-companion.md) ;
 (g) le compagnon optionnel `m8shift-runtime.py` pour les sidecars runtime consultatifs.
 
 **Automate d'état** (`X`, `Y` = deux membres quelconques du roster actif) :
@@ -254,7 +254,7 @@ ne route pas le travail, ne donne aucune permission, ne lance aucun outil et ne
 mute pas le `LOCK`. L'enforcement des permissions par l'hôte ou l'UI peut être
 ajouté autour de M8Shift, tandis que le cœur reste un relais mono-fichier passif.
 Le contrat d'implémentation est suivi dans
-[RFC — Contrats et validation Stage 4](../en/rfc/rfc-contracts-validation.md).
+[RFC — Contrats et validation Stage 4](../en/rfc/012-rfc-contracts-validation.md).
 
 ---
 

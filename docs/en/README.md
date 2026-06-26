@@ -45,26 +45,26 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 
 | Document | Purpose |
 |----------|---------|
-| [rfc-agent-runtime-architecture.md](rfc/rfc-agent-runtime-architecture.md) | Shipped local runtime scaffold for roles, workflows, approvals, providers, and reports. |
-| [rfc-agent-token-footprint.md](rfc/rfc-agent-token-footprint.md) | Proposed: cut the per-session token footprint by splitting an operational core from on-demand reference. |
-| [rfc-claim-check.md](rfc/rfc-claim-check.md) | Advisory pre-claim overlap checks. |
-| [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | Shipped cooperative baton request and operator steering for interactive UI deadlocks. |
-| [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | Stage 4 contracts, review decisions, and shipped read-only validation. |
-| [rfc-headless-runner-hardening.md](rfc/rfc-headless-runner-hardening.md) | Shipped reference runner hardening: validation, dry-run, timeout, and audit events. |
-| [rfc-hosted-runtime-control-plane.md](rfc/rfc-hosted-runtime-control-plane.md) | Future optional hosted/runtime control plane. |
-| [rfc-i18n-packs.md](rfc/rfc-i18n-packs.md) | Build-time language packs and localized single-file variants. |
-| [rfc-input-neutral-patterns.md](rfc/rfc-input-neutral-patterns.md) | Neutral runtime pattern inventory curated for future companion RFCs. |
-| [rfc-memory.md](rfc/rfc-memory.md) | Shared append-only memory ledger. |
-| [rfc-n-agents.md](rfc/rfc-n-agents.md) | N-agent relay model with one shared pen. |
-| [rfc-pause-resume.md](rfc/rfc-pause-resume.md) | Stable `PAUSED` state for open sessions with no active task. |
-| [rfc-provider-management.md](rfc/rfc-provider-management.md) | Shipped local provider/adapter registry outside the core. |
-| [rfc-roster.md](rfc/rfc-roster.md) | Historical configurable roster RFC. |
-| [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |
-| [rfc-runtime-patterns.md](rfc/rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |
-| [rfc-session-history.md](rfc/rfc-session-history.md) | Session history ledger and `history` command. |
-| [rfc-session-reports.md](rfc/rfc-session-reports.md) | Shipped session reports and decision ledger generated from existing turns. |
-| [rfc-shared-tree-degree-gt1.md](rfc/rfc-shared-tree-degree-gt1.md) | Research RFC for true degree > 1 writes in one shared working tree; rejected for the core. |
-| [rfc-stage6-integrations.md](rfc/rfc-stage6-integrations.md) | Stage 6 closure: local integration layer shipped; heavier integrations deferred to post-Stage-6 companions. |
-| [rfc-subturn.md](rfc/rfc-subturn.md) | Rejected `subturn` proposal. |
-| [rfc-tasks.md](rfc/rfc-tasks.md) | Shared append-only task board. |
-| [rfc-worktree-companion.md](rfc/rfc-worktree-companion.md) | Opt-in worktree companion for degree-2 parallel work and serialized integration. |
+| [001-rfc-roster.md](rfc/001-rfc-roster.md) | Historical configurable roster RFC. |
+| [002-rfc-n-agents.md](rfc/002-rfc-n-agents.md) | N-agent relay model with one shared pen. |
+| [003-rfc-i18n-packs.md](rfc/003-rfc-i18n-packs.md) | Build-time language packs and localized single-file variants. |
+| [004-rfc-memory.md](rfc/004-rfc-memory.md) | Shared append-only memory ledger. |
+| [005-rfc-claim-check.md](rfc/005-rfc-claim-check.md) | Advisory pre-claim overlap checks. |
+| [006-rfc-tasks.md](rfc/006-rfc-tasks.md) | Shared append-only task board. |
+| [007-rfc-subturn.md](rfc/007-rfc-subturn.md) | Rejected `subturn` proposal. |
+| [008-rfc-worktree-companion.md](rfc/008-rfc-worktree-companion.md) | Opt-in worktree companion for degree-2 parallel work and serialized integration. |
+| [009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md) | Shipped local runtime companion for presence, operator inbox, progress, and diagnostics. |
+| [010-rfc-runtime-patterns.md](rfc/010-rfc-runtime-patterns.md) | Runtime/gateway patterns retained, rejected, or deferred. |
+| [011-rfc-session-history.md](rfc/011-rfc-session-history.md) | Session history ledger and `history` command. |
+| [012-rfc-contracts-validation.md](rfc/012-rfc-contracts-validation.md) | Stage 4 contracts, review decisions, and shipped read-only validation. |
+| [013-rfc-hosted-runtime-control-plane.md](rfc/013-rfc-hosted-runtime-control-plane.md) | Future optional hosted/runtime control plane. |
+| [014-rfc-provider-management.md](rfc/014-rfc-provider-management.md) | Shipped local provider/adapter registry outside the core. |
+| [015-rfc-shared-tree-degree-gt1.md](rfc/015-rfc-shared-tree-degree-gt1.md) | Research RFC for true degree > 1 writes in one shared working tree; rejected for the core. |
+| [016-rfc-cooperative-turn-request.md](rfc/016-rfc-cooperative-turn-request.md) | Shipped cooperative baton request and operator steering for interactive UI deadlocks. |
+| [017-rfc-stage6-integrations.md](rfc/017-rfc-stage6-integrations.md) | Stage 6 closure: local integration layer shipped; heavier integrations deferred to post-Stage-6 companions. |
+| [018-rfc-agent-runtime-architecture.md](rfc/018-rfc-agent-runtime-architecture.md) | Shipped local runtime scaffold for roles, workflows, approvals, providers, and reports. |
+| [019-rfc-input-neutral-patterns.md](rfc/019-rfc-input-neutral-patterns.md) | Neutral runtime pattern inventory curated for future companion RFCs. |
+| [020-rfc-headless-runner-hardening.md](rfc/020-rfc-headless-runner-hardening.md) | Shipped reference runner hardening: validation, dry-run, timeout, and audit events. |
+| [021-rfc-pause-resume.md](rfc/021-rfc-pause-resume.md) | Stable `PAUSED` state for open sessions with no active task. |
+| [022-rfc-session-reports.md](rfc/022-rfc-session-reports.md) | Shipped session reports and decision ledger generated from existing turns. |
+| [023-rfc-agent-token-footprint.md](rfc/023-rfc-agent-token-footprint.md) | Implemented Phase 1: cuts the mandatory protocol read by splitting an operational core from on-demand reference. |

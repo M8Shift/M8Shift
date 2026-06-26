@@ -18,7 +18,7 @@ human still nudges each agent to resume between turns — see §8.
 | Included | Excluded |
 |----------|----------|
 | Single-file lock, turn journal, control CLI | Network / multi-machine orchestration |
-| Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion) |
+| Idempotent self-install (`init`) into any project | A second simultaneous writer **in the core** (degree-2 lives in the opt-in [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md) companion) |
 | Anti-deadlock via TTL, bounded archiving | Resident daemon, persistent queue |
 | `CLAUDE.md` / `AGENTS.md` anchors | Authentication / encryption of the state file |
 | Local Stage-6 integration layer: installers, checksums, `watch`, reference headless runner | Provider SDKs, hosted control plane, IDE/MCP/orchestrator runtimes inside the core |
@@ -232,7 +232,7 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   `wait → relaunch the agent → claim` — a host integration, not a change to the mutex. A
   notification/webhook can *signal* a turn but cannot *wake* the AI by itself. The
   shipped local host-side answer is `m8shift-runtime.py` for presence, operator inbox,
-  progress, and runtime diagnostics; see [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md).
+  progress, and runtime diagnostics; see [009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md).
 - **Installer vs `init` boundary**: `init` initializes M8Shift state and anchors in the
   current project. It does **not** copy `m8shift.py`, `m8shift-worktree.py`,
   `m8shift-runtime.py`, language variants, or installers into a target directory.
@@ -259,9 +259,9 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   nothing at the file-system level prevents it (manual edit).
 - **N-agent roster, one pen (current)**: an active roster of ≥2 agents relays through a
   single **degree-1 mutex** — any holder hands the pen to any other member via `--to`, one
-  writer at a time (`init --agents a,b,c…`; see [RFC — roster](rfc/rfc-roster.md), now superseded
+  writer at a time (`init --agents a,b,c…`; see [RFC — roster](rfc/001-rfc-roster.md), now superseded
   by this generalized model). **Shipped (off-core)**: **N concurrent writers** via the opt-in
-  [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion — isolated git worktrees in parallel
+  [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md) companion — isolated git worktrees in parallel
   plus a single serialized integration pen, layered on this same degree-1 core.
 - **Anchor loading**: it depends on the host tool. Codex builds its instruction
   chain once per execution, gives priority to `AGENTS.override.md` in a folder
@@ -392,30 +392,30 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 
 | RFC / source | Feature | Surface | Charter |
 |--------------|---------|---------|---------|
-| [rfc-memory.md](rfc/rfc-memory.md) | **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | Dumb, file-ordered ledger; `remember` never calls `set_lock`, so memory can never feed mutex/routing. |
-| [rfc-roster.md](rfc/rfc-roster.md) / [rfc-n-agents.md](rfc/rfc-n-agents.md) | **N-agent directed roster** | `init --agents a,b,c…`; `--to <agent>` directed handoffs to any other active roster member; generated anchors for known agents and `AGENTS.md` fallback for unknown cooperative agents. | Generalizes the original pair without changing the one-pen mutex; every turn still has one holder and one target. |
-| [rfc-claim-check.md](rfc/rfc-claim-check.md) | **Advisory pre-claim check** | `claim <agent> --check [--files CSV] [--turns N]` reports readiness and exact file overlap with recent turns. | Takes no pen, mutates nothing; overlap never changes rc or feeds routing. |
-| [rfc-tasks.md](rfc/rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
-| [rfc-session-history.md](rfc/rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
-| [rfc-session-reports.md](rfc/rfc-session-reports.md) | **Session reports** | `session list/show/decisions/report`, `M8SHIFT.session-reports/<session-id>.md`. | Derived project memory; optional writes are path-confined, reject M8Shift coordination/distributed-script targets including case variants, and never mutate the `LOCK`. |
-| [rfc-runtime-patterns.md](rfc/rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
-| [rfc-i18n-packs.md](rfc/rfc-i18n-packs.md) | **Localized single-file variants** | `m8shift-i18n.py --langs … --into DIR` builds self-contained language variants from `i18n/<lang>/` packs; `init --lang` records the generated language in `LOCK`. | Runtime stays single-file and self-contained; packs are build inputs, not runtime dependencies. |
+| [004-rfc-memory.md](rfc/004-rfc-memory.md) | **Shared memory** | `remember <agent> "<note>"` appends to a gitignored, append-only `M8SHIFT.memory.md` (pen-free, `file_lock` only); `recap` shows the last N as headlines. | Dumb, file-ordered ledger; `remember` never calls `set_lock`, so memory can never feed mutex/routing. |
+| [001-rfc-roster.md](rfc/001-rfc-roster.md) / [002-rfc-n-agents.md](rfc/002-rfc-n-agents.md) | **N-agent directed roster** | `init --agents a,b,c…`; `--to <agent>` directed handoffs to any other active roster member; generated anchors for known agents and `AGENTS.md` fallback for unknown cooperative agents. | Generalizes the original pair without changing the one-pen mutex; every turn still has one holder and one target. |
+| [005-rfc-claim-check.md](rfc/005-rfc-claim-check.md) | **Advisory pre-claim check** | `claim <agent> --check [--files CSV] [--turns N]` reports readiness and exact file overlap with recent turns. | Takes no pen, mutates nothing; overlap never changes rc or feeds routing. |
+| [006-rfc-tasks.md](rfc/006-rfc-tasks.md) | **Tasks board** | `task add/done/drop <agent> …` · `task list` · `task show` over append-only `M8SHIFT.tasks.md`; status is folded at read time. | Pen-free event log; `--for`/`blocked_on` are advisory text, never enforced by the mutex. |
+| [011-rfc-session-history.md](rfc/011-rfc-session-history.md) | **Session history** | `history [--limit N] [--oneline] [--json]` folds append-only `M8SHIFT.sessions.jsonl` into one entry per session. | Observability only; start/done/reset events never feed claimability or routing. |
+| [022-rfc-session-reports.md](rfc/022-rfc-session-reports.md) | **Session reports** | `session list/show/decisions/report`, `M8SHIFT.session-reports/<session-id>.md`. | Derived project memory; optional writes are path-confined, reject M8Shift coordination/distributed-script targets including case variants, and never mutate the `LOCK`. |
+| [010-rfc-runtime-patterns.md](rfc/010-rfc-runtime-patterns.md) | **Read and diagnostic surfaces** | `recap`, `peek`, `log`, `status --json`, `doctor [--lint] [--json]`, timezone-prefixed local time in human output. | Read-only formatters/diagnostics over existing state; no repair, no routing decisions. |
+| [003-rfc-i18n-packs.md](rfc/003-rfc-i18n-packs.md) | **Localized single-file variants** | `m8shift-i18n.py --langs … --into DIR` builds self-contained language variants from `i18n/<lang>/` packs; `init --lang` records the generated language in `LOCK`. | Runtime stays single-file and self-contained; packs are build inputs, not runtime dependencies. |
 | Operator live view | **Passive monitoring** | `watch [--for <agent>] [--interval N] [--clear] [--changes-only]` repeats the status view in a terminal. | Foreground/read-only loop only; no daemon, no notification, no `claim`, no force recovery. |
 | Operator-loop guardrail | **Safe resumption** | `next <agent>`, `status --for <agent>`, and `append --wait` keep an agent in the relay loop until its next turn or `DONE`. | `next` mutates only by performing the normal `claim`; hints are advisory; `append --wait` waits after the handoff and never changes routing. |
-| [rfc-worktree-companion.md](rfc/rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
+| [008-rfc-worktree-companion.md](rfc/008-rfc-worktree-companion.md) | **Opt-in degree-2 companion** | `m8shift-worktree.py claim/done/drop/status/integrate` uses isolated git worktrees and a serialized integration pen. | Parallel work stays off-core; the core remains degree-1 and only integration is serialized through the shared lock. |
 | Protocol surface | **Advisory turn fields** | `append … --branch/--commit/--tests/--next/--blocked-on …` + open `--field k=v` (`x_*`) namespace, surfaced verbatim by `peek`. | Written verbatim, never interpreted; the engine routes on the `LOCK`, not turn fields. |
-| [rfc-contracts-validation.md](rfc/rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
-| [rfc-stage6-integrations.md](rfc/rfc-stage6-integrations.md) | **Stage 6 local integration layer** | Bash/PowerShell installers, `checksums.sha256`, versioned distributed scripts, `watch`, site/docs sync, and `examples/headless_runner.py` with `M8SHIFT_RUN_ID`, heartbeat, and `.m8shift/runtime/runs.jsonl`. | Shipped local convenience layer around the passive core; provider/IDE/MCP/control-plane integrations remain optional companions. |
-| [rfc-runtime-companion.md](rfc/rfc-runtime-companion.md) | **Runtime companion v1** | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`; `.m8shift/runtime/{presence.json,progress.jsonl,idempotency.jsonl,inbox/*.jsonl}`. | Local advisory sidecars only; no direct `M8SHIFT.md` edits and no second pen authority. |
-| [rfc-agent-runtime-architecture.md](rfc/rfc-agent-runtime-architecture.md) | **Agent runtime architecture companion v1** | `m8shift-runtime.py init`, `roles`, `workflows`, `approve`, `report`; `.m8shift/{roles,workflows,policies,runs}`. | Local scaffold and reports only; removable without breaking the core relay. |
-| [rfc-provider-management.md](rfc/rfc-provider-management.md) | **Provider management v1** | `m8shift-runtime.py providers init/list/show/check/render`; `.m8shift/providers.json`. | Host-side mapping from roster names to safe argv arrays; no provider SDK, secrets, or core routing authority. |
-| [rfc-headless-runner-hardening.md](rfc/rfc-headless-runner-hardening.md) | **Headless runner hardening** | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, argument validation, and `run.timeout` events. | Bounds stuck provider processes while preserving post-run validation and no force-steal rule. |
-| [rfc-cooperative-turn-request.md](rfc/rfc-cooperative-turn-request.md) | **Cooperative turn request** | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, and append-only `M8SHIFT.requests.md`. | Requests never make `claim` succeed; only explicit yield/force-steer changes routing, and `steer-turn` refuses fresh `WORKING_*`. |
-| [rfc-pause-resume.md](rfc/rfc-pause-resume.md) | **Pause / resume** | `PAUSED`, `pause <holder> --reason`, `resume <agent> --reason`, `next --resume --reason`, and livelock doctor warnings. | Open session with no active task has no holder; no automatic claim until explicit user-scope resume. |
+| [012-rfc-contracts-validation.md](rfc/012-rfc-contracts-validation.md) | **Stage 4 contracts and validation** | `append … --schema stage4.v1 --relation … --role-from/--role-to … --requires … --expected-output … --evidence … --decision … --waiver-reason … --permissions …`; `contract validate [--strict] [--json] [--all]`; `doctor --contracts`. | Typed metadata is validated only on explicit read-only commands; it never grants permissions, routes work, runs tools, or mutates the `LOCK`. |
+| [017-rfc-stage6-integrations.md](rfc/017-rfc-stage6-integrations.md) | **Stage 6 local integration layer** | Bash/PowerShell installers, `checksums.sha256`, versioned distributed scripts, `watch`, site/docs sync, and `examples/headless_runner.py` with `M8SHIFT_RUN_ID`, heartbeat, and `.m8shift/runtime/runs.jsonl`. | Shipped local convenience layer around the passive core; provider/IDE/MCP/control-plane integrations remain optional companions. |
+| [009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md) | **Runtime companion v1** | `m8shift-runtime.py watch/operator/progress/status-runtime/doctor`; `.m8shift/runtime/{presence.json,progress.jsonl,idempotency.jsonl,inbox/*.jsonl}`. | Local advisory sidecars only; no direct `M8SHIFT.md` edits and no second pen authority. |
+| [018-rfc-agent-runtime-architecture.md](rfc/018-rfc-agent-runtime-architecture.md) | **Agent runtime architecture companion v1** | `m8shift-runtime.py init`, `roles`, `workflows`, `approve`, `report`; `.m8shift/{roles,workflows,policies,runs}`. | Local scaffold and reports only; removable without breaking the core relay. |
+| [014-rfc-provider-management.md](rfc/014-rfc-provider-management.md) | **Provider management v1** | `m8shift-runtime.py providers init/list/show/check/render`; `.m8shift/providers.json`. | Host-side mapping from roster names to safe argv arrays; no provider SDK, secrets, or core routing authority. |
+| [020-rfc-headless-runner-hardening.md](rfc/020-rfc-headless-runner-hardening.md) | **Headless runner hardening** | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace`, argument validation, and `run.timeout` events. | Bounds stuck provider processes while preserving post-run validation and no force-steal rule. |
+| [016-rfc-cooperative-turn-request.md](rfc/016-rfc-cooperative-turn-request.md) | **Cooperative turn request** | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, and append-only `M8SHIFT.requests.md`. | Requests never make `claim` succeed; only explicit yield/force-steer changes routing, and `steer-turn` refuses fresh `WORKING_*`. |
+| [021-rfc-pause-resume.md](rfc/021-rfc-pause-resume.md) | **Pause / resume** | `PAUSED`, `pause <holder> --reason`, `resume <agent> --reason`, `next --resume --reason`, and livelock doctor warnings. | Open session with no active task has no holder; no automatic claim until explicit user-scope resume. |
 
 ### 12.2 Stage 4 contract surface
 
-[RFC — Stage 4 contracts and validation](rfc/rfc-contracts-validation.md) is now implemented as a
+[RFC — Stage 4 contracts and validation](rfc/012-rfc-contracts-validation.md) is now implemented as a
 read-only validation surface: typed handoff contracts, explicit review decisions
 (`approve`, `revise`, `reject`, `waive`), ergonomic append flags, `contract validate`, and
 `doctor --contracts`. Its boundary is the same as the rest of the core: validation may report
@@ -426,25 +426,25 @@ run tools, or mutate the `LOCK`.
 
 The remaining future topics are now explicit RFCs:
 
-- [RFC input — Neutral runtime patterns inventory](rfc/rfc-input-neutral-patterns.md):
+- [RFC input — Neutral runtime patterns inventory](rfc/019-rfc-input-neutral-patterns.md):
   curated source material for future companion RFCs, with shipped core surfaces
   separated from deferred runtime patterns.
-- [RFC — Hosted/runtime control plane](rfc/rfc-hosted-runtime-control-plane.md):
+- [RFC — Hosted/runtime control plane](rfc/013-rfc-hosted-runtime-control-plane.md):
   optional hosted/runtime supervision and notifications around the passive core;
   local presence, inbox, progress, and diagnostics are already covered by
   `m8shift-runtime.py`.
-- [RFC — Provider management](rfc/rfc-provider-management.md): optional mapping from
+- [RFC — Provider management](rfc/014-rfc-provider-management.md): optional mapping from
   roster identities (`claude`, `codex`, `gemini`, `vibe`, …) to host provider
   commands, capabilities, and policies.
-- [RFC — True degree > 1 writes in one shared working tree](rfc/rfc-shared-tree-degree-gt1.md):
+- [RFC — True degree > 1 writes in one shared working tree](rfc/015-rfc-shared-tree-degree-gt1.md):
   research topic, rejected for the core; use the
-  [worktree companion](rfc/rfc-worktree-companion.md) for real parallelism.
+  [worktree companion](rfc/008-rfc-worktree-companion.md) for real parallelism.
 
-`subturn` was **rejected** (see [rfc-subturn.md](rfc/rfc-subturn.md)): §5 advisory fields cover
+`subturn` was **rejected** (see [007-rfc-subturn.md](rfc/007-rfc-subturn.md)): §5 advisory fields cover
 at-append provenance and `remember` covers mid-turn streaming, so a fourth ledger would be
 redundant surface.
 
-**Degree-2 has shipped off-core** as the opt-in [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md)
+**Degree-2 has shipped off-core** as the opt-in [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md)
 companion — parallel isolated git worktrees plus a single serialized integration pen — so the core
 itself stays a pure degree-1 mutex while true concurrency is available when wanted.
 
@@ -452,9 +452,9 @@ itself stays a pure degree-1 mutex while true concurrency is available when want
 
 | Rejected | Quality broken | Why |
 |----------|----------------|-----|
-| **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the [`m8shift-worktree.py`](rfc/rfc-worktree-companion.md) companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
+| **Path-scoped *leases* in the core** (concurrent disjoint writes through the mutex) | degree-1 mutex / minimal | Two writers in the core at once would break the single pen. Degree-2 ships instead **off-core** as the [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md) companion (worktree isolation + a serialized integration pen); `claim --check` covers the in-core advisory 80%. |
 | **Background daemon / autonomous watcher / push-notifier** | passive | M8Shift has no resident process. The shipped `watch` command is only a foreground read-only terminal view; notifications can *signal* a turn, never *wake* the AI. |
-| **Runtime supervision in the core** | passive / single-file | Queues, presence, progress drafts, and operator inboxes are useful host integration concerns, but they belong in an opt-in companion ([rfc-runtime-companion.md](rfc/rfc-runtime-companion.md)), not in the mutex. |
+| **Runtime supervision in the core** | passive / single-file | Queues, presence, progress drafts, and operator inboxes are useful host integration concerns, but they belong in an opt-in companion ([009-rfc-runtime-companion.md](rfc/009-rfc-runtime-companion.md)), not in the mutex. |
 | **Running git / builds / APIs / executing `--next`** | passive + zero-credential | Acting on a tool needs auth + network and turns M8Shift into an orchestrator; handoff fields stay write-only advisory the receiving agent interprets with its own auth. |
 | **Third-party deps / multi-file package** | single file | Every item is scoped to stdlib (`json`, `fnmatch`, `re`); a DB / queue / server would split the tool — no more `cp m8shift.py`. |
 | **"Smart" *derived* memory** (dedup / summarize / search / prune) | minimal / file-based | The ledger is a dumb append-only record; any digest is verbatim agent passthrough. The instant M8Shift curates content it owns a knowledge base with policy — a second source of truth. |
