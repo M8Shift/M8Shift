@@ -207,6 +207,8 @@ loop:
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # 必要なら待機し、claim + peek
 ./m8shift.py claim <agent> [--force]               # ペンを取得（排他的）— あなたの番 /
                                                   #   IDLE / 自分自身のロックから ; --force = 古いロックのみ
+./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
+./m8shift.py guard <agent>        # alias for may-i-write
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # ターンを閉じて引き継ぐ
 ./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)

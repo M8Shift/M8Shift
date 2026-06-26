@@ -60,7 +60,9 @@ Every change follows the same branch-based flow.
    (`feat/…`, `fix/…`, `docs/…`, `refactor/…`). All work happens here.
 3. **Commit each logical change on the branch** — small, self-contained commits
    (one concern per commit), not one giant commit. Commit while you hold the relay
-   pen; do not stage pre-existing untracked files without explicit instruction.
+   pen; run `./m8shift.py may-i-write <agent>` first when a script or hook needs a
+   hard yes/no guard. Do not stage pre-existing untracked files without explicit
+   instruction.
 4. **Tests, systematically.** Read the code, review it, and **add or update tests for
    every behavioral change**. `python3 -m unittest discover -s tests` must be green on
    the branch before review.
