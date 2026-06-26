@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.23.0"
+VERSION = "3.24.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -176,8 +176,9 @@ core relay.
 Runtime JSONL sidecars use the `m8shift.runtime.event.v1` envelope. Invalid or
 deleted sidecars are diagnostics, not core relay failures. The runtime companion
 uses `presence.json` as one advisory lane per agent identity: a fresh lane blocks a
-second managed runtime, and stale takeover must be explicit. It never edits
-`M8SHIFT.md` directly and never owns the pen.
+second managed runtime, and stale takeover must be explicit. Optional no-progress
+thresholds warn or block only the companion loop when progress/run events stop. It
+never edits `M8SHIFT.md` directly and never owns the pen.
 """
 
 
@@ -418,10 +419,96 @@ def relay_runtime_state(lk, agent):
     return "waiting"
 
 
-def update_presence(core, agent, session_id, mode, state, run_id="", stale_after=300, takeover_stale=False):
+def iso_from_dt(value):
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ") if value else ""
+
+
+def latest_runtime_activity(agent, run_id):
+    findings = []
+    latest = None
+    for path in (RUNS, PROGRESS):
+        rows, err = read_jsonl_diagnostic(path)
+        if err:
+            findings.append({"severity": "warning", "check": "runtime.jsonl", "message": err})
+            continue
+        for row in rows:
+            if row.get("agent") != agent:
+                continue
+            if run_id and row.get("run_id") != run_id:
+                continue
+            ts = parse_utc(row.get("ts", ""))
+            if ts and (latest is None or ts > latest):
+                latest = ts
+    return latest, findings
+
+
+def no_progress_hint(agent, run_id):
+    target = f"{agent}/{run_id}" if run_id else agent
+    return (
+        f"Record progress for {target}, inspect status-runtime/doctor, or ask the "
+        "operator for a handoff decision; no automatic force recovery is performed."
+    )
+
+
+def no_progress_finding(agent, row):
+    status = row.get("no_progress_status")
+    if status not in {"warning", "blocked"}:
+        return None
+    severity = "error" if status == "blocked" else "warning"
+    return {
+        "severity": severity,
+        "check": "runtime.no_progress",
+        "message": (
+            f"{agent} runtime has no progress for "
+            f"{row.get('no_progress_elapsed_seconds', 0)}s"
+        ),
+        "hint": row.get("no_progress_hint", ""),
+    }
+
+
+def evaluate_no_progress(agent, run_id, previous, warn_after=0, block_after=0):
+    fields = {}
+    if not warn_after and not block_after:
+        return fields, []
+    latest, findings = latest_runtime_activity(agent, run_id)
+    latest_iso = iso_from_dt(latest)
+
+    current = now()
+    previous_activity = previous.get("last_activity_at", "") if isinstance(previous, dict) else ""
+    if latest_iso and latest_iso != previous_activity:
+        since = iso_from_dt(current)
+    elif isinstance(previous, dict) and previous.get("no_progress_since"):
+        since = previous["no_progress_since"]
+    else:
+        since = iso_from_dt(current)
+    since_dt = parse_utc(since) or current
+    elapsed = max(0, int((current - since_dt).total_seconds()))
+    status = "ok"
+    if block_after and elapsed >= block_after:
+        status = "blocked"
+    elif warn_after and elapsed >= warn_after:
+        status = "warning"
+    fields.update({
+        "last_activity_at": latest_iso,
+        "no_progress_since": since,
+        "no_progress_elapsed_seconds": elapsed,
+        "no_progress_warn_after_seconds": warn_after,
+        "no_progress_block_after_seconds": block_after,
+        "no_progress_status": status,
+        "no_progress_hint": no_progress_hint(agent, run_id),
+    })
+    finding = no_progress_finding(agent, fields)
+    if finding:
+        findings.append(finding)
+    return fields, findings
+
+
+def update_presence(core, agent, session_id, mode, state, run_id="", stale_after=300,
+                    takeover_stale=False, no_progress_warn_after=0, no_progress_block_after=0):
     validate_agent(core, agent)
     presence = read_json(PRESENCE, {})
     existing = presence.get(agent)
+    findings = []
     takeover_from = ""
     if existing and existing.get("session_id") != session_id:
         owner = existing.get("session_id") or "<unknown>"
@@ -457,9 +544,17 @@ def update_presence(core, agent, session_id, mode, state, run_id="", stale_after
     if takeover_from:
         row["takeover_from"] = takeover_from
         row["takeover_at"] = row["last_seen"]
+    previous = existing if existing and existing.get("session_id") == session_id else {}
+    no_progress_fields, no_progress_findings = evaluate_no_progress(
+        agent, run_id, previous,
+        warn_after=no_progress_warn_after,
+        block_after=no_progress_block_after,
+    )
+    row.update(no_progress_fields)
+    findings.extend(no_progress_findings)
     presence[agent] = row
     atomic_write_json(PRESENCE, presence)
-    return presence[agent]
+    return presence[agent], findings
 
 
 def run_core_json(*args):
@@ -472,6 +567,11 @@ def run_core_json(*args):
 def cmd_watch(args):
     if args.interval < 1:
         sys.exit("m8shift-runtime: --interval must be >= 1")
+    if args.no_progress_warn_after < 0 or args.no_progress_block_after < 0:
+        sys.exit("m8shift-runtime: no-progress thresholds must be >= 0")
+    if (args.no_progress_warn_after and args.no_progress_block_after
+            and args.no_progress_block_after < args.no_progress_warn_after):
+        sys.exit("m8shift-runtime: --no-progress-block-after must be >= --no-progress-warn-after")
     core = load_core()
     agent = validate_agent(core, args.agent)
     session_id = validate_session_id(args.session or f"{agent}-{uuid.uuid4().hex[:8]}")
@@ -479,20 +579,33 @@ def cmd_watch(args):
     while True:
         _, lk = load_status(core)
         state = relay_runtime_state(lk, agent)
-        row = update_presence(
+        row, findings = update_presence(
             core, agent, session_id, "ui-watch", state,
             run_id=run_id, stale_after=args.stale_after,
             takeover_stale=args.takeover_stale or args.force,
+            no_progress_warn_after=args.no_progress_warn_after,
+            no_progress_block_after=args.no_progress_block_after,
         )
         prompt = ""
         if lk.get("state") in ("IDLE", f"AWAITING_{agent.upper()}"):
             prompt = f"python3 m8shift.py next {agent}"
+        blocked = row.get("no_progress_status") == "blocked"
         if args.json:
-            print(json.dumps({"presence": row, "resume_prompt": prompt}, ensure_ascii=False, sort_keys=True))
+            print(json.dumps({
+                "presence": row,
+                "resume_prompt": prompt,
+                "runtime_findings": findings,
+            }, ensure_ascii=False, sort_keys=True))
         else:
             print(f"{iso()} {agent} runtime={state} relay={lk.get('state')} holder={lk.get('holder')}")
             if prompt:
                 print(f"resume: {prompt}")
+            for finding in findings:
+                print(f"{finding['severity']} {finding['check']}: {finding['message']}")
+                if finding.get("hint"):
+                    print(f"hint: {finding['hint']}")
+        if blocked:
+            return 2
         if args.once:
             return 0
         time.sleep(args.interval)
@@ -864,9 +977,13 @@ def runtime_summary(agent=""):
             findings.append({"severity": "warning", "check": "runtime.inbox", "message": err})
         last_progress = next((row for row in reversed(progress) if row.get("agent") == ag), None)
         pres = presence.get(ag)
+        if isinstance(pres, dict):
+            finding = no_progress_finding(ag, pres)
+            if finding:
+                findings.append(finding)
         out[ag] = {
             "presence": pres,
-            "presence_stale": bool(pres) and not fresh_presence(pres, pres.get("stale_after_seconds", 300)),
+            "presence_stale": isinstance(pres, dict) and not fresh_presence(pres, pres.get("stale_after_seconds", 300)),
             "inbox_count": len(inbox),
             "last_progress": last_progress,
         }
@@ -976,6 +1093,10 @@ def cmd_doctor(args):
                 "check": "runtime.presence_stale",
                 "message": f"{agent} runtime presence is stale",
             })
+        if isinstance(row, dict):
+            finding = no_progress_finding(agent, row)
+            if finding:
+                findings.append(finding)
     if os.path.exists(PROVIDERS):
         findings.extend(provider_findings(load_provider_registry()))
     ok = not any(f["severity"] == "error" for f in findings)
@@ -1015,6 +1136,10 @@ def main():
     w.add_argument("--run", default="", help="optional run id")
     w.add_argument("--interval", type=int, default=5)
     w.add_argument("--stale-after", type=int, default=300)
+    w.add_argument("--no-progress-warn-after", type=int, default=0,
+                   help="warn when no progress/run event advances within N seconds (0 disables)")
+    w.add_argument("--no-progress-block-after", type=int, default=0,
+                   help="block this companion loop when no progress/run event advances within N seconds (0 disables)")
     w.add_argument("--once", action="store_true")
     w.add_argument("--takeover-stale", action="store_true",
                    help="explicitly take over a different session only when its lane is stale")

@@ -229,6 +229,12 @@ it is "the same wait/resume/status cycle repeats without advancing the relay".
 
 **Where it belongs:** runtime companion and `doctor`, not the core mutex.
 
+**Implemented v1 pattern:** `m8shift-runtime.py watch` can compare the current run's
+latest `progress.jsonl` / `runs.jsonl` event with explicit
+`--no-progress-warn-after` and `--no-progress-block-after` thresholds. Warning emits a
+`runtime.no_progress` finding and hint. Blocking exits only the companion loop with
+that finding.
+
 **Detected patterns:**
 
 - same `status` observed for too long with no heartbeat/progress change;
@@ -238,7 +244,7 @@ it is "the same wait/resume/status cycle repeats without advancing the relay".
 - UI expected to resume but no presence is alive.
 
 **Boundary:** detection reports or blocks the companion's own loop. It does not auto-force
-the core lock.
+the core lock and never emits a force-recovery command.
 
 ### 9. Idempotency keys — KEEP
 
