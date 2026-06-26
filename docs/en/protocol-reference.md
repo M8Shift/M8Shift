@@ -126,6 +126,13 @@ same metadata and serializes unavailable values as `null`.
   read-only status view so a terminal can show relay evolution without manually
   re-running `status`. It is a foreground/passive monitor: no `claim`, no handoff,
   no force recovery, no daemon.
+- **Doctor lint**: `doctor --lint --json` is CI-safe and read-only. It reports
+  core-safe findings for relay/LOCK validity, anchors and stanza placement,
+  `AGENTS.override.md` synchronization, protocol/reference drift, stale or
+  malformed `.m8shift.lock`, project-root status checks, session-ledger shape,
+  multiple open relay sessions for the same roster, and livelock indicators.
+  It never repairs files, prompts, contacts the network, or changes legal
+  `LOCK` transitions.
 
 ---
 

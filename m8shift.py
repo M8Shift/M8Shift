@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.20.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.21.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -423,6 +423,13 @@ same metadata and serializes unavailable values as `null`.
   read-only status view so a terminal can show relay evolution without manually
   re-running `status`. It is a foreground/passive monitor: no `claim`, no handoff,
   no force recovery, no daemon.
+- **Doctor lint**: `doctor --lint --json` is CI-safe and read-only. It reports
+  core-safe findings for relay/LOCK validity, anchors and stanza placement,
+  `AGENTS.override.md` synchronization, protocol/reference drift, stale or
+  malformed `.m8shift.lock`, project-root status checks, session-ledger shape,
+  multiple open relay sessions for the same roster, and livelock indicators.
+  It never repairs files, prompts, contacts the network, or changes legal
+  `LOCK` transitions.
 
 ---
 
@@ -2434,6 +2441,122 @@ def _doctor_anchor_findings(agent, anchor, seen):
     return findings
 
 
+def _stanza_block(text):
+    m = re.search(re.escape(STANZA_BEGIN) + r".*?" + re.escape(STANZA_END), text or "", re.DOTALL)
+    return m.group(0) if m else ""
+
+
+def _doctor_override_sync_findings():
+    """AGENTS.override.md masks AGENTS.md in Codex UIs; when present, the two stanzas must match.
+
+    The check is read-only and only compares the generated stanza block. Missing/unreadable/incomplete
+    anchors are reported by _doctor_anchor_findings, so this helper stays quiet unless both blocks can
+    be read and compared.
+    """
+    override_path = os.path.join(HERE, CODEX_OVERRIDE)
+    codex_path = os.path.join(HERE, CODEX_ANCHOR)
+    if not os.path.exists(override_path) or not os.path.exists(codex_path):
+        return []
+    try:
+        override_block = _stanza_block(read(override_path))
+        codex_block = _stanza_block(read(codex_path))
+    except OSError:
+        return []
+    if override_block and codex_block and override_block != codex_block:
+        return [doctor_finding(
+            "anchor.override_out_of_sync", "warning",
+            f"{CODEX_OVERRIDE} contains a different M8Shift stanza than {CODEX_ANCHOR}.",
+            CODEX_OVERRIDE,
+            "run `./m8shift.py init` to synchronize the Codex override stanza",
+        )]
+    return []
+
+
+def _doctor_file_lock_findings():
+    """Inspect the internal .m8shift.lock without taking or removing it."""
+    findings = []
+    if not os.path.lexists(LOCKFILE):
+        return findings
+    name = os.path.basename(LOCKFILE)
+    try:
+        st = os.lstat(LOCKFILE)
+    except OSError as e:
+        return [doctor_finding(
+            "file_lock.unreadable", "warning",
+            f"{name} cannot be inspected: {e}.",
+            name,
+        )]
+    if not stat.S_ISREG(st.st_mode):
+        findings.append(doctor_finding(
+            "file_lock.malformed", "error",
+            f"{name} is not a regular lock-token file.",
+            name,
+            "remove the suspicious lock path after confirming no m8shift.py process is active",
+        ))
+        return findings
+    try:
+        token, st2 = _read_regular_file_token(LOCKFILE)
+    except OSError as e:
+        findings.append(doctor_finding(
+            "file_lock.unreadable", "warning",
+            f"{name} cannot be read: {e}.",
+            name,
+        ))
+        return findings
+    if not re.fullmatch(rb"\d+:\d+\Z", token or b""):
+        findings.append(doctor_finding(
+            "file_lock.malformed", "warning",
+            f"{name} does not contain a valid ownership token.",
+            name,
+            "remove the stale lock after confirming no m8shift.py process is active",
+        ))
+    age = time.time() - st2.st_mtime
+    if age > LOCK_STALE_S:
+        findings.append(doctor_finding(
+            "file_lock.stale", "warning",
+            f"{name} looks abandoned ({int(age)}s old).",
+            name,
+            "rerun the command; m8shift.py will reclaim the internal file lock if it is still stale",
+        ))
+    return findings
+
+
+def _doctor_status_json_findings():
+    root = os.path.realpath(os.path.dirname(COWORK) or ".")
+    cwd = os.path.realpath(os.getcwd())
+    if cwd != root:
+        return [doctor_finding(
+            "status.cwd_mismatch", "warning",
+            "doctor is not running from the relay project root; verify `status --json` from the project root.",
+            ".",
+            f"cd {root} && ./m8shift.py status --json",
+        )]
+    return []
+
+
+def _doctor_session_identity_findings(events, turns, lk):
+    if not events or not lk:
+        return []
+    open_by_agents = {}
+    for s in fold_session_history(events, turns, lk):
+        if s.get("state") in {"DONE", "RESET"}:
+            continue
+        key = s.get("agents", "-")
+        if key and key != "-":
+            open_by_agents.setdefault(key, []).append(s.get("session_id", "-"))
+    findings = []
+    for agents, sids in open_by_agents.items():
+        uniq = [sid for sid in sids if sid and sid != "-"]
+        if len(set(uniq)) > 1:
+            findings.append(doctor_finding(
+                "sessions.multiple_open_identity", "warning",
+                f"multiple open relay sessions share the same agent roster {agents}: {', '.join(uniq)}.",
+                os.path.basename(SESSIONS),
+                "review `./m8shift.py history` and close/reset stale sessions explicitly",
+            ))
+    return findings
+
+
 def _security_doctor_findings(lk):
     findings = []
     effective_root = os.path.realpath(os.path.dirname(COWORK))
@@ -2493,6 +2616,7 @@ def _security_doctor_findings(lk):
 def collect_doctor_findings(security=False, contracts=False):
     """Read-only health checks. No file_lock, no write, no force recovery."""
     findings = []
+    turns = []
     if not os.path.exists(COWORK):
         return [doctor_finding(
             "relay.missing", "error",
@@ -2627,21 +2751,13 @@ def collect_doctor_findings(security=False, contracts=False):
                     os.path.basename(COWORK),
                 ))
 
-    if os.path.exists(LOCKFILE):
-        try:
-            age = time.time() - os.path.getmtime(LOCKFILE)
-        except OSError:
-            age = 0
-        if age > LOCK_STALE_S:
-            findings.append(doctor_finding(
-                "file_lock.stale", "warning",
-                f"{os.path.basename(LOCKFILE)} looks abandoned ({int(age)}s old).",
-                os.path.basename(LOCKFILE),
-                "rerun the command; m8shift.py will reclaim the internal file lock if it is still stale",
-                ))
+    findings.extend(_doctor_file_lock_findings())
+    findings.extend(_doctor_status_json_findings())
 
+    session_events = []
     if os.path.exists(SESSIONS):
         try:
+            session_events = parse_session_events(read(SESSIONS))
             for n, line in enumerate(read(SESSIONS).splitlines(), 1):
                 if not line.strip():
                     continue
@@ -2669,6 +2785,7 @@ def collect_doctor_findings(security=False, contracts=False):
                 f"{os.path.basename(SESSIONS)} cannot be read: {e}.",
                 os.path.basename(SESSIONS),
             ))
+    findings.extend(_doctor_session_identity_findings(session_events, turns, lk))
 
     if not os.path.exists(PROTO):
         findings.append(doctor_finding(
@@ -2732,6 +2849,7 @@ def collect_doctor_findings(security=False, contracts=False):
     override_path = os.path.join(HERE, CODEX_OVERRIDE)
     if os.path.exists(override_path):
         findings.extend(_doctor_anchor_findings("codex-override", CODEX_OVERRIDE, {}))
+        findings.extend(_doctor_override_sync_findings())
 
     runtime_dir = os.path.join(os.path.dirname(COWORK), ".m8shift", "runtime")
     if os.path.isdir(runtime_dir):
