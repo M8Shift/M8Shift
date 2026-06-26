@@ -61,3 +61,14 @@ python3 scripts/gen_docs.py
 
 Branch per change; keep `main` green. Don't commit relay artefacts (`M8SHIFT.md`,
 `.m8shift.lock`, `CLAUDE.md`, `AGENTS.md`, …) — they are gitignored.
+
+Commits made under a M8Shift relay should also carry:
+
+```text
+Coordinated-With: M8Shift vX.Y.Z
+```
+
+`m8shift.py init` writes `.m8shift/hooks/commit-msg`, a hook template that injects this
+trailer from the active relay version. For an external relay, run commits with
+`M8SHIFT_ROOT=/path/to/relay`; without a configured relay the hook exits cleanly and
+does not block the commit.
