@@ -15,6 +15,27 @@ for normal use — clone, copy `m8shift.py` into a repo, run it. Keep it that wa
   other localized documentation tree; localized docs may link to the English RFCs.
 - **Tests must stay green.** `python3 -m unittest discover -s tests`.
 
+## Language policy
+
+English is the canonical development language for M8Shift. Commit messages,
+branch and merge-request descriptions, release notes, code identifiers, inline
+comments, tests, architecture notes, and design/RFC documents should be written
+in English by default.
+
+User-facing translations are welcome, but they live in the explicit
+internationalisation surfaces:
+
+- language packs under `i18n/<lang>/`;
+- localized tutorials and how-to pages under the matching `docs/<lang>/` tree;
+- links from localized docs back to canonical English references when duplicating
+  content would create drift.
+
+Durable project decisions that affect code, protocol behavior, or documentation
+structure must be recorded in English, or include an English summary when the
+working discussion used another language. Operational relay turns may be
+bilingual when useful; the permanent project record stays readable by every
+contributor.
+
 ## Internationalisation (i18n)
 
 The runtime selects a language via `--lang <code>` or `$M8SHIFT_LANG` (fallback: English).
