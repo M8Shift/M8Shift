@@ -161,6 +161,10 @@ gitignored runtime sidecars under `.m8shift/runtime/` (`presence.json`,
 the `m8shift.runtime.event.v1` envelope with `source`, `relay`, and `payload`
 metadata. Invalid or deleted runtime sidecars are diagnostic findings only; they
 must never change claimability or reinterpret `M8SHIFT.md`.
+`m8shift-runtime.py watch` also owns one advisory lane per agent identity in
+`presence.json`: a second managed runtime for the same agent is refused while the
+lane is fresh, and takeover requires the explicit `--takeover-stale` flag after the
+record is stale. Lane ownership never grants or steals the core pen.
 
 `init`:
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE
