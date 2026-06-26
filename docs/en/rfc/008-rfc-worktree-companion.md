@@ -1,7 +1,7 @@
 # RFC — Worktree companion (§8): degree-2 concurrency, opt-in
 
 **Status:** proposed (co-design kickoff) · **Targets:** a separate companion tool · **Builds on:**
-[rfc-n-agents.md](rfc-n-agents.md) §8/§8c (the settled model) · **Co-designed:** Claude ⇄ Codex via the relay
+[002-rfc-n-agents.md](002-rfc-n-agents.md) §8/§8c (the settled model) · **Co-designed:** Claude ⇄ Codex via the relay
 
 ## Goal
 

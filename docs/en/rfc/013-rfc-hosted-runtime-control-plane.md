@@ -200,7 +200,7 @@ A first implementation is acceptable when:
 ## 13. Relationship to existing surfaces
 
 This RFC generalizes the local ideas already described by
-[rfc-runtime-companion.md](rfc-runtime-companion.md). That document remains the
+[009-rfc-runtime-companion.md](009-rfc-runtime-companion.md). That document remains the
 local/runtime pattern. This RFC is the broader control-plane boundary, including
 hosted or multi-session variants.
 

@@ -6,7 +6,7 @@
 > shipped model is broader: an **active roster of ≥2 agents, all of which relay**, with **one
 > pen** (degree-1) — the holder hands off to any other member via `--to`. For the live model
 > see [the protocol](../protocol.md) §1–2 and the README. "Stage 2" below = **N *concurrent*
-> writers** (degree-2, isolated worktrees) — see [rfc-n-agents.md](rfc-n-agents.md). The text
+> writers** (degree-2, isolated worktrees) — see [002-rfc-n-agents.md](002-rfc-n-agents.md). The text
 > below is kept as the original design record; read it as historical.
 
 ## 1. Summary
