@@ -143,6 +143,9 @@ M8Shift is developed through its own relay (the agents coordinate via a `M8SHIFT
 That relay runs a *frozen* copy of the engine, so it can lag the code under
 development. When a version is **stabilized** (tests green, merged to `main`, tagged):
 
+- **Use a dedicated relay directory outside the M8Shift source tree.** Do not run
+  the dogfood relay from inside the repo being changed; keep it in a sibling such as
+  `../m8shift-relais` so relay artifacts and source work cannot collide.
 - **Promote the relay engine** to that latest stable version (copy the current
   `m8shift.py` over the relay's copy) so the relay exercises the very mechanisms just
   shipped. Verify `--version` matches and that `status` still reads the live session.
