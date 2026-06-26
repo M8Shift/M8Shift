@@ -45,7 +45,8 @@ import uuid
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.21.0"
+VERSION = "3.22.0"
+RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 
@@ -89,12 +90,23 @@ def append_run_event(args, event, run_id, agent, **fields):
     """
     if args.no_run_log:
         return
+    lk = read_lock(args.m8shift) or {}
     row = {
+        "schema": RUNTIME_EVENT_SCHEMA,
+        "type": event,
         "event": event,
         "run_id": run_id,
         "agent": agent,
         "ts": iso_now(),
         "runner_version": VERSION,
+        "source": {"tool": "headless_runner.py", "version": VERSION},
+        "relay": {
+            "state": lk.get("state", ""),
+            "holder": lk.get("holder", ""),
+            "turn": lk.get("turn", ""),
+        },
+        "idempotency_key": "",
+        "payload": dict(fields),
     }
     row.update(fields)
     os.makedirs(args.runtime_dir, exist_ok=True)

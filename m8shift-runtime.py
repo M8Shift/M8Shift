@@ -17,7 +17,9 @@ import sys
 import time
 import uuid
 
-VERSION = "3.21.0"
+VERSION = "3.22.0"
+RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
+PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE_PATH = os.path.join(HERE, "m8shift.py")
 RUNTIME_DIR = os.path.join(HERE, ".m8shift", "runtime")
@@ -171,7 +173,9 @@ core relay.
 - `policies/`: human approval and runtime policy notes.
 - `runtime/`, `runs/`, `cache/`, `tmp/`: generated state; keep ignored.
 
-The runtime companion never edits `M8SHIFT.md` directly and never owns the pen.
+Runtime JSONL sidecars use the `m8shift.runtime.event.v1` envelope. Invalid or
+deleted sidecars are diagnostics, not core relay failures. The runtime companion
+never edits `M8SHIFT.md` directly and never owns the pen.
 """
 
 
@@ -278,6 +282,39 @@ def read_jsonl(path):
     return rows
 
 
+def read_json_diagnostic(path, default):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return default, None
+    except (OSError, json.JSONDecodeError) as e:
+        return default, str(e)
+    if not isinstance(data, type(default)):
+        return default, f"expected {type(default).__name__}, got {type(data).__name__}"
+    return data, None
+
+
+def read_jsonl_diagnostic(path):
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, RecursionError, ValueError) as e:
+                    return rows, f"{path}:{n}: {e}"
+                if isinstance(row, dict):
+                    rows.append(row)
+    except FileNotFoundError:
+        return [], None
+    except OSError as e:
+        return [], str(e)
+    return rows, None
+
+
 def validate_session_id(session_id):
     if not SESSION_RE.fullmatch(session_id):
         sys.exit("m8shift-runtime: unsafe --session value")
@@ -298,6 +335,40 @@ def load_status(core):
     text = core.load_or_die()
     lk = core.get_lock(text)
     return text, lk
+
+
+def safe_relay_snapshot():
+    try:
+        core = load_core()
+        _, lk = load_status(core)
+    except (SystemExit, Exception):
+        return {}
+    return {
+        "state": lk.get("state", ""),
+        "holder": lk.get("holder", ""),
+        "turn": lk.get("turn", ""),
+    }
+
+
+def runtime_event(event_type, *, agent="", session_id="", run_id="", idempotency_key="",
+                  payload=None, **legacy_fields):
+    row = {
+        "schema": RUNTIME_EVENT_SCHEMA,
+        "type": event_type,
+        "ts": iso(),
+        "source": {"tool": "m8shift-runtime.py", "version": VERSION},
+        "relay": safe_relay_snapshot(),
+        "idempotency_key": idempotency_key or "",
+        "payload": payload or {},
+    }
+    if agent:
+        row["agent"] = agent
+    if session_id:
+        row["session_id"] = session_id
+    if run_id:
+        row["run_id"] = run_id
+    row.update({k: v for k, v in legacy_fields.items() if v is not None})
+    return row
 
 
 def validate_agent(core, agent):
@@ -357,10 +428,12 @@ def update_presence(core, agent, session_id, mode, state, run_id="", stale_after
         )
     _, lk = load_status(core)
     presence[agent] = {
+        "schema": PRESENCE_SCHEMA,
         "session_id": session_id,
         "run_id": run_id,
         "mode": mode,
         "state": state,
+        "stale_after_seconds": stale_after,
         "relay_state": lk.get("state", ""),
         "holder": lk.get("holder", ""),
         "turn": lk.get("turn", ""),
@@ -417,7 +490,13 @@ def idempotency_seen(key):
 
 def record_idempotency(key, action):
     if key:
-        append_jsonl(IDEMPOTENCY, {"type": "idempotency.recorded", "key": key, "action": action, "ts": iso()})
+        append_jsonl(IDEMPOTENCY, runtime_event(
+            "idempotency.recorded",
+            idempotency_key=key,
+            payload={"action": action, "key": key},
+            key=key,
+            action=action,
+        ))
 
 
 def cmd_operator(args):
@@ -426,14 +505,20 @@ def cmd_operator(args):
     if args.idempotency_key and idempotency_seen(args.idempotency_key):
         print(f"duplicate ignored: idempotency key {args.idempotency_key}")
         return 0
-    row = {
-        "type": "operator.message",
-        "agent": agent,
-        "mode": args.mode,
-        "message": args.message,
-        "idempotency_key": args.idempotency_key or "",
-        "ts": iso(),
-    }
+    behavior = {
+        "status": "Ask for progress only; no scope change.",
+        "followup": "Deliver after the current safe point.",
+        "collect": "Accumulate notes before the next turn or summary.",
+        "interrupt": "Ask the active runtime to summarize and hand off safely.",
+    }[args.mode]
+    row = runtime_event(
+        "operator.message",
+        agent=agent,
+        idempotency_key=args.idempotency_key or "",
+        payload={"mode": args.mode, "message": args.message, "required_behavior": behavior},
+        mode=args.mode,
+        message=args.message,
+    )
     append_jsonl(os.path.join(INBOX_DIR, f"{agent}.jsonl"), row)
     record_idempotency(args.idempotency_key, "operator")
     print(f"✓ queued {args.mode} message for {agent}")
@@ -444,13 +529,13 @@ def cmd_progress(args):
     core = load_core()
     agent = validate_agent(core, args.agent)
     run_id = validate_run_id(args.run)
-    row = {
-        "type": "progress",
-        "agent": agent,
-        "run_id": run_id,
-        "message": args.message,
-        "ts": iso(),
-    }
+    row = runtime_event(
+        "progress",
+        agent=agent,
+        run_id=run_id,
+        payload={"message": args.message},
+        message=args.message,
+    )
     append_jsonl(PROGRESS, row)
     print(f"✓ progress recorded for {agent}/{args.run}")
     return 0
@@ -519,6 +604,7 @@ def provider_by_name(name):
 def cmd_runtime_init(args):
     agents = active_roster_or_default(args.agents)
     ensure_project_dirs()
+    ensure_runtime_dirs()
     created = []
     if write_text_if_missing(os.path.join(PROJECT_DIR, "README.md"), RUNTIME_README, args.force):
         created.append(".m8shift/README.md")
@@ -531,6 +617,16 @@ def cmd_runtime_init(args):
         created.append(".m8shift/policies/approvals.md")
     if write_json_if_missing(PROVIDERS, default_provider_registry(agents), args.force):
         created.append(".m8shift/providers.json")
+    if write_json_if_missing(PRESENCE, {}, args.force):
+        created.append(".m8shift/runtime/presence.json")
+    for path, label in (
+        (RUNS, ".m8shift/runtime/runs.jsonl"),
+        (PROGRESS, ".m8shift/runtime/progress.jsonl"),
+        (IDEMPOTENCY, ".m8shift/runtime/idempotency.jsonl"),
+        (APPROVALS, ".m8shift/runtime/approvals.jsonl"),
+    ):
+        if write_text_if_missing(path, "", args.force):
+            created.append(label)
     ensure_runtime_gitignore()
     if args.json:
         print(json.dumps({"created": created, "agents": agents, "runtime_version": VERSION}, ensure_ascii=False, sort_keys=True))
@@ -669,15 +765,13 @@ def cmd_approve(args):
         sys.exit("m8shift-runtime: invalid --by agent/operator name")
     run_id = validate_run_id(args.run)
     gate_id = validate_run_id(args.gate)
-    row = {
-        "type": "approval",
-        "run_id": run_id,
+    payload = {
         "gate_id": gate_id,
         "by": by,
         "decision": args.decision,
         "reason": args.reason,
-        "ts": iso(),
     }
+    row = runtime_event("approval", run_id=run_id, payload=payload, **payload)
     append_jsonl(APPROVALS, row)
     print(f"✓ approval recorded for {run_id}/{gate_id}: {args.decision}")
     return 0
@@ -685,14 +779,24 @@ def cmd_approve(args):
 
 def cmd_report(args):
     run_id = validate_run_id(args.run)
-    events = [row for row in read_jsonl(RUNS) if row.get("run_id") == run_id]
-    progress = [row for row in read_jsonl(PROGRESS) if row.get("run_id") == run_id]
-    approvals = [row for row in read_jsonl(APPROVALS) if row.get("run_id") == run_id]
+    findings = []
+
+    def rows_for(path):
+        rows, err = read_jsonl_diagnostic(path)
+        if err:
+            findings.append({"severity": "warning", "check": "runtime.jsonl", "message": err})
+            return []
+        return [row for row in rows if row.get("run_id") == run_id]
+
+    events = rows_for(RUNS)
+    progress = rows_for(PROGRESS)
+    approvals = rows_for(APPROVALS)
     payload = {
         "run_id": run_id,
         "events": events,
         "progress": progress,
         "approvals": approvals,
+        "runtime_findings": findings,
         "runtime_version": VERSION,
     }
     if args.json:
@@ -706,6 +810,8 @@ def cmd_report(args):
         f"- approvals: {len(approvals)}",
         "",
     ]
+    for finding in findings:
+        lines.append(f"- warning `{finding.get('check')}`: {finding.get('message')}")
     for row in events:
         lines.append(f"- event `{row.get('event', row.get('type', '?'))}` at {row.get('ts', '-')}: {row.get('status', row.get('relay_state', ''))}")
     for row in progress:
@@ -726,32 +832,43 @@ def cmd_report(args):
 
 
 def runtime_summary(agent=""):
-    presence = read_json(PRESENCE, {})
-    progress = read_jsonl(PROGRESS)
+    findings = []
+    presence, err = read_json_diagnostic(PRESENCE, {})
+    if err:
+        findings.append({"severity": "warning", "check": "runtime.json", "message": f"{os.path.relpath(PRESENCE, HERE)}: {err}"})
+    progress, err = read_jsonl_diagnostic(PROGRESS)
+    if err:
+        findings.append({"severity": "warning", "check": "runtime.jsonl", "message": err})
     agents = [agent] if agent else sorted(presence)
     out = {}
     for ag in agents:
-        inbox = read_jsonl(os.path.join(INBOX_DIR, f"{ag}.jsonl"))
+        inbox_path = os.path.join(INBOX_DIR, f"{ag}.jsonl")
+        inbox, err = read_jsonl_diagnostic(inbox_path)
+        if err:
+            findings.append({"severity": "warning", "check": "runtime.inbox", "message": err})
         last_progress = next((row for row in reversed(progress) if row.get("agent") == ag), None)
+        pres = presence.get(ag)
         out[ag] = {
-            "presence": presence.get(ag),
+            "presence": pres,
+            "presence_stale": bool(pres) and not fresh_presence(pres, pres.get("stale_after_seconds", 300)),
             "inbox_count": len(inbox),
             "last_progress": last_progress,
         }
-    return out
+    return out, findings
 
 
 def cmd_status_runtime(args):
     core = load_core()
     agent = validate_agent(core, args.agent) if args.agent else ""
     status = run_core_json("status", "--json")
-    summary = runtime_summary(agent)
+    summary, findings = runtime_summary(agent)
     if args.json:
         print(json.dumps({
             "m8shift_version": status.get("m8shift_version"),
             "runtime_version": VERSION,
             "relay": status,
             "runtime": summary,
+            "runtime_findings": findings,
         }, ensure_ascii=False, sort_keys=True))
         return 0
     print(f"m8shift-runtime.py v{VERSION}")
@@ -809,28 +926,35 @@ def cmd_doctor(args):
             "check": "runtime.gitignore",
             "message": ".m8shift/runtime exists but .m8shift/ is not gitignored",
         })
-    for path in (PRESENCE,):
-        if os.path.exists(path):
-            try:
-                read_json(path, {})
-            except SystemExit as e:
-                findings.append({"severity": "warning", "check": "runtime.json", "message": str(e)})
-    for path in (RUNS, PROGRESS, IDEMPOTENCY):
-        if os.path.exists(path):
-            try:
-                read_jsonl(path)
-            except (OSError, ValueError) as e:
-                findings.append({"severity": "warning", "check": "runtime.jsonl", "message": str(e)})
+    presence, err = read_json_diagnostic(PRESENCE, {})
+    if err:
+        findings.append({"severity": "warning", "check": "runtime.json", "message": f"{os.path.relpath(PRESENCE, HERE)}: {err}"})
+    for path in (RUNS, PROGRESS, IDEMPOTENCY, APPROVALS):
+        rows, err = read_jsonl_diagnostic(path)
+        if err:
+            findings.append({"severity": "warning", "check": "runtime.jsonl", "message": err})
+            continue
+        if any(row.get("schema") != RUNTIME_EVENT_SCHEMA for row in rows):
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.event_schema",
+                "message": f"{os.path.relpath(path, HERE)} has an event without schema {RUNTIME_EVENT_SCHEMA}",
+            })
     if os.path.isdir(INBOX_DIR):
         for name in os.listdir(INBOX_DIR):
             if name.endswith(".jsonl"):
-                try:
-                    read_jsonl(os.path.join(INBOX_DIR, name))
-                except (OSError, ValueError) as e:
-                    findings.append({"severity": "warning", "check": "runtime.inbox", "message": str(e)})
-    presence = read_json(PRESENCE, {})
+                rows, err = read_jsonl_diagnostic(os.path.join(INBOX_DIR, name))
+                if err:
+                    findings.append({"severity": "warning", "check": "runtime.inbox", "message": err})
+                    continue
+                if any(row.get("schema") != RUNTIME_EVENT_SCHEMA for row in rows):
+                    findings.append({
+                        "severity": "warning",
+                        "check": "runtime.event_schema",
+                        "message": f".m8shift/runtime/inbox/{name} has an event without schema {RUNTIME_EVENT_SCHEMA}",
+                    })
     for agent, row in presence.items():
-        if not fresh_presence(row, args.stale_after):
+        if isinstance(row, dict) and not fresh_presence(row, args.stale_after):
             findings.append({
                 "severity": "info",
                 "check": "runtime.presence_stale",
