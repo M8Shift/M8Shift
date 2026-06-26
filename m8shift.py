@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.19.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.20.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -370,11 +370,11 @@ same metadata and serializes unavailable values as `null`.
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
-./m8shift.py status [--for <agent>]                # lock + last turn + optional next-action hint
+./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
 ./m8shift.py contract validate [--strict] [--json] # read-only Stage-4 contract validation
-./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # read-only briefing: LOCK + last turns + memory + tasks
+./m8shift.py recap [--turns N] [--memory N] [--tasks N] [--brief]  # read-only briefing: LOCK + last turns + memory + tasks
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
@@ -410,6 +410,15 @@ same metadata and serializes unavailable values as `null`.
 - **Non-blocking** inspection: `status` or `wait <you> --once`. `wait <you>`
   **without** `--once` blocks until your turn — do not use it if you must return
   control to your loop in the meantime.
+- **Brief read output**: `status --brief` and `recap --brief` are human-output-only
+  compact modes. They are strict subsets of the default human output: no new fields,
+  no default-output change. `status --brief` keeps the version line, `holder`,
+  `state`, `agents`, `turn`, `since`, `expires`, and the `next` action (plus stale
+  or request hints when present); it drops framing, `lang`, `session`, `started`,
+  `duration`, `note`, and the last-turn footer. `recap --brief` keeps the version
+  line, `holder`, `state`, `agents`, `turn`, `since`, and recent turn summaries; it
+  drops framing, `session`, `expires`, `note`, section headings, memory headlines,
+  and task headlines.
 - **Live operator view**: `watch --for <you> --interval 5` repeats the same
   read-only status view so a terminal can show relay evolution without manually
   re-running `status`. It is a foreground/passive monitor: no `claim`, no handoff,
@@ -2852,15 +2861,28 @@ def cmd_contract_validate(args):
     return 1 if args.strict and not strict_ok else 0
 
 
+def _print_lock_line(k, lk):
+    v = ",".join(active_agents(lk)) if k == "agents" else display_lock_value(k, lk.get(k, ""))
+    print(f"  {k:<8} {v}")
+
+
 def cmd_recap(args):
     """Read-only session-start briefing: current LOCK + the last N turn summaries."""
     text = load_or_die()
     lk = get_lock(text)
     print(f"m8shift.py v{VERSION}")
+    if getattr(args, "brief", False):
+        for k in ("holder", "state", "agents", "turn", "since"):
+            _print_lock_line(k, lk)
+        turns = parse_turns(text)
+        recent = turns[-args.turns:] if args.turns > 0 else turns
+        for t in recent:
+            f = t["fields"]
+            print(f"  #{t['n']} {f.get('from', t['agent'])} -> {f.get('to', '-')}: {f.get('done', '-')}")
+        return 0
     print("── LOCK ───────────────────────────────")
     for k in ("holder", "state", "agents", "session", "turn", "since", "expires", "note"):
-        v = ",".join(active_agents(lk)) if k == "agents" else display_lock_value(k, lk.get(k, ""))
-        print(f"  {k:<8} {v}")
+        _print_lock_line(k, lk)
     turns = parse_turns(text)
     recent = turns[-args.turns:] if args.turns > 0 else turns
     if recent:
@@ -3104,9 +3126,22 @@ def _status_info(text=None):
     return lk, stale, last
 
 
-def _print_status_block(lk, stale, last, session_info=None, for_agent=""):
+def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False):
     session_info = session_info or current_session_info(lk)
     print(f"m8shift.py v{VERSION}")
+    if brief:
+        for k in ("holder", "state", "agents", "turn", "since", "expires"):
+            _print_lock_line(k, lk)
+        if stale:
+            print(tr("status_stale"))
+        if for_agent:
+            agent = need_agent(for_agent)
+            print(tr("status_next", action=next_action_for(lk, agent=agent, stale=stale)))
+            for line in request_hints_for_agent(agent):
+                print(f"  {line}")
+        else:
+            print(tr("status_next", action=next_action_for(lk, stale=stale)))
+        return
     print("── LOCK ───────────────────────────────")
     for k in ("holder", "state", "lang", "session", "turn", "since", "expires", "note"):
         print(f"  {k:<8} {display_lock_value(k, lk.get(k, ''))}")
@@ -3170,7 +3205,8 @@ def cmd_status(args):
             out["turn_requests"] = turn_requests_for_agent(agent)
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
-    _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""))
+    _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""),
+                        getattr(args, "brief", False))
     return 0
 
 
@@ -4002,6 +4038,8 @@ def main():
 
     st = sub.add_parser("status")
     st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
+    st.add_argument("--brief", action="store_true",
+                    help="compact human output: strict subset of the default status lines")
     st.add_argument("--for", dest="for_agent", default="",
                     help="show the next safe action for this agent")
     st.set_defaults(fn=cmd_status)
@@ -4045,6 +4083,8 @@ def main():
     rc.add_argument("--turns", type=int, default=6)
     rc.add_argument("--memory", type=int, default=5, help="memory headlines to show (<=0 = all)")
     rc.add_argument("--tasks", type=int, default=5, help="open-task headlines to show (<=0 = all)")
+    rc.add_argument("--brief", action="store_true",
+                    help="compact human output: strict subset of the default recap lines")
     rc.set_defaults(fn=cmd_recap)
 
     pk = sub.add_parser("peek", help="last handoff addressed to <agent> (rc 3 if not your turn)")
