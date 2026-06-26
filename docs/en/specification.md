@@ -1,5 +1,6 @@
 # Specification — M8Shift
 
+> [!NOTE]
 > **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-06-25
 
 ---
@@ -10,8 +11,11 @@
 **without stepping on each other**, coordinating through a **single shared
 file** `M8SHIFT.md`, in strict alternation (cooperative mutex). The system must be
 **portable to any project** and **usable by the agents without a human having to
-explain the protocol** (it is self-contained). *Limit*: in interactive agent UIs a
-human still nudges each agent to resume between turns — see §8.
+explain the protocol** (it is self-contained).
+
+> [!WARNING]
+> In interactive agent UIs a human still nudges each agent to resume between turns —
+> see §8.
 
 ## 2. Scope
 
@@ -40,10 +44,12 @@ views can challenge each other while the human maintainer keeps the final decisi
 
 The project turns that practice from manual copy/paste between siloed agent UIs into
 a shared workspace: each agent can hand off context, ask for review, and receive the
-other agent's critique without the maintainer becoming a message courier. M8Shift is
-therefore a peer-coordination primitive, not a manager agent: it gives teammates a
-shared baton, a durable record, and a safe alternation rule. See the longer rationale
-in [philosophy.md](philosophy.md).
+other agent's critique without the maintainer becoming a message courier.
+
+> [!IMPORTANT]
+> M8Shift is a peer-coordination primitive, not a manager agent: it gives teammates a
+> shared baton, a durable record, and a safe alternation rule. See the longer
+> rationale in [philosophy.md](philosophy.md).
 
 ```mermaid
 flowchart LR
