@@ -271,19 +271,29 @@ identity changes between preparation and execution.
 
 ```json
 {
+  "schema": "m8shift.headless.run_plan.v1",
   "run_id": "...",
   "agent": "codex",
-  "cwd": "/repo",
-  "argv": ["codex", "exec", "..."],
-  "prompt_sha256": "...",
-  "created_at": "..."
+  "command": {
+    "argv": ["codex", "exec", "..."],
+    "shell": false
+  },
+  "expected_post_run": {
+    "type": "core_state_advanced",
+    "pre_state": "AWAITING_CODEX",
+    "pre_turn": "12"
+  },
+  "created_at": "...",
+  "source": {"tool": "headless_runner.py", "version": "<runner version>"}
 }
 ```
 
-Then execute exactly that plan and verify the core state afterward.
+Then execute exactly that plan and verify the core `LOCK` state afterward. A mismatch
+emits a `headless.post_run_core_state` finding in the runtime ledger; it never emits a
+force-recovery command.
 
 **Boundary:** this is local process hygiene. M8Shift does not become a shell approval
-system.
+system and does not trust process exit status as proof of relay progress.
 
 ### 11. Bounded task/run ledgers — KEEP
 

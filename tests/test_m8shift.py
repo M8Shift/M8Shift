@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.24.0"
+VERSION = "3.25.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2366,7 +2366,17 @@ subprocess.check_call([
         self.assertIn("payload", rows[0])
         self.assertEqual(rows[0]["run_id"], run_id)
         self.assertEqual(rows[1]["status"], "ok")
+        self.assertTrue(rows[1]["verification_ok"])
+        self.assertEqual(rows[1]["verification_status"], "core_advanced")
         self.assertEqual(rows[1]["relay_state"], "AWAITING_CODEX")
+        plan_path = os.path.join(self.d, ".m8shift", "runtime", "run-plans", f"{run_id}.json")
+        with open(plan_path, encoding="utf-8") as f:
+            plan = json.load(f)
+        self.assertEqual(plan["schema"], "m8shift.headless.run_plan.v1")
+        self.assertEqual(plan["agent"], "claude")
+        self.assertFalse(plan["command"]["shell"])
+        self.assertEqual(plan["command"]["argv"][0], sys.executable)
+        self.assertEqual(plan["expected_post_run"]["type"], "core_state_advanced")
 
     def test_done_release_are_baton_owner_ops(self):
         # #4: in AWAITING_*, `holder` is the baton owner; done/release act for them WITHOUT an
@@ -2418,6 +2428,45 @@ subprocess.check_call([
         lk = hr.read_lock(os.path.join(self.d, "M8SHIFT.md"))
         self.assertIsNotNone(lk, "runner cannot read a current M8SHIFT.md")
         self.assertEqual(lk["state"], "IDLE")
+
+    def test_headless_runner_run_plan_is_immutable(self):
+        import importlib.util
+        rp = os.path.join(REPO, "examples", "headless_runner.py")
+        spec = importlib.util.spec_from_file_location("headless_runner", rp)
+        hr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hr)
+        plan = {"schema": hr.RUN_PLAN_SCHEMA, "run_id": "fixed-run", "agent": "claude"}
+        path = hr.write_run_plan(os.path.join(self.d, ".m8shift", "runtime"), plan)
+        with self.assertRaises(FileExistsError):
+            hr.write_run_plan(os.path.join(self.d, ".m8shift", "runtime"),
+                              {"schema": hr.RUN_PLAN_SCHEMA, "run_id": "fixed-run", "agent": "codex"})
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["agent"], "claude")
+
+    def test_headless_runner_post_run_verification_detects_mismatch(self):
+        self.init()
+        before = self.md()
+        runner = os.path.join(REPO, "examples", "headless_runner.py")
+        r = subprocess.run(
+            [sys.executable, runner, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--start-on-idle", "--once",
+             "--interval", "1", "--max-retries", "1", "--run-id", "fixed-run",
+             "--cmd", sys.executable, "-c", "import sys; sys.exit(0)"],
+            cwd=self.d, capture_output=True, text=True, timeout=8,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.md(), before)
+        self.assertNotIn("claim --force", r.stdout + r.stderr)
+        self.assertNotIn("steer-turn", r.stdout + r.stderr)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        events = [row["event"] for row in rows]
+        self.assertIn("run.verification_failed", events)
+        ended = [row for row in rows if row["event"] == "run.ended"][-1]
+        self.assertEqual(ended["status"], "no_progress")
+        self.assertFalse(ended["verification_ok"])
+        self.assertEqual(ended["verification_status"], "no_progress")
+        self.assertIn("headless.post_run_core_state", {f["check"] for f in ended["runtime_findings"]})
 
     def test_headless_runner_dry_run_and_argument_validation(self):
         runner = os.path.join(REPO, "examples", "headless_runner.py")

@@ -45,10 +45,12 @@ import uuid
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.24.0"
+VERSION = "3.25.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
+RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
 
 def read_lock(m8shift_path):
@@ -80,6 +82,100 @@ def iso_now():
 def new_run_id(agent):
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}-{agent}-{uuid.uuid4().hex[:8]}"
+
+
+def validate_run_id(run_id):
+    if not RUN_ID_RE.fullmatch(run_id) or "/" in run_id or "\\" in run_id or ":" in run_id:
+        raise SystemExit("invalid run id: expected a path-safe token")
+    return run_id
+
+
+def run_plan_path(runtime_dir, run_id):
+    return os.path.join(runtime_dir, "run-plans", f"{run_id}.json")
+
+
+def expected_post_run(me, lk):
+    return {
+        "type": "core_state_advanced",
+        "pre_state": lk.get("state", ""),
+        "pre_turn": lk.get("turn", ""),
+        "agent": me,
+        "stuck_state": f"WORKING_{me.upper()}",
+        "success_rule": "post turn changed OR post state differs from both pre_state and stuck_state",
+    }
+
+
+def make_run_plan(args, run_id, me, lk):
+    return {
+        "schema": RUN_PLAN_SCHEMA,
+        "created_at": iso_now(),
+        "run_id": run_id,
+        "agent": me,
+        "command": {
+            "argv": list(args.cmd),
+            "shell": False,
+        },
+        "expected_post_run": expected_post_run(me, lk),
+        "source": {"tool": "headless_runner.py", "version": VERSION},
+    }
+
+
+def write_run_plan(runtime_dir, plan):
+    os.makedirs(os.path.join(runtime_dir, "run-plans"), exist_ok=True)
+    path = run_plan_path(runtime_dir, plan["run_id"])
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh, ensure_ascii=False, sort_keys=True, indent=2)
+            fh.write("\n")
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def verify_post_run(plan, after):
+    expected = plan["expected_post_run"]
+    actual = {
+        "state": after.get("state", ""),
+        "holder": after.get("holder", ""),
+        "turn": after.get("turn", ""),
+    }
+    pre_state = expected.get("pre_state", "")
+    pre_turn = expected.get("pre_turn", "")
+    stuck_state = expected.get("stuck_state", "")
+    me = expected.get("agent", "")
+    progressed = actual["turn"] != pre_turn or actual["state"] not in (pre_state, stuck_state)
+    if actual["state"] == stuck_state and actual["holder"] == me:
+        status = "stuck_working"
+        ok = False
+    elif progressed:
+        status = "core_advanced"
+        ok = True
+    else:
+        status = "no_progress"
+        ok = False
+    finding = None
+    if not ok:
+        finding = {
+            "severity": "error",
+            "check": "headless.post_run_core_state",
+            "message": (
+                f"run {plan['run_id']} ended without expected core state advance "
+                f"(status={status})"
+            ),
+            "hint": "Inspect the relay and agent output; no automatic force recovery is performed.",
+        }
+    return {
+        "ok": ok,
+        "status": status,
+        "expected": expected,
+        "actual": actual,
+        "finding": finding,
+    }
 
 
 def append_run_event(args, event, run_id, agent, **fields):
@@ -118,6 +214,8 @@ def append_run_event(args, event, run_id, agent, **fields):
 def validate_args(args):
     if not AGENT_RE.fullmatch(args.agent.lower()):
         raise SystemExit("invalid agent name: expected [a-z][a-z0-9_-]*")
+    if args.run_id:
+        validate_run_id(args.run_id)
     if args.interval < 1:
         raise SystemExit("--interval must be >= 1")
     if args.max_retries < 1:
@@ -211,6 +309,7 @@ def main():
                    help="seconds to wait after terminate before kill on timeout")
     p.add_argument("--runtime-dir", default=os.path.join(".m8shift", "runtime"),
                    help="local runtime sidecar dir for runs.jsonl (default: .m8shift/runtime)")
+    p.add_argument("--run-id", default="", help="optional path-safe run id (default: generated)")
     p.add_argument("--no-run-log", action="store_true",
                    help="disable .m8shift/runtime/runs.jsonl lifecycle logging")
     p.add_argument("--once", action="store_true",
@@ -251,8 +350,15 @@ def main():
 
         # It is our turn: run the headless agent for exactly one turn (static argv).
         log(f"state={state} → running the agent for one turn.")
-        run_id = new_run_id(me)
-        append_run_event(args, "run.started", run_id, me, relay_state=state, relay_turn=lk.get("turn", ""))
+        run_id = validate_run_id(args.run_id or new_run_id(me))
+        plan = make_run_plan(args, run_id, me, lk)
+        try:
+            plan_path = write_run_plan(args.runtime_dir, plan)
+        except FileExistsError:
+            log(f"immutable run plan already exists for {run_id}; refusing to overwrite.")
+            return 2
+        append_run_event(args, "run.started", run_id, me, relay_state=state, relay_turn=lk.get("turn", ""),
+                         run_plan=plan_path, run_plan_schema=RUN_PLAN_SCHEMA)
         child_env = dict(os.environ)
         child_env.update({
             "M8SHIFT_RUN_ID": run_id,
@@ -284,28 +390,41 @@ def main():
             except subprocess.TimeoutExpired:
                 maybe_refresh_ttl(args, me, me_working, run_id)
 
-        # Post-run validation against the new state.
+        # Post-run validation against the immutable run plan and the new core state.
         after = read_lock(args.m8shift) or {}
-        progressed = (after.get("turn") != lk.get("turn")
-                      or after.get("state") not in (state, me_working))
+        verification = verify_post_run(plan, after)
+        finding = verification.get("finding")
+        findings = [finding] if finding else []
+        if finding:
+            append_run_event(args, "run.verification_failed", run_id, me,
+                             verification=verification, runtime_findings=findings)
         if timed_out:
             fails += 1
             append_run_event(args, "run.ended", run_id, me, status="timeout",
                              returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""))
-        elif after.get("state") == me_working and after.get("holder") == me:
+                             relay_turn=after.get("turn", ""),
+                             verification_ok=verification["ok"],
+                             verification_status=verification["status"],
+                             runtime_findings=findings)
+        elif verification["status"] == "stuck_working":
             # claimed but exited without append → crashed mid-turn.
             fails += 1
             log(f"agent exited holding the pen (crash {fails}/{args.max_retries}).")
             append_run_event(args, "run.ended", run_id, me, status="stuck_working",
                              returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""))
-        elif progressed:
+                             relay_turn=after.get("turn", ""),
+                             verification_ok=False,
+                             verification_status=verification["status"],
+                             runtime_findings=findings)
+        elif verification["ok"]:
             fails = 0  # a turn was posted / the state advanced — real progress.
             status = "ok" if proc.returncode == 0 else "progressed_with_error"
             append_run_event(args, "run.ended", run_id, me, status=status,
                              returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""))
+                             relay_turn=after.get("turn", ""),
+                             verification_ok=True,
+                             verification_status=verification["status"],
+                             runtime_findings=[])
             if args.once:
                 return 0
         else:
@@ -313,7 +432,10 @@ def main():
             log(f"agent ran but did not take the turn ({fails}/{args.max_retries}).")
             append_run_event(args, "run.ended", run_id, me, status="no_progress",
                              returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""))
+                             relay_turn=after.get("turn", ""),
+                             verification_ok=False,
+                             verification_status=verification["status"],
+                             runtime_findings=findings)
 
         if fails >= args.max_retries:
             log("retry cap reached — stopping; leaving the pen for manual recovery.")
