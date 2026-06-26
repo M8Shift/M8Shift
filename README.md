@@ -19,7 +19,7 @@ English | [Français](docs/README_fr.md)
 
 </div>
 
-## What is M8Shift?
+## 🧭 What is M8Shift?
 
 M8Shift is a **cooperative mutex** for AI agents. When Claude and Codex work on the
 same repository, they overwrite each other. M8Shift introduces a single **pen**: at
@@ -36,7 +36,7 @@ so the agents need **no human explanation**. *Caveat for interactive UIs* (VS Co
 a human still nudges each agent to *resume* between turns — `wait` blocks a process but
 does not wake an agent's chat UI. See [Limitations](#limitations).
 
-## Why
+## 💡 Why
 
 When Claude and Codex share a repository, they have no way to take turns: edits
 collide and work is lost. M8Shift fixes this with a single exclusive lock (the
@@ -51,7 +51,9 @@ created to make that contradiction usable — Claude, Codex or another agent can
 challenge, and hand off work without the maintainer becoming a copy/paste relay. The
 human still decides the direction. See [Philosophy](docs/en/philosophy.md).
 
-## Runs anywhere — no API key
+<a id="runs-anywhere--no-api-key"></a>
+
+## 🔐 Runs anywhere — no API key
 
 M8Shift is a **passive CLI**: the agents drive it with shell commands, so it works on
 every surface where Claude Code or Codex run, and it adds **zero credentials**.
@@ -68,7 +70,9 @@ network calls** (stdlib only, local files) — the agents use whatever subscript
 login you already have. Nothing leaves your machine, there is no per-call cost, and no
 vendor lock-in.
 
-## Install
+<a id="install"></a>
+
+## ⚙️ Install
 
 One-line local install for macOS/Linux/WSL/Git Bash:
 
@@ -101,10 +105,11 @@ $env:M8SHIFT_INSTALL_REF = "vX.Y.Z"
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/vX.Y.Z/install.ps1 | iex
 ```
 
-Security boundary: Bash and PowerShell both verify downloaded files by default
-(`--no-verify` opts out) against the `checksums.sha256` manifest from the selected ref.
-That catches corruption or mismatch. For out-of-band trust against a compromised origin,
-pin reviewed digests with `--sha256 FILE:HEX` or use a signed release tag.
+> [!IMPORTANT]
+> Bash and PowerShell both verify downloaded files by default (`--no-verify` opts out)
+> against the `checksums.sha256` manifest from the selected ref. That catches
+> corruption or mismatch. For out-of-band trust against a compromised origin, pin
+> reviewed digests with `--sha256 FILE:HEX` or use a signed release tag.
 
 Manual install:
 
@@ -136,14 +141,16 @@ pending review — see [CONTRIBUTING.md](CONTRIBUTING.md)). Use `--agents a,b,c�
 **active roster** (default `claude,codex`): **all** declared agents relay — the pen holder
 hands off to any other member via `--to` — still one writer at a time (degree-1).
 
-**On Windows?** No dependencies (stdlib only) — run via WSL, Git Bash, or the native
-PowerShell one-liner above. See [Running on Windows](docs/en/windows.md).
+> [!TIP]
+> **On Windows?** No dependencies (stdlib only) — run via WSL, Git Bash, or the native
+> PowerShell one-liner above. See [Running on Windows](docs/en/windows.md).
 
-**From a fork / clone?** M8Shift is one file — host it on any Git or GitLab:
-`git clone https://gitlab.example.com/you/M8Shift.git`, then `cp m8shift.py /my/project/`
-and run `init` as above.
+> [!TIP]
+> **From a fork / clone?** M8Shift is one file — host it on any Git or GitLab:
+> `git clone https://gitlab.example.com/you/M8Shift.git`, then
+> `cp m8shift.py /my/project/` and run `init` as above.
 
-## Quickstart
+## 🚀 Quickstart
 
 Each agent runs the same loop: `next → work → append`. `next` is the guarded
 shortcut for `wait → claim → peek`: it waits if needed, then claims and prints the
@@ -175,15 +182,20 @@ run the CLI, and follow `claim → work → append`.
 ./m8shift.py wait claude           # polls ~60s (--interval N)
 ```
 
-**Golden rule:** you only work and write **after acquiring the pen via `claim`**
-(`append` is accepted only from `WORKING_<you>`).
+> [!IMPORTANT]
+> **Golden rule:** you only work and write **after acquiring the pen via `claim`**
+> (`append` is accepted only from `WORKING_<you>`).
+
 Before stopping, run `status --for <you>`; if the relay is not `DONE`, keep waiting,
 hand off your own `WORKING_<you>` state with `append`, close it with `done`, or park an
 open/no-work session with `pause`.
-For a passive live view while agents work, leave `./m8shift.py watch --for <you>
---interval 5` running in a separate terminal; it never claims or changes the relay.
 
-## Documentation
+> [!TIP]
+> For a passive live view while agents work, leave
+> `./m8shift.py watch --for <you> --interval 5` running in a separate terminal; it
+> never claims or changes the relay.
+
+## 📚 Documentation
 
 Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 
@@ -195,12 +207,14 @@ Docs follow the [Diátaxis](https://diataxis.fr/) framework:
 - **Reference (spec)** — [docs/en/specification.md](docs/en/specification.md) — the full specification.
 - **Explanation (architecture)** — [docs/en/architecture.md](docs/en/architecture.md) — design and operation.
 - **Explanation (philosophy)** — [docs/en/philosophy.md](docs/en/philosophy.md) — why the project exists.
-RFCs are maintained in English under `docs/en/rfc/`. **Numbers are assigned in
-creation order and are permanent** — a number never tracks *implementation* order.
-For example RFC 010 was authored 10th (2026-06-24) but its patterns shipped last, in
-v3.21–v3.26 (2026-06-26); renumbering would break cross-links, git history, and
-issue/MR references, so an RFC keeps its birth number even when implemented much later
-(or never). Dates below are the implementation date (`—` when not implemented).
+> [!NOTE]
+> RFCs are maintained in English under `docs/en/rfc/`. **Numbers are assigned in
+> creation order and are permanent** — a number never tracks *implementation* order.
+> For example RFC 010 was authored 10th (2026-06-24) but its patterns shipped last, in
+> v3.21–v3.26 (2026-06-26); renumbering would break cross-links, git history, and
+> issue/MR references, so an RFC keeps its birth number even when implemented much
+> later (or never). Dates below are the implementation date (`—` when not
+> implemented).
 
 | № | RFC | Description | Status | Implemented | How |
 |----:|-----|-------------|--------|-------------|-----|
@@ -234,7 +248,7 @@ issue/MR references, so an RFC keeps its birth number even when implemented much
 | 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | Safe headless command templates | draft | — | deferred from RFC 010 |
 | 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | Richer companion workboard outside core | draft | — | deferred from RFC 010 |
 
-## How it works
+## 🔁 How it works
 
 M8Shift stores its state in the `LOCK` block at the top of `M8SHIFT.md`. To work, an
 agent must first **take the pen** with `claim` (state `WORKING_<you>`), an
@@ -270,7 +284,7 @@ available (otherwise `local`); JSON output stays canonical UTC.
 ledger; `status --json` exposes them as `session_started_at`,
 `session_duration_seconds`, and `session_duration` (`null` when unavailable).
 
-## Guarantees
+## ✅ Guarantees
 
 Verified by the tests and by multi-agent review:
 
@@ -293,26 +307,32 @@ Verified by the tests and by multi-agent review:
   case-sensitive or -insensitive filesystems, pre-existing anchors — without
   breakage or duplication.
 
-## Limitations
+<a id="limitations"></a>
 
-- **Waking an interactive agent UI.** `wait` blocks a *process* until your turn; it
-  does **not** relaunch or wake an agent running in an interactive UI (VS Code, …).
-  Between turns a human still nudges each agent (e.g. *"resume M8Shift"*). Fully
-  hands-off operation needs a **headless** loop (`claude -p`, `codex exec`, cron)
-  wrapping `wait → relaunch the agent → claim` — a host integration, not a change to
-  the mutex. A system notification/webhook can *signal* a turn but cannot *wake* the AI
-  by itself. An example runner is provided:
-  [`examples/headless_runner.py`](examples/headless_runner.py). It supports `--once`,
-  manual TTL heartbeat, `M8SHIFT_RUN_ID`, immutable local run plans, post-run
-  `LOCK` verification, and local `.m8shift/runtime/runs.jsonl` lifecycle/finding
-  events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
-  companion adds local presence, operator inbox, progress, and runtime diagnostics
-  under `.m8shift/runtime/`.
+## ⚠️ Limitations
+
+> [!WARNING]
+> **Waking an interactive agent UI.** `wait` blocks a *process* until your turn; it
+> does **not** relaunch or wake an agent running in an interactive UI (VS Code, …).
+> Between turns a human still nudges each agent (e.g. *"resume M8Shift"*). Fully
+> hands-off operation needs a **headless** loop (`claude -p`, `codex exec`, cron)
+> wrapping `wait → relaunch the agent → claim` — a host integration, not a change to
+> the mutex. A system notification/webhook can *signal* a turn but cannot *wake* the AI
+> by itself.
+>
+> An example runner is provided: [`examples/headless_runner.py`](examples/headless_runner.py).
+> It supports `--once`, manual TTL heartbeat, `M8SHIFT_RUN_ID`, immutable local run
+> plans, post-run `LOCK` verification, and local `.m8shift/runtime/runs.jsonl`
+> lifecycle/finding events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
+> companion adds local presence, operator inbox, progress, and runtime diagnostics
+> under `.m8shift/runtime/`.
 - **Cooperative, N-agent, advisory** — see the
   [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, one
   writer at a time).
 
-## Tests
+<a id="tests"></a>
+
+## 🧪 Tests
 
 No external Python dependency (stdlib only):
 
@@ -325,7 +345,7 @@ bug, referenced `NR-n`) covering the claim model, the one-pen mutex, the N-agent
 canonical/override anchors, the configurable roster, advisory turn fields, shared
 memory, `claim --check`, the tasks board, archive, robustness, and injection safety.
 
-## Positioning — not an orchestrator
+## 🧩 Positioning — not an orchestrator
 
 M8Shift is a **coordination primitive**, not an agent platform. It deliberately does
 **one thing**: ensure that, of the agents already running on a shared repo, only one
@@ -360,7 +380,7 @@ you just want two agents you already run (Claude Code, Codex, …) to **stop ove
 each other** — with nothing to install or authenticate. They are **complementary**, not
 competing (M8Shift could even be the lock inside a larger setup).
 
-## Roadmap
+## 🗺️ Roadmap
 
 M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 [architecture §1.8](docs/en/architecture.md). The current roadmap is:
@@ -385,19 +405,20 @@ New ideas are welcome via an RFC under `docs/en/rfc/`. RFCs are English-only;
 localized documentation should link to the canonical English RFC instead of maintaining
 translated copies.
 
-**Non-goals** (they would break a M8Shift quality): path-scoped *leases* for concurrent
-disjoint writes inside the shared tree (use the
-[opt-in worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) instead); a
-background daemon / autonomous watcher / push-notifier; running git, builds or APIs (needs auth +
-network → an orchestrator); third-party deps or a multi-file package; and "smart"
-*derived* memory (dedup / summarize / prune) — the ledger stays a dumb, human-curated
-record.
+> [!CAUTION]
+> **Non-goals** (they would break a M8Shift quality): path-scoped *leases* for
+> concurrent disjoint writes inside the shared tree (use the
+> [opt-in worktree companion](docs/en/rfc/008-rfc-worktree-companion.md) instead); a
+> background daemon / autonomous watcher / push-notifier; running git, builds or APIs
+> (needs auth + network → an orchestrator); third-party deps or a multi-file package;
+> and "smart" *derived* memory (dedup / summarize / prune) — the ledger stays a dumb,
+> human-curated record.
 
-## License
+## 📄 License
 
 Licensed under the [Apache License 2.0](LICENSE).
 
-## Contributing
+## 🤝 Contributing
 
 Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (ground
 rules + how to add or improve a language pack). M8Shift is a single file by design

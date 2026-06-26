@@ -13,12 +13,15 @@ You do not need to understand the whole protocol yet. Just follow the steps in
 order and compare each console output with the **Expected result** block below
 it. If something looks different, read the **If you see something else** note.
 
-> Tip: the shipped `m8shift.py` prints its runtime messages in English. Localized
-> variants generated with `m8shift-i18n.py` may print another language, but the
-> commands, flags, states, and lock fields stay the same.
+> [!TIP]
+> The shipped `m8shift.py` prints its runtime messages in English. Localized variants
+> generated with `m8shift-i18n.py` may print another language, but the commands,
+> flags, states, and lock fields stay the same.
 
-**What you need:** a terminal, Python 3, and the single file `m8shift.py`.
-**Time:** about 10 minutes.
+| Need | Value |
+|------|-------|
+| Tools | A terminal, Python 3, and the single file `m8shift.py` |
+| Time | About 10 minutes |
 
 ---
 
@@ -50,9 +53,9 @@ Replace `/path/to/m8shift.py` with the real location on your machine.
 
 **Expected result:** no output. `ls` should now show a single `m8shift.py`.
 
-**If you see `No such file or directory`:** the source path is wrong. Find the
-file first with `find ~ -name m8shift.py 2>/dev/null` and use the path it
-prints.
+> [!WARNING]
+> **If you see `No such file or directory`:** the source path is wrong. Find the
+> file first with `find ~ -name m8shift.py 2>/dev/null` and use the path it prints.
 
 ---
 
@@ -82,9 +85,10 @@ In English: the protocol was written, `M8SHIFT.md` was created with a brand-new
 lock in state `IDLE`, and the two anchor files were created. The lock starts at
 `IDLE` because nobody holds the pen yet.
 
-**If you see `M8SHIFT.md: preserved`:** you already ran `init` here before, so the
-existing relay state was kept (this is on purpose). For this tutorial, start
-clean with `./m8shift.py init --name hello-m8shift --force`.
+> [!NOTE]
+> **If you see `M8SHIFT.md: preserved`:** you already ran `init` here before, so the
+> existing relay state was kept (this is on purpose). For this tutorial, start clean
+> with `./m8shift.py init --name hello-m8shift --force`.
 
 ---
 
@@ -127,8 +131,9 @@ What each field means:
   `WORKING_*`; otherwise it is `-`.
 - `note` — a short human-readable memo.
 
-You never edit this block by hand — the `m8shift.py` commands rewrite it for you.
-The markers `M8SHIFT:LOCK:BEGIN` and `M8SHIFT:LOCK:END` are how the tool finds it.
+> [!IMPORTANT]
+> You never edit this block by hand — the `m8shift.py` commands rewrite it for you.
+> The markers `M8SHIFT:LOCK:BEGIN` and `M8SHIFT:LOCK:END` are how the tool finds it.
 
 ---
 

@@ -27,6 +27,10 @@ agent reads its own anchor at session start and participates through one `M8SHIF
 The human maintainer assigns scope and arbitrates. Agents never invent scope: when
 there is no authorized task, the relay is parked (`PAUSED`) and the agents wait.
 
+> [!IMPORTANT]
+> A model may analyze, review, or implement only inside the scope it has been given.
+> No scope means `PAUSED`, not speculative work.
+
 ## 2. Roles are per-task, not fixed
 
 For each unit of work the maintainer (or the relay handoff) assigns roles. The two
@@ -43,8 +47,11 @@ own work.
 
 ## 3. Delivery workflow (mandatory)
 
-Every change follows the same branch-based flow. **`main` only ever receives a
-stabilized version through a merge request — never a direct intermediate commit.**
+Every change follows the same branch-based flow.
+
+> [!IMPORTANT]
+> **`main` only ever receives a stabilized version through a merge request — never a
+> direct intermediate commit.**
 
 1. **Open a tracking item on the forge** before starting: an issue (or a sprint
    grouping several issues) describing the goal, the acceptance criteria, and the
@@ -73,7 +80,8 @@ releasable at all times.
 
 ## 4. Code-quality bar
 
-Non-negotiable for any change that reaches a merge request:
+> [!WARNING]
+> The following bar applies to any change that reaches a merge request.
 
 - **Read then review.** Read the surrounding code; match its idioms, naming, and
   comment density. Review your own diff adversarially before asking for review.
@@ -114,11 +122,12 @@ Use the project forge to make work auditable:
 - the **merge request** links the issue and is reviewed before merge;
 - close the issue when the MR merges; tag the version if applicable.
 
-**Log decisions as you work.** The issue (or the GitHub/forge ticket) is the running
-decision record: post the key **decisions, agreements, and disagreements**, and the
-technical choices with a short rationale, into the issue thread *while the task
-progresses* — not only at the end. This builds a permanent, local, auditable reference
-of *why* the code is the way it is.
+> [!TIP]
+> **Log decisions as you work.** The issue (or the GitHub/forge ticket) is the running
+> decision record: post the key **decisions, agreements, and disagreements**, and the
+> technical choices with a short rationale, into the issue thread *while the task
+> progresses* — not only at the end. This builds a permanent, local, auditable
+> reference of *why* the code is the way it is.
 
 **Close cleanly at the end.** When the task is done, **systematically close** the issue
 with a short wrap-up: the affected branch(es), the merged MR, the decisions taken, and
