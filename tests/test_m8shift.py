@@ -2280,6 +2280,15 @@ class TestSessionReports(CLIBase):
 
 # ───────────── regressions from the Codex audit round (v3.x) ────────────────
 
+class TestDeterministicE2E(unittest.TestCase):
+    def test_tier_a_arithmetic_case_drives_real_cli_and_asserts_artifact(self):
+        runner = os.path.join(REPO, "m8shift-e2e.py")
+        case = os.path.join(REPO, "tests", "e2e", "arithmetic.md")
+        r = subprocess.run([sys.executable, runner, case], cwd=REPO,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 class TestAuditFixes(CLIBase):
     """Regressions for the Codex audit: claim --check DONE, seed turn-0 format, the headless
     runner rename, m8shift-i18n.py --check format-safety, and the baton-owner done/release."""
@@ -2315,6 +2324,7 @@ class TestAuditFixes(CLIBase):
         # Every tracked Python script carries the same explicit version surface as m8shift.py.
         v = cowork.VERSION
         scripts = [
+            "m8shift-e2e.py",
             "m8shift-i18n.py",
             "m8shift-runtime.py",
             "m8shift-worktree.py",
