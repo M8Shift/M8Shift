@@ -1241,6 +1241,46 @@ class TestReadCommands(CLIBase):
         checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
         self.assertIn("status.cwd_mismatch", checks)
 
+    def _seed_git_m8shift_source_tree(self):
+        for rel in (
+            "m8shift-i18n.py",
+            os.path.join("tests", "test_m8shift.py"),
+            os.path.join("docs", "en", "agents-guide.md"),
+            "checksums.sha256",
+        ):
+            path = os.path.join(self.d, rel)
+            os.makedirs(os.path.dirname(path) or self.d, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("fixture\n")
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.d, capture_output=True, text=True)
+
+        self.assertEqual(git("init", "-q").returncode, 0)
+        self.assertEqual(git("add", "m8shift.py", "m8shift-i18n.py", "tests/test_m8shift.py",
+                             "docs/en/agents-guide.md", "checksums.sha256").returncode, 0)
+
+    @unittest.skipUnless(shutil.which("git"), "git missing")
+    def test_init_and_doctor_warn_for_relay_inside_m8shift_source_tree(self):
+        self._seed_git_m8shift_source_tree()
+        init = self.init()
+        self.assertIn("dedicated relay directory", init.stdout)
+        r = self.cw("doctor", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        findings = json.loads(r.stdout)["findings"]
+        self.assertIn("dogfood.relay_inside_source_tree", {f["check"] for f in findings})
+
+    @unittest.skipUnless(shutil.which("git"), "git missing")
+    def test_doctor_does_not_warn_for_generic_git_project(self):
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.d, capture_output=True, text=True)
+
+        self.assertEqual(git("init", "-q").returncode, 0)
+        self.assertEqual(git("add", "m8shift.py").returncode, 0)
+        self.init()
+        findings = json.loads(self.cw("doctor", "--json").stdout)["findings"]
+        self.assertNotIn("dogfood.relay_inside_source_tree", {f["check"] for f in findings})
+
     def test_doctor_lint_multiple_open_session_identity(self):
         self.init()
         extra_sid = "20260626T120000Z-deadbeef"
@@ -2310,6 +2350,13 @@ class TestAuditFixes(CLIBase):
         self.assertIn(f"v{v}", self.cw("recap").stdout.splitlines()[0])
         self.assertIn(v, self.md())                                   # stamped in the M8SHIFT.md banner
         self.assertEqual(json.loads(self.cw("status", "--json").stdout)["m8shift_version"], v)
+
+    def test_gitignore_covers_generated_relay_sidecars(self):
+        with open(os.path.join(REPO, ".gitignore"), encoding="utf-8") as f:
+            ignored = {line.strip() for line in f if line.strip() and not line.startswith("#")}
+        self.assertIn("M8SHIFT.protocol-reference.md", ignored)
+        self.assertIn("M8SHIFT.requests.md", ignored)
+        self.assertIn("M8SHIFT.session-reports/", ignored)
 
     def test_distributed_scripts_version_surface(self):
         # Every tracked Python script carries the same explicit version surface as m8shift.py.
