@@ -15,7 +15,7 @@ functions (they `sys.exit` and would make the wrong transitions). Stdlib only.
   drop      <id> <agent> --yes                        remove a feature worktree (never automatic)
   status    [<id>]                                    canonical LOCK + companion worktrees
 
-Safety (see docs/en/rfc-worktree-companion.md, the CONVERGED v1 contract): the `.m8shift.lock` is
+Safety (see docs/en/rfc/008-rfc-worktree-companion.md, the CONVERGED v1 contract): the `.m8shift.lock` is
 held ONLY around the fast LOCK flips, never around `git merge`; the merge is `--no-ff --no-commit`
 so an abort is a real rollback; an `integrating:<id>@<sha>` sentinel guards the pen against a TTL
 reclaim mid-merge; the merge is committed only after re-verifying holder+state+sentinel+HEAD under
