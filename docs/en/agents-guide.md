@@ -85,14 +85,16 @@ Non-negotiable for any change that reaches a merge request:
 - **Version lockstep.** A release bumps `VERSION` identically across all distributed
   scripts; the doc/protocol in-sync tests must stay green.
 - **Passive-core invariants.** M8Shift is a passive, stdlib-only, no-network,
-  no-daemon, one-pen advisory mutex. Companions live outside the core and never own
-  the pen, write `M8SHIFT.md`, or become a second routing authority.
+  no-daemon, one-pen advisory mutex. Runtime/provider/reporting companions remain
+  advisory and never own the pen or write `M8SHIFT.md`. The worktree companion is the
+  explicit exception: `integrate` uses the canonical core `LOCK` as a serialized
+  integration pen via core helpers; it must never create a second routing authority.
 - **Security mindset.** For any filesystem path or write primitive, enumerate the
   bypass classes (traversal, in-root reserved files, case-insensitive aliasing,
   symlink/hardlink, TOCTOU) and test them. Prefer adversarial verification over a
   single manual pass.
 
-## 5. Repository hygiene (must hold in every commit and the history)
+## 5. Repository hygiene (holds for every new commit; never rewrite older history)
 
 - **Scrubbed identity.** Commits are authored as the project's public identity, not a
   personal/forge identity.
@@ -112,10 +114,37 @@ Use the project forge to make work auditable:
 - the **merge request** links the issue and is reviewed before merge;
 - close the issue when the MR merges; tag the version if applicable.
 
+**Log decisions as you work.** The issue (or the GitHub/forge ticket) is the running
+decision record: post the key **decisions, agreements, and disagreements**, and the
+technical choices with a short rationale, into the issue thread *while the task
+progresses* — not only at the end. This builds a permanent, local, auditable reference
+of *why* the code is the way it is.
+
+**Close cleanly at the end.** When the task is done, **systematically close** the issue
+with a short wrap-up: the affected branch(es), the merged MR, the decisions taken, and
+the final outcome — enough that a future reader reconstructs the choices without
+re-reading every commit. An open task is never left dangling after the work ships.
+
 If the forge is temporarily unavailable, record the same intent in the relay task
 ledger (`m8shift.py task add …`) and reconcile to a forge issue when possible.
 
-## 7. Stopping condition
+## 7. Dogfooding — building M8Shift with M8Shift
+
+M8Shift is developed through its own relay (the agents coordinate via a `M8SHIFT.md`).
+That relay runs a *frozen* copy of the engine, so it can lag the code under
+development. When a version is **stabilized** (tests green, merged to `main`, tagged):
+
+- **Promote the relay engine** to that latest stable version (copy the current
+  `m8shift.py` over the relay's copy) so the relay exercises the very mechanisms just
+  shipped. Verify `--version` matches and that `status` still reads the live session.
+- **Run the relay on the latest stable.** Dogfooding the newest engine is how we prove
+  the coordination mechanisms work end to end before the solution is deployed — a stale
+  relay binary can fail to read newer states (e.g. a `PAUSED` lock written by a newer
+  engine) and raise false "corrupted" errors.
+- Treat any skew between the relay engine and the shipped version as a documented
+  exception to resolve at the next stable point.
+
+## 8. Stopping condition
 
 An agent keeps working/listening until the relay is `DONE` or the maintainer gives an
 explicit stop. `idle`/`PAUSED` is not a stop signal: park cleanly and wait for the
