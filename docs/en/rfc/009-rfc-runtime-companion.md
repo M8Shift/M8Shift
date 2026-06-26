@@ -72,10 +72,18 @@ Runtime state is local, generated, and gitignored:
       codex.jsonl          # operator messages queued for codex
       claude.jsonl
     idempotency.jsonl      # best-effort duplicate suppression for companion actions
+    approvals.jsonl        # local approval decisions
+    archive/
+      runs.jsonl           # older rows pruned from runtime JSONL ledgers
 ```
 
 `M8SHIFT.md` remains the coordination source of truth. Runtime sidecars explain what
 the host processes are doing around that source of truth.
+
+The shipped baseline includes `m8shift-runtime.py retention prune --keep N`, which
+keeps the newest `N` rows per runtime JSONL ledger and archives older rows under
+`.m8shift/runtime/archive/` by default. The richer policy space remains tracked in
+[026-rfc-sidecar-retention.md](026-rfc-sidecar-retention.md).
 
 ## Presence model
 
