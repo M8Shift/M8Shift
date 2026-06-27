@@ -276,9 +276,8 @@ remains a passive single-file relay. The implementation contract is tracked in
 - **Input validation**: single-line fields (newlines and reserved markers
   rejected); body neutralized (anti-injection against forged turns).
 - **Single source of truth**: the protocol, the `M8SHIFT.md` template, and the
-  stanza are constants in `m8shift.py`; `docs/en/protocol.md` and
-  `docs/fr/protocole.md` are a *generation* of `m8shift.PROTOCOL[lang]` (byte-for-byte
-  regression test `test_protocol_docs_in_sync`).
+  stanza are constants in `m8shift.py`; `docs/en/protocol.md` is a *generation* of
+  `m8shift.PROTOCOL["en"]` (byte-for-byte regression test `test_protocol_docs_in_sync`).
 - **Idempotent, priority injection**: the stanza is delimited by `M8SHIFT:STANZA`
   markers, moved/refreshed at the top without duplication. Case variants are
   normalized to the canonical name on any FS (`git mv -f` if Git is available and
