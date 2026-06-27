@@ -2,11 +2,10 @@
 """Regenerate the protocol reference docs (stdlib only, passive — writes only docs/).
 
     docs/en/protocol.md   ← m8shift.PROTOCOL["en"]            (the EN-only core)
-    docs/fr/protocole.md  ← i18n/fr/protocol.md               (the FR pack body, byte-for-byte)
 
-Since the core is English-only, the non-English protocol docs come straight from the packs,
-never from PROTOCOL[lang]. Run after editing the EN template or a pack so
-test_protocol_docs_in_sync stays green.
+Documentation is English-only; the i18n packs (i18n/<lang>/) still drive the localized
+single-file build, but no localized docs are rendered. Run after editing the EN template
+so test_protocol_docs_in_sync stays green.
 
     python3 scripts/gen_docs.py
 """
@@ -44,9 +43,6 @@ def main(argv=None):
         ("docs/en/protocol.md", m8shift.PROTOCOL["en"]),
         ("docs/en/protocol-reference.md", m8shift.PROTOCOL_REFERENCE["en"]),
     ]
-    fr_pack = os.path.join(ROOT, "i18n", "fr", "protocol.md")
-    if os.path.isfile(fr_pack):
-        targets.append(("docs/fr/protocole.md", open(fr_pack, encoding="utf-8").read()))
 
     for rel, body in targets:
         body = render_doc(rel, body)
