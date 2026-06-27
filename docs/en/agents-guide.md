@@ -45,6 +45,35 @@ The same agent does not have to keep the same role across tasks. A healthy task 
 **one implementer and one independent reviewer**: the author never green-lights their
 own work.
 
+### Reviewer neutrality and objectivity
+
+M8Shift has no model of its own, so it cannot debias an agent's reasoning. What it can
+do — and what this section requires — is keep the *process* fair. Neutrality here is
+**structural and procedural, never a claim about an agent's internal cognition**:
+
+- **The structure already enforces separation.** The reviewer is a *different agent on a
+  different turn* from the author, and the durable turn journal is append-only, so a
+  finding and the response to it are both permanently on record and cannot be quietly
+  softened or erased. This recorded separation is M8Shift's answer to *process fairness
+  between agents* — the only "bias" surface that applies to a model-less coordinator.
+- **Review adversarially by default.** Approach the peer's work expecting to find
+  problems; a clean pass is a conclusion you reach, not a courtesy you extend. Prefer
+  independent verification over a single agreeable read (see §4).
+- **Do not favor your own prior output.** When you review — or re-review across turns —
+  judge the change on its merits, not on whether it matches what you would have written
+  or already proposed. Self-consistency is not correctness.
+- **Surface disagreement explicitly.** Record disagreements, trade-offs, and rejected
+  alternatives in the turn and the issue thread (see §6) instead of smoothing them over.
+  A documented disagreement is worth more than a frictionless approval.
+- **The author never green-lights their own work** (restated from above and §8): only an
+  independent reviewer — or an explicit human decision — closes a review.
+
+> [!IMPORTANT]
+> These are *procedural* guardrails, not a guarantee of objectivity. M8Shift structures
+> the review so bias is checked by an independent, recorded turn; it does not — and
+> cannot — make an agent unbiased. Treat the requirement as: **make your reasoning
+> inspectable and let an independent turn challenge it.**
+
 ## 3. Delivery workflow (mandatory)
 
 Every change follows the same branch-based flow.
