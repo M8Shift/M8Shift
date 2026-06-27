@@ -76,7 +76,10 @@ Every change follows the same branch-based flow.
    valid, scope clean. The reviewer approves or returns ranked findings.
 8. **Stabilize, then merge.** `main` receives the change **only once the version is
    stable and reviewed**, via the merge request. Tag the release if it is a version
-   bump. Delete the work branch after merge.
+   bump. **When the change bumps the version, update the published site
+   ([m8shift.ai](https://m8shift.ai/)) in the same cycle** — version references, the RFC
+   table and statuses, and any new feature surfaces — so the site never lags the
+   release. Delete the work branch after merge.
 
 Intermediate, work-in-progress commits live **only on the work branch**. `main` stays
 releasable at all times.
@@ -131,6 +134,24 @@ Use the project forge to make work auditable:
 - the work **branch** references the issue;
 - the **merge request** links the issue and is reviewed before merge;
 - close the issue when the MR merges; tag the version if applicable.
+
+### Issue format
+
+Every issue follows the same shape, so any agent can pick it up cold:
+
+- **Goal** — the outcome the change delivers, in one or two sentences.
+- **Scope** — what is in and explicitly out (no over-reach beyond the stated bounds).
+- **Acceptance criteria** — the checks that make it *done* (tests, docs, behavior).
+- **Charter constraints** — the invariants the change must respect when relevant
+  (stdlib-only, no daemon, no network, advisory companions, read-only doctor).
+- **Roles** — who analyses/implements vs who reviews (see §2).
+- **Workflow** — the branch → MR (`Closes #N`) → independent review → merge-when-stable →
+  push forge-first then GitHub order (see §3).
+- **Decision log** — decisions, agreements, and disagreements recorded in the thread as
+  the task progresses, plus a short closing wrap-up.
+
+The forge issue templates under [`.gitea/issue_template/`](../../.gitea/issue_template/)
+and [`.github/ISSUE_TEMPLATE/`](../../.github/ISSUE_TEMPLATE/) pre-fill this shape.
 
 > [!TIP]
 > **Log decisions as you work.** The issue (or the GitHub/forge ticket) is the running
