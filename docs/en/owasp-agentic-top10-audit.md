@@ -277,7 +277,7 @@ access-controlled server) — explicitly **not to be done** inside M8Shift (§5)
 | # | Finding | ASI | Concrete action | File |
 |---|---------|-----|-----------------|------|
 | 1 | ~~**SEC-4**: the i18n builder's `--name` can write outside the directory (RCE-adjacent)~~ | ASI05 | ✅ **FIXED** — `safe_output_name()` enforces a plain basename (no `/`, `..`, absolute, `altsep`) + `realpath`/`commonpath` "escapes --into" check; locked by `test_name_rejects_path_escape` | `m8shift-i18n.py:44-49, 247-252` |
-| 2 | **SEC-7**: stale-lock takeover can `unlink` another process's fresh lock (TOCTOU) | ASI03/07 | Re-check token ownership **after** the stale reclaim, **before** any write (the `guard.require_owned()` exists for `claim` at `m8shift.py:3604` — generalize it) | `m8shift.py:938-958` |
+| 2 | ~~**SEC-7**: stale-lock takeover can `unlink` another process's fresh lock (TOCTOU)~~ | ASI03/07 | ✅ **ADDRESSED** — the `.m8shift.lock` reclaim is serialized + multi-re-checked (`_lock_unlink_guard`, `_reclaim_stale_lock`: same-inode + staleness re-checks before `unlink`), and `guard.require_owned()` is **generalized to every LOCK write** (8/8 `write(set_lock())` sites re-check token ownership before writing → a stolen-mid-flight transition is refused). Locked by `test_file_lock_token_ownership` + `test_stale_internal_lock_reclaimed` | `m8shift.py:1055-1069, 1104-1171` |
 
 ### 🟡 P2 — Useful hardening
 
@@ -324,7 +324,7 @@ access-controlled server) — explicitly **not to be done** inside M8Shift (§5)
 **Residual risks (all documented, consistent with the model)**
 - **ASI01:** anti-injection ultimately relies on the agent (boundary documented, not filtered).
 - **ASI03 / ASI10:** declarative identity → **weak prevention against a malicious agent**; M8Shift offers *detection/attribution*, not *prevention*.
-- **Remaining gap:** SEC-7 (stale-lock takeover TOCTOU on `claim`-reclaim, P1) is still open — re-check token ownership *after* the stale reclaim, *before* any write. SEC-4 (i18n path footgun, was P1) is now **fixed + tested**. The pre-commit pen guard (issue #39) adds a *commit-time* narrowing of the unguarded-write window but does **not** close the claim-reclaim race.
+- **No P1 gap remaining.** SEC-4 (i18n path footgun) is **fixed + tested**. SEC-7 (stale-lock takeover TOCTOU) is **addressed**: the `.m8shift.lock` reclaim is serialized and multi-re-checked (`_lock_unlink_guard` / `_reclaim_stale_lock`), and `guard.require_owned()` is generalized to **every** LOCK write (re-checks token ownership before writing, so a transition whose lock was stolen mid-flight is refused) — locked by regression tests. The pre-commit pen guard (issue #39) adds a complementary *commit-time* narrowing for scripted writes.
 
 **Verdict:**
 

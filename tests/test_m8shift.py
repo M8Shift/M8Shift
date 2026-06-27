@@ -3484,6 +3484,11 @@ class TestStage8Core(CLIBase):
             with open(cowork.LOCKFILE, "wb") as f:
                 f.write(b"stolen")            # a stale takeover overwrote our token
             self.assertFalse(guard.still_owned())
+            # SEC-7: require_owned() fails CLOSED — every LOCK write calls it immediately
+            # before writing, so a transition whose .m8shift.lock was stolen mid-flight is
+            # refused, never applied (the re-check generalizes across all write paths).
+            with self.assertRaises(SystemExit):
+                guard.require_owned()
 
 
 # ───────────────────────── installer verify default ─────────────────────────
