@@ -82,3 +82,7 @@ python3 scripts/gen_docs.py
 
 Branch per change; keep `main` green. Don't commit relay artefacts (`M8SHIFT.md`,
 `.m8shift.lock`, `CLAUDE.md`, `AGENTS.md`, …) — they are gitignored.
+
+When dogfooding M8Shift itself, keep the relay in a dedicated directory outside the
+source repo (for example `../m8shift-relais`). Do not run the live relay from inside
+the repo being changed; relay state and source work must not share the same tree.
