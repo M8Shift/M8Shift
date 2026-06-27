@@ -209,6 +209,8 @@ Schutzvorrichtung:
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wartet bei Bedarf, dann claim + peek
 ./m8shift.py claim <agent> [--force]               # den Stift ÜBERNEHMEN (exklusiv) — aus deinem Zug /
                                                   #   IDLE / deiner eigenen Sperre ; --force = NUR veraltete Sperre
+./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
+./m8shift.py guard <agent>        # alias for may-i-write
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # schließt deinen Zug ab + übergibt
 ./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)

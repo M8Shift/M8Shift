@@ -1,0 +1,56 @@
+#!/bin/sh
+# M8Shift pre-commit guard — enforce the one-pen write rule for configured agents.
+#
+# This hook is ADVISORY and LOCAL: it does not contact the network and it is not a
+# security boundary. It only narrows the window in which a misconfigured agent can
+# commit without holding the relay pen (see the SEC-7 / TOCTOU note in the docs).
+#
+# Behavior:
+#   - $M8SHIFT_AGENT unset  -> exit 0 (skip). Humans and unconfigured checkouts are
+#     never blocked.
+#   - $M8SHIFT_AGENT set    -> run `m8shift.py may-i-write "$M8SHIFT_AGENT"`. On a
+#     non-zero return code, print why and exit 1 (BLOCK the commit). Fail CLOSED:
+#     a configured agent that cannot prove a valid WORKING lock cannot commit.
+#
+# Resolution:
+#   - The relay root is resolved by m8shift.py itself via $M8SHIFT_ROOT (opt-in);
+#     leave it unset to coordinate against the relay next to m8shift.py.
+#   - The m8shift.py program is found via $M8SHIFT_BIN (explicit path), else `m8shift.py`
+#     on $PATH, else `./m8shift.py` at the repo root.
+#
+# Install (per clone, hooks are not version-controlled by Git):
+#   cp hooks/pre-commit <repo>/.git/hooks/pre-commit
+#   chmod +x <repo>/.git/hooks/pre-commit
+
+set -eu
+
+# Unconfigured / human commit: never block.
+if [ -z "${M8SHIFT_AGENT:-}" ]; then
+	exit 0
+fi
+
+# Resolve the m8shift.py program robustly.
+m8shift=""
+if [ -n "${M8SHIFT_BIN:-}" ] && [ -x "${M8SHIFT_BIN}" ]; then
+	m8shift="${M8SHIFT_BIN}"
+elif command -v m8shift.py >/dev/null 2>&1; then
+	m8shift="m8shift.py"
+else
+	repo_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '.')"
+	if [ -x "${repo_root}/m8shift.py" ]; then
+		m8shift="${repo_root}/m8shift.py"
+	fi
+fi
+
+if [ -z "${m8shift}" ]; then
+	printf '%s\n' "m8shift pre-commit: cannot find m8shift.py (set \$M8SHIFT_BIN or add it to \$PATH); refusing to commit as agent '${M8SHIFT_AGENT}'." >&2
+	exit 1
+fi
+
+# Point-in-time guard: rc 0 only while $M8SHIFT_AGENT holds a valid WORKING lock.
+if "${m8shift}" may-i-write "${M8SHIFT_AGENT}" >&2; then
+	exit 0
+fi
+
+printf '%s\n' "m8shift pre-commit: '${M8SHIFT_AGENT}' does not hold a valid write pen — commit blocked. Acquire the pen (m8shift.py claim ${M8SHIFT_AGENT}) or follow the next action above." >&2
+exit 1
