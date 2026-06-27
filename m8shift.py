@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.26.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.27.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -444,7 +444,7 @@ same metadata and serializes unavailable values as `null`.
 - **Doctor lint**: `doctor --lint --json` is CI-safe and read-only. It reports
   core-safe findings for relay/LOCK validity, anchors and stanza placement,
   `AGENTS.override.md` synchronization, protocol/reference drift, stale or
-  malformed `.m8shift.lock`, project-root status checks, session-ledger shape,
+  malformed `.m8shift.lock`, project-root status checks, session/request-ledger shape,
   multiple open relay sessions for the same roster, and livelock indicators.
   It never repairs files, prompts, contacts the network, or changes legal
   `LOCK` transitions.
@@ -1959,6 +1959,63 @@ def request_hints_for_agent(agent):
             if line]
 
 
+def _doctor_request_ledger_findings():
+    if not os.path.exists(REQUESTS):
+        return []
+    try:
+        text = read(REQUESTS)
+    except OSError as e:
+        return [doctor_finding(
+            "requests.unreadable", "warning",
+            f"{os.path.basename(REQUESTS)} cannot be read: {e}.",
+            os.path.basename(REQUESTS),
+        )]
+    findings = []
+    begin_count = len(re.findall(r"<!-- M8SHIFT:REQUEST \d+ BEGIN -->", text))
+    end_count = len(re.findall(r"<!-- M8SHIFT:REQUEST \d+ END -->", text))
+    valid_blocks = list(REQUEST_RE.finditer(text))
+    if begin_count != len(valid_blocks) or end_count != len(valid_blocks):
+        findings.append(doctor_finding(
+            "requests.markers_invalid", "warning",
+            f"{os.path.basename(REQUESTS)} has malformed request markers.",
+            os.path.basename(REQUESTS),
+        ))
+    valid_kinds = {"turn_request", "yield_turn", "decline_turn", "steer_turn"}
+    valid_statuses = {"open", "accepted", "declined", "steered"}
+    events = parse_request_events(text)
+    seen_requests = set()
+    seen_answers = set()
+    event_invalid = False
+    sequence_invalid = False
+    for ev in events:
+        missing = [k for k in ("id", "kind", "status", "actor", "from", "to") if not str(ev.get(k, "")).strip()]
+        if missing or ev.get("kind") not in valid_kinds or ev.get("status") not in valid_statuses:
+            if not event_invalid:
+                findings.append(doctor_finding(
+                    "requests.event_invalid", "warning",
+                    f"{os.path.basename(REQUESTS)} has an invalid request event near id {ev.get('id', '?')}.",
+                    os.path.basename(REQUESTS),
+                ))
+                event_invalid = True
+            continue
+        rid = ev.get("id")
+        if ev.get("kind") == "turn_request":
+            if rid in seen_requests:
+                sequence_invalid = True
+            seen_requests.add(rid)
+        else:
+            if rid not in seen_requests or rid in seen_answers:
+                sequence_invalid = True
+            seen_answers.add(rid)
+    if sequence_invalid:
+        findings.append(doctor_finding(
+            "requests.sequence_invalid", "warning",
+            f"{os.path.basename(REQUESTS)} has duplicate requests or invalid answer ordering.",
+            os.path.basename(REQUESTS),
+        ))
+    return findings
+
+
 def as_int(value, default=0):
     try:
         return int(value)
@@ -2358,6 +2415,7 @@ def reserved_report_output_paths():
         COWORK,
         ARCHIVE,
         PROTO,
+        PROTO_REFERENCE,
         MEMORY,
         TASKS,
         SESSIONS,
@@ -3093,6 +3151,7 @@ def collect_doctor_findings(security=False, contracts=False):
                 os.path.basename(SESSIONS),
             ))
     findings.extend(_doctor_session_identity_findings(session_events, turns, lk))
+    findings.extend(_doctor_request_ledger_findings())
 
     if not os.path.exists(PROTO):
         findings.append(doctor_finding(

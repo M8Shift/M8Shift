@@ -168,7 +168,7 @@ Custom `--output PATH` is allowed only for files under the project root:
 - refuse an existing symlink target;
 - refuse a parent directory whose real path escapes the project root;
 - refuse reserved M8Shift coordination and distributed script files (`M8SHIFT.md`,
-  session/request ledgers, protocol/memory/task files, `.m8shift.lock`, shipped
+  session/request ledgers, protocol/protocol-reference/memory/task files, `.m8shift.lock`, shipped
   `m8shift*.py` scripts, checksummed kit files, and existing files under `examples/`
   or `scripts/`), even when `--force` is provided;
 - tolerate a missing, malformed, or non-UTF-8 `checksums.sha256` while falling back to
