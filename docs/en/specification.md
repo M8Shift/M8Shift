@@ -305,8 +305,8 @@ Return codes: `0` success · `1` refusal/error (state, guardrail, invalid input)
   Git integration test is skipped if Git is absent).
 - Multi-agent adversarial verification + 3 successive Codex reviews, each finding
   reproduced then fixed then re-tested.
-- Documentary non-regression test: `docs/en/protocol.md` and `docs/fr/protocole.md`
-  must stay byte-identical to `m8shift.PROTOCOL["en"]` and the `i18n/<lang>/protocol.md` pack body (`test_protocol_docs_in_sync`).
+- Documentary non-regression test: `docs/en/protocol.md` must stay byte-identical to
+  `m8shift.PROTOCOL["en"]` (`test_protocol_docs_in_sync`); the `i18n/<lang>/` packs drive the localized single-file build.
 
 ## 10. Versioning
 
