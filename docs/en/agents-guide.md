@@ -113,7 +113,10 @@ releasable at all times.
 - **Dogfooding provenance.** Commits coordinated through M8Shift carry
   `Coordinated-With: M8Shift vX.Y.Z`, where `vX.Y.Z` is the active relay engine
   version. Use the generated `.m8shift/hooks/commit-msg` template and set
-  `M8SHIFT_ROOT` when the relay lives outside the repo being changed.
+  `M8SHIFT_ROOT` when the relay lives outside the repo being changed. The template
+  is a `commit-msg` hook (it stamps the final saved message, never an aborted one)
+  and inserts the trailer into the message body above any `git commit -v` scissors
+  line, so verbose commits keep the trailer instead of dropping it with the diff.
 - **No relay artefacts committed.** `M8SHIFT.md`, `M8SHIFT.archive.md`,
   `.m8shift.lock`, and other generated relay state stay out of the repo.
 
