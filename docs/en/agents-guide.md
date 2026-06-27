@@ -74,6 +74,33 @@ do — and what this section requires — is keep the *process* fair. Neutrality
 > cannot — make an agent unbiased. Treat the requirement as: **make your reasoning
 > inspectable and let an independent turn challenge it.**
 
+### Verification honesty
+
+Reviewing honestly also means **verifying honestly**. An agent carries memory — session
+context and persistent notes — and that memory is a source of bias *at verification time*:
+it can tempt you to read a result through what you expect, to skip a check you "know" is
+fine, or to claim a green result without re-running it. That failure mode is **verification
+by expectation**, and it is how regressions slip past a confident review.
+
+The guardrail is not to forget what you know — you cannot, and should not. It is to ground
+every verification in **freshly executed ground truth**:
+
+- **Memory supplies hypotheses, never proof of current state.** What you remember is
+  something *to test*, not evidence that it still holds.
+- **Re-derive each result from the artifact, every time.** Run the real suite, the real
+  build, the real `grep` / `shasum`; read the actual exit code and counts; and **quote the
+  raw output** instead of asserting "it passes." A runner's result cannot be faked by
+  belief — which is exactly why it is trustworthy.
+- **For high-stakes claims, have the independent reviewer re-verify.** A second agent with
+  different priors — and who did not write the code — catches the angle your memory is
+  blind to.
+
+> [!IMPORTANT]
+> This is the model-less analogue of a "blank-slate review": honesty comes not from wiping
+> memory but from **re-executing the ground truth and letting an independent turn confirm
+> it.** Recalled memory notes are background context reflecting what was true when written —
+> verify before you rely on them.
+
 ## 3. Delivery workflow (mandatory)
 
 Every change follows the same branch-based flow.
