@@ -1652,6 +1652,23 @@ class TestInjector(unittest.TestCase):
                                cwd=d, capture_output=True, text=True)
         self.assertIn("pluma tomada", claim.stdout)  # es claim_ok
 
+    def test_name_rejects_path_escape(self):
+        """SEC-4: --name must be a plain basename. Path/traversal/absolute values are
+        rejected (this is the only RCE-adjacent surface — m8shift-i18n.py writes a file)
+        and never escape --into. Belt-and-suspenders: safe_output_name() + commonpath."""
+        if "fr" not in self._packs():
+            self.skipTest("fr pack missing")
+        d = tempfile.mkdtemp(prefix="m8shift-sec4-")
+        self.addCleanup(shutil.rmtree, d, True)
+        into = os.path.join(d, "dst")
+        for bad in ("../evil.py", "foo/bar.py", "/etc/passwd", "a/../../../b", ".."):
+            r = subprocess.run(
+                [sys.executable, self.INJ, "--langs", "fr", "--into", into, "--name", bad],
+                capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, f"--name {bad!r} must be rejected")
+        stray = [f for f in os.listdir(d) if f.endswith(".py")]
+        self.assertEqual(stray, [], f"--name escaped --into into {d}: {stray}")
+
     def test_output_name_must_stay_inside_output_dir(self):
         d = tempfile.mkdtemp(prefix="m8shift-i18n-out-")
         self.addCleanup(shutil.rmtree, d, True)

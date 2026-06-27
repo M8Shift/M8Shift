@@ -31,6 +31,8 @@ M8Shift is **free and open source**, released under the
 | [brand/color-palette.md](brand/color-palette.md) | Canonical M8Shift brand color palette and CSS tokens. |
 | [philosophy.md](philosophy.md) | Why M8Shift exists and what collaboration model it supports. |
 | [security-audit.md](security-audit.md) | Security audit of code, coordination, and prompt surfaces. |
+| [owasp-agentic-top10-audit.md](owasp-agentic-top10-audit.md) | M8Shift mapped against the OWASP Top 10 for Agentic Applications (2026). |
+| [security-research-and-frameworks.md](security-research-and-frameworks.md) | M8Shift against external security frameworks (arXiv, MITRE ATLAS, NIST/CISA/ANSSI, IBM AI Risk Atlas). |
 | [stage2-rationale.md](stage2-rationale.md) | Design rationale behind the N-agent relay model. |
 
 ## Design decisions
