@@ -190,6 +190,14 @@ hint; it never runs force recovery automatically.
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE
   lock); `M8SHIFT.md` is **not** overwritten if it already exists (except with
   `--force`) → the state of the ongoing relay is preserved;
+- writes `.m8shift/hooks/commit-msg`, a Git hook template that adds the
+  `Coordinated-With: M8Shift vX.Y.Z` trailer by reading the active relay version from
+  `$M8SHIFT_ROOT` (or the current directory when it contains a relay); if no relay is
+  configured, it exits 0 without changing the commit message. It is a `commit-msg`
+  hook (not `prepare-commit-msg`) so it stamps the *final* saved message and never
+  tags an aborted commit; it inserts the trailer into the message body — inside the
+  trailer block, above any `git commit -v` `>8` scissors line — so verbose commits
+  keep the trailer instead of dropping it below the cut with the diff;
 - injects at the **top** a "M8Shift relay" block into **each active agent's anchor**
   (by default `CLAUDE.md` and `AGENTS.md`; created if missing), between
   `M8SHIFT:STANZA` markers → **idempotent** re-injection (moves/updates the block
