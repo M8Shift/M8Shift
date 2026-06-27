@@ -66,3 +66,32 @@ When a repo is coordinated through M8Shift, run `./m8shift.py may-i-write <agent
 the alias `guard <agent>`) before scripted writes or commits. It exits 0 only while
 that agent holds a non-expired `WORKING_<AGENT>` lock; any other rc means stop and
 follow the printed next action.
+
+### Pre-commit hook (enforce the pen on commit)
+
+`hooks/pre-commit` is a POSIX-sh, stdlib-only, **local and advisory** Git hook that runs
+`may-i-write` immediately before each commit, so the rule is *enforced* — not merely
+documented. Install it per clone (Git does not version-control `.git/hooks/`):
+
+```bash
+cp hooks/pre-commit .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+
+Behaviour:
+
+- `$M8SHIFT_AGENT` **unset** → the hook exits 0 (skip). Humans and unconfigured
+  checkouts are never blocked.
+- `$M8SHIFT_AGENT` **set** → the hook runs `m8shift.py may-i-write "$M8SHIFT_AGENT"` and,
+  on any non-zero rc, prints why and **blocks the commit** (fail *closed*). The relay
+  root is resolved by `m8shift.py` via `$M8SHIFT_ROOT`; the program is found via
+  `$M8SHIFT_BIN`, else `m8shift.py` on `$PATH`, else `./m8shift.py` at the repo root.
+
+**Zero-memory note.** A fresh agent needs no memorised rule: the policy lives in the
+program. The `init`-generated anchors (`CLAUDE.md` / `AGENTS.md`) tell the agent to set
+`$M8SHIFT_AGENT` and run `may-i-write`; the installed hook then enforces it at commit
+time. Hook + `may-i-write` + anchors are self-contained.
+
+This hook is **advisory and local** — it is not a security boundary and does not contact
+the network. It narrows, but does not fully close, the check-then-commit race; see the
+SEC-7 / TOCTOU note in [`docs/en/protocol-reference.md`](docs/en/protocol-reference.md).

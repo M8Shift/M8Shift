@@ -407,6 +407,17 @@ same metadata and serializes unavailable values as `null`.
 - **Hard pre-write guard**: `may-i-write <you>` (alias: `guard <you>`) is read-only
   and exits 0 only when `holder=<you>`, `state=WORKING_<YOU>`, and the lock has not
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
+  A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
+  advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
+  valid pen, and with it unset it skips (humans are never blocked). See the agents
+  guide and `CONTRIBUTING.md` for install instructions.
+- **SEC-7 / TOCTOU — honest limit**: `may-i-write` is a **point-in-time read** that
+  holds **no lock**. It reports the relay state *at the instant it runs*; the state can
+  change between that check and the write completing (e.g. the lock expires, or another
+  agent forces a stale-lock takeover). The pre-commit hook **narrows** the window — it
+  checks immediately before the commit — but does **not** fully close the race. Treat the
+  guard as a strong advisory gate, not a mutual-exclusion guarantee; the single-writer
+  invariant still rests on the `claim`/`append` mutex, not on the guard.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB

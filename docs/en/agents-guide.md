@@ -61,8 +61,9 @@ Every change follows the same branch-based flow.
 3. **Commit each logical change on the branch** — small, self-contained commits
    (one concern per commit), not one giant commit. Commit while you hold the relay
    pen; run `./m8shift.py may-i-write <agent>` first when a script or hook needs a
-   hard yes/no guard. Do not stage pre-existing untracked files without explicit
-   instruction.
+   hard yes/no guard. Install the shipped pre-commit hook so the pen is *enforced*,
+   not just documented (see §9). Do not stage pre-existing untracked files without
+   explicit instruction.
 4. **Tests, systematically.** Read the code, review it, and **add or update tests for
    every behavioral change**. `python3 -m unittest discover -s tests` must be green on
    the branch before review.
@@ -161,3 +162,34 @@ An agent keeps working/listening until the relay is `DONE` or the maintainer giv
 explicit stop. `idle`/`PAUSED` is not a stop signal: park cleanly and wait for the
 next authorized scope. The author never closes their own review; only an explicit
 human stop ends the loop.
+
+## 9. Enforce the pen on commit — `hooks/pre-commit`
+
+The relay coordinates *who writes when*, but nothing stops a misconfigured agent from
+running `git commit` without holding the pen. `hooks/pre-commit` closes that gap: a
+POSIX-sh, stdlib-only, **local and advisory** hook that runs `may-i-write` immediately
+before each commit. Install it per clone (Git does not track `.git/hooks/`):
+
+```bash
+cp hooks/pre-commit .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+
+- **`$M8SHIFT_AGENT` unset** → the hook exits 0 (skip). Humans and unconfigured
+  checkouts are never blocked.
+- **`$M8SHIFT_AGENT` set** → it runs `m8shift.py may-i-write "$M8SHIFT_AGENT"` and, on
+  any non-zero rc, prints why and **blocks the commit** — fail *closed* for a configured
+  agent. The relay root is resolved by `m8shift.py` via `$M8SHIFT_ROOT`; the program is
+  found via `$M8SHIFT_BIN`, else `m8shift.py` on `$PATH`, else `./m8shift.py` at the
+  repo root.
+
+> [!NOTE]
+> **Zero-memory by design.** A fresh agent does not have to *remember* the write rule:
+> it lives in the program. The `init`-generated anchors (`CLAUDE.md` / `AGENTS.md`)
+> instruct the agent to set `$M8SHIFT_AGENT` and run `may-i-write`; the installed hook
+> then enforces it at commit time. The hook + `may-i-write` + the anchors are
+> self-contained.
+
+The hook is **advisory and local** — not a security boundary, no network. It narrows but
+does not fully close the check-then-commit race; see the SEC-7 / TOCTOU note in
+[`protocol-reference.md`](protocol-reference.md).
