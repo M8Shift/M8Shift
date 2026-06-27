@@ -78,3 +78,4 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | Draft safe headless command templates for cooperative CLIs. |
 | [029-rfc-m8shift-board.md](rfc/029-rfc-m8shift-board.md) | Draft richer companion workboard concept outside the core task board. |
 | [030-rfc-tamper-evidence.md](rfc/030-rfc-tamper-evidence.md) | Proposed stdlib hash-chain for tamper-evidence — detection + warning, not prevention/identity/encryption; git as the strong anchor. |
+| [031-rfc-decision-traceability.md](rfc/031-rfc-decision-traceability.md) | Proposed tool-independent decision traceability — forge / GitHub / both / git or a markdown ADR fallback; structured contradictory-decision records (positions for/against + resolution). |
