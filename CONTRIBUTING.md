@@ -71,4 +71,9 @@ Coordinated-With: M8Shift vX.Y.Z
 `m8shift.py init` writes `.m8shift/hooks/commit-msg`, a hook template that injects this
 trailer from the active relay version. For an external relay, run commits with
 `M8SHIFT_ROOT=/path/to/relay`; without a configured relay the hook exits cleanly and
-does not block the commit.
+does not block the commit. It is a `commit-msg` hook (not `prepare-commit-msg`) on
+purpose: it stamps the *final* saved message, so it never tags a commit the author
+aborted by emptying the editor. Because that final buffer may be a `git commit -v`
+message (body followed by a `>8` scissors line and the diff), the hook inserts the
+trailer into the message body — inside the trailer block, above the scissors — so it
+survives verbose commits instead of being dropped with the diff.

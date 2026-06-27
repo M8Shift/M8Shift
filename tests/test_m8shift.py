@@ -2370,6 +2370,65 @@ class TestAuditFixes(CLIBase):
         finally:
             shutil.rmtree(app, ignore_errors=True)
 
+    def test_commit_msg_hook_keeps_trailer_in_body_for_verbose_commit(self):
+        # NR: `git commit -v` assembles subject + body + a `>8` scissors line + the
+        # diff. The trailer must land in the message BODY (above the scissors), not
+        # be appended at EOF below it — otherwise git discards it with the diff.
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            verbose = (
+                "feat: do a thing\n"
+                "\n"
+                "Body line one.\n"
+                "\n"
+                "Co-Authored-By: Claude <noreply@example.invalid>\n"
+                "\n"
+                "# Please enter the commit message for your changes. Lines starting\n"
+                "# with '#' will be ignored, and an empty message aborts the commit.\n"
+                "#\n"
+                "# ------------------------ >8 ------------------------\n"
+                "# Do not modify or remove the line above.\n"
+                "# Everything below it will be ignored.\n"
+                "diff --git a/x b/x\n"
+                "index 000..111 100644\n"
+                "--- a/x\n"
+                "+++ b/x\n"
+                "+added line\n"
+            )
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write(verbose)
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+
+            trailer = f"Coordinated-With: M8Shift v{cowork.VERSION}"
+            self.assertIn(trailer, body)
+            # Trailer is in the message body: above the scissors line and above the diff.
+            scissors_idx = body.index(">8")
+            self.assertLess(body.index(trailer), scissors_idx)
+            self.assertLess(body.index(trailer), body.index("diff --git"))
+            # It joins the existing trailer block, right after Co-Authored-By.
+            self.assertLess(body.index("Co-Authored-By:"), body.index(trailer))
+            # The verbose tail (scissors + diff) is preserved untouched.
+            self.assertIn("# ------------------------ >8 ------------------------", body)
+            self.assertIn("+added line", body)
+            # No duplication on a second pass.
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                self.assertEqual(f.read().count("Coordinated-With:"), 1)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
     def test_distributed_scripts_version_surface(self):
         # Every tracked Python script carries the same explicit version surface as m8shift.py.
         v = cowork.VERSION

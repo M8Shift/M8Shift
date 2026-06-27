@@ -472,10 +472,14 @@ hint; it never runs force recovery automatically.
 - writes `M8SHIFT.protocol.md` (this document) and `M8SHIFT.md` (a fresh IDLE
   lock); `M8SHIFT.md` is **not** overwritten if it already exists (except with
   `--force`) → the state of the ongoing relay is preserved;
-- writes `.m8shift/hooks/commit-msg`, a Git hook template that appends the
+- writes `.m8shift/hooks/commit-msg`, a Git hook template that adds the
   `Coordinated-With: M8Shift vX.Y.Z` trailer by reading the active relay version from
   `$M8SHIFT_ROOT` (or the current directory when it contains a relay); if no relay is
-  configured, it exits 0 without changing the commit message;
+  configured, it exits 0 without changing the commit message. It is a `commit-msg`
+  hook (not `prepare-commit-msg`) so it stamps the *final* saved message and never
+  tags an aborted commit; it inserts the trailer into the message body — inside the
+  trailer block, above any `git commit -v` `>8` scissors line — so verbose commits
+  keep the trailer instead of dropping it below the cut with the diff;
 - injects at the **top** a "M8Shift relay" block into **each active agent's anchor**
   (by default `CLAUDE.md` and `AGENTS.md`; created if missing), between
   `M8SHIFT:STANZA` markers → **idempotent** re-injection (moves/updates the block
@@ -634,9 +638,19 @@ COMMIT_MSG_HOOK_EN = r'''#!/usr/bin/env python3
 """M8Shift commit-msg hook: add dogfooding provenance without blocking commits.
 
 Install this template as `.git/hooks/commit-msg` (or call it from an existing hook).
-It appends `Coordinated-With: M8Shift vX.Y.Z` by reading the active relay's
+It adds `Coordinated-With: M8Shift vX.Y.Z` by reading the active relay's
 `m8shift.py --version`. Configure an external relay with M8SHIFT_ROOT=/path/to/relay.
 If no relay is configured or readable, the hook exits 0 and leaves the message alone.
+
+Why `commit-msg` and not `prepare-commit-msg`: the trailer records the relay that
+the *final* message was coordinated under. `commit-msg` runs on the message the
+author actually saved, so we never stamp a provenance trailer onto a commit that the
+author aborted by emptying the editor. The trade-off is that the verbose-diff buffer
+of `git commit -v` (subject + body + a `# ... >8 ...` scissors line + the diff +
+trailing `#` comments) has already been assembled, so the hook must insert the
+trailer into the message *body* — inside the trailer block, above the scissors line
+and the trailing comment block — rather than appending at end-of-file, where it would
+land below the scissors and be discarded.
 """
 import os
 import re
@@ -647,6 +661,8 @@ TRAILER_KEY = "Coordinated-With"
 TRAILER_RE = re.compile(r"(?im)^Coordinated-With:\s*M8Shift\s+v\S+\s*$")
 TRAILER_LINE_RE = re.compile(r"^[A-Za-z0-9-]+(?:-[A-Za-z0-9-]+)*:\s+\S")
 VERSION_RE = re.compile(r"\bm8shift\.py\s+(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)\b")
+# Git's verbose/scissors marker: a comment line carrying the " >8 " cut mark.
+SCISSORS_RE = re.compile(r"^#.*\s>8\s")
 
 
 def candidate_roots():
@@ -692,17 +708,77 @@ def has_trailer(message):
     return bool(TRAILER_RE.search(message or ""))
 
 
-def append_trailer(message, trailer):
-    stripped = (message or "").rstrip()
-    if not stripped:
+def split_at_scissors(lines):
+    """Return (body_lines, tail_lines): everything from the verbose `>8` scissors
+    line onward (the cut comment block + the diff) is the immutable tail. When there
+    is no scissors line, the whole message is body and tail is empty."""
+    for idx, line in enumerate(lines):
+        if SCISSORS_RE.match(line):
+            return lines[:idx], lines[idx:]
+    return lines, []
+
+
+def insert_trailer(body_lines, comment_char, trailer):
+    """Insert `trailer` into the trailer block at the end of the real message body,
+    above any trailing git comment lines and blank lines. Preserves git trailer
+    conventions: a single blank line separates the trailer block from the prose
+    body when the body has no trailer block yet."""
+    lines = list(body_lines)
+    # Drop trailing blank lines, then the trailing run of git comment lines (the
+    # "Please enter the commit message" block), then more trailing blanks: the
+    # trailer belongs to the authored prose, not to these git-generated lines.
+    end = len(lines)
+    while end > 0 and lines[end - 1].strip() == "":
+        end -= 1
+    while end > 0 and lines[end - 1].lstrip().startswith(comment_char):
+        end -= 1
+    while end > 0 and lines[end - 1].strip() == "":
+        end -= 1
+    tail = lines[end:]
+    body = lines[:end]
+    if not body:
+        return [trailer] + tail
+    # Find the existing trailer block: the trailing run of `Key: value` lines.
+    j = len(body)
+    while j > 0 and TRAILER_LINE_RE.match(body[j - 1]):
+        j -= 1
+    in_trailer_block = j < len(body) and (j == 0 or body[j - 1].strip() == "")
+    if in_trailer_block:
+        return body + [trailer] + tail
+    return body + ["", trailer] + tail
+
+
+def append_trailer(message, trailer, comment_char="#"):
+    text = message or ""
+    if not text.strip():
         return trailer + "\n"
-    lines = stripped.splitlines()
-    i = len(lines) - 1
-    while i >= 0 and TRAILER_LINE_RE.match(lines[i]):
-        i -= 1
-    has_trailer_block = i < len(lines) - 1 and (i < 0 or lines[i].strip() == "")
-    separator = "\n" if has_trailer_block else "\n\n"
-    return stripped + separator + trailer + "\n"
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split("\n")
+    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in lines]
+    # `split("\n")` yields a trailing "" for a final newline; drop it and restore later.
+    trailing_newline = lines and lines[-1] == ""
+    if trailing_newline:
+        lines = lines[:-1]
+    body_lines, tail_lines = split_at_scissors(lines)
+    body_lines = insert_trailer(body_lines, comment_char, trailer)
+    out = body_lines + tail_lines
+    result = newline.join(out)
+    if trailing_newline or not tail_lines:
+        result += newline
+    return result
+
+
+def comment_char():
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", "core.commentChar"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return "#"
+    value = (result.stdout or "").strip()
+    # A single configured char wins; `auto` or anything else falls back to `#`.
+    return value if len(value) == 1 else "#"
 
 
 def main(argv):
@@ -719,9 +795,10 @@ def main(argv):
         return 0
     if has_trailer(message):
         return 0
+    trailer = f"{TRAILER_KEY}: M8Shift v{version}"
     try:
         with open(msg_path, "w", encoding="utf-8") as f:
-            f.write(append_trailer(message, f"{TRAILER_KEY}: M8Shift v{version}"))
+            f.write(append_trailer(message, trailer, comment_char()))
     except OSError:
         return 0
     return 0
