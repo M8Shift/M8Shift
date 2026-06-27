@@ -39,3 +39,6 @@ build/
 
 # Répertoires de travail temporaires
 _temp/
+
+# Agent/workflow working dirs
+.claude/
