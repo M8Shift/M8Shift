@@ -67,6 +67,22 @@ R12/R28 ↔ degree-2 worktree isolation), and **GOVERN/MANAGE accountability + m
 open gaps the audit already names: **SEC-4** and **SEC-7**, both surfacing under CISA's
 "harden the deployment environment / configuration" and ANSSI's access-control axis.
 
+### 1.1 Framework applicability at a glance
+
+One-screen map across every framework reviewed; each row is detailed in the section noted,
+and the per-item applies/N-A verdicts (ATLAS tactic-by-tactic §3.2, IBM risk-by-risk §4.2)
+live in those sections.
+
+| Framework | What it targets | Applies to M8Shift | Where it presses |
+|-----------|-----------------|--------------------|------------------|
+| [OWASP Agentic Top 10](https://genai.owasp.org/) (ASI01–10) | agentic-application threats | **Audited threat-by-threat** — see the [OWASP audit](owasp-agentic-top10-audit.md) coverage matrix | ASI01/ASI06/ASI07 reinforcement; identity & network out of scope by design |
+| [MITRE ATLAS](https://atlas.mitre.org/) | adversarial ML (model attacks) | **~10 % applies** — ~90 % is model-attack with no surface here (§3) | supply chain + the ecosystem of agents *using* M8Shift |
+| [IBM AI Risk Atlas](https://www.ibm.com/think/topics/ai-risk-management) | AI risks incl. bias & fairness | **N/A by design** — Training-Data / Inference / Output, incl. all bias, structurally inapplicable (§4) | none on the model axis; process fairness is the only analogue (§4.3) |
+| [NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework) (100-1 + 600-1) | AI risk-management functions | **Partial** — GOVERN / MAP / MANAGE apply; MEASURE (model metrics, bias) N/A (§5.1) | SEC-4 / SEC-7 under MANAGE |
+| [CISA Secure AI](https://www.cisa.gov/ai) | secure-by-design AI lifecycle | **Applies** — supply chain, config hardening, monitoring (§5.2) | SEC-4 / SEC-7 (harden deployment / configuration) |
+| [ANSSI-PA-102](https://cyber.gouv.fr/) | securing a generative-AI system | **Partial** — phase isolation / access control apply; model / training poisoning N/A (§5.3) | SEC-7 (access-control axis) |
+| [arXiv defenses](https://arxiv.org/) | agentic attacks & defenses | **Mixed** — activation / model-drift defenses N/A; verify-before-commit maps to review/validation (§2) | reinforce the documented injection boundary |
+
 ## 2. arXiv — agentic-security research & defenses
 
 All 19 papers below were verified by fetching `arxiv.org/abs/<id>` and confirming exact
