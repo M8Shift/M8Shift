@@ -524,6 +524,33 @@ class TestClaimModel(CLIBase):
 # ───────────────────────────── mutex / guardrails ───────────────────────────
 
 class TestMutexGuards(CLIBase):
+    def test_may_i_write_requires_current_valid_pen(self):
+        self.init()
+        before = self.md()
+        idle = self.cw("may-i-write", "claude")
+        self.assertEqual(idle.returncode, 3)
+        self.assertIn("STOP", idle.stdout)
+        self.assertEqual(self.md(), before)
+
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        ok = self.cw("may-i-write", "claude")
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIn("may write", ok.stdout)
+        no = self.cw("may-i-write", "codex")
+        self.assertEqual(no.returncode, 3)
+        self.assertIn("holder=claude", no.stdout)
+
+    def test_may_i_write_refuses_expired_own_lock_and_guard_aliases_it(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.set_expires_past()
+        r = self.cw("may-i-write", "claude")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("expired lock", r.stdout)
+        alias = self.cw("guard", "claude")
+        self.assertEqual(alias.returncode, 3)
+        self.assertIn("STOP", alias.stdout)
+
     def test_force_refused_on_fresh_lock(self):
         """NR-1: claim --force does not steal a non-stale lock."""
         self.init()
@@ -608,6 +635,80 @@ class TestMutexGuards(CLIBase):
             audit = f.read()
         self.assertIn("operator decided no codex work", audit)
         self.assertIn('"pending_turn": "1"', audit)
+
+
+# ───────────────────────────── pre-commit hook (Git) ───────────────────────
+
+HOOK = os.path.join(REPO, "hooks", "pre-commit")
+
+
+@unittest.skipUnless(shutil.which("git"), "git not available")
+class TestPreCommitHook(unittest.TestCase):
+    """The shipped hook template gates `git commit` on a valid write pen: it BLOCKS a
+    commit when the holder is not the configured agent and ALLOWS it when the agent
+    holds the pen. Driven in a throwaway /tmp git repo + relay, exactly as an agent
+    would install it (copied into .git/hooks/pre-commit, chmod +x)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8shift-hook-")
+        shutil.copy(SCRIPT, os.path.join(self.d, "m8shift.py"))
+        for c in (["init", "-q"], ["config", "user.email", "t@example.invalid"],
+                  ["config", "user.name", "tester"]):
+            r = subprocess.run(["git", *c], cwd=self.d, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        hooks_dir = os.path.join(self.d, ".git", "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        dst = os.path.join(hooks_dir, "pre-commit")
+        shutil.copy(HOOK, dst)
+        os.chmod(dst, 0o755)
+        r = subprocess.run([sys.executable, "m8shift.py", "init"],
+                           cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _commit(self, content, agent=None):
+        path = os.path.join(self.d, "f.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        subprocess.run(["git", "add", "f.txt"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        env = dict(os.environ)
+        env["M8SHIFT_BIN"] = os.path.join(self.d, "m8shift.py")
+        if agent is None:
+            env.pop("M8SHIFT_AGENT", None)
+        else:
+            env["M8SHIFT_AGENT"] = agent
+        return subprocess.run(["git", "commit", "-m", "msg"], cwd=self.d,
+                              capture_output=True, text=True, env=env)
+
+    def test_unset_agent_skips(self):
+        """No $M8SHIFT_AGENT: a human/unconfigured commit is never blocked."""
+        r = self._commit("human\n", agent=None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_blocks_when_agent_does_not_hold_pen(self):
+        """$M8SHIFT_AGENT set but no valid pen → fail CLOSED (commit blocked)."""
+        r = self._commit("a\n", agent="claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("commit blocked", r.stderr)
+
+    def test_allows_when_agent_holds_pen(self):
+        """The pen holder commits successfully."""
+        c = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                           cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(c.returncode, 0, c.stderr)
+        r = self._commit("b\n", agent="claude")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_blocks_when_other_agent_holds_pen(self):
+        """Holder=claude, committer configured as codex → blocked."""
+        subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                       cwd=self.d, check=True, capture_output=True, text=True)
+        r = self._commit("c\n", agent="codex")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("commit blocked", r.stderr)
 
 
 # ───────────────────────────── robustness / inputs ─────────────────────────
