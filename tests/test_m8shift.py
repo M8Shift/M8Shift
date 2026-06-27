@@ -123,15 +123,11 @@ class TestPureFunctions(unittest.TestCase):
         self.assertNotIn("M8SHIFT:TURN", out)
 
     def test_protocol_docs_in_sync(self):
-        """Doc sync (EN-only core): docs/en == the core EN template; docs/<lang> == the
-        i18n/<lang> pack body byte-for-byte (regenerate with scripts/gen_docs.py)."""
+        """Doc sync (English-only docs): docs/en == the core EN template
+        byte-for-byte (regenerate with scripts/gen_docs.py)."""
         cases = [("docs/en/protocol.md", cowork.PROTOCOL["en"].replace(
                     "M8SHIFT.protocol-reference.md", "protocol-reference.md")),
                  ("docs/en/protocol-reference.md", cowork.PROTOCOL_REFERENCE["en"])]
-        fr_pack = os.path.join(REPO, "i18n", "fr", "protocol.md")
-        if os.path.exists(fr_pack):
-            with open(fr_pack, encoding="utf-8") as f:
-                cases.append(("docs/fr/protocole.md", f.read()))
         for rel, expected in cases:
             path = os.path.join(REPO, rel)
             if not os.path.exists(path):

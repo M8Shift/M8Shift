@@ -15,8 +15,6 @@ _Different agents. Different roles. One coordinated workflow._
 [![no API key](https://img.shields.io/badge/API%20key-not%20required-success.svg)](#runs-anywhere--no-api-key)
 [![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](docs/en/specification.md#11-developing-m8shift-with-m8shift-dogfooding)
 
-English | [Français](docs/README_fr.md)
-
 </div>
 
 ## 🧭 What is M8Shift?
@@ -198,17 +196,16 @@ open/no-work session with `pause`.
 ## 📚 Documentation
 
 Docs follow the [Diátaxis](https://diataxis.fr/) framework. Start with the
-published bilingual site, or use the repository-local docs when working from a
-clone.
+published site, or use the repository-local docs when working from a clone.
 
-| Category | English | Français |
-|----------|---------|----------|
-| **Live site** | [m8shift.ai](https://m8shift.ai/) | [m8shift.ai/fr](https://m8shift.ai/fr/) |
-| **Documentation index** | [docs/en/README.md](docs/en/README.md) | [docs/fr/README.md](docs/fr/README.md) |
-| **Getting started** | [tutorial](docs/en/tutorial.md) · [VS Code guide](docs/en/vscode-guide.md) · [Windows](docs/en/windows.md) | [tutoriel](docs/fr/tutoriel.md) · [guide VS Code](docs/fr/guide-vscode.md) · [Windows](docs/fr/windows.md) |
-| **Reference** | [protocol](docs/en/protocol.md) · [protocol reference](docs/en/protocol-reference.md) · [specification](docs/en/specification.md) · [agents guide](docs/en/agents-guide.md) | [protocole](docs/fr/protocole.md) · [cahier des charges](docs/fr/cahier-des-charges.md) |
-| **Explanation** | [architecture](docs/en/architecture.md) · [philosophy](docs/en/philosophy.md) · [security audit](docs/en/security-audit.md) · [stage-2 rationale](docs/en/stage2-rationale.md) | [architecture](docs/fr/architecture.md) · [philosophie](docs/fr/philosophie.md) |
-| **RFCs** | [RFC index](docs/en/README.md#rfcs) · [RFC directory](docs/en/rfc/) | RFCs are English-only; French docs link to the canonical English RFCs. |
+| Category | Document |
+|----------|----------|
+| **Live site** | [m8shift.ai](https://m8shift.ai/) |
+| **Documentation index** | [docs/en/README.md](docs/en/README.md) |
+| **Getting started** | [tutorial](docs/en/tutorial.md) · [VS Code guide](docs/en/vscode-guide.md) · [Windows](docs/en/windows.md) |
+| **Reference** | [protocol](docs/en/protocol.md) · [protocol reference](docs/en/protocol-reference.md) · [specification](docs/en/specification.md) · [agents guide](docs/en/agents-guide.md) |
+| **Explanation** | [architecture](docs/en/architecture.md) · [philosophy](docs/en/philosophy.md) · [security audit](docs/en/security-audit.md) · [stage-2 rationale](docs/en/stage2-rationale.md) |
+| **RFCs** | [RFC index](docs/en/README.md#rfcs) · [RFC directory](docs/en/rfc/) |
 
 > [!NOTE]
 > RFCs are maintained in English under `docs/en/rfc/`. **Numbers are assigned in
