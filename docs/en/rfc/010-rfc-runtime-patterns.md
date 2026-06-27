@@ -38,11 +38,11 @@ The filter below is accepted as the post-Stage-6 design boundary:
   semantic/vector memory and autonomous summarization; autonomous workboard dispatcher; automatic UI
   wake guarantees; path-scoped shared-tree leases; durable queue as core authority; and automatic
   force recovery.
-- **6 deferred topics are split into dedicated draft RFCs** so they can be designed independently:
-  [024 doctor split](024-rfc-doctor-split.md), [025 status-runtime](025-rfc-status-runtime.md),
-  [026 sidecar retention](026-rfc-sidecar-retention.md), [027 notifications](027-rfc-notifications.md),
-  [028 headless command templates](028-rfc-headless-command-templates.md), and
-  [029 m8shift-board](029-rfc-m8shift-board.md).
+- **Deferred topics are split into dedicated RFCs** so they can be designed independently.
+  [024 doctor split](024-rfc-doctor-split.md) and [025 status-runtime](025-rfc-status-runtime.md)
+  now have baseline implementations; [026 sidecar retention](026-rfc-sidecar-retention.md),
+  [027 notifications](027-rfc-notifications.md), [028 headless command templates](028-rfc-headless-command-templates.md),
+  and [029 m8shift-board](029-rfc-m8shift-board.md) continue the companion backlog.
 - **Implementation order is accepted as backlog order** for the retained runtime work:
   core-safe diagnostics → runtime sidecars → lane ownership → no-progress detection → headless plan →
   retention. This RFC does not implement those backlog items by itself.
@@ -588,14 +588,12 @@ Reports are evidence. They MUST NOT be parsed by the core to decide routing.
 
 ## Deferred / separate RFC
 
-These are useful but need their own design before implementation:
+These are useful but need their own design or policy work beyond the current baseline:
 
-1. `m8shift.py doctor` vs `m8shift-runtime doctor`: split of checks between core and companion.
-2. `status-runtime`: whether to merge core status + presence/progress into one command.
-3. Runtime sidecar retention policy: fixed cap, age-based pruning, or explicit archive.
-4. Notification mechanism: stdout only, OS notification, or project-local prompt file.
-5. Headless command templates: safe defaults for `codex exec`, `claude -p`, and other CLIs.
-6. Future `m8shift-board.py`: whether a richer board is worth the extra companion.
+1. Runtime sidecar retention policy: fixed cap, age-based pruning, or explicit archive.
+2. Notification mechanism: stdout only, OS notification, or project-local prompt file.
+3. Headless command templates: safe defaults for `codex exec`, `claude -p`, and other CLIs.
+4. Future `m8shift-board.py`: whether a richer board is worth the extra companion.
 
 ## Implementation order
 
