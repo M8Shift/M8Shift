@@ -2320,6 +2320,87 @@ class TestSessionReports(CLIBase):
 
 # ───────────── regressions from the Codex audit round (v3.x) ────────────────
 
+def _load_e2e():
+    import importlib.util
+    rp = os.path.join(REPO, "m8shift-e2e.py")
+    spec = importlib.util.spec_from_file_location("m8shift_e2e", rp)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestDeterministicE2E(unittest.TestCase):
+    def test_tier_a_arithmetic_case_drives_real_cli_and_asserts_artifact(self):
+        runner = os.path.join(REPO, "m8shift-e2e.py")
+        case = os.path.join(REPO, "tests", "e2e", "arithmetic.md")
+        r = subprocess.run([sys.executable, runner, case], cwd=REPO,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_tier_b_skips_cleanly_when_gate_off(self):
+        # OPT-IN live tier: no env, no agent CLI configured → clean skip, rc 0, no failure.
+        runner = os.path.join(REPO, "m8shift-e2e.py")
+        case = os.path.join(REPO, "tests", "e2e", "arithmetic.md")
+        env = {k: v for k, v in os.environ.items() if k not in ("M8SHIFT_LIVE_E2E", "M8SHIFT_E2E_AGENT_CMD")}
+        r = subprocess.run([sys.executable, runner, case, "--live"], cwd=REPO,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SKIP Tier B", r.stdout)
+
+    def test_tier_b_gate_requires_truthy_env_then_resolvable_cli(self):
+        e2e = _load_e2e()
+        env = {k: v for k, v in os.environ.items() if k not in ("M8SHIFT_LIVE_E2E", "M8SHIFT_E2E_AGENT_CMD")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertIn("not truthy", e2e.live_gate_reason())
+        with mock.patch.dict(os.environ, {**env, "M8SHIFT_LIVE_E2E": "1"}, clear=True):
+            self.assertIn("unset", e2e.live_gate_reason())
+        with mock.patch.dict(os.environ, {**env, "M8SHIFT_LIVE_E2E": "yes",
+                                          "M8SHIFT_E2E_AGENT_CMD": "no-such-agent-cli-xyz {prompt}"}, clear=True):
+            self.assertIn("not found", e2e.live_gate_reason())
+        # No shell evaluation: argv is shlex-split, the placeholder stays a literal token.
+        with mock.patch.dict(os.environ, {**env, "M8SHIFT_E2E_AGENT_CMD": "agent --p {prompt}"}, clear=True):
+            self.assertEqual(e2e.agent_argv(), ["agent", "--p", "{prompt}"])
+
+    def test_artifact_path_rejects_traversal_and_absolute(self):
+        e2e = _load_e2e()
+        work = tempfile.mkdtemp(prefix="m8shift-e2e-test-")
+        try:
+            self.assertEqual(e2e.artifact_path(work, "result.txt"),
+                             os.path.join(os.path.abspath(work), "result.txt"))
+            for bad in ("../escape.txt", "sub/../../escape.txt", "/etc/passwd", os.path.abspath(work)):
+                with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                    e2e.artifact_path(work, bad)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_eval_int_rejects_pow_div_mod_and_non_int_literals(self):
+        import ast
+        e2e = _load_e2e()
+        self.assertEqual(e2e.compute("19 + 23"), "42")
+        self.assertEqual(e2e.compute("-(2 * 3) - 1"), "-7")
+        for expr in ("2 ** 3", "6 / 2", "7 % 3", "1.5 + 1", "'a' + 'b'", "1 // 1"):
+            with self.subTest(expr=expr), self.assertRaises(SystemExit):
+                e2e.eval_int(ast.parse(expr, mode="eval"))
+
+    def test_read_case_raises_on_missing_fence_and_missing_key(self):
+        e2e = _load_e2e()
+        d = tempfile.mkdtemp(prefix="m8shift-e2e-case-")
+        try:
+            no_fence = os.path.join(d, "no_fence.md")
+            with open(no_fence, "w", encoding="utf-8") as f:
+                f.write("# title\n\nno fenced block here\n")
+            with self.assertRaises(SystemExit):
+                e2e.read_case(no_fence)
+
+            missing_key = os.path.join(d, "missing_key.md")
+            with open(missing_key, "w", encoding="utf-8") as f:
+                f.write("```m8shift-e2e\nname: x\nartifact: r.txt\nexpression: 1 + 1\n```\n")
+            with self.assertRaises(SystemExit):
+                e2e.read_case(missing_key)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class TestAuditFixes(CLIBase):
     """Regressions for the Codex audit: claim --check DONE, seed turn-0 format, the headless
     runner rename, m8shift-i18n.py --check format-safety, and the baton-owner done/release."""
@@ -2362,6 +2443,7 @@ class TestAuditFixes(CLIBase):
         # Every tracked Python script carries the same explicit version surface as m8shift.py.
         v = cowork.VERSION
         scripts = [
+            "m8shift-e2e.py",
             "m8shift-i18n.py",
             "m8shift-runtime.py",
             "m8shift-worktree.py",
