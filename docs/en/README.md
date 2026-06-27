@@ -77,3 +77,4 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [027-rfc-notifications.md](rfc/027-rfc-notifications.md) | Proposed tiered local notifications (stdout/file/bell/OS/hook) for handoffs and stale turns — advisory, no-daemon, no-network. |
 | [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | Draft safe headless command templates for cooperative CLIs. |
 | [029-rfc-m8shift-board.md](rfc/029-rfc-m8shift-board.md) | Draft richer companion workboard concept outside the core task board. |
+| [030-rfc-tamper-evidence.md](rfc/030-rfc-tamper-evidence.md) | Proposed stdlib hash-chain for tamper-evidence — detection + warning, not prevention/identity/encryption; git as the strong anchor. |
