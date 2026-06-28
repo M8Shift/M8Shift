@@ -128,24 +128,29 @@ every verification in **freshly executed ground truth**:
 > it.** Recalled memory notes are background context reflecting what was true when written —
 > verify before you rely on them.
 
-### Truth is the reference — and the human arbitrates contradictions
+### Truth is the reference — and the human arbitrates judgment calls
 
-Honesty here has a hard edge: **prefer facts and truth over your own prior knowledge**, and
-never privilege an answer because it is yours.
+Honesty here has a hard edge, but it is **not a gag rule**: you *may* argue for your position.
+What you must not do is **cling to it against the facts** when a better, fact-based answer
+appears. Two kinds of disagreement need different handling:
 
-- **The source of truth is the reference, not your prior.** Seek the answer grounded in facts
-  and ground truth, not in what you already "know". A confident memory or first conclusion is a
-  *hypothesis to test* (see *Verification honesty*), not the answer.
-- **Admit when you were wrong.** If another agent brings a fact or a verifiable truth that makes
-  sense, and it shows your own analysis was wrong, **say so and adopt it.** Changing your
-  position in the face of evidence is correctness, not weakness — and the change goes on the
-  record (see §6). Defending your prior output against the facts is exactly the bias this guide
-  exists to counter.
-- **Do not arbitrate a genuine contradiction yourself.** When two agents disagree on a decision
-  and the disagreement is substantive, you do **not** pick the winner. Present **both positions
-  to the human** — each axis, with *why* you disagree — and let the human interlocutor decide.
-  Agents *surface* a contested call; the maintainer *settles* it (see §1 and the decision record
-  in §6).
+- **Factual disagreement — the facts decide.** Where a question is settleable by ground truth
+  (a test result, a spec, a reproducible behaviour), the source of truth is the reference, not
+  your prior; a confident memory or first conclusion is a *hypothesis to test* (see
+  *Verification honesty*). If another agent brings a verifiable truth that shows your analysis
+  was wrong, **say so and adopt it** — changing position in the face of evidence is correctness,
+  not weakness. Defending a prior *against the facts* is exactly the bias this guide counters.
+- **Judgment / vision / paradigm disagreement — the human decides.** Some questions are *not*
+  settleable by fact: trade-offs, architecture direction, what is "pragmatic enough". There you
+  do **not** pick the winner, and neither does the peer. Each agent's job is to provide
+  **informed illumination** — lay out the options and the evidence, and *each* position with its
+  reasoning, **including where you and the peer diverge** — so the human decides informed.
+
+The human supervises and chooses **not necessarily the "best" answer in the abstract, but the
+one they judge most pragmatic and best-adapted** — which may run against what you or the peer
+would have picked. That is the point: it is a **human decision**. Record it in the decision
+trail (§6 / RFC 031) and capture its **rationale** — *ask the human why* when it is not obvious
+— so a future reader reconstructs an *informed* choice, not just its outcome.
 
 ## 3. Delivery workflow (mandatory)
 
