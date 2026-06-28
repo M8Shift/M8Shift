@@ -31,6 +31,33 @@ there is no authorized task, the relay is parked (`PAUSED`) and the agents wait.
 > A model may analyze, review, or implement only inside the scope it has been given.
 > No scope means `PAUSED`, not speculative work.
 
+### Why more than one agent
+
+Two agents are only better than one if they genuinely *contradict* each other. A single
+model is prone to **overconfidence** — it states wrong answers as fluently as right ones, so
+confidence is no signal of correctness — and to **sycophancy** — it tends to agree to be
+agreeable. The human reviewing it is prone to **automation bias** — deferring to the machine
+because "it's the AI." Left unchecked these compound: a confident wrong answer, politely
+agreed with, accepted by a trusting human.
+
+M8Shift's value is to turn "two AIs" into a *real* check rather than a second opinion that
+rubber-stamps the first:
+
+- the reviewer is an **independent agent on a separate turn**, required to review
+  adversarially (§2) and not to favor its own prior output;
+- model **diversity** matters — different model families (e.g. Claude + Codex) have less
+  correlated blind spots than two instances of one model;
+- the contradiction is **anchored in external ground truth** — deterministic tests, builds,
+  and the byte-level record, which no amount of mutual agreement can fake (§4, *Verification
+  honesty*);
+- a **human maintainer arbitrates** the genuine disagreements.
+
+> [!WARNING]
+> The trap is the mirror image of the benefit: if the two agents simply *agree* — especially
+> the same model talking to itself — you get an **echo chamber** that produces *false*
+> confidence, worse than one agent because a human now trusts a "consensus." The advantage
+> comes from the contradiction being **real and independent**, not from the redundancy itself.
+
 ## 2. Roles are per-task, not fixed
 
 For each unit of work the maintainer (or the relay handoff) assigns roles. The two
