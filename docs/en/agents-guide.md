@@ -199,13 +199,20 @@ releasable at all times.
   project names in committed content or history of public mirrors.
 - **Signed-off collaboration.** Commit messages include the agreed
   `Co-Authored-By:` trailer.
-- **Dogfooding provenance.** Commits coordinated through M8Shift carry
-  `Coordinated-With: M8Shift vX.Y.Z`, where `vX.Y.Z` is the active relay engine
-  version. Use the generated `.m8shift/hooks/commit-msg` template and set
-  `M8SHIFT_ROOT` when the relay lives outside the repo being changed. The template
-  is a `commit-msg` hook (it stamps the final saved message, never an aborted one)
-  and inserts the trailer into the message body above any `git commit -v` scissors
-  line, so verbose commits keep the trailer instead of dropping it with the diff.
+- **Dogfooding provenance — model *and* engine, on every commit.** Each commit
+  records the full processing chain, so the forge history shows *who* did the work and
+  *with which engine version*:
+  - `Agent-Model: <model-id>` — which model produced the work (e.g.
+    `claude-opus-4-8`, `claude-haiku-4-5`, the Codex model id);
+  - `Coordinated-With: M8Shift vX.Y.Z` — which engine version coordinated it.
+
+  The two trailers travel **together**. `vX.Y.Z` is the active relay engine version
+  when a relay is running, otherwise the local `m8shift.py --version` — **solo commits
+  are stamped too**, not only relay-coordinated ones. Use the generated
+  `.m8shift/hooks/commit-msg` template and set `M8SHIFT_ROOT` when the relay lives
+  outside the repo being changed; it stamps the final saved message (never an aborted
+  one) and inserts the trailers into the body above any `git commit -v` scissors line,
+  so verbose commits keep them instead of dropping them with the diff.
 - **No relay artefacts committed.** `M8SHIFT.md`, `M8SHIFT.archive.md`,
   `.m8shift.lock`, and other generated relay state stay out of the repo.
 
