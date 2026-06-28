@@ -411,6 +411,26 @@ The honest analysis:
 > concrete to-check is **default roster ordering** (avoid static declaration-order
 > advantage).
 
+#### A second bias axis — trusting the AI, not the AI's output
+
+The risks above concern *model* bias (the AI's output). A different, and for a multi-agent
+relay more relevant, axis is **trust calibration** — the biases of relying on AI at all:
+
+- **automation bias** — the human deferring to the machine ("it's the AI");
+- **overconfidence** — an LLM stating wrong answers as fluently as right ones, so confidence
+  is no signal of correctness;
+- **sycophancy** — an LLM agreeing to be agreeable rather than to be correct.
+
+These are exactly what M8Shift's **structured contradiction** targets: an independent reviewer
+required to refute rather than rubber-stamp, ideally from a **different model family** (less
+correlated blind spots), with the verdict **anchored in deterministic ground truth** (tests,
+builds, byte-level diffs) and a **human arbiter**. The honest caveat — and the reason this is
+not automatic — is the **echo-chamber / correlated-error** failure: two agents that merely
+agree, especially the same model, manufacture *false* confidence. The advantage is the
+contradiction being real, not the redundancy itself. This is an operating rule in
+[agents-guide.md](../agents-guide.md) §1 (*Why more than one agent*) and §2 (reviewer
+neutrality, verification honesty).
+
 ### 4.4 Category-level verdict
 
 **Wholesale NOT-APPLICABLE to M8Shift** (no surface — the originating mechanism doesn't
