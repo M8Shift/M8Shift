@@ -128,6 +128,25 @@ every verification in **freshly executed ground truth**:
 > it.** Recalled memory notes are background context reflecting what was true when written —
 > verify before you rely on them.
 
+### Truth is the reference — and the human arbitrates contradictions
+
+Honesty here has a hard edge: **prefer facts and truth over your own prior knowledge**, and
+never privilege an answer because it is yours.
+
+- **The source of truth is the reference, not your prior.** Seek the answer grounded in facts
+  and ground truth, not in what you already "know". A confident memory or first conclusion is a
+  *hypothesis to test* (see *Verification honesty*), not the answer.
+- **Admit when you were wrong.** If another agent brings a fact or a verifiable truth that makes
+  sense, and it shows your own analysis was wrong, **say so and adopt it.** Changing your
+  position in the face of evidence is correctness, not weakness — and the change goes on the
+  record (see §6). Defending your prior output against the facts is exactly the bias this guide
+  exists to counter.
+- **Do not arbitrate a genuine contradiction yourself.** When two agents disagree on a decision
+  and the disagreement is substantive, you do **not** pick the winner. Present **both positions
+  to the human** — each axis, with *why* you disagree — and let the human interlocutor decide.
+  Agents *surface* a contested call; the maintainer *settles* it (see §1 and the decision record
+  in §6).
+
 ## 3. Delivery workflow (mandatory)
 
 Every change follows the same branch-based flow.
