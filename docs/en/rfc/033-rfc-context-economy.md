@@ -98,6 +98,30 @@ context_policy:                 # token figures are advisory estimates; line fig
   code_snippet_inline_limit: 120  # lines — enforceable
 ```
 
+### Optional compression backend (e.g. Headroom)
+
+The compression itself can be delegated to an **optional, operator-wired backend** — for example
+[Headroom](https://github.com/headroomlabs-ai/headroom) (Apache-2.0, runs locally). Headroom's
+**Compress-Cache-Retrieve (CCR)** model maps directly onto the three layers (§3): the compressed
+view feeds the active context, the originals stay in its store, and a `headroom_retrieve` tool
+fetches the full original on demand — exactly the *by-reference* archive access this RFC
+prescribes. It ships native wrappers for Claude Code and Codex and an MCP server.
+
+This stays **strictly optional and out of the core**:
+
+- **Not bundled, not a core dependency.** Headroom needs an ONNX model and `pip` packages —
+  incompatible with the stdlib-only, model-less, no-network core. The operator opts in (CLI /
+  proxy / MCP); M8Shift never depends on it.
+- **The charter-pure baseline is the default** and works with no backend at all: references over
+  pasted content, the line-based inline limits above, Task Packets (§4), and manual compaction
+  (§10).
+- **Verify against the retrieved original, never the compressed view (§9).** The compression is
+  "aggressive but reversible", but it is **not documented as deterministic or audited** — so for
+  verification (and for tamper-evidence, [030-rfc-tamper-evidence.md](030-rfc-tamper-evidence.md))
+  the **retrieved original is the source of truth**: an agent proving its work pulls the original,
+  it never trusts the compressed summary. Compress the disposable / archive layers; keep locked
+  decisions and the exact facts needed to verify **verbatim**.
+
 ## 9. Economy never starves verification (the hard constraint)
 
 Context economy is **subordinate to correctness**. Compression must **never** amputate the
