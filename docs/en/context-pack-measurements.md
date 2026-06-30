@@ -13,6 +13,24 @@ checks. It grows as adapters (e.g. Headroom, RTK) are added and re-measured. See
 
 ## Round 1 — native pack (Phase 1) · 2026-06-30
 
+### Models and versions under test
+
+| Role | Identifier | Notes |
+|---|---|---|
+| Equivalence inference, Claude side | `claude-sonnet-4-6` | cost-efficient **stand-in** used for the test |
+| Claude token count (Anthropic `count_tokens`) | `claude-sonnet-4-6` | model param passed to the API |
+| Equivalence, Codex side (self-reported) | `gpt-5-codex` | the relay's actual Codex agent |
+| Codex token tokenizer | `tiktoken` `o200k_base` | the GPT-4o / GPT-5 / Codex BPE |
+| Reference tokenizer | `tiktoken` `cl100k_base` | cross-check / invariance |
+| **Deployed relay agents** | **`claude-opus-4-8`** (Claude) · **`gpt-5-codex`** (Codex) | what actually runs in the relay |
+
+> ⚠️ **Caveat — test model vs deployed model.** The Claude-side equivalence and token
+> count used `claude-sonnet-4-6` as a cost-efficient stand-in, **not** the deployed relay
+> Claude agent `claude-opus-4-8`. The Codex side used the actual `gpt-5-codex`. A re-run on
+> `claude-opus-4-8` is **pending / optional** for deployed-exact Claude numbers; the
+> equivalence behaviour (preserved-verbatim, dropped-flagged) is expected to hold across
+> Claude tiers, but the exact token counts will differ slightly.
+
 ### Tools tested
 
 | Tool | Role | Notes |
