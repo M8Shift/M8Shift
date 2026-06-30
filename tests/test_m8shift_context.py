@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Tests for m8shift-context.py Phase 1 native context companion."""
 import json
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = os.path.join(REPO, "m8shift.py")
@@ -15,6 +17,13 @@ CONTEXT = os.path.join(REPO, "m8shift-context.py")
 
 def run(args, cwd, stdin=None):
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, input=stdin)
+
+
+def load_context_module():
+    spec = importlib.util.spec_from_file_location("m8shift_context", CONTEXT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ContextBase(unittest.TestCase):
@@ -111,6 +120,18 @@ class TestContextBenchmark(ContextBase):
         payload = json.loads(real.stdout)
         self.assertTrue(payload["ship_gate_passed"])
         self.assertTrue(all(row["real_token_reduction"] > 0 for row in payload["fixtures"]))
+
+
+class TestContextGitCollector(unittest.TestCase):
+    def test_git_collector_timeout_returns_empty_string(self):
+        module = load_context_module()
+        with mock.patch.object(
+            module.subprocess,
+            "run",
+            side_effect=module.subprocess.TimeoutExpired(["git"], module.GIT_TIMEOUT_SECONDS),
+        ) as run_mock:
+            self.assertEqual(module.git("/tmp/project", ["status", "--short"]), "")
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], module.GIT_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
