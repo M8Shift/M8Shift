@@ -165,3 +165,25 @@ RTK **passes the DoD selectively**: a real, large reduction (54–68 %) **with**
 from raw output. RTK is **complementary** to the native pack (a different token axis); notably
 `rtk err` *preserves* critical error lines that the native pack's line-truncation would drop —
 the two cover each other's blind spots.
+
+## Round 3 — Headroom (context compressor): parked, not run · 2026-06-30
+
+Both agents — Claude (analysis) and Codex (independent review) — agreed **not** to run Round 3
+on the current native pack. Reasoning:
+
+- The native pack already distils real relay context to ~2 k tokens (1 727 proxy / 1 967 sonnet /
+  2 537 opus) while preserving recent `ask`/`done`/`decision` **verbatim** + SHA-256 references, so
+  Headroom would compress an **already-distilled operational view**, not the original relay — the
+  remaining reducible material is small.
+- **Equivalence risk rises, not falls:** the target is a *contract* pack where exact wording and
+  absence-signals matter — exactly the fields that must not be semantically rewritten.
+- Headroom adds ONNX + pip + a model download + the Phase-2 subprocess-runner surface **before**
+  any evidence of extra value. The big wins are already captured (native pack on the relay-context
+  axis, RTK on the shell-output axis).
+
+**Parked behind a concrete use case.** Headroom may become worth testing later for: a profile that
+intentionally inlines large file excerpts; large supporting-sources sections; archive / RAG
+retrieval bundles; or reports exceeding the pack budget. **Hard constraint for any future Headroom
+integration:** compress only the *disposable / supporting* sections, **never** the
+`ask`/`done`/`decision` verbatim blocks, and only with a strict preserve-block mechanism + source
+references.

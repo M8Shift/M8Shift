@@ -29,6 +29,26 @@ not automatically wake the model session. The result looks like an abandoned shi
 This is not a mutex failure. It is a missing bridge between **readiness detection**
 and **interactive UI resumption**.
 
+### Motivating incident — the PAUSED wait gap (2026-06-30)
+
+A concrete instance recorded from a live relay session. The session was paused (`PAUSED`,
+turn 84); the waiting agent **stopped its `wait`** because in `PAUSED` the command loops printing
+*"paused: do not claim until resume"*, which looks useless. The operator then resumed the session
+and posted a new turn (a fresh user scope). Because the agent had stopped listening, **it did not
+catch the new turn** — picking it up required a manual `next`.
+
+Two faults compound:
+
+1. **Discipline.** `PAUSED` is **not** `DONE`. The keep-listening rule is "stay armed until
+   `DONE`", not "until `PAUSED`": the session is still open and a new scope can arrive. An agent
+   must not stop its listener on `PAUSED`.
+2. **Command behaviour.** The core `wait` *induced* the mistake by spamming a no-claim line in
+   `PAUSED`. In `PAUSED`, `wait` must stay **alive but quiet** — longer interval, suppressed
+   no-claim noise, still never claims — and **auto-wake on resume → the agent's turn**.
+
+**Invariant:** a new scope arriving after a pause must reach a still-listening agent
+**automatically**, with no manual `next`.
+
 ## 2. Core invariant
 
 The passive core must stay passive.
