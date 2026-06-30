@@ -3118,6 +3118,35 @@ class TestPauseResume(CLIBase):
         self.assertIn('"event": "pause"', ledger)
         self.assertIn('"event": "resume"', ledger)
 
+    def test_wait_from_paused_stays_armed_and_wakes_on_resume_without_spam(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.assertEqual(
+            self.cw("pause", "claude", "--reason", "waiting for user scope").returncode,
+            0,
+        )
+        p = subprocess.Popen(
+            [sys.executable, "m8shift.py", "wait", "codex", "--interval", "1"],
+            cwd=self.d,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            time.sleep(2.3)  # old behavior printed the PAUSED warning every poll
+            self.assertIsNone(p.poll(), "wait must stay alive while PAUSED")
+            resumed = self.cw("resume", "codex", "--reason", "user assigned new scope")
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            out, err = p.communicate(timeout=6)
+        finally:
+            if p.poll() is None:
+                p.kill()
+                p.communicate()
+        self.assertEqual(p.returncode, 0, out + err)
+        self.assertEqual(out.count("paused:"), 1, out)
+        self.assertNotIn("PAUSED (holder=none), re-checking", out)
+        self.assertIn("your turn", out)
+
     def test_pause_requires_current_holder_and_release_refuses_paused(self):
         self.init()
         self.cw("claim", "claude")
