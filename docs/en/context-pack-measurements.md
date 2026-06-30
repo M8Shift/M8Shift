@@ -26,10 +26,10 @@ checks. It grows as adapters (e.g. Headroom, RTK) are added and re-measured. See
 
 > ⚠️ **Caveat — test model vs deployed model.** The Claude-side equivalence and token
 > count used `claude-sonnet-4-6` as a cost-efficient stand-in, **not** the deployed relay
-> Claude agent `claude-opus-4-8`. The Codex side used the actual `gpt-5-codex`. A re-run on
-> `claude-opus-4-8` is **pending / optional** for deployed-exact Claude numbers; the
-> equivalence behaviour (preserved-verbatim, dropped-flagged) is expected to hold across
-> Claude tiers, but the exact token counts will differ slightly.
+> Claude agent `claude-opus-4-8`. The Codex side used the actual `gpt-5-codex`. **Update — the
+> `claude-opus-4-8` re-run is now done (see below):** the equivalence behaviour holds on the
+> deployed model and the Claude-exact reduction is ~96 % for both Claude tiers. The
+> `claude-sonnet-4-6` figures are kept alongside the `claude-opus-4-8` ones.
 
 ### Tools tested
 
@@ -61,6 +61,16 @@ applies to Claude as well.
 | proxy tokens | 73 394 | 1 727 | **−97.6 %** |
 | lines | 3 305 | 145 | −95.6 % |
 
+**Claude-exact** (Anthropic `count_tokens`, raw `M8SHIFT.md` → real pack, a later snapshot):
+
+| Model | raw → pack | reduction |
+|---|---|---|
+| `claude-sonnet-4-6` | 51 082 → 1 967 | −96.1 % |
+| `claude-opus-4-8` (**deployed**) | 69 088 → 2 537 | −96.3 % |
+
+`opus-4-8` counts more tokens per text than `sonnet-4-6` (finer tokenizer), but the **reduction
+ratio is the same** — confirming the saving holds for the deployed model.
+
 The pack is roughly **constant-size**, so the reduction grows with input size: small contexts
 gain modestly (~36 %), medium/large 91–98 %.
 
@@ -77,6 +87,7 @@ Canonical-question test against the **real** pack — one **preserved** recent f
 | Model | Recent preserved fact | Older dropped fact |
 |---|---|---|
 | **Claude** (`claude-sonnet-4-6`) | answered correctly, verbatim from the pack | **not hallucinated** — flagged absent, pointed to `M8SHIFT.md` to retrieve |
+| **Claude** (`claude-opus-4-8`, **deployed**) | answered correctly, verbatim from the pack | **not hallucinated** — flagged absent, pointed to the source, and even distinguished near-miss facts (git-alignment ≠ the asked branch list; pack version ≠ a relay engine promotion) |
 | **Codex** (`gpt-5-codex`, self-reported) | answered correctly, verbatim from the pack | **not hallucinated** — flagged absent, pointed to the `SHA-256` source references to retrieve |
 
 **Result:** equivalence holds **for both models** — preserved facts are usable; dropped facts
