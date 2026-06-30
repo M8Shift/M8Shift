@@ -3751,6 +3751,7 @@ def cmd_watch(args):
 def cmd_wait(args):
     if not args.once and args.interval < 1:
         sys.exit(tr("bad_interval"))
+    last_state = None
     while True:
         text = load_or_die()              # sets ROSTER/LANG from the current file
         agent = need_agent(args.agent)    # validated against the current roster
@@ -3762,9 +3763,18 @@ def cmd_wait(args):
             print(tr(key, st=st, agent=agent))
             return 0
         if st == "PAUSED":
-            print("paused: waiting for user scope; do not claim until `resume <agent> --reason ...`.")
+            msg = (
+                "paused: waiting for user scope; listener stays armed until resume or DONE "
+                "— do not claim until `resume <agent> --reason ...`."
+            )
             if args.once:
+                print(msg)
                 return 3
+            if last_state != "PAUSED":
+                print(msg, flush=True)
+            last_state = "PAUSED"
+            time.sleep(max(args.interval, min(args.interval * 2, 300)))
+            continue
         if st == "DONE":
             print(tr("wait_done"))
             return 0
@@ -3779,6 +3789,7 @@ def cmd_wait(args):
         if args.once:  # single, non-blocking poll: rc=3 = not (yet) your turn
             print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
             return 3
+        last_state = st
         print(tr("wait_poll", st=st, holder=lk.get("holder"), interval=args.interval))
         time.sleep(args.interval)
 
