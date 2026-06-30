@@ -98,6 +98,32 @@ context_policy:                 # token figures are advisory estimates; line fig
   code_snippet_inline_limit: 120  # lines — enforceable
 ```
 
+### Waiting cost model
+
+Passive waiting is not the expensive part of a relay. A silent `wait` process that produces no
+useful output has near-zero model-token cost; the cost appears when text is reinjected into an
+agent context.
+
+The companion / agent-guide discipline should therefore treat waiting noise as a first-class
+context budget concern:
+
+| Source | Cost profile | Policy |
+|--------|--------------|--------|
+| Operator messages during a wait | usually small, cumulative | keep them scoped; convert repeated nudges into one explicit scope / decision |
+| Repeated terminal polling output | low per poll, costly when copied back repeatedly | prefer `wait <agent> --interval 30` or `watch`; surface only state changes, errors, abnormal timeouts, or explicit status requests |
+| Long command output, test logs, stack traces | often the largest avoidable cost | write to files; hand off a short summary plus a path; inline only bounded tails / excerpts |
+| The next model turn | medium to high | it rehydrates the useful conversation context, recent user messages, and relevant tool output; avoid creating repeated status/log churn before the next turn |
+
+Recommended operational default:
+
+```bash
+python3 m8shift.py wait <agent> --interval 30
+```
+
+If a long wait needs observability, the runtime companion should log locally and summarize
+only meaningful changes. If a command emits large output, store it as evidence and pass a
+reference (`path`, `run-id`, report id) rather than copying the whole output into the relay.
+
 ### Optional compression backend (e.g. Headroom)
 
 The compression itself can be delegated to an **optional, operator-wired backend** — for example
