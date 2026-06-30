@@ -8,6 +8,7 @@ may write.
 """
 import argparse
 import contextlib
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -253,6 +254,17 @@ def read_jsonl(path):
 
 def sha256_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError as e:
+        die(f"cannot hash {path}: {e}")
+    return h.hexdigest()
 
 
 def size_metrics(text):
@@ -562,11 +574,11 @@ def cmd_init(args):
             continue
         write_json(path, default_profile_json(name))
         wrote.append(rel(root, path))
-    for name, manifest in DEFAULT_ADAPTERS.items():
+    for name in DEFAULT_ADAPTERS:
         path = os.path.join(adapters_dir(root), f"{name}.json")
         if os.path.exists(path) and not args.force:
             continue
-        write_json(path, manifest)
+        write_json(path, default_adapter_manifest(name))
         wrote.append(rel(root, path))
     readme = os.path.join(context_dir(root), "README.md")
     if args.force or not os.path.exists(readme):
@@ -779,6 +791,28 @@ def load_adapter(root, name):
     return data
 
 
+def adapter_identity_for_program(program):
+    resolved = shutil_which(program)
+    if not resolved:
+        return None
+    real = os.path.realpath(resolved)
+    return {
+        "program": program,
+        "path": real,
+        "sha256": sha256_file(real),
+    }
+
+
+def default_adapter_manifest(name):
+    manifest = copy.deepcopy(DEFAULT_ADAPTERS[name])
+    command = manifest.get("command")
+    if isinstance(command, list) and command:
+        identity = adapter_identity_for_program(command[0])
+        if identity:
+            manifest["trusted_executable"] = identity
+    return manifest
+
+
 def adapter_findings(manifest, check_executable=True):
     findings = []
     if not isinstance(manifest, dict):
@@ -809,8 +843,14 @@ def adapter_findings(manifest, check_executable=True):
             findings.append(finding("error", "adapter.program_denied", f"{name}: command[0] may not be a M8Shift relay binary"))
         elif program not in ALLOWED_ADAPTER_PROGRAMS:
             findings.append(finding("error", "adapter.program_not_allowed", f"{name}: command[0] {program!r} is not in the adapter allowlist"))
-        elif check_executable and shutil_which(program) is None:
-            findings.append(finding("error", "adapter.executable_missing", f"{name}: executable {program!r} not found on PATH"))
+        elif check_executable:
+            resolved = shutil_which(program)
+            if resolved is None:
+                findings.append(finding("error", "adapter.executable_missing", f"{name}: executable {program!r} not found on PATH"))
+            elif adapter_resolves_to_denied_program(resolved):
+                findings.append(finding("error", "adapter.program_resolved_denied", f"{name}: executable {program!r} resolves to a M8Shift relay binary"))
+            else:
+                findings.extend(adapter_identity_findings(manifest, program, resolved))
     if manifest.get("mutates_core") is not False:
         findings.append(finding("error", "adapter.mutates_core", f"{name}: mutates_core must be false"))
     if manifest.get("mutates_repo") is not False:
@@ -846,6 +886,33 @@ def shutil_which(executable):
     return None
 
 
+def adapter_resolves_to_denied_program(path):
+    return os.path.basename(os.path.realpath(path)) in DENIED_ADAPTER_PROGRAMS
+
+
+def adapter_identity_findings(manifest, program, resolved):
+    name = manifest.get("name", "")
+    trusted = manifest.get("trusted_executable")
+    if not isinstance(trusted, dict):
+        return [finding("error", "adapter.trusted_executable", f"{name}: missing trusted executable identity; rerun `adapters init --force` with a trusted {program!r} on PATH")]
+    expected_program = trusted.get("program")
+    expected_path = trusted.get("path")
+    expected_sha = trusted.get("sha256")
+    if expected_program != program:
+        return [finding("error", "adapter.trusted_executable", f"{name}: trusted executable program must be {program!r}")]
+    if not isinstance(expected_path, str) or not os.path.isabs(expected_path):
+        return [finding("error", "adapter.trusted_executable", f"{name}: trusted executable path must be absolute")]
+    if not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        return [finding("error", "adapter.trusted_executable", f"{name}: trusted executable sha256 is invalid")]
+    real = os.path.realpath(resolved)
+    if real != expected_path:
+        return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} resolved to {real}, expected {expected_path}")]
+    actual_sha = sha256_file(real)
+    if actual_sha != expected_sha:
+        return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} sha256 {actual_sha} does not match trusted sha256 {expected_sha}")]
+    return []
+
+
 def adapter_mode_args(manifest, mode):
     modes = manifest.get("modes") if isinstance(manifest.get("modes"), dict) else {}
     if mode:
@@ -872,6 +939,11 @@ def render_adapter_command(manifest, mode):
         resolved = shutil_which(out[0])
         if not resolved:
             die(f"adapter executable not found on PATH: {out[0]}")
+        if adapter_resolves_to_denied_program(resolved):
+            die(f"adapter executable resolves to a M8Shift relay binary: {out[0]}")
+        identity_errors = adapter_identity_findings(manifest, out[0], resolved)
+        if identity_errors:
+            die("; ".join(row["message"] for row in identity_errors))
         out[0] = resolved
     return out
 
@@ -1001,11 +1073,11 @@ def cmd_adapters_init(args):
     root = root_from(args)
     ensure_dirs(root)
     wrote = []
-    for name, manifest in DEFAULT_ADAPTERS.items():
+    for name in DEFAULT_ADAPTERS:
         path = adapter_path(root, name)
         if os.path.exists(path) and not args.force:
             continue
-        write_json(path, manifest)
+        write_json(path, default_adapter_manifest(name))
         wrote.append(rel(root, path))
     if args.json:
         print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS)}, ensure_ascii=False, sort_keys=True))

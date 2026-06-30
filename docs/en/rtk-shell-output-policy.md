@@ -29,6 +29,20 @@ The shipped manifest is written by:
 python3 m8shift-context.py adapters init
 ```
 
+`adapters init` records the trusted `rtk` executable identity when `rtk` is
+available on `PATH`: resolved absolute path plus binary SHA-256. At runtime,
+M8Shift re-resolves `rtk` and rejects execution unless both the path and hash
+match the recorded identity. This deliberately rejects same-name wrappers,
+renamed copies, symlink/path hijacks, and relay binaries disguised as `rtk`.
+
+If RTK is installed or upgraded after manifest generation, regenerate the manifest
+from a trusted shell:
+
+```bash
+python3 m8shift-context.py adapters init --force
+python3 m8shift-context.py adapters check rtk-shell-output
+```
+
 Typical usage:
 
 ```bash
@@ -39,5 +53,6 @@ ls -lR | python3 m8shift-context.py adapters run rtk-shell-output --mode ls --st
 
 The runner is companion-only: argv arrays only, bare executable names only,
 `rtk` allowlisted as the shipped shell-output filter, `PATH` resolution required,
-bounded timeout/stdout/stderr, allowlisted environment, no shell string, no `LOCK`
-mutation, and fallback behavior declared in the manifest.
+trusted executable identity required, bounded timeout/stdout/stderr, allowlisted
+environment, no shell string, no `LOCK` mutation, and fallback behavior declared
+in the manifest.

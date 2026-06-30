@@ -216,6 +216,9 @@ Phase 2 constraints:
 
 - `command` is an argv array, never a shell string;
 - `command[0]` is a bare allowlisted program name resolved through `PATH`;
+- the resolved executable must match the manifest's trusted executable identity
+  (`program`, resolved absolute path, and SHA-256), so renamed copies, wrappers,
+  symlink/path hijacks, and relay binaries disguised as adapter tools fail closed;
 - stdin/stdout are versioned JSON for JSON-native adapters; `shell_output_filter`
   adapters may consume/produce text, but the M8Shift runner wraps the result in a
   versioned JSON response;
