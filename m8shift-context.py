@@ -7,6 +7,7 @@ without external dependencies. It never edits the core relay and never decides w
 may write.
 """
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -14,6 +15,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 
 VERSION = "3.27.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
@@ -37,6 +40,9 @@ ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
 ADAPTER_NAME_RE = re.compile(r"[a-z][a-z0-9_.:-]{0,127}\Z")
+ADAPTER_PROGRAM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}\Z")
+ALLOWED_ADAPTER_PROGRAMS = {"rtk"}
+DENIED_ADAPTER_PROGRAMS = {"m8shift.py", "m8shift-runtime.py", "m8shift-worktree.py", "m8shift-context.py"}
 
 
 DEFAULT_ADAPTERS = {
@@ -55,6 +61,7 @@ DEFAULT_ADAPTERS = {
         "requires_env": [],
         "timeout_seconds": 30,
         "max_stdout_bytes": 1048576,
+        "max_stderr_bytes": 65536,
         "failure_policy": "fallback_original",
         "modes": {
             "err": ["err"],
@@ -139,8 +146,8 @@ def safe_join(root, path, label="path"):
     if not path:
         die(f"{label} is empty")
     candidate = path if os.path.isabs(path) else os.path.join(root, path)
-    candidate = os.path.abspath(candidate)
-    root_abs = os.path.abspath(root)
+    candidate = os.path.realpath(os.path.abspath(candidate))
+    root_abs = os.path.realpath(os.path.abspath(root))
     try:
         common = os.path.commonpath([root_abs, candidate])
     except ValueError:
@@ -792,8 +799,18 @@ def adapter_findings(manifest, check_executable=True):
         findings.append(finding("error", "adapter.command_string", f"{name}: command must be an argv array, not a shell string"))
     elif not isinstance(command, list) or not command or not all(isinstance(v, str) and v for v in command):
         findings.append(finding("error", "adapter.command", f"{name}: command must be a non-empty argv array"))
-    elif check_executable and command[0] != "$M8SHIFT_ADAPTER_MODE_ARGS" and "/" not in command[0] and shutil_which(command[0]) is None:
-        findings.append(finding("warning", "adapter.executable_missing", f"{name}: executable {command[0]!r} not found on PATH"))
+    elif command:
+        program = command[0]
+        if "/" in program or "\\" in program or program in {".", ".."} or program.startswith("-"):
+            findings.append(finding("error", "adapter.program_path", f"{name}: command[0] must be a bare allowlisted program name"))
+        elif not ADAPTER_PROGRAM_RE.fullmatch(program):
+            findings.append(finding("error", "adapter.program_name", f"{name}: command[0] is not a safe program name"))
+        elif program in DENIED_ADAPTER_PROGRAMS:
+            findings.append(finding("error", "adapter.program_denied", f"{name}: command[0] may not be a M8Shift relay binary"))
+        elif program not in ALLOWED_ADAPTER_PROGRAMS:
+            findings.append(finding("error", "adapter.program_not_allowed", f"{name}: command[0] {program!r} is not in the adapter allowlist"))
+        elif check_executable and shutil_which(program) is None:
+            findings.append(finding("error", "adapter.executable_missing", f"{name}: executable {program!r} not found on PATH"))
     if manifest.get("mutates_core") is not False:
         findings.append(finding("error", "adapter.mutates_core", f"{name}: mutates_core must be false"))
     if manifest.get("mutates_repo") is not False:
@@ -804,6 +821,9 @@ def adapter_findings(manifest, check_executable=True):
     max_stdout = manifest.get("max_stdout_bytes")
     if not isinstance(max_stdout, int) or not (1 <= max_stdout <= 10 * 1024 * 1024):
         findings.append(finding("error", "adapter.max_stdout", f"{name}: max_stdout_bytes must be 1..10485760"))
+    max_stderr = manifest.get("max_stderr_bytes", 65536)
+    if not isinstance(max_stderr, int) or not (1 <= max_stderr <= 10 * 1024 * 1024):
+        findings.append(finding("error", "adapter.max_stderr", f"{name}: max_stderr_bytes must be 1..10485760"))
     if manifest.get("failure_policy") not in ADAPTER_FAILURE_POLICIES:
         findings.append(finding("error", "adapter.failure_policy", f"{name}: unsupported failure_policy"))
     requires_env = manifest.get("requires_env", [])
@@ -848,6 +868,11 @@ def render_adapter_command(manifest, mode):
             out.append(mode)
         else:
             out.append(arg)
+    if out:
+        resolved = shutil_which(out[0])
+        if not resolved:
+            die(f"adapter executable not found on PATH: {out[0]}")
+        out[0] = resolved
     return out
 
 
@@ -888,26 +913,87 @@ def adapter_result(manifest, *, mode, original, filtered, fallback_used=False, e
     }
 
 
-def run_adapter_process(manifest, mode, text):
-    command = render_adapter_command(manifest, mode)
+def read_limited_stream(pipe, limit, chunks, overflow, label, stop_event):
+    total = 0
     try:
-        completed = subprocess.run(
+        while not stop_event.is_set():
+            chunk = pipe.read(4096)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                overflow.append(f"{label} exceeded limit {limit} bytes")
+                stop_event.set()
+                break
+            chunks.append(chunk)
+    finally:
+        with contextlib.suppress(Exception):
+            pipe.close()
+
+
+def run_adapter_process(root, manifest, mode, text):
+    command = render_adapter_command(manifest, mode)
+    stdout_chunks = []
+    stderr_chunks = []
+    overflow = []
+    stop_event = threading.Event()
+    try:
+        proc = subprocess.Popen(
             command,
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=manifest.get("timeout_seconds", 30),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=root,
             env=adapter_env(manifest),
         )
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except OSError as e:
         return None, str(e), ""
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
-    max_stdout = manifest.get("max_stdout_bytes", 1048576)
-    if len(stdout.encode("utf-8")) > max_stdout:
-        return None, f"adapter stdout exceeded max_stdout_bytes={max_stdout}", stderr
-    if completed.returncode != 0:
-        return None, f"adapter exited {completed.returncode}", stderr
+    readers = [
+        threading.Thread(
+            target=read_limited_stream,
+            args=(proc.stdout, manifest.get("max_stdout_bytes", 1048576), stdout_chunks, overflow, "stdout", stop_event),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=read_limited_stream,
+            args=(proc.stderr, manifest.get("max_stderr_bytes", 65536), stderr_chunks, overflow, "stderr", stop_event),
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+    input_error = ""
+    try:
+        if proc.stdin:
+            proc.stdin.write(text.encode("utf-8"))
+            proc.stdin.close()
+    except (BrokenPipeError, OSError) as e:
+        input_error = str(e)
+    deadline = time.monotonic() + manifest.get("timeout_seconds", 30)
+    while proc.poll() is None:
+        if overflow:
+            proc.kill()
+            break
+        if time.monotonic() > deadline:
+            proc.kill()
+            overflow.append(f"adapter timed out after {manifest.get('timeout_seconds', 30)}s")
+            break
+        time.sleep(0.01)
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    stop_event.set()
+    for reader in readers:
+        reader.join(timeout=1)
+    stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+    stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+    if overflow:
+        return None, "; ".join(overflow), stderr
+    if input_error and proc.returncode not in (0, None):
+        return None, input_error, stderr
+    if proc.returncode != 0:
+        return None, f"adapter exited {proc.returncode}", stderr
     return stdout, "", stderr
 
 
@@ -979,12 +1065,13 @@ def cmd_adapters_check(args):
 def cmd_adapters_run(args):
     root = root_from(args)
     manifest = load_adapter(root, args.name)
+    adapter_mode_args(manifest, args.mode)  # enforce forbidden modes before any executable lookup
     findings = adapter_findings(manifest)
     errors = [row for row in findings if row["severity"] == "error"]
     if errors:
         die("; ".join(row["message"] for row in errors))
     original = read_adapter_input(root, args)
-    filtered, error, stderr = run_adapter_process(manifest, args.mode, original)
+    filtered, error, stderr = run_adapter_process(root, manifest, args.mode, original)
     fallback_used = filtered is None
     if fallback_used:
         if manifest.get("failure_policy") != "fallback_original":

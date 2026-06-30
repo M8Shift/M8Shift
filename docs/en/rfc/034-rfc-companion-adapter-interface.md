@@ -81,7 +81,7 @@ This RFC creates a boundary: the center stays boring; the edges can become usefu
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Native `m8shift-context.py`: pack, receipts, metrics, benchmark, doctor | implemented |
-| 2 | External adapter subprocess runner: manifest validation, argv execution, timeout, max output, env allowlist, fallback policy | shipped for `shell_output_filter` adapters in `m8shift-context.py` |
+| 2 | External adapter subprocess runner: manifest validation, allowlisted argv execution, timeout, stdout/stderr caps, env allowlist, fallback policy | shipped for `shell_output_filter` adapters in `m8shift-context.py` |
 | 3 | Optional example manifests for Headroom-style, RTK-style, and repo-packer tools | RTK shell-output manifest shipped; others deferred |
 | 4 | Agent-guide/runtime documentation integration, including the condensed waiting-cost rule from RFC 033 | deferred |
 
@@ -215,7 +215,10 @@ and a process boundary:
 Phase 2 constraints:
 
 - `command` is an argv array, never a shell string;
-- stdin/stdout are versioned JSON;
+- `command[0]` is a bare allowlisted program name resolved through `PATH`;
+- stdin/stdout are versioned JSON for JSON-native adapters; `shell_output_filter`
+  adapters may consume/produce text, but the M8Shift runner wraps the result in a
+  versioned JSON response;
 - runtime and output size are bounded;
 - environment variables are allowlisted;
 - stderr is diagnostic only;
