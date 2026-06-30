@@ -3375,6 +3375,69 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(reset_payload["runtime_findings"], [])
         self.assertEqual(self.md(), before)
 
+    def test_runtime_headroom_detects_checkpoint_and_surfaces_in_status_doctor(self):
+        self.init()
+        agent, other = "claude", "codex"
+        for _ in range(16):
+            r = self.turn(agent, other, body="small body")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            agent, other = other, agent
+
+        high = self.rt("headroom", "claude", "--json")
+        self.assertEqual(high.returncode, 0, high.stderr)
+        payload = json.loads(high.stdout)
+        self.assertEqual(payload["status"], "high")
+        self.assertEqual(payload["metrics"]["turns_since_checkpoint"], 16)
+        self.assertIn("turns since checkpoint", " ".join(payload["reasons"]))
+
+        status = json.loads(self.rt("status-runtime", "claude", "--json").stdout)
+        self.assertEqual(status["headroom"]["status"], "high")
+        self.assertIn("runtime.headroom", {f["check"] for f in status["runtime_findings"]})
+        doctor = json.loads(self.rt("doctor", "--json").stdout)
+        self.assertIn("runtime.headroom", {f["check"] for f in doctor["findings"]})
+
+        checkpoint = self.rt("headroom", "claude", "--checkpoint", "--json")
+        self.assertEqual(checkpoint.returncode, 0, checkpoint.stderr)
+        checkpoint_payload = json.loads(checkpoint.stdout)
+        rel = checkpoint_payload["checkpoint_written"]
+        self.assertTrue(rel.startswith(".m8shift/runs/headroom-"), rel)
+        self.assertTrue(os.path.exists(os.path.join(self.d, rel)))
+
+        reset = json.loads(self.rt("headroom", "claude", "--json").stdout)
+        self.assertEqual(reset["status"], "ok")
+        self.assertEqual(reset["metrics"]["turns_since_checkpoint"], 0)
+
+    def test_runtime_headroom_pause_is_explicit_and_holder_gated(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        before = self.md()
+        refused = self.rt(
+            "headroom", "codex",
+            "--window-status", "high", "--window-reason", "ui context exhausted",
+            "--pause-on", "high", "--reason", "context checkpoint required",
+            "--json",
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("cannot pause as codex", refused.stderr)
+        self.assertEqual(self.md(), before)
+
+        paused = self.rt(
+            "headroom", "claude",
+            "--window-status", "high", "--window-reason", "ui context exhausted",
+            "--pause-on", "high", "--reason", "context checkpoint required",
+            "--json",
+        )
+        self.assertEqual(paused.returncode, 0, paused.stderr)
+        payload = json.loads(paused.stdout)
+        self.assertTrue(payload["paused"])
+        self.assertTrue(payload["checkpoint_written"])
+        lk = self.lock()
+        self.assertEqual(lk["state"], "PAUSED")
+        self.assertEqual(lk["holder"], "none")
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as fh:
+            events = [json.loads(line) for line in fh if line.strip()]
+        self.assertIn("headroom.checkpoint", {row.get("event") for row in events})
+
     def test_runtime_retention_prunes_and_archives_ledgers_without_core_mutation(self):
         self.init()
         before = self.md()
