@@ -37,8 +37,8 @@ class ContextBase(unittest.TestCase):
     def core(self, *args):
         return run([sys.executable, "m8shift.py", *args], self.d)
 
-    def ctx(self, *args):
-        return run([sys.executable, "m8shift-context.py", *args], self.d)
+    def ctx(self, *args, stdin=None):
+        return run([sys.executable, "m8shift-context.py", *args], self.d, stdin=stdin)
 
     def write_json(self, rel, data):
         path = os.path.join(self.d, rel)
@@ -57,6 +57,13 @@ class TestContextInitDoctor(ContextBase):
         with open(profile, encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertEqual(data["schema"], "m8shift.context.profile.v1")
+        adapter = os.path.join(self.d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
+        self.assertTrue(os.path.exists(adapter))
+        with open(adapter, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        self.assertEqual(manifest["schema"], "m8shift.adapter.v1")
+        self.assertEqual(manifest["type"], "shell_output_filter")
+        self.assertIn("git-diff", manifest["policy"]["forbidden_modes"])
 
         dr = self.ctx("doctor", "--json")
         self.assertEqual(dr.returncode, 0, dr.stderr)
@@ -120,6 +127,89 @@ class TestContextBenchmark(ContextBase):
         payload = json.loads(real.stdout)
         self.assertTrue(payload["ship_gate_passed"])
         self.assertTrue(all(row["real_token_reduction"] > 0 for row in payload["fixtures"]))
+
+
+class TestContextAdapters(ContextBase):
+    def test_rtk_manifest_policy_and_forbidden_git_diff_mode(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        shown = self.ctx("adapters", "show", "rtk-shell-output")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        manifest = json.loads(shown.stdout)
+        self.assertEqual(manifest["command"], ["rtk", "$M8SHIFT_ADAPTER_MODE_ARGS"])
+        self.assertEqual(manifest["modes"]["err"], ["err"])
+        self.assertEqual(manifest["modes"]["git-diff"], ["git", "diff"])
+        self.assertIn("git-diff", manifest["policy"]["forbidden_modes"])
+
+        checked = self.ctx("adapters", "check", "rtk-shell-output", "--json")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertTrue(json.loads(checked.stdout)["ok"])
+
+        refused = self.ctx(
+            "adapters", "run", "rtk-shell-output", "--mode", "git-diff", "--stdin",
+            stdin="diff --git a/x b/x\n@@\n-old\n+new\n",
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("forbidden", refused.stderr)
+
+    def test_adapter_runner_is_argv_only_bounded_and_wraps_output(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        self.write_json(".m8shift/context/adapters/fake-filter.json", {
+            "schema": "m8shift.adapter.v1",
+            "name": "fake-filter",
+            "type": "shell_output_filter",
+            "version": "0.1.0",
+            "authority": "advisory",
+            "command": [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write(sys.stdin.read().replace('INFO noisy\\n', ''))",
+            ],
+            "capabilities": ["filter_errors"],
+            "input_schema": "m8shift.shell_output_filter.request.v1",
+            "output_schema": "m8shift.shell_output_filter.response.v1",
+            "mutates_core": False,
+            "mutates_repo": False,
+            "requires_env": [],
+            "timeout_seconds": 10,
+            "max_stdout_bytes": 4096,
+            "failure_policy": "fail_closed",
+            "modes": {"err": []},
+        })
+        run_result = self.ctx(
+            "adapters", "run", "fake-filter", "--mode", "err", "--stdin", "--json",
+            stdin="INFO noisy\nERROR keep me\n",
+        )
+        self.assertEqual(run_result.returncode, 0, run_result.stderr)
+        payload = json.loads(run_result.stdout)
+        self.assertEqual(payload["schema"], "m8shift.adapter.result.v1")
+        self.assertEqual(payload["status"], "ok")
+        self.assertNotIn("INFO noisy", payload["filtered_text"])
+        self.assertIn("ERROR keep me", payload["filtered_text"])
+        self.assertEqual(payload["filtered_metrics"]["lines"], 1)
+
+    def test_adapter_check_rejects_shell_string_command(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        self.write_json(".m8shift/context/adapters/bad.json", {
+            "schema": "m8shift.adapter.v1",
+            "name": "bad",
+            "type": "shell_output_filter",
+            "version": "0.1.0",
+            "authority": "advisory",
+            "command": "rtk err",
+            "capabilities": [],
+            "input_schema": "m8shift.shell_output_filter.request.v1",
+            "output_schema": "m8shift.shell_output_filter.response.v1",
+            "mutates_core": False,
+            "mutates_repo": False,
+            "requires_env": [],
+            "timeout_seconds": 10,
+            "max_stdout_bytes": 4096,
+            "failure_policy": "fail_closed",
+        })
+        checked = self.ctx("adapters", "check", "bad", "--json")
+        self.assertEqual(checked.returncode, 1)
+        findings = json.loads(checked.stdout)["findings"]
+        self.assertIn("adapter.command_string", {row["check"] for row in findings})
 
 
 class TestContextGitCollector(unittest.TestCase):

@@ -81,8 +81,8 @@ This RFC creates a boundary: the center stays boring; the edges can become usefu
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Native `m8shift-context.py`: pack, receipts, metrics, benchmark, doctor | implemented |
-| 2 | External adapter subprocess runner: manifest validation, JSON stdin/stdout, timeout, max output, env allowlist, fallback policy | deferred |
-| 3 | Optional example manifests for Headroom-style, RTK-style, and repo-packer tools | deferred |
+| 2 | External adapter subprocess runner: manifest validation, argv execution, timeout, max output, env allowlist, fallback policy | shipped for `shell_output_filter` adapters in `m8shift-context.py` |
+| 3 | Optional example manifests for Headroom-style, RTK-style, and repo-packer tools | RTK shell-output manifest shipped; others deferred |
 | 4 | Agent-guide/runtime documentation integration, including the condensed waiting-cost rule from RFC 033 | deferred |
 
 Phase 1 must not implement all adapter types. It establishes the data model and
@@ -188,8 +188,9 @@ on byte-count optimism.
 
 ## 9. Adapter interface — Phase 2 shape
 
-External adapters are not executed in Phase 1. When Phase 2 starts, adapter
-manifests should use JSON and a process boundary:
+External adapters were not executed in Phase 1. Phase 2 starts with a narrow
+`shell_output_filter` runner in `m8shift-context.py`; adapter manifests use JSON
+and a process boundary:
 
 ```json
 {
@@ -221,6 +222,11 @@ Phase 2 constraints:
 - invalid JSON is adapter failure;
 - adapter failure follows the declared fallback policy;
 - adapters do not mutate core relay files directly.
+
+The shipped RTK manifest is advisory and operator-installed: M8Shift does not
+bundle or auto-install RTK. It recommends `err`, `test`, `log`, and `ls` for noisy
+shell output, and forbids `git-diff` for code review because Round 2 measurements
+showed it drops hunks.
 
 ## 10. Authority levels
 

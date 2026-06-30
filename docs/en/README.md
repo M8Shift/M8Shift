@@ -35,6 +35,7 @@ M8Shift is **free and open source**, released under the
 | [security-research-and-frameworks.md](security-research-and-frameworks.md) | M8Shift against external security frameworks (arXiv, MITRE ATLAS, NIST/CISA/ANSSI, IBM AI Risk Atlas). |
 | [stage2-rationale.md](stage2-rationale.md) | Design rationale behind the N-agent relay model. |
 | [context-pack-measurements.md](context-pack-measurements.md) | DoD evidence log: measured token reduction + output equivalence of the context companion (RFC 034), for Claude and Codex. |
+| [rtk-shell-output-policy.md](rtk-shell-output-policy.md) | Usage policy for the optional RTK shell-output adapter: recommended modes and forbidden diff mode. |
 
 ## Design decisions
 
@@ -82,6 +83,6 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [031-rfc-decision-traceability.md](rfc/031-rfc-decision-traceability.md) | Proposed tool-independent decision traceability — forge / GitHub / both / git or a markdown ADR fallback; structured contradictory-decision records (positions for/against + resolution). |
 | [032-rfc-tiered-delegation.md](rfc/032-rfc-tiered-delegation.md) | Proposed capability-tiered sub-agent delegation — a pen-holder routes simple sub-tasks to cheaper models as tools (worktree-parallel, verify-before-integrate); the degree-1 core is unchanged. |
 | [033-rfc-context-economy.md](rfc/033-rfc-context-economy.md) | Draft context economy & handoff protocol — exchange compact Task Packets, not full context; three context layers; advisory budgets; economy never starves verification; companion + agents-guide discipline. |
-| [034-rfc-companion-adapter-interface.md](rfc/034-rfc-companion-adapter-interface.md) | Phase 1 native context companion — referenced packs, receipts, metrics, and benchmark gates for real token reduction before external adapters. |
+| [034-rfc-companion-adapter-interface.md](rfc/034-rfc-companion-adapter-interface.md) | Native context companion plus Phase-2 shell-output adapter runner and shipped RTK manifest/policy. |
 | [035-rfc-interactive-listener-gap.md](rfc/035-rfc-interactive-listener-gap.md) | Proposed runtime listener fix for the gap between `wait` readiness and interactive UI resumption. |
 | [036-rfc-token-window-exhaustion.md](rfc/036-rfc-token-window-exhaustion.md) | Shipped runtime `headroom` guard for proxy context exhaustion detection, checkpointing, status/doctor surfacing, and explicit pause. |

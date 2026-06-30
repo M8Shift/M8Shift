@@ -20,6 +20,8 @@ SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
 SCHEMA_PROFILE = "m8shift.context.profile.v1"
+SCHEMA_ADAPTER = "m8shift.adapter.v1"
+SCHEMA_ADAPTER_RESULT = "m8shift.adapter.result.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TURN_RE = re.compile(
     r"<!-- M8SHIFT:TURN (?P<num>\d+) (?P<author>[a-z][a-z0-9_-]*) BEGIN -->"
@@ -31,6 +33,49 @@ FIELD_RE = re.compile(r"^- (?P<key>[a-z_]+):\s*(?P<value>.*)$")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 PROFILE_NAMES = ("implementer", "reviewer", "tester", "gatekeeper", "maintainer")
 GIT_TIMEOUT_SECONDS = 10
+ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
+ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
+ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
+ADAPTER_NAME_RE = re.compile(r"[a-z][a-z0-9_.:-]{0,127}\Z")
+
+
+DEFAULT_ADAPTERS = {
+    "rtk-shell-output": {
+        "schema": SCHEMA_ADAPTER,
+        "name": "rtk-shell-output",
+        "type": "shell_output_filter",
+        "version": "0.1.0",
+        "authority": "advisory",
+        "command": ["rtk", "$M8SHIFT_ADAPTER_MODE_ARGS"],
+        "capabilities": ["filter_errors", "compact_tests", "compact_logs", "compact_listings"],
+        "input_schema": "m8shift.shell_output_filter.request.v1",
+        "output_schema": "m8shift.shell_output_filter.response.v1",
+        "mutates_core": False,
+        "mutates_repo": False,
+        "requires_env": [],
+        "timeout_seconds": 30,
+        "max_stdout_bytes": 1048576,
+        "failure_policy": "fallback_original",
+        "modes": {
+            "err": ["err"],
+            "test": ["test"],
+            "log": ["git", "log"],
+            "ls": ["ls"],
+            "git-diff": ["git", "diff"],
+        },
+        "policy": {
+            "recommended_modes": ["err", "test", "log", "ls"],
+            "forbidden_modes": {
+                "git-diff": (
+                    "Do not use RTK git diff for code review: Round 2 measurement found it "
+                    "lossy for hunks; read raw diffs instead."
+                )
+            },
+            "not_evidence": True,
+            "operator_installs": "RTK is not bundled; install rtk separately on the host.",
+        },
+    },
+}
 
 
 DEFAULT_PROFILES = {
@@ -121,6 +166,10 @@ def profiles_dir(root):
     return os.path.join(context_dir(root), "profiles")
 
 
+def adapters_dir(root):
+    return os.path.join(context_dir(root), "adapters")
+
+
 def metrics_path(root):
     return os.path.join(context_dir(root), "metrics.jsonl")
 
@@ -130,7 +179,7 @@ def benchmarks_path(root):
 
 
 def ensure_dirs(root):
-    for path in (context_dir(root), packs_dir(root), receipts_dir(root), profiles_dir(root)):
+    for path in (context_dir(root), packs_dir(root), receipts_dir(root), profiles_dir(root), adapters_dir(root)):
         os.makedirs(path, exist_ok=True)
 
 
@@ -506,11 +555,17 @@ def cmd_init(args):
             continue
         write_json(path, default_profile_json(name))
         wrote.append(rel(root, path))
+    for name, manifest in DEFAULT_ADAPTERS.items():
+        path = os.path.join(adapters_dir(root), f"{name}.json")
+        if os.path.exists(path) and not args.force:
+            continue
+        write_json(path, manifest)
+        wrote.append(rel(root, path))
     readme = os.path.join(context_dir(root), "README.md")
     if args.force or not os.path.exists(readme):
         write_text(readme, (
             "# M8Shift context companion\n\n"
-            "Generated context packs, receipts, metrics, and benchmarks live here.\n"
+            "Generated context packs, receipts, metrics, adapter manifests, and benchmarks live here.\n"
             "Packs are operational views only; verification uses original sources.\n"
         ))
         wrote.append(rel(root, readme))
@@ -701,6 +756,258 @@ def cmd_benchmark(args):
     return 0
 
 
+def adapter_path(root, name):
+    if not ADAPTER_NAME_RE.fullmatch(name or ""):
+        die(f"unsafe adapter name {name!r}")
+    return os.path.join(adapters_dir(root), f"{name}.json")
+
+
+def load_adapter(root, name):
+    path = adapter_path(root, name)
+    data = read_json(path, None)
+    if data is None and name in DEFAULT_ADAPTERS:
+        return DEFAULT_ADAPTERS[name]
+    if not isinstance(data, dict):
+        die(f"adapter manifest not found: {name}")
+    return data
+
+
+def adapter_findings(manifest, check_executable=True):
+    findings = []
+    if not isinstance(manifest, dict):
+        return [finding("error", "adapter.schema", "manifest is not a JSON object")]
+    name = manifest.get("name", "")
+    if manifest.get("schema") != SCHEMA_ADAPTER:
+        findings.append(finding("error", "adapter.schema", f"{name or '<unknown>'}: expected {SCHEMA_ADAPTER}"))
+    if not ADAPTER_NAME_RE.fullmatch(name):
+        findings.append(finding("error", "adapter.name", "adapter name is invalid"))
+    if manifest.get("type") not in ADAPTER_TYPES:
+        findings.append(finding("error", "adapter.type", f"{name}: unsupported adapter type"))
+    if manifest.get("authority") not in ADAPTER_AUTHORITIES:
+        findings.append(finding("error", "adapter.authority", f"{name}: unsupported authority"))
+    if manifest.get("authority") != "advisory":
+        findings.append(finding("error", "adapter.authority", f"{name}: shell-output filters must remain advisory"))
+    command = manifest.get("command")
+    if isinstance(command, str):
+        findings.append(finding("error", "adapter.command_string", f"{name}: command must be an argv array, not a shell string"))
+    elif not isinstance(command, list) or not command or not all(isinstance(v, str) and v for v in command):
+        findings.append(finding("error", "adapter.command", f"{name}: command must be a non-empty argv array"))
+    elif check_executable and command[0] != "$M8SHIFT_ADAPTER_MODE_ARGS" and "/" not in command[0] and shutil_which(command[0]) is None:
+        findings.append(finding("warning", "adapter.executable_missing", f"{name}: executable {command[0]!r} not found on PATH"))
+    if manifest.get("mutates_core") is not False:
+        findings.append(finding("error", "adapter.mutates_core", f"{name}: mutates_core must be false"))
+    if manifest.get("mutates_repo") is not False:
+        findings.append(finding("error", "adapter.mutates_repo", f"{name}: mutates_repo must be false"))
+    timeout = manifest.get("timeout_seconds")
+    if not isinstance(timeout, int) or not (1 <= timeout <= 300):
+        findings.append(finding("error", "adapter.timeout", f"{name}: timeout_seconds must be 1..300"))
+    max_stdout = manifest.get("max_stdout_bytes")
+    if not isinstance(max_stdout, int) or not (1 <= max_stdout <= 10 * 1024 * 1024):
+        findings.append(finding("error", "adapter.max_stdout", f"{name}: max_stdout_bytes must be 1..10485760"))
+    if manifest.get("failure_policy") not in ADAPTER_FAILURE_POLICIES:
+        findings.append(finding("error", "adapter.failure_policy", f"{name}: unsupported failure_policy"))
+    requires_env = manifest.get("requires_env", [])
+    if not isinstance(requires_env, list) or not all(isinstance(v, str) and re.fullmatch(r"[A-Z_][A-Z0-9_]*", v) for v in requires_env):
+        findings.append(finding("error", "adapter.requires_env", f"{name}: requires_env must be env var names"))
+    for env_name in requires_env if isinstance(requires_env, list) else []:
+        if env_name not in os.environ:
+            findings.append(finding("error", "adapter.env_missing", f"{name}: missing env {env_name}"))
+    modes = manifest.get("modes", {})
+    if modes and (not isinstance(modes, dict) or not all(isinstance(k, str) and isinstance(v, list) and all(isinstance(x, str) and x for x in v) for k, v in modes.items())):
+        findings.append(finding("error", "adapter.modes", f"{name}: modes must map names to argv fragments"))
+    return findings
+
+
+def shutil_which(executable):
+    for folder in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        path = os.path.join(folder, executable)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def adapter_mode_args(manifest, mode):
+    modes = manifest.get("modes") if isinstance(manifest.get("modes"), dict) else {}
+    if mode:
+        if mode not in modes:
+            die(f"adapter mode {mode!r} is not declared by {manifest.get('name')}")
+        forbidden = manifest.get("policy", {}).get("forbidden_modes", {})
+        if isinstance(forbidden, dict) and mode in forbidden:
+            die(f"adapter mode {mode!r} is forbidden: {forbidden[mode]}")
+        return modes.get(mode, [])
+    return []
+
+
+def render_adapter_command(manifest, mode):
+    mode_args = adapter_mode_args(manifest, mode)
+    out = []
+    for arg in manifest.get("command", []):
+        if arg == "$M8SHIFT_ADAPTER_MODE_ARGS":
+            out.extend(mode_args)
+        elif arg == "$M8SHIFT_ADAPTER_MODE":
+            out.append(mode)
+        else:
+            out.append(arg)
+    return out
+
+
+def adapter_env(manifest):
+    env = {"PATH": os.environ.get("PATH", os.defpath)}
+    for key in manifest.get("requires_env", []):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
+
+def read_adapter_input(root, args):
+    if args.stdin:
+        return sys.stdin.read()
+    if args.input:
+        return read_text(safe_join(root, args.input, "input path"))
+    die("adapter run requires --stdin or --input")
+
+
+def adapter_result(manifest, *, mode, original, filtered, fallback_used=False, error="", stderr=""):
+    return {
+        "schema": SCHEMA_ADAPTER_RESULT,
+        "adapter": manifest.get("name", ""),
+        "adapter_type": manifest.get("type", ""),
+        "mode": mode,
+        "status": "fallback" if fallback_used else "ok",
+        "fallback_used": fallback_used,
+        "error": error,
+        "stderr": stderr,
+        "input_schema": manifest.get("input_schema", ""),
+        "output_schema": manifest.get("output_schema", ""),
+        "original_sha256": sha256_text(original),
+        "filtered_sha256": sha256_text(filtered),
+        "original_metrics": size_metrics(original),
+        "filtered_metrics": size_metrics(filtered),
+        "filtered_text": filtered,
+        "warning": "Adapter output is an operational view, not evidence; verify against raw output when decisions depend on exact text.",
+    }
+
+
+def run_adapter_process(manifest, mode, text):
+    command = render_adapter_command(manifest, mode)
+    try:
+        completed = subprocess.run(
+            command,
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=manifest.get("timeout_seconds", 30),
+            env=adapter_env(manifest),
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, str(e), ""
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    max_stdout = manifest.get("max_stdout_bytes", 1048576)
+    if len(stdout.encode("utf-8")) > max_stdout:
+        return None, f"adapter stdout exceeded max_stdout_bytes={max_stdout}", stderr
+    if completed.returncode != 0:
+        return None, f"adapter exited {completed.returncode}", stderr
+    return stdout, "", stderr
+
+
+def cmd_adapters_init(args):
+    root = root_from(args)
+    ensure_dirs(root)
+    wrote = []
+    for name, manifest in DEFAULT_ADAPTERS.items():
+        path = adapter_path(root, name)
+        if os.path.exists(path) and not args.force:
+            continue
+        write_json(path, manifest)
+        wrote.append(rel(root, path))
+    if args.json:
+        print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS)}, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"✓ adapter manifests ready ({len(wrote)} file(s) written)")
+        for path in wrote:
+            print(f"  {path}")
+    return 0
+
+
+def cmd_adapters_list(args):
+    root = root_from(args)
+    names = set(DEFAULT_ADAPTERS)
+    if os.path.isdir(adapters_dir(root)):
+        for entry in os.listdir(adapters_dir(root)):
+            if entry.endswith(".json"):
+                names.add(entry[:-5])
+    if args.json:
+        print(json.dumps({"adapters": sorted(names)}, ensure_ascii=False, sort_keys=True))
+    else:
+        for name in sorted(names):
+            print(name)
+    return 0
+
+
+def cmd_adapters_show(args):
+    root = root_from(args)
+    manifest = load_adapter(root, args.name)
+    print(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2))
+    return 0
+
+
+def cmd_adapters_check(args):
+    root = root_from(args)
+    if args.name:
+        names = [args.name]
+    else:
+        names = set(DEFAULT_ADAPTERS)
+        if os.path.isdir(adapters_dir(root)):
+            names.update(entry[:-5] for entry in os.listdir(adapters_dir(root)) if entry.endswith(".json"))
+        names = sorted(names)
+    manifests = [load_adapter(root, name) for name in names]
+    findings = []
+    for manifest in manifests:
+        findings.extend(adapter_findings(manifest))
+    ok = not any(row["severity"] == "error" for row in findings)
+    if args.json:
+        print(json.dumps({"ok": ok, "findings": findings}, ensure_ascii=False, sort_keys=True))
+    else:
+        if not findings:
+            print("✓ adapter manifests OK")
+        for row in findings:
+            print(f"{row['severity']}: {row['check']}: {row['message']}")
+    return 0 if ok else 1
+
+
+def cmd_adapters_run(args):
+    root = root_from(args)
+    manifest = load_adapter(root, args.name)
+    findings = adapter_findings(manifest)
+    errors = [row for row in findings if row["severity"] == "error"]
+    if errors:
+        die("; ".join(row["message"] for row in errors))
+    original = read_adapter_input(root, args)
+    filtered, error, stderr = run_adapter_process(manifest, args.mode, original)
+    fallback_used = filtered is None
+    if fallback_used:
+        if manifest.get("failure_policy") != "fallback_original":
+            die(error or "adapter failed")
+        filtered = original
+    result = adapter_result(
+        manifest,
+        mode=args.mode,
+        original=original,
+        filtered=filtered,
+        fallback_used=fallback_used,
+        error=error,
+        stderr=stderr,
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        print(result["filtered_text"], end="" if result["filtered_text"].endswith("\n") else "\n")
+        if fallback_used:
+            print(f"[m8shift-context adapter fallback: {error}]", file=sys.stderr)
+    return 0
+
+
 def finding(severity, check, message):
     return {"severity": severity, "check": check, "message": message}
 
@@ -726,6 +1033,11 @@ def cmd_doctor(args):
         receipt = read_json(os.path.join(receipts_dir(root), receipt_name), {})
         if not receipt.get("references"):
             findings.append(finding("error", "receipt.references", f"{receipt_name} has no source references"))
+    adapter_names = set(DEFAULT_ADAPTERS)
+    if os.path.isdir(adapters_dir(root)):
+        adapter_names.update(entry[:-5] for entry in os.listdir(adapters_dir(root)) if entry.endswith(".json"))
+    for name in sorted(adapter_names):
+        findings.extend(adapter_findings(load_adapter(root, name), check_executable=False))
     if args.json:
         print(json.dumps({"findings": findings}, ensure_ascii=False, sort_keys=True))
     else:
@@ -774,6 +1086,31 @@ def main(argv=None):
     sb.add_argument("--write", action="store_true", help="append benchmark result to .m8shift/context/benchmarks.jsonl")
     sb.add_argument("--json", action="store_true")
     sb.set_defaults(func=cmd_benchmark)
+
+    sa = sub.add_parser("adapters", help="Phase-2 external adapter manifests and bounded runner")
+    sa_sub = sa.add_subparsers(dest="verb", required=True)
+    sai = sa_sub.add_parser("init", help="write shipped adapter manifests")
+    sai.add_argument("--force", action="store_true")
+    sai.add_argument("--json", action="store_true")
+    sai.set_defaults(func=cmd_adapters_init)
+    sal = sa_sub.add_parser("list", help="list known adapter manifests")
+    sal.add_argument("--json", action="store_true")
+    sal.set_defaults(func=cmd_adapters_list)
+    sas = sa_sub.add_parser("show", help="show one adapter manifest")
+    sas.add_argument("name")
+    sas.set_defaults(func=cmd_adapters_show)
+    sac = sa_sub.add_parser("check", help="validate adapter manifests")
+    sac.add_argument("name", nargs="?")
+    sac.add_argument("--json", action="store_true")
+    sac.set_defaults(func=cmd_adapters_check)
+    sar = sa_sub.add_parser("run", help="run one advisory adapter with bounded argv-only execution")
+    sar.add_argument("name")
+    sar.add_argument("--mode", required=True)
+    src = sar.add_mutually_exclusive_group(required=True)
+    src.add_argument("--stdin", action="store_true", help="read raw adapter input from stdin")
+    src.add_argument("--input", help="read raw adapter input from a project-relative file")
+    sar.add_argument("--json", action="store_true")
+    sar.set_defaults(func=cmd_adapters_run)
 
     sd = sub.add_parser("doctor", help="read-only context companion diagnostics")
     sd.add_argument("--json", action="store_true")
