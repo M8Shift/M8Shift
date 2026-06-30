@@ -1,6 +1,6 @@
 # RFC 036 — Token-window exhaustion detection and graceful pause
 
-- **Status:** proposed
+- **Status:** accepted / implemented in `m8shift-runtime.py`
 - **Date:** 2026-06-30
 - **Scope:** define how M8Shift companions should detect likely context-window exhaustion
   and force an explicit checkpoint / pause instead of letting agents silently degrade.
@@ -10,6 +10,23 @@
   [033-rfc-context-economy.md](033-rfc-context-economy.md),
   [034-rfc-companion-adapter-interface.md](034-rfc-companion-adapter-interface.md),
   [035-rfc-interactive-listener-gap.md](035-rfc-interactive-listener-gap.md).
+
+## 0. Implementation summary
+
+Implemented in the optional runtime companion, not in the passive core:
+
+- `python3 m8shift-runtime.py headroom [agent]` computes Tier-0 proxy signals:
+  turns since the latest recorded headroom checkpoint, relay bytes, runtime ledger
+  bytes, and handoff body bytes.
+- Harnesses may pass an exact local signal with `--window-status ok|warning|high`
+  and `--window-reason`.
+- `--checkpoint` writes a derived `session report current` checkpoint under
+  `.m8shift/runs/` and records a `headroom.checkpoint` runtime event.
+- `--pause-on warning|high --reason TEXT` is the only mutating pause path: it
+  checkpoints first, then calls the core `pause` command, and only succeeds when
+  the named agent is the current holder.
+- `status-runtime` includes the current headroom payload and `doctor` reports
+  `runtime.headroom` when checkpointing is overdue.
 
 ## 1. Problem
 
