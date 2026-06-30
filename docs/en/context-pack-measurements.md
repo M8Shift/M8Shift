@@ -41,6 +41,11 @@ checks. It grows as adapters (e.g. Headroom, RTK) are added and re-measured. See
 | Anthropic `count_tokens` API | real token count for **Claude** | exact (key-gated) |
 | Anthropic Messages API | output-equivalence inference | `claude-sonnet-4-6` |
 
+> **Note on tokenizers.** `tiktoken` is OpenAI's tokenizer (`o200k_base` / `cl100k_base` = the
+> GPT family) and is used here for the **Codex / GPT side only** — it does **not** tokenize
+> Claude. Every **Claude** token count comes exclusively from the Anthropic `count_tokens` API
+> (Claude's real, proprietary tokenizer). The two are never mixed.
+
 ### Token reduction (before → after)
 
 **Synthetic benchmark fixtures** (Codex `o200k`, exact):
