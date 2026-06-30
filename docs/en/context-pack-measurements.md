@@ -122,7 +122,46 @@ equivalence via the Anthropic Messages API. Native pack via
 `m8shift-context.py pack --profile reviewer`. The external-dependency measurement harnesses
 live **outside** the stdlib-only core (they require `tiktoken` and a model API key).
 
-## Round 2 — first external adapter (Headroom or RTK)
+## Round 2 — RTK (Rust Token Killer), shell-output filter · 2026-06-30
 
-*Pending a maintainer decision.* To beat Round 1, an external adapter must reduce **beyond**
-~177 tokens / −97.6 % **while staying equivalent** — a high bar against the native baseline.
+**Honest reframe.** RTK ([`rtk-ai/rtk`](https://github.com/rtk-ai/rtk), a zero-dependency Rust
+binary) does **not** compete with the native pack: it compresses **live shell command output**
+(test runs, git, listings, logs) before it reaches the model — a **different and complementary
+token axis** to the relay-context pack. So Round 2 is not "beat −97.6 %"; it measures RTK's
+**additive** saving on shell output, under the same DoD (real reduction *and* equivalence, both
+models).
+
+### Tools and method
+
+`rtk 0.43.0` (installed via Homebrew). For each real command: raw output vs `rtk <command>`,
+tokenized for **both models** — `tiktoken o200k` (Codex) and the Anthropic `count_tokens` API
+with `claude-opus-4-8` (the deployed Claude). Cross-checked against RTK's own `rtk gain`.
+
+### Token reduction (raw → rtk)
+
+| Command | Codex (`o200k`) | Claude (`opus-4-8`) |
+|---|---|---|
+| `git diff HEAD~15` | 24 978 → 8 294 (−66.8 %) | 39 487 → 12 512 (−68.3 %) |
+| `git log --stat -25` | 5 636 → 2 172 (−61.5 %) | 8 674 → 3 616 (−58.3 %) |
+| `ls -lR` | 127 820 → 58 690 (−54.1 %) | 187 220 → 71 355 (−61.9 %) |
+
+Both models agree closely, and my independent count matches RTK's self-report (`rtk gain` =
+−68.5 %). Real reduction, **54–68 %** on shell output.
+
+### Output equivalence (mode/task-dependent — the decisive half)
+
+| RTK mode | Reduction | Equivalence |
+|---|---|---|
+| `rtk err` / `rtk test` | very high | ✅ **excellent** — keeps errors/warnings/failures, drops INFO noise (52 lines → 2: the ERROR + WARNING). Equivalent for "are there problems?" |
+| `rtk git log` | −58/62 % | ✅ keeps commits + messages, marks omitted body lines `[+N lines omitted]` |
+| `rtk ls` | −54/62 % | ✅ keeps the file list (4 965/5 165 entries), compacts the format |
+| `rtk git diff` | −67/68 % | ⚠️ **lossy** — drops the actual hunks (raw 16 hunks / 1 685 `+` lines → 0 / 0), keeps only the stat. **Not equivalent for code review.** The dedicated `rtk diff` expects files, not git refs. |
+
+### Verdict
+
+RTK **passes the DoD selectively**: a real, large reduction (54–68 %) **with** equivalence for
+**noisy / summary / error** output (logs, errors, status, listings) — its design target — but
+**`rtk git diff` is lossy** for verbatim content, so a code review must read the actual diff
+from raw output. RTK is **complementary** to the native pack (a different token axis); notably
+`rtk err` *preserves* critical error lines that the native pack's line-truncation would drop —
+the two cover each other's blind spots.
