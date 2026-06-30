@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Tests for m8shift-context.py Phase 1 native context companion."""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORE = os.path.join(REPO, "m8shift.py")
+CONTEXT = os.path.join(REPO, "m8shift-context.py")
+
+
+def run(args, cwd, stdin=None):
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, input=stdin)
+
+
+class ContextBase(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8ctx-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        shutil.copy(CORE, os.path.join(self.d, "m8shift.py"))
+        shutil.copy(CONTEXT, os.path.join(self.d, "m8shift-context.py"))
+        self.assertEqual(self.core("init").returncode, 0)
+
+    def core(self, *args):
+        return run([sys.executable, "m8shift.py", *args], self.d)
+
+    def ctx(self, *args):
+        return run([sys.executable, "m8shift-context.py", *args], self.d)
+
+    def write_json(self, rel, data):
+        path = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(path) or self.d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return path
+
+
+class TestContextInitDoctor(ContextBase):
+    def test_init_writes_profiles_and_doctor_is_read_only_clean(self):
+        r = self.ctx("init")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        profile = os.path.join(self.d, ".m8shift", "context", "profiles", "reviewer.json")
+        self.assertTrue(os.path.exists(profile))
+        with open(profile, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(data["schema"], "m8shift.context.profile.v1")
+
+        dr = self.ctx("doctor", "--json")
+        self.assertEqual(dr.returncode, 0, dr.stderr)
+        self.assertEqual(json.loads(dr.stdout)["findings"], [])
+
+
+class TestContextPack(ContextBase):
+    def test_pack_preserves_handoff_fields_verbatim_and_writes_receipt_metrics(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        self.assertEqual(self.core("claim", "claude").returncode, 0)
+        ask = "PLEASE_KEEP_THIS_ASK_VERBATIM"
+        done = "PLEASE_KEEP_THIS_DONE_VERBATIM"
+        r = self.core(
+            "append", "claude", "--to", "codex",
+            "--ask", ask,
+            "--done", done,
+            "--files", "m8shift-context.py",
+            "--decision", "accept",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        pr = self.ctx("pack", "--profile", "reviewer", "--turns", "1", "--write", "--json")
+        self.assertEqual(pr.returncode, 0, pr.stderr)
+        payload = json.loads(pr.stdout)
+        pack_path = os.path.join(self.d, payload["pack"])
+        with open(pack_path, encoding="utf-8") as fh:
+            body = fh.read()
+
+        self.assertIn("ask (verbatim)", body)
+        self.assertIn(ask, body)
+        self.assertIn("done (verbatim)", body)
+        self.assertIn(done, body)
+        self.assertIn("decision: accept", body)
+        self.assertIn("Source references", body)
+        self.assertTrue(payload["receipt"]["references"])
+
+        mr = self.ctx("metrics", "--last", "--json")
+        self.assertEqual(mr.returncode, 0, mr.stderr)
+        metrics = json.loads(mr.stdout)
+        self.assertEqual(len(metrics), 1)
+        self.assertEqual(metrics[0]["schema"], "m8shift.context.metrics.v1")
+        self.assertTrue(metrics[0]["required_fields_preserved"])
+
+
+class TestContextBenchmark(ContextBase):
+    def test_benchmark_requires_real_token_counts_for_ship_gate(self):
+        proxy_only = self.ctx("benchmark", "--json")
+        self.assertEqual(proxy_only.returncode, 0, proxy_only.stderr)
+        payload = json.loads(proxy_only.stdout)
+        self.assertFalse(payload["ship_gate_passed"])
+        self.assertIn("missing real token counts", payload["warnings"][0])
+
+        counts = {
+            "small": {"without": 500, "with": 200},
+            "medium": {"without": 5000, "with": 1000},
+            "large": {"without": 20000, "with": 2500},
+        }
+        path = self.write_json("real-tokens.json", counts)
+        real = self.ctx("benchmark", "--real-tokens", path, "--require-real-tokens", "--json")
+        self.assertEqual(real.returncode, 0, real.stderr + real.stdout)
+        payload = json.loads(real.stdout)
+        self.assertTrue(payload["ship_gate_passed"])
+        self.assertTrue(all(row["real_token_reduction"] > 0 for row in payload["fixtures"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

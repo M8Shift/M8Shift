@@ -2678,6 +2678,7 @@ class TestAuditFixes(CLIBase):
         # Every tracked Python script carries the same explicit version surface as m8shift.py.
         v = cowork.VERSION
         scripts = [
+            "m8shift-context.py",
             "m8shift-e2e.py",
             "m8shift-i18n.py",
             "m8shift-runtime.py",
