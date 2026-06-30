@@ -100,6 +100,7 @@ flowchart LR
 | EF-22 | `session list/show/decisions/report` derives session views and Markdown reports from existing turns and session events. Report writes are explicit, path-confined, atomic, reject reserved M8Shift coordination/distributed-script files even with `--force` and case variants, and never mutate the `LOCK`; structured decisions are extracted only from `schema=stage4.v1 relation=review_result decision=approve|revise|reject|waive`. | `TestSessionReports` |
 | EF-23 | `status --brief` and `recap --brief` provide compact human output as a strict subset of the default human output, with no new information and no default-output change. `status --brief` keeps version, holder/state/agents/turn/since/expires and next-action lines; `recap --brief` keeps version, holder/state/agents/turn/since and recent turn summaries. | `test_status_brief_is_strict_subset_and_default_stays_full`, `test_recap_brief_is_strict_subset_and_default_stays_full` |
 | EF-24 | `m8shift-runtime.py status-runtime` composes core `status --json` with advisory runtime sidecars (presence, inbox, progress, and run lifecycle) and never mutates the relay. `--json` exposes the full composed payload; `--brief` is human-only and prints a strict line subset of the default human status. | `test_watch_operator_progress_and_status_runtime`, `test_status_runtime_discovers_agents_without_presence` |
+| EF-25 | `m8shift-runtime.py headroom [agent]` computes stdlib-only Tier-0 context headroom proxies (turns since checkpoint, relay bytes, runtime ledger bytes, handoff body bytes), accepts an optional harness-provided `--window-status`, writes explicit session-report checkpoints, surfaces `ok`/`warning`/`high` in `status-runtime` and `doctor`, and may call core `pause` only when `--pause-on` + `--reason` are explicit and the named agent is the current holder. | `test_runtime_headroom_detects_checkpoint_and_surfaces_in_status_doctor`, `test_runtime_headroom_pause_is_explicit_and_holder_gated` |
 
 ## 5. Non-functional requirements
 
@@ -197,7 +198,12 @@ second managed runtime for the same agent identity, and stale takeover requires 
 explicit `--takeover-stale` flag. `watch --no-progress-warn-after N
 --no-progress-block-after M` emits `runtime.no_progress` findings when the current
 run has no newer `progress.jsonl` or `runs.jsonl` event; blocked no-progress stops
-only that companion loop. `examples/headless_runner.py` stores immutable headless
+only that companion loop. `headroom [agent]` estimates context-window exhaustion
+with tokenizer-less proxies (turns since checkpoint, relay bytes, runtime ledger
+bytes, handoff body bytes), records explicit checkpoint events in `runs.jsonl`, can
+write a derived `session report` under `.m8shift/runs/`, and may pause the relay
+only when `--pause-on warning|high` and `--reason` are explicit and the named agent
+is the current holder. `examples/headless_runner.py` stores immutable headless
 plans in `run-plans/<run-id>.json` and verifies post-run core state from the `LOCK`
 rather than trusting process exit status. `m8shift-runtime.py retention prune
 --keep N` provides basic fixed-count pruning for runtime JSONL ledgers, archiving

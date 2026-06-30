@@ -51,6 +51,14 @@ DEFAULT_ANCHORS = {
     "gemini": "GEMINI.md",
     "vibe": "AGENTS.md",
 }
+HEADROOM_DEFAULTS = {
+    "warn_after_turns_since_checkpoint": 8,
+    "warn_after_handoff_body_bytes": 12000,
+    "warn_after_relay_bytes": 250000,
+    "pause_recommendation_after_turns_since_checkpoint": 15,
+    "pause_recommendation_after_relay_bytes": 500000,
+}
+HEADROOM_LEVEL = {"ok": 0, "warning": 1, "high": 2}
 
 
 def now():
@@ -484,6 +492,199 @@ def no_progress_finding(agent, row):
         ),
         "hint": row.get("no_progress_hint", ""),
     }
+
+
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def bytes_len(text):
+    return len((text or "").encode("utf-8"))
+
+
+def latest_headroom_checkpoint(session_id):
+    rows, err = read_jsonl_diagnostic(RUNS)
+    if err:
+        return None, {"severity": "warning", "check": "runtime.jsonl", "message": err}
+    best = None
+    for row in rows:
+        event = row.get("event") or row.get("type")
+        if event != "headroom.checkpoint":
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        row_session = row.get("session_id") or payload.get("session_id")
+        if session_id and row_session and row_session != session_id:
+            continue
+        turn = safe_int(payload.get("turn", row.get("turn", 0)), 0)
+        ts = parse_utc(row.get("ts", ""))
+        candidate = {
+            "turn": turn,
+            "ts": row.get("ts", ""),
+            "path": payload.get("path", row.get("path", "")),
+        }
+        if best is None:
+            best = candidate
+            continue
+        best_ts = parse_utc(best.get("ts", ""))
+        if turn > best.get("turn", 0) or (turn == best.get("turn", 0) and ts and (not best_ts or ts > best_ts)):
+            best = candidate
+    return best, None
+
+
+def runtime_ledgers_bytes():
+    total = 0
+    for path in runtime_ledger_paths():
+        try:
+            total += os.path.getsize(path)
+        except OSError:
+            continue
+    return total
+
+
+def headroom_status_from_signals(warnings, highs, harness_status=""):
+    if harness_status == "high" or highs:
+        return "high"
+    if harness_status == "warning" or warnings:
+        return "warning"
+    return "ok"
+
+
+def headroom_next_action(status):
+    if status == "high":
+        return "checkpoint + pause recommended before more implementation"
+    if status == "warning":
+        return "write a checkpoint soon; pause if no immediate safe handoff exists"
+    return "continue; checkpoint optional"
+
+
+def compute_headroom(agent="", *, warn_turns=None, warn_body_bytes=None,
+                     warn_relay_bytes=None, high_turns=None, high_relay_bytes=None,
+                     harness_status="", harness_reason=""):
+    core = load_core()
+    if agent:
+        validate_agent(core, agent)
+    text, lk = load_status(core)
+    turns = core.parse_turns(text)
+    current_turn = safe_int(lk.get("turn", ""), max([t["n"] for t in turns], default=0))
+    session_id = lk.get("session", "")
+    checkpoint, checkpoint_finding = latest_headroom_checkpoint(session_id)
+    checkpoint_turn = safe_int((checkpoint or {}).get("turn", 0), 0)
+    turns_since_checkpoint = max(0, current_turn - checkpoint_turn)
+    body_sizes = [bytes_len(t.get("body", "")) for t in turns]
+    max_body_bytes = max(body_sizes, default=0)
+    last_body_bytes = body_sizes[-1] if body_sizes else 0
+    relay_bytes = bytes_len(text)
+    runtime_bytes = runtime_ledgers_bytes()
+
+    warn_turns = HEADROOM_DEFAULTS["warn_after_turns_since_checkpoint"] if warn_turns is None else warn_turns
+    warn_body_bytes = HEADROOM_DEFAULTS["warn_after_handoff_body_bytes"] if warn_body_bytes is None else warn_body_bytes
+    warn_relay_bytes = HEADROOM_DEFAULTS["warn_after_relay_bytes"] if warn_relay_bytes is None else warn_relay_bytes
+    high_turns = HEADROOM_DEFAULTS["pause_recommendation_after_turns_since_checkpoint"] if high_turns is None else high_turns
+    high_relay_bytes = HEADROOM_DEFAULTS["pause_recommendation_after_relay_bytes"] if high_relay_bytes is None else high_relay_bytes
+
+    warnings = []
+    highs = []
+    if high_turns and turns_since_checkpoint >= high_turns:
+        highs.append(f"{turns_since_checkpoint} turns since checkpoint")
+    elif warn_turns and turns_since_checkpoint >= warn_turns:
+        warnings.append(f"{turns_since_checkpoint} turns since checkpoint")
+    if high_relay_bytes and relay_bytes >= high_relay_bytes:
+        highs.append(f"relay is {relay_bytes} bytes")
+    elif warn_relay_bytes and relay_bytes >= warn_relay_bytes:
+        warnings.append(f"relay is {relay_bytes} bytes")
+    if warn_body_bytes and max_body_bytes >= warn_body_bytes:
+        warnings.append(f"largest handoff body is {max_body_bytes} bytes")
+    if harness_status and harness_reason:
+        (highs if harness_status == "high" else warnings).append(harness_reason)
+
+    status = headroom_status_from_signals(warnings, highs, harness_status=harness_status)
+    findings = [checkpoint_finding] if checkpoint_finding else []
+    payload = {
+        "status": status,
+        "reasons": highs + warnings,
+        "next": headroom_next_action(status),
+        "metrics": {
+            "turn": current_turn,
+            "turns_total": len(turns),
+            "turns_since_checkpoint": turns_since_checkpoint,
+            "relay_bytes": relay_bytes,
+            "runtime_ledger_bytes": runtime_bytes,
+            "last_handoff_body_bytes": last_body_bytes,
+            "max_handoff_body_bytes": max_body_bytes,
+        },
+        "thresholds": {
+            "warn_after_turns_since_checkpoint": warn_turns,
+            "warn_after_handoff_body_bytes": warn_body_bytes,
+            "warn_after_relay_bytes": warn_relay_bytes,
+            "pause_recommendation_after_turns_since_checkpoint": high_turns,
+            "pause_recommendation_after_relay_bytes": high_relay_bytes,
+        },
+        "checkpoint": checkpoint or {},
+        "relay": {"state": lk.get("state", ""), "holder": lk.get("holder", ""), "session": session_id},
+        "agent": agent,
+        "runtime_findings": findings,
+        "runtime_version": VERSION,
+    }
+    return payload
+
+
+def headroom_finding(headroom):
+    status = headroom.get("status")
+    if status not in {"warning", "high"}:
+        return None
+    severity = "error" if status == "high" else "warning"
+    reasons = "; ".join(headroom.get("reasons") or ["headroom risk"])
+    return {
+        "severity": severity,
+        "check": "runtime.headroom",
+        "message": reasons,
+        "hint": headroom.get("next", ""),
+    }
+
+
+def headroom_checkpoint_path(session_id, turn):
+    safe_session = re.sub(r"[^A-Za-z0-9_.:@-]+", "-", session_id or "current").strip("-") or "current"
+    name = f"headroom-{safe_session}-turn-{turn}-{uuid.uuid4().hex[:8]}.md"
+    return os.path.join(".m8shift", "runs", name).replace(os.sep, "/")
+
+
+def write_headroom_checkpoint(agent, headroom, reason):
+    ensure_runtime_dirs()
+    session_id = headroom.get("relay", {}).get("session", "")
+    turn = headroom.get("metrics", {}).get("turn", 0)
+    rel = headroom_checkpoint_path(session_id, turn)
+    result = subprocess.run(
+        [sys.executable, CORE_PATH, "session", "report", "current", "--write", "--output", rel],
+        cwd=HERE,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip())
+    run_id = f"headroom-{uuid.uuid4().hex[:8]}"
+    row = runtime_event(
+        "headroom.checkpoint",
+        agent=agent,
+        session_id=session_id,
+        run_id=run_id,
+        payload={
+            "path": rel,
+            "turn": turn,
+            "reason": reason,
+            "session_id": session_id,
+            "headroom_status": headroom.get("status"),
+            "metrics": headroom.get("metrics", {}),
+        },
+        event="headroom.checkpoint",
+        path=rel,
+        turn=turn,
+        reason=reason,
+    )
+    append_jsonl(RUNS, row)
+    return rel
 
 
 def evaluate_no_progress(agent, run_id, previous, warn_after=0, block_after=0):
@@ -1107,17 +1308,27 @@ def cmd_status_runtime(args):
     agent = validate_agent(core, args.agent) if args.agent else ""
     status = run_core_json("status", "--json")
     summary, findings = runtime_summary(agent)
+    headroom = compute_headroom(agent)
+    finding = headroom_finding(headroom)
+    if finding:
+        findings.append(finding)
+    findings.extend(headroom.get("runtime_findings", []))
     if args.json:
         print(json.dumps({
             "m8shift_version": status.get("m8shift_version"),
             "runtime_version": VERSION,
             "relay": status,
             "runtime": summary,
+            "headroom": headroom,
             "runtime_findings": findings,
         }, ensure_ascii=False, sort_keys=True))
         return 0
     print(f"m8shift-runtime.py v{VERSION}")
     print(f"relay: {status.get('state')} holder={status.get('holder')} turn={status.get('turn')}")
+    reasons = "; ".join(headroom.get("reasons") or ["-"])
+    print(f"headroom: {headroom.get('status')} — {reasons}")
+    if not args.brief:
+        print(f"  next: {headroom.get('next')}")
     for ag, data in summary.items():
         pres = data.get("presence") or {}
         print(
@@ -1129,6 +1340,92 @@ def cmd_status_runtime(args):
         if not args.brief and data.get("last_run_event"):
             row = data["last_run_event"]
             print(f"  last run: {row.get('event', row.get('type', '-'))} {row.get('run_id', '')} ({row.get('ts', '-')})")
+    return 0
+
+
+def cmd_headroom(args):
+    if args.pause_on and not args.agent:
+        sys.exit("m8shift-runtime: headroom --pause-on requires an agent")
+    if args.pause_on and not args.reason.strip():
+        sys.exit("m8shift-runtime: headroom --pause-on requires --reason")
+    if args.window_status and args.window_status not in HEADROOM_LEVEL:
+        sys.exit("m8shift-runtime: invalid --window-status")
+    for name in (
+        "warn_after_turns_since_checkpoint",
+        "warn_after_handoff_body_bytes",
+        "warn_after_relay_bytes",
+        "pause_recommendation_after_turns_since_checkpoint",
+        "pause_recommendation_after_relay_bytes",
+    ):
+        if getattr(args, name) < 0:
+            sys.exit("m8shift-runtime: headroom thresholds must be >= 0")
+    headroom = compute_headroom(
+        args.agent,
+        warn_turns=args.warn_after_turns_since_checkpoint,
+        warn_body_bytes=args.warn_after_handoff_body_bytes,
+        warn_relay_bytes=args.warn_after_relay_bytes,
+        high_turns=args.pause_recommendation_after_turns_since_checkpoint,
+        high_relay_bytes=args.pause_recommendation_after_relay_bytes,
+        harness_status=args.window_status,
+        harness_reason=args.window_reason,
+    )
+    headroom["checkpoint_written"] = ""
+    headroom["paused"] = False
+    should_checkpoint = args.checkpoint
+    should_pause = bool(args.pause_on and HEADROOM_LEVEL[headroom["status"]] >= HEADROOM_LEVEL[args.pause_on])
+    if should_pause:
+        core = load_core()
+        text, lk = load_status(core)
+        validate_agent(core, args.agent)
+        if lk.get("holder") != args.agent or lk.get("state") in {"DONE", "PAUSED"}:
+            sys.exit(
+                f"m8shift-runtime: cannot pause as {args.agent}; "
+                f"state={lk.get('state')} holder={lk.get('holder')}"
+            )
+        should_checkpoint = True
+    if should_checkpoint:
+        try:
+            headroom["checkpoint_written"] = write_headroom_checkpoint(
+                args.agent or headroom.get("relay", {}).get("holder", ""),
+                headroom,
+                args.reason or "headroom checkpoint",
+            )
+        except RuntimeError as e:
+            sys.exit(f"m8shift-runtime: checkpoint failed: {e}")
+    if should_pause:
+        result = subprocess.run(
+            [sys.executable, CORE_PATH, "pause", args.agent, "--reason", args.reason],
+            cwd=HERE,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            sys.exit((result.stderr or result.stdout).strip())
+        headroom["paused"] = True
+        headroom["pause_output"] = (result.stdout or "").strip()
+    elif args.pause_on:
+        headroom["pause_skipped"] = f"headroom={headroom['status']} below {args.pause_on}"
+
+    if args.json:
+        print(json.dumps(headroom, ensure_ascii=False, sort_keys=True))
+        return 0
+    print(f"m8shift-runtime.py v{VERSION}")
+    print("── headroom ───────────────────────────")
+    print(f"status: {headroom['status']}")
+    print(f"reasons: {'; '.join(headroom.get('reasons') or ['-'])}")
+    print(f"next: {headroom['next']}")
+    metrics = headroom["metrics"]
+    print(
+        f"metrics: turns_since_checkpoint={metrics['turns_since_checkpoint']} "
+        f"relay_bytes={metrics['relay_bytes']} "
+        f"max_body_bytes={metrics['max_handoff_body_bytes']}"
+    )
+    if headroom.get("checkpoint_written"):
+        print(f"checkpoint: {headroom['checkpoint_written']}")
+    if headroom.get("paused"):
+        print("paused: yes")
+    elif headroom.get("pause_skipped"):
+        print(headroom["pause_skipped"])
     return 0
 
 
@@ -1212,6 +1509,14 @@ def cmd_doctor(args):
             finding = no_progress_finding(agent, row)
             if finding:
                 findings.append(finding)
+    try:
+        headroom = compute_headroom()
+        finding = headroom_finding(headroom)
+        if finding:
+            findings.append(finding)
+        findings.extend(headroom.get("runtime_findings", []))
+    except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
+        findings.append({"severity": "warning", "check": "runtime.headroom", "message": str(e)})
     if os.path.exists(PROVIDERS):
         findings.extend(provider_findings(load_provider_registry()))
     ok = not any(f["severity"] == "error" for f in findings)
@@ -1280,6 +1585,29 @@ def main():
     sr.add_argument("--brief", action="store_true", help="compact human output; ignored with --json")
     sr.add_argument("--json", action="store_true")
     sr.set_defaults(fn=cmd_status_runtime)
+
+    hr = sub.add_parser("headroom", help="estimate context-window headroom from local proxy signals")
+    hr.add_argument("agent", nargs="?", help="agent to authorize optional pause/checkpoint actions")
+    hr.add_argument("--json", action="store_true")
+    hr.add_argument("--checkpoint", action="store_true",
+                    help="write a derived session-report checkpoint and record it in runtime runs")
+    hr.add_argument("--pause-on", choices=("warning", "high"), default="",
+                    help="if the computed risk reaches this level, checkpoint and pause the current holder")
+    hr.add_argument("--reason", default="", help="required with --pause-on; recorded in checkpoint/pause audit")
+    hr.add_argument("--window-status", choices=("ok", "warning", "high"), default="",
+                    help="optional harness-provided exact context-window signal")
+    hr.add_argument("--window-reason", default="", help="reason attached to --window-status warning/high")
+    hr.add_argument("--warn-after-turns-since-checkpoint", type=int,
+                    default=HEADROOM_DEFAULTS["warn_after_turns_since_checkpoint"])
+    hr.add_argument("--warn-after-handoff-body-bytes", type=int,
+                    default=HEADROOM_DEFAULTS["warn_after_handoff_body_bytes"])
+    hr.add_argument("--warn-after-relay-bytes", type=int,
+                    default=HEADROOM_DEFAULTS["warn_after_relay_bytes"])
+    hr.add_argument("--pause-recommendation-after-turns-since-checkpoint", type=int,
+                    default=HEADROOM_DEFAULTS["pause_recommendation_after_turns_since_checkpoint"])
+    hr.add_argument("--pause-recommendation-after-relay-bytes", type=int,
+                    default=HEADROOM_DEFAULTS["pause_recommendation_after_relay_bytes"])
+    hr.set_defaults(fn=cmd_headroom)
 
     dr = sub.add_parser("doctor", help="read-only runtime sidecar diagnostics")
     dr.add_argument("--json", action="store_true")
