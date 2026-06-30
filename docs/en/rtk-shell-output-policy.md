@@ -37,6 +37,7 @@ git log --stat -25 | python3 m8shift-context.py adapters run rtk-shell-output --
 ls -lR | python3 m8shift-context.py adapters run rtk-shell-output --mode ls --stdin
 ```
 
-The runner is companion-only: argv arrays only, bounded timeout/output, allowlisted
-environment, no shell string, no `LOCK` mutation, and fallback behavior declared in
-the manifest.
+The runner is companion-only: argv arrays only, bare executable names only,
+`rtk` allowlisted as the shipped shell-output filter, `PATH` resolution required,
+bounded timeout/stdout/stderr, allowlisted environment, no shell string, no `LOCK`
+mutation, and fallback behavior declared in the manifest.
