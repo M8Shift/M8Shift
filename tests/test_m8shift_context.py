@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for m8shift-context.py Phase 1 native context companion."""
+import hashlib
 import json
 import importlib.util
 import os
@@ -53,6 +54,37 @@ class ContextBase(unittest.TestCase):
         path = os.path.join(bindir, "rtk")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("#!/usr/bin/env python3\n" + body)
+        os.chmod(path, 0o755)
+        self.fake_rtk_path = path
+        env = os.environ.copy()
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        return env
+
+    def trusted_rtk_identity(self, path=None):
+        path = path or self.fake_rtk_path
+        real = os.path.realpath(path)
+        h = hashlib.sha256()
+        with open(real, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return {"program": "rtk", "path": real, "sha256": h.hexdigest()}
+
+    def symlinked_rtk_to_core_env(self):
+        bindir = os.path.join(self.d, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        core = os.path.join(self.d, "m8shift.py")
+        os.chmod(core, 0o755)
+        os.symlink(core, os.path.join(bindir, "rtk"))
+        env = os.environ.copy()
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        return env
+
+    def rtk_hijack_env(self, body, dirname="hijack-bin"):
+        bindir = os.path.join(self.d, dirname)
+        os.makedirs(bindir, exist_ok=True)
+        path = os.path.join(bindir, "rtk")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
         os.chmod(path, 0o755)
         env = os.environ.copy()
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
@@ -143,17 +175,20 @@ class TestContextBenchmark(ContextBase):
 class TestContextAdapters(ContextBase):
     def test_rtk_manifest_policy_and_forbidden_git_diff_mode(self):
         self.assertEqual(self.ctx("init").returncode, 0)
+        env = self.fake_rtk_env("import sys\nsys.stdout.write(sys.stdin.read())\n")
+        self.assertEqual(self.ctx("adapters", "init", "--force", env=env).returncode, 0)
         shown = self.ctx("adapters", "show", "rtk-shell-output")
         self.assertEqual(shown.returncode, 0, shown.stderr)
         manifest = json.loads(shown.stdout)
         self.assertEqual(manifest["command"], ["rtk", "$M8SHIFT_ADAPTER_MODE_ARGS"])
+        self.assertEqual(manifest["trusted_executable"], self.trusted_rtk_identity())
         self.assertEqual(manifest["modes"]["err"], ["err"])
         self.assertEqual(manifest["modes"]["git-diff"], ["git", "diff"])
         self.assertIn("git-diff", manifest["policy"]["forbidden_modes"])
 
         checked = self.ctx(
             "adapters", "check", "rtk-shell-output", "--json",
-            env=self.fake_rtk_env("import sys\nsys.stdout.write(sys.stdin.read())\n"),
+            env=env,
         )
         self.assertEqual(checked.returncode, 0, checked.stderr)
         self.assertTrue(json.loads(checked.stdout)["ok"])
@@ -167,6 +202,11 @@ class TestContextAdapters(ContextBase):
 
     def test_adapter_runner_is_argv_only_bounded_and_wraps_output(self):
         self.assertEqual(self.ctx("init").returncode, 0)
+        env = self.fake_rtk_env(
+            "import sys\n"
+            "lines = sys.stdin.read().splitlines(True)\n"
+            "sys.stdout.write(''.join(line for line in lines if not line.startswith('INFO noisy')))\n"
+        )
         self.write_json(".m8shift/context/adapters/fake-filter.json", {
             "schema": "m8shift.adapter.v1",
             "name": "fake-filter",
@@ -174,6 +214,7 @@ class TestContextAdapters(ContextBase):
             "version": "0.1.0",
             "authority": "advisory",
             "command": ["rtk"],
+            "trusted_executable": self.trusted_rtk_identity(),
             "capabilities": ["filter_errors"],
             "input_schema": "m8shift.shell_output_filter.request.v1",
             "output_schema": "m8shift.shell_output_filter.response.v1",
@@ -189,11 +230,7 @@ class TestContextAdapters(ContextBase):
         run_result = self.ctx(
             "adapters", "run", "fake-filter", "--mode", "err", "--stdin", "--json",
             stdin="INFO noisy\nERROR keep me\n",
-            env=self.fake_rtk_env(
-                "import sys\n"
-                "lines = sys.stdin.read().splitlines(True)\n"
-                "sys.stdout.write(''.join(line for line in lines if not line.startswith('INFO noisy')))\n"
-            ),
+            env=env,
         )
         self.assertEqual(run_result.returncode, 0, run_result.stderr)
         payload = json.loads(run_result.stdout)
@@ -273,8 +310,85 @@ class TestContextAdapters(ContextBase):
         self.assertEqual(checked.returncode, 1, checked.stdout)
         self.assertIn("adapter.executable_missing", {row["check"] for row in json.loads(checked.stdout)["findings"]})
 
+    def test_adapter_check_and_run_reject_resolved_core_symlink(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        env = self.symlinked_rtk_to_core_env()
+
+        checked = self.ctx("adapters", "check", "rtk-shell-output", "--json", env=env)
+        self.assertEqual(checked.returncode, 1, checked.stdout)
+        self.assertIn(
+            "adapter.program_resolved_denied",
+            {row["check"] for row in json.loads(checked.stdout)["findings"]},
+        )
+
+        result = self.ctx(
+            "adapters", "run", "rtk-shell-output", "--mode", "err", "--stdin",
+            stdin="ERROR should not execute core\n",
+            env=env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resolves to a M8Shift relay binary", result.stderr)
+
+    def test_adapter_run_rejects_renamed_core_copy_named_rtk(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        trusted_env = self.fake_rtk_env("import sys\nsys.stdout.write(sys.stdin.read())\n")
+        self.assertEqual(self.ctx("adapters", "init", "--force", env=trusted_env).returncode, 0)
+
+        hijack_bin = os.path.join(self.d, "copy-hijack")
+        os.makedirs(hijack_bin, exist_ok=True)
+        shutil.copy(os.path.join(self.d, "m8shift.py"), os.path.join(hijack_bin, "rtk"))
+        os.chmod(os.path.join(hijack_bin, "rtk"), 0o755)
+        hijack_env = os.environ.copy()
+        hijack_env["PATH"] = hijack_bin + os.pathsep + hijack_env.get("PATH", "")
+
+        checked = self.ctx("adapters", "check", "rtk-shell-output", "--json", env=hijack_env)
+        self.assertEqual(checked.returncode, 1, checked.stdout)
+        self.assertIn(
+            "adapter.program_identity_mismatch",
+            {row["check"] for row in json.loads(checked.stdout)["findings"]},
+        )
+
+        result = self.ctx(
+            "adapters", "run", "rtk-shell-output", "--mode", "err", "--stdin",
+            stdin="ERROR should not execute renamed core\n",
+            env=hijack_env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected", result.stderr)
+
+    def test_adapter_run_rejects_wrapper_named_rtk(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        trusted_env = self.fake_rtk_env("import sys\nsys.stdout.write(sys.stdin.read())\n")
+        self.assertEqual(self.ctx("adapters", "init", "--force", env=trusted_env).returncode, 0)
+        witness = os.path.join(self.d, "wrapper-executed.txt")
+        core = os.path.join(self.d, "m8shift.py")
+        hijack_env = self.rtk_hijack_env(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            f"open({witness!r}, 'w', encoding='utf-8').write('PWNED')\n"
+            f"os.execv(sys.executable, [sys.executable, {core!r}, 'status'])\n",
+            dirname="wrapper-hijack",
+        )
+
+        checked = self.ctx("adapters", "check", "rtk-shell-output", "--json", env=hijack_env)
+        self.assertEqual(checked.returncode, 1, checked.stdout)
+        self.assertIn(
+            "adapter.program_identity_mismatch",
+            {row["check"] for row in json.loads(checked.stdout)["findings"]},
+        )
+
+        result = self.ctx(
+            "adapters", "run", "rtk-shell-output", "--mode", "err", "--stdin",
+            stdin="ERROR should not execute wrapper\n",
+            env=hijack_env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected", result.stderr)
+        self.assertFalse(os.path.exists(witness))
+
     def test_adapter_run_caps_stderr_and_falls_back_without_buffering_unbounded(self):
         self.assertEqual(self.ctx("init").returncode, 0)
+        env = self.fake_rtk_env("import sys\nsys.stderr.write('x' * 1000)\nsys.stdout.write('SHOULD NOT WIN\\n')\n")
         self.write_json(".m8shift/context/adapters/noisy-stderr.json", {
             "schema": "m8shift.adapter.v1",
             "name": "noisy-stderr",
@@ -282,6 +396,7 @@ class TestContextAdapters(ContextBase):
             "version": "0.1.0",
             "authority": "advisory",
             "command": ["rtk"],
+            "trusted_executable": self.trusted_rtk_identity(),
             "capabilities": [],
             "input_schema": "m8shift.shell_output_filter.request.v1",
             "output_schema": "m8shift.shell_output_filter.response.v1",
@@ -297,7 +412,7 @@ class TestContextAdapters(ContextBase):
         result = self.ctx(
             "adapters", "run", "noisy-stderr", "--mode", "err", "--stdin", "--json",
             stdin="ERROR original\n",
-            env=self.fake_rtk_env("import sys\nsys.stderr.write('x' * 1000)\nsys.stdout.write('SHOULD NOT WIN\\n')\n"),
+            env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
@@ -307,6 +422,8 @@ class TestContextAdapters(ContextBase):
 
     def test_adapter_input_rejects_symlink_escape(self):
         self.assertEqual(self.ctx("init").returncode, 0)
+        env = self.fake_rtk_env("import sys\nsys.stdout.write(sys.stdin.read())\n")
+        self.assertEqual(self.ctx("adapters", "init", "--force", env=env).returncode, 0)
         outside = tempfile.NamedTemporaryFile("w", delete=False)
         self.addCleanup(lambda: os.path.exists(outside.name) and os.unlink(outside.name))
         with outside:
@@ -314,7 +431,7 @@ class TestContextAdapters(ContextBase):
         os.symlink(outside.name, os.path.join(self.d, "linked-outside.txt"))
         result = self.ctx(
             "adapters", "run", "rtk-shell-output", "--mode", "err", "--input", "linked-outside.txt",
-            env=self.fake_rtk_env("import sys\nsys.stdout.write(sys.stdin.read())\n"),
+            env=env,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("escapes project root", result.stderr)
