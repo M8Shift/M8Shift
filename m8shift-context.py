@@ -30,6 +30,7 @@ TURN_RE = re.compile(
 FIELD_RE = re.compile(r"^- (?P<key>[a-z_]+):\s*(?P<value>.*)$")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 PROFILE_NAMES = ("implementer", "reviewer", "tester", "gatekeeper", "maintainer")
+GIT_TIMEOUT_SECONDS = 10
 
 
 DEFAULT_PROFILES = {
@@ -257,7 +258,15 @@ def parse_turns(text):
 
 
 def git(root, args):
-    r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True)
+    try:
+        r = subprocess.run(
+            ["git", "-C", root, *args],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
     if r.returncode != 0:
         return ""
     return r.stdout.strip()
