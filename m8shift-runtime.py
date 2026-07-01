@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.32.0"
+VERSION = "3.33.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +49,7 @@ NOTIFY_DEFAULT_DEDUP_S = 300
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+PLATFORM_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 PROVIDER_MODES = {"interactive", "headless", "hybrid", "local"}
 DEFAULT_CAPABILITIES = {
     "claude": ["read_repo", "write_repo", "review", "long_context"],
@@ -156,6 +157,11 @@ def active_roster_or_default(raw=""):
 
 
 def provider_template(agent):
+    argv = []
+    permissions = "human-driven"
+    if agent == "codex":
+        argv = ["codex", "exec", "$M8SHIFT_PROMPT"]
+        permissions = "workspace-write"
     provider = {
         "name": agent,
         "provider": {
@@ -166,15 +172,53 @@ def provider_template(agent):
         }.get(agent, agent),
         "mode": "interactive" if agent in {"claude", "gemini", "vibe"} else "headless",
         "anchor": DEFAULT_ANCHORS.get(agent, "AGENTS.md"),
-        "argv": [],
+        "argv": argv,
         "capabilities": DEFAULT_CAPABILITIES.get(agent, ["read_repo", "review"]),
         "requires_env": [],
-        "permissions": "human-driven",
+        "permissions": permissions,
     }
-    if agent == "codex":
-        provider["argv"] = ["codex", "exec", "$M8SHIFT_PROMPT"]
-        provider["permissions"] = "workspace-write"
     return provider
+
+
+def curated_provider_examples():
+    common_env = [
+        "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER",
+        "M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TURN",
+    ]
+    return [
+        {
+            "//": "Opt-in sample; copy into agents and adapt locally before running.",
+            "name": "codex",
+            "provider": "openai-codex",
+            "mode": "headless",
+            "anchor": "AGENTS.md",
+            "argv": ["codex", "exec", "$M8SHIFT_PROMPT"],
+            "argv_by_platform": {
+                "default": ["codex", "exec", "$M8SHIFT_PROMPT"],
+                "win32": ["codex.cmd", "exec", "$M8SHIFT_PROMPT"],
+            },
+            "env_allowlist": common_env,
+            "capabilities": DEFAULT_CAPABILITIES.get("codex", ["read_repo", "write_repo", "run_tests"]),
+            "requires_env": [],
+            "permissions": "workspace-write",
+        },
+        {
+            "//": "Opt-in sample; copy into agents and adapt locally before running.",
+            "name": "claude",
+            "provider": "anthropic-claude",
+            "mode": "headless",
+            "anchor": "CLAUDE.md",
+            "argv": ["claude", "-p", "$M8SHIFT_PROMPT"],
+            "argv_by_platform": {
+                "default": ["claude", "-p", "$M8SHIFT_PROMPT"],
+                "win32": ["claude.cmd", "-p", "$M8SHIFT_PROMPT"],
+            },
+            "env_allowlist": common_env,
+            "capabilities": DEFAULT_CAPABILITIES.get("claude", ["read_repo", "write_repo", "review"]),
+            "requires_env": [],
+            "permissions": "workspace-write",
+        },
+    ]
 
 
 def default_provider_registry(agents):
@@ -182,6 +226,7 @@ def default_provider_registry(agents):
         "schema": "m8shift.providers.v1",
         "generated_by": f"m8shift-runtime.py {VERSION}",
         "agents": [provider_template(agent) for agent in agents],
+        "examples": curated_provider_examples(),
     }
 
 
@@ -191,6 +236,8 @@ This directory is optional. It belongs to `m8shift-runtime.py`, not to the passi
 core relay.
 
 - `providers.json`: host-side agent/provider registry. Keep secrets out of it.
+  Generated registries include opt-in `examples` for cooperative headless CLIs;
+  copy/adapt them into active agents before use.
 - `roles/`: stable behavioral role contracts.
 - `workflows/`: simple local workflow definitions.
 - `policies/`: human approval and runtime policy notes.
@@ -1397,6 +1444,107 @@ def cmd_progress(args):
     return 0
 
 
+def select_provider_argv(row, platform=None):
+    platform = platform or sys.platform
+    by_platform = row.get("argv_by_platform")
+    if isinstance(by_platform, dict):
+        keys = [platform]
+        if platform.startswith("linux"):
+            keys.append("linux")
+        elif platform.startswith("darwin"):
+            keys.append("darwin")
+        elif platform.startswith(("win32", "cygwin", "msys")):
+            keys.extend(["win32", "windows"])
+        keys.append("default")
+        for key in keys:
+            value = by_platform.get(key)
+            if value:
+                return value, key
+    return row.get("argv", []), ""
+
+
+def render_argv_template(argv, *, agent, prompt, run_id=""):
+    values = {
+        "$M8SHIFT_PROMPT": prompt,
+        "$M8SHIFT_AGENT": agent,
+        "$M8SHIFT_RUN_ID": run_id,
+    }
+    out = []
+    for arg in argv:
+        value = arg
+        for marker, replacement in values.items():
+            value = value.replace(marker, replacement)
+        out.append(value)
+    return out
+
+
+def provider_entry_findings(agent, prefix, seen=None):
+    findings = []
+    if not isinstance(agent, dict):
+        return [{"severity": "error", "check": "providers.agent", "message": f"{prefix} is not an object"}]
+    name = agent.get("name", "")
+    if not isinstance(name, str) or not AGENT_RE.fullmatch(name):
+        findings.append({"severity": "error", "check": "providers.name", "message": f"{prefix}.name is invalid"})
+    elif seen is not None and name in seen:
+        findings.append({"severity": "error", "check": "providers.name_duplicate", "message": f"duplicate agent {name}"})
+    if seen is not None and isinstance(name, str):
+        seen.add(name)
+    label = name or prefix
+    if not isinstance(agent.get("provider", ""), str) or not agent.get("provider", "").strip():
+        findings.append({"severity": "error", "check": "providers.provider", "message": f"{label} provider is required"})
+    mode = agent.get("mode", "")
+    if mode not in PROVIDER_MODES:
+        findings.append({"severity": "error", "check": "providers.mode", "message": f"{label} mode must be one of {', '.join(sorted(PROVIDER_MODES))}"})
+    if not isinstance(agent.get("anchor", ""), str) or not agent.get("anchor", "").strip():
+        findings.append({"severity": "warning", "check": "providers.anchor", "message": f"{label} anchor is missing"})
+    argv = agent.get("argv", [])
+    if isinstance(argv, str):
+        findings.append({"severity": "error", "check": "providers.argv_string", "message": f"{label} argv must be an array, not a shell string"})
+    elif not isinstance(argv, list) or not all(isinstance(v, str) and v for v in argv):
+        findings.append({"severity": "error", "check": "providers.argv", "message": f"{label} argv must be a list of non-empty strings"})
+    by_platform = agent.get("argv_by_platform", {})
+    if by_platform in (None, ""):
+        by_platform = {}
+    if by_platform and not isinstance(by_platform, dict):
+        findings.append({"severity": "error", "check": "providers.argv_by_platform", "message": f"{label} argv_by_platform must be an object"})
+    elif isinstance(by_platform, dict):
+        for platform, platform_argv in by_platform.items():
+            if not isinstance(platform, str) or not PLATFORM_RE.fullmatch(platform):
+                findings.append({"severity": "error", "check": "providers.platform", "message": f"{label} has invalid platform key {platform!r}"})
+            if isinstance(platform_argv, str):
+                findings.append({"severity": "error", "check": "providers.argv_by_platform_string", "message": f"{label} argv_by_platform[{platform!r}] must be an array, not a shell string"})
+            elif not isinstance(platform_argv, list) or not all(isinstance(v, str) and v for v in platform_argv):
+                findings.append({"severity": "error", "check": "providers.argv_by_platform", "message": f"{label} argv_by_platform[{platform!r}] must be a list of non-empty strings"})
+    selected_argv, selected_key = select_provider_argv(agent)
+    if mode in {"headless", "hybrid"} and not selected_argv:
+        findings.append({"severity": "warning", "check": "providers.argv_missing", "message": f"{label} has mode={mode} but no argv"})
+    elif isinstance(selected_argv, list) and selected_argv:
+        exe = selected_argv[0]
+        if os.path.isabs(exe):
+            if not os.path.exists(exe):
+                findings.append({"severity": "warning", "check": "providers.executable_missing", "message": f"{label} executable {exe!r} not found"})
+        elif "/" in exe or "\\" in exe:
+            findings.append({"severity": "error", "check": "providers.executable_path", "message": f"{label} argv[0] must be a bare PATH program or absolute path"})
+        elif shutil.which(exe) is None:
+            where = f" for platform {selected_key}" if selected_key else ""
+            findings.append({"severity": "warning", "check": "providers.executable_missing", "message": f"{label} executable {exe!r}{where} not found on PATH"})
+    for field in ("capabilities", "requires_env", "env_allowlist"):
+        values = agent.get(field, [])
+        if values in (None, "") and field == "env_allowlist":
+            values = []
+        if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
+            findings.append({"severity": "error", "check": f"providers.{field}", "message": f"{label} {field} must be a list of strings"})
+    for env_name in agent.get("requires_env", []):
+        if not ENV_RE.fullmatch(env_name):
+            findings.append({"severity": "error", "check": "providers.env_name", "message": f"{label} has invalid env var name {env_name!r}"})
+        elif env_name not in os.environ:
+            findings.append({"severity": "error", "check": "providers.env_missing", "message": f"{label} requires missing environment variable {env_name}"})
+    for env_name in agent.get("env_allowlist", []):
+        if not ENV_RE.fullmatch(env_name):
+            findings.append({"severity": "error", "check": "providers.env_allowlist_name", "message": f"{label} has invalid env allowlist name {env_name!r}"})
+    return findings
+
+
 def provider_findings(registry):
     findings = []
     if not isinstance(registry, dict):
@@ -1408,41 +1556,15 @@ def provider_findings(registry):
         return findings + [{"severity": "error", "check": "providers.agents", "message": "agents must be a list"}]
     seen = set()
     for idx, agent in enumerate(agents):
-        prefix = f"agents[{idx}]"
-        if not isinstance(agent, dict):
-            findings.append({"severity": "error", "check": "providers.agent", "message": f"{prefix} is not an object"})
-            continue
-        name = agent.get("name", "")
-        if not isinstance(name, str) or not AGENT_RE.fullmatch(name):
-            findings.append({"severity": "error", "check": "providers.name", "message": f"{prefix}.name is invalid"})
-        elif name in seen:
-            findings.append({"severity": "error", "check": "providers.name_duplicate", "message": f"duplicate agent {name}"})
-        seen.add(name)
-        if not isinstance(agent.get("provider", ""), str) or not agent.get("provider", "").strip():
-            findings.append({"severity": "error", "check": "providers.provider", "message": f"{name or prefix} provider is required"})
-        mode = agent.get("mode", "")
-        if mode not in PROVIDER_MODES:
-            findings.append({"severity": "error", "check": "providers.mode", "message": f"{name or prefix} mode must be one of {', '.join(sorted(PROVIDER_MODES))}"})
-        if not isinstance(agent.get("anchor", ""), str) or not agent.get("anchor", "").strip():
-            findings.append({"severity": "warning", "check": "providers.anchor", "message": f"{name or prefix} anchor is missing"})
-        argv = agent.get("argv", [])
-        if isinstance(argv, str):
-            findings.append({"severity": "error", "check": "providers.argv_string", "message": f"{name or prefix} argv must be an array, not a shell string"})
-        elif not isinstance(argv, list) or not all(isinstance(v, str) and v for v in argv):
-            findings.append({"severity": "error", "check": "providers.argv", "message": f"{name or prefix} argv must be a list of non-empty strings"})
-        elif mode in {"headless", "hybrid"} and not argv:
-            findings.append({"severity": "warning", "check": "providers.argv_missing", "message": f"{name or prefix} has mode={mode} but no argv"})
-        elif argv and "/" not in argv[0] and shutil.which(argv[0]) is None:
-            findings.append({"severity": "warning", "check": "providers.executable_missing", "message": f"{name or prefix} executable {argv[0]!r} not found on PATH"})
-        for field in ("capabilities", "requires_env"):
-            values = agent.get(field, [])
-            if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
-                findings.append({"severity": "error", "check": f"providers.{field}", "message": f"{name or prefix} {field} must be a list of strings"})
-        for env_name in agent.get("requires_env", []):
-            if not ENV_RE.fullmatch(env_name):
-                findings.append({"severity": "error", "check": "providers.env_name", "message": f"{name or prefix} has invalid env var name {env_name!r}"})
-            elif env_name not in os.environ:
-                findings.append({"severity": "error", "check": "providers.env_missing", "message": f"{name or prefix} requires missing environment variable {env_name}"})
+        findings.extend(provider_entry_findings(agent, f"agents[{idx}]", seen))
+    examples = registry.get("examples", [])
+    if examples in (None, ""):
+        examples = []
+    if not isinstance(examples, list):
+        findings.append({"severity": "error", "check": "providers.examples", "message": "examples must be a list"})
+    else:
+        for idx, example in enumerate(examples):
+            findings.extend(provider_entry_findings(example, f"examples[{idx}]", None))
     return findings
 
 
@@ -1545,18 +1667,8 @@ def cmd_providers_check(args):
 
 
 def render_provider_argv(row, prompt, run_id=""):
-    values = {
-        "$M8SHIFT_PROMPT": prompt,
-        "$M8SHIFT_AGENT": row.get("name", ""),
-        "$M8SHIFT_RUN_ID": run_id,
-    }
-    argv = []
-    for arg in row.get("argv", []):
-        out = arg
-        for marker, value in values.items():
-            out = out.replace(marker, value)
-        argv.append(out)
-    return argv
+    argv, _platform = select_provider_argv(row)
+    return render_argv_template(argv, agent=row.get("name", ""), prompt=prompt, run_id=run_id)
 
 
 def cmd_providers_render(args):
@@ -1566,10 +1678,17 @@ def cmd_providers_render(args):
         sys.exit(f"m8shift-runtime: no provider entry for {args.agent}")
     if any(f["severity"] == "error" for f in provider_findings({"schema": "m8shift.providers.v1", "agents": [row]})):
         sys.exit(f"m8shift-runtime: provider entry for {args.agent} is invalid")
-    if not row.get("argv"):
+    argv_template, platform_key = select_provider_argv(row)
+    if not argv_template:
         sys.exit(f"m8shift-runtime: provider entry for {args.agent} has no argv")
     argv = render_provider_argv(row, args.prompt, args.run)
-    payload = {"agent": row.get("name"), "argv": argv, "mode": row.get("mode"), "provider": row.get("provider")}
+    payload = {
+        "agent": row.get("name"),
+        "argv": argv,
+        "mode": row.get("mode"),
+        "provider": row.get("provider"),
+        "platform": platform_key or sys.platform,
+    }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
