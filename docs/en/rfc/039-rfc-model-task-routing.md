@@ -1,6 +1,6 @@
 # RFC 039 — CLI agent launching + model / task-type cost routing
 
-- **Status:** draft (authored by Claude; for Codex review)
+- **Status:** draft (authored by Claude; Codex-reviewed, stabilized)
 - **Builds on:** [032-rfc-tiered-delegation.md](032-rfc-tiered-delegation.md) (the delegation charter this operationalizes), [014-rfc-provider-management.md](014-rfc-provider-management.md) (provider registry + capability vocabulary + `providers render`), [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md) + [020-rfc-headless-runner-hardening.md](020-rfc-headless-runner-hardening.md) (safe argv launch), [018-rfc-agent-runtime-architecture.md](018-rfc-agent-runtime-architecture.md) (roles / agent registry / run ledger), [008-rfc-worktree-companion.md](008-rfc-worktree-companion.md) (degree-2 isolation), [034-rfc-companion-adapter-interface.md](034-rfc-companion-adapter-interface.md) (hardened subprocess runner), [031-rfc-decision-traceability.md](031-rfc-decision-traceability.md) (decision record), [040-rfc-ai-session-usage-monitoring.md](040-rfc-ai-session-usage-monitoring.md) (usage/cooldown — the orthogonal cost axis).
 - **Core invariant:** routing is an **advisory, degree-2 companion**. The passive, stdlib-only, degree-1 core (`m8shift.py`, the `LOCK`, `M8SHIFT.md`) never learns a model name, never scores a provider, and never gates `claim`/`append` on routing metadata. Removing `.m8shift/routing/` loses only recommendations, never the relay or its journal.
 
@@ -33,7 +33,8 @@ output is always verified before integration (RFC 032 §4).
 
 - **No hidden auto-scoring.** RFC 014 §4 and RFC 018/034 already reject "automatic provider selection
   by hidden scoring." Routing **recommends**; the human/pen-holder **decides**. The companion never
-  silently picks and runs a model without a recorded, confirmable decision.
+  silently picks and runs a model without a recorded, confirmable decision — `route delegate` never
+  launches without an explicit confirmation gate (§9).
 - **No baked-in prices or vendor list.** The RFC ships *axes*, *ordinal tiers*, and a *schema*. Concrete
   models and their relative costs live in an operator-owned, gitignored manifest that is re-pointed as
   prices move — so the design survives every price change and model launch.
@@ -48,7 +49,7 @@ output is always verified before integration (RFC 032 §4).
 | RFC 032 open question | RFC 039 answer |
 |---|---|
 | #1 How is a tier expressed (per-task field vs policy file vs judgment)? | Per task-type in a `skills.json` manifest: `min_model` (floor) + `optimum_model` + `downgradable`. |
-| #2 Expose a `delegate` verb, or stay example-only? | Yes — a runtime-companion `route recommend | delegate` verb (never a core verb). |
+| #2 Expose a `delegate` verb, or stay example-only? | Yes — a runtime-companion `route recommend \| delegate` verb (never a core verb). |
 | #3 How is spend bounded? | A capability-first, cheapest-eligible selection + an **optional** per-turn sub-agent budget gate (operator policy), reusing RFC 040 usage snapshots for the running total rather than a second cost meter. |
 | #4 Same-family vs cross-provider verifier? | Provider-neutral by construction; an open question (§14) on whether `downgradable:false` tasks require a *different-family* verifier. |
 
@@ -136,8 +137,17 @@ no-baked-in-list rule).
 ## 8. Selection algorithm (capability-first, cost tie-break, fail-safe)
 
 1. Resolve `task-type → {floor tier, required_capabilities, required_context_class}` from `skills.json`.
+   When `min_model` is a **model id** rather than a bare tier, resolve it through `models.json` and use
+   that model's tier as the floor; an unresolved id is a **manifest error and cannot launch** (fail-safe,
+   not a silent pass).
 2. `ELIGIBLE` = models with `tier ≥ floor` **and** `capabilities ⊇ required` **and** `context_class ≥ required`.
-3. If `ELIGIBLE` is empty → **fail-safe**: recommend the **pen-holder's own model** (never relax the floor).
+3. If `ELIGIBLE` is empty → **fail-safe to the pen-holder's own model**, resolved by strict precedence:
+   (a) the active runtime lane / run metadata if it carries a verified `Agent-Model` identity; (b) an
+   explicit `--self MODEL_ID` from the operator; (c) the active RFC 014 provider binding **only if** it
+   maps the current pen-holder to exactly one model identity. If none resolves, emit **"no delegation
+   recommendation; use the pen-holder manually"** and launch nothing — the companion never guesses a
+   default/cheap model. A self-model unknown to the manifest is still the safe human path but is **not an
+   automatically launchable routed model**. The floor is never relaxed.
 4. Among `ELIGIBLE`, pick the **least-costly** `cost_band`; break ties by `latency` per the task's time-tolerance.
 5. Emit a **ranked, advisory** recommendation + rationale (floor, chosen tier, feasible set, `saved_vs`
    the pen-holder's flagship, `below_optimum` flag, the `verify` recipe, `authority: advisory`).
@@ -171,6 +181,13 @@ python3 m8shift-runtime.py route delegate --task-type mechanical-edit \
 # 4) Only the pen-holder commits, through the core pen, as its own turn (degree-1 unchanged)
 ```
 
+**`route delegate` requires an explicit confirmation gate** — it never launches a model the companion
+chose on its own. It defaults to **print-only / `--dry-run`**; an actual launch requires either
+`--confirm-route <recommendation-id>` (referencing a prior `route recommend` output) or `--yes`, and
+records an RFC 031 decision (chosen model + rationale + who confirmed). This keeps the RFC 014/018
+"no hidden auto-scoring" invariant intact: the *selection* is advisory; the *launch* is a
+human-confirmed act.
+
 **Chat-UI degradation (RFC 035):** `route delegate` assumes a headless runner. In a pure chat-UI
 session with no runner, `route recommend` degrades to a **print-only** advisory that the human
 executes by hand — stated explicitly so a chat-only operator is never stranded.
@@ -192,6 +209,9 @@ resulting commit; a future enhancement could auto-stamp it from the routing deci
 3. **`adversarial-verify` / security / legal are pinned** to the top tier, `downgradable:false`.
 4. **Fail-safe on ambiguity** — unknown/unannotated/below-floor/ambiguous → the pen-holder's own model.
 5. **Advisory + traceable** — routing recommends; the human decides; RFC 031 records model, why, who confirmed.
+6. **Confirmed launch** — `route delegate` never launches without an explicit confirmation gate
+   (`--confirm-route`/`--yes` + an RFC 031 record); print-only/`--dry-run` is the default. Selection is
+   advisory; launch is a human-confirmed act.
 
 ## 12. Charter boundary
 
@@ -208,24 +228,29 @@ stdout, **no credentials** in M8Shift files, **gitignored** sidecars, **no netwo
 **no force-steal** of a valid lock. The implementing turn must carry an adversarial security review of
 any new subprocess path before merge.
 
-## 14. Open questions (for review)
+## 14. Resolved questions (Codex review)
 
-1. **Budget altitude** (RFC 032 #3): advisory warn by default, opt-in fail-closed operator policy; reuse
-   RFC 040 usage snapshots for the running total (not a second cost meter). Confirm.
-2. **Tier/rank provenance**: keep `capability` ordinals operator-asserted (stdlib, network-free) with an
-   optional evidence field + a staleness/timestamp warning, or offer a benchmark-import?
-3. **Escalation economics**: for which task-types is start-cheap-and-escalate cheaper *in expectation*
-   than starting at optimum? Drive it with per-task-type `escalation-rate` telemetry.
-4. **Cross-provider verifier** (RFC 032 #4): should `downgradable:false` tasks require a *different-family*
-   verifier (conflict-of-interest guard), or is the human pen-holder as final authority enough?
-5. **Fail-safe identity**: where does the pen-holder's own model come from — active RFC 014 provider
-   adapter, env, or explicit `--self`? Must be unambiguous so "escalate" never resolves cheaper.
-6. **Manifest lint**: should a `doctor`-style lint **hard-fail** a skill whose floor references a tier no
-   manifest model reaches, or warn only?
-7. **RFC 040 interaction**: if the least-costly eligible model is in usage-cooldown, `route recommend`
-   skips to the next eligible (still ≥ floor) and records the substitution in provenance. Confirm.
-8. **Shipped defaults**: ship provider-neutral task-type defaults only, leaving every tier→model binding
-   to the operator (avoid a de-facto vendor opinion). Confirm.
+1. **Budget altitude** (RFC 032 #3): advisory warning by default; opt-in fail-closed operator policy only;
+   reuse RFC 040 usage snapshots for the running total — never a second cost meter.
+2. **Tier/rank provenance**: operator-asserted `capability` ordinals plus a manifest `updated` timestamp,
+   an optional evidence field, and a staleness warning. An optional benchmark import may come later but is
+   never a dependency (stays stdlib, network-free).
+3. **Escalation economics**: start-cheap-and-escalate is enabled **only** for `downgradable:true`,
+   deterministic-ish task-types at first, driven by per-task-type `escalation-rate` telemetry; it is
+   **disabled** for adversarial/security/legal and any load-bearing review until data proves it safe.
+4. **Cross-provider verifier** (RFC 032 #4): not universal. A policy knob, **recommended** for high-stakes
+   `downgradable:false` tasks when a different-family model is available; otherwise require human
+   pen-holder verification plus a recorded waiver.
+5. **Fail-safe identity**: resolved in §8 step 3 — strict precedence (runtime-lane verified `Agent-Model`
+   → explicit `--self` → unique RFC 014 binding → else refuse and hand to the human). The companion never
+   guesses a default/cheap model.
+6. **Manifest lint**: `route recommend` **warns** on a floor referencing an unreachable tier/model;
+   `route delegate` **hard-fails**; `doctor` reports it (warning by default, error under `--strict`).
+7. **RFC 040 interaction**: skip a cooled-down model **only if** the next eligible candidate still clears
+   the floor/capability/context gates; if all eligible candidates are cooling down, recommend cooldown/wait
+   or the self/manual path — never drop below the floor.
+8. **Shipped defaults**: provider-neutral task-type defaults only; **no** tier→model binding is ever shipped
+   (that would be a de-facto vendor opinion).
 
 ## 15. Recommendation
 
