@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.31.0"
+VERSION = "3.32.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +39,13 @@ INBOX_DIR = os.path.join(RUNTIME_DIR, "inbox")
 RETENTION_POLICY = os.path.join(RUNTIME_DIR, "retention.json")
 RETENTION_ARCHIVE_INDEX = os.path.join(RUNTIME_DIR, "archive", "index.jsonl")
 RETENTION_SCHEMA = "m8shift.runtime.retention.v1"
+NOTIFY_DIR = os.path.join(RUNTIME_DIR, "notify")
+NOTIFY_CONFIG = os.path.join(RUNTIME_DIR, "notify.config.json")
+NOTIFY_LOG = os.path.join(NOTIFY_DIR, "log.jsonl")
+NOTIFY_TIERS = {"stdout", "file", "bell", "os", "hook"}
+NOTIFY_EVENTS = {"turn-ready", "stale", "blocked", "done"}
+NOTIFY_PLACEHOLDERS = {"{agent}", "{event}", "{state}"}
+NOTIFY_DEFAULT_DEDUP_S = 300
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
@@ -84,6 +91,10 @@ def load_core():
 
 def ensure_runtime_dirs():
     os.makedirs(INBOX_DIR, exist_ok=True)
+
+
+def ensure_notify_dir():
+    os.makedirs(NOTIFY_DIR, exist_ok=True)
 
 
 def ensure_project_dirs():
@@ -350,6 +361,369 @@ def read_jsonl_diagnostic(path):
     except OSError as e:
         return [], str(e)
     return rows, None
+
+
+def headless_runtime():
+    return bool(os.environ.get("CI")) or not sys.stdout.isatty()
+
+
+def default_notify_config():
+    tiers = ["stdout", "file"]
+    if not headless_runtime():
+        tiers.append("bell")
+    return {
+        "tiers": tiers,
+        "os_preset": "off",
+        "hook": None,
+        "dedup_window_seconds": NOTIFY_DEFAULT_DEDUP_S,
+    }
+
+
+def split_csv(value):
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def normalize_notify_config(raw):
+    cfg = default_notify_config()
+    findings = []
+    if not raw:
+        return cfg, findings
+    if not isinstance(raw, dict):
+        return cfg, [{
+            "severity": "warning",
+            "check": "runtime.notify_config",
+            "message": "notify config must be a JSON object; using defaults",
+        }]
+    tiers = raw.get("tiers", cfg["tiers"])
+    if not isinstance(tiers, list) or not all(isinstance(t, str) for t in tiers):
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.notify_config",
+            "message": "notify tiers must be a list of strings; using defaults",
+        })
+    else:
+        unknown = [t for t in tiers if t not in NOTIFY_TIERS]
+        if unknown:
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.notify_config",
+                "message": f"unknown notify tier(s): {', '.join(sorted(unknown))}",
+            })
+        known = [t for t in tiers if t in NOTIFY_TIERS]
+        if known:
+            cfg["tiers"] = known
+    preset = raw.get("os_preset", cfg["os_preset"])
+    if isinstance(preset, str) and preset.strip():
+        cfg["os_preset"] = preset.strip()
+    elif preset not in (None, ""):
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.notify_config",
+            "message": "os_preset must be a string; using default",
+        })
+    hook = raw.get("hook", cfg["hook"])
+    if hook is None:
+        cfg["hook"] = None
+    elif isinstance(hook, list) and all(isinstance(x, str) and x for x in hook):
+        cfg["hook"] = hook
+    else:
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.notify_hook",
+            "message": "hook must be an argv list of non-empty strings; hook tier disabled",
+        })
+        cfg["hook"] = None
+    dedup = raw.get("dedup_window_seconds", cfg["dedup_window_seconds"])
+    try:
+        dedup = int(dedup)
+        if dedup < 0:
+            raise ValueError
+        cfg["dedup_window_seconds"] = dedup
+    except (TypeError, ValueError):
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.notify_config",
+            "message": "dedup_window_seconds must be a non-negative integer; using default",
+        })
+    findings.extend(notify_hook_findings(cfg.get("hook")))
+    return cfg, findings
+
+
+def load_notify_config():
+    raw, err = read_json_diagnostic(NOTIFY_CONFIG, {})
+    cfg, findings = normalize_notify_config(raw)
+    if err:
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.notify_config",
+            "message": f"{os.path.relpath(NOTIFY_CONFIG, HERE)}: {err}",
+        })
+    return cfg, findings
+
+
+def notify_hook_findings(hook):
+    if not hook:
+        return []
+    findings = []
+    if len(hook) == 1 and re.search(r"[;&|`$<>]", hook[0]):
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.notify_hook",
+            "message": "hook looks like a shell string; configure argv items instead",
+        })
+    for arg in hook:
+        if any(ph in arg for ph in NOTIFY_PLACEHOLDERS) and arg not in NOTIFY_PLACEHOLDERS:
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.notify_hook",
+                "message": f"placeholder in hook arg {arg!r} is not a literal argv item",
+            })
+    return findings
+
+
+def notify_prompt_path(agent):
+    return os.path.join(NOTIFY_DIR, f"{agent}.prompt")
+
+
+def notify_event_path(agent):
+    return os.path.join(NOTIFY_DIR, f"{agent}.event.json")
+
+
+def write_notify_text(path, text):
+    ensure_notify_dir()
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def write_notify_json(path, data):
+    ensure_notify_dir()
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, sort_keys=True, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def append_notify_log(row):
+    ensure_notify_dir()
+    with open(NOTIFY_LOG, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def latest_notify_delivered(agent, event):
+    rows, err = read_jsonl_diagnostic(NOTIFY_LOG)
+    if err:
+        return None
+    for row in reversed(rows):
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if (row.get("type") == "notify.delivered"
+                and payload.get("agent") == agent
+                and payload.get("event") == event):
+            return row
+    return None
+
+
+def notify_duplicate(agent, event, window_seconds):
+    if window_seconds <= 0:
+        return False
+    last = latest_notify_delivered(agent, event)
+    if not last:
+        return False
+    ts = parse_utc(last.get("ts", ""))
+    return bool(ts and (now() - ts).total_seconds() < window_seconds)
+
+
+def default_resume_prompt(agent, event):
+    if event == "turn-ready":
+        return f"python3 m8shift.py next {agent}"
+    return f"python3 m8shift-runtime.py status-runtime {agent}"
+
+
+def read_prompt_source(path):
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().rstrip("\n")
+    except OSError as e:
+        sys.exit(f"m8shift-runtime: cannot read --prompt-file: {e}")
+
+
+def os_notify_argv(preset, event, message):
+    preset = (preset or "off").strip().lower()
+    if preset in {"", "off", "none"}:
+        return None, ""
+    if preset == "auto":
+        if sys.platform == "darwin":
+            preset = "osascript"
+        elif os.name == "nt":
+            preset = "powershell"
+        else:
+            preset = "notify-send"
+    if preset == "osascript":
+        title = f"M8Shift {event}".replace("\\", "\\\\").replace('"', '\\"')
+        body = (message or event).replace("\\", "\\\\").replace('"', '\\"')
+        return ["osascript", "-e", f'display notification "{body}" with title "{title}"'], "osascript"
+    if preset == "notify-send":
+        return ["notify-send", f"M8Shift {event}", message or event], "notify-send"
+    if preset in {"powershell", "pwsh"}:
+        exe = "pwsh" if preset == "pwsh" else "powershell"
+        # Local one-shot best-effort toast fallback: no shell=True; message is passed as argv.
+        return [exe, "-NoProfile", "-Command", "Write-Output $args[0]", message or event], exe
+    return [preset, f"M8Shift {event}", message or event], preset
+
+
+def render_hook_argv(hook, *, agent, event, state):
+    values = {"{agent}": agent, "{event}": event, "{state}": state}
+    return [values.get(arg, arg) for arg in hook]
+
+
+def run_argv(argv, tier, findings):
+    if not argv:
+        return False
+    exe = argv[0]
+    if os.path.isabs(exe):
+        exists = os.path.exists(exe)
+    else:
+        exists = shutil.which(exe) is not None
+    if not exists:
+        findings.append({
+            "severity": "warning",
+            "check": f"runtime.notify_{tier}",
+            "message": f"{tier} notifier executable {exe!r} not found; degraded to stdout/file",
+        })
+        return False
+    try:
+        r = subprocess.run(argv, cwd=HERE, capture_output=True, text=True, timeout=10, shell=False)
+    except Exception as e:  # noqa: BLE001 - notification must never block the relay
+        findings.append({
+            "severity": "warning",
+            "check": f"runtime.notify_{tier}",
+            "message": f"{tier} notifier failed: {e}",
+        })
+        return False
+    if r.returncode != 0:
+        findings.append({
+            "severity": "warning",
+            "check": f"runtime.notify_{tier}",
+            "message": f"{tier} notifier exited {r.returncode}: {(r.stderr or r.stdout).strip()}",
+        })
+        return False
+    return True
+
+
+def emit_notification(agent, event, message, *, prompt="", config=None, state="", holder="", json_output=False):
+    cfg_findings = []
+    if config is None:
+        config, cfg_findings = load_notify_config()
+    findings = list(cfg_findings)
+    tiers = list(config.get("tiers", []))
+    if notify_duplicate(agent, event, safe_int(config.get("dedup_window_seconds"), NOTIFY_DEFAULT_DEDUP_S)):
+        row = runtime_event(
+            "notify.suppressed",
+            agent=agent,
+            payload={"agent": agent, "event": event, "reason": "dedup", "state": state},
+        )
+        append_notify_log(row)
+        return {
+            "ok": True,
+            "delivered": False,
+            "suppressed": "dedup",
+            "tiers": [],
+            "findings": findings,
+        }
+
+    prompt = prompt or default_resume_prompt(agent, event)
+    payload = {
+        "schema": "m8shift.runtime.notify.event.v1",
+        "agent": agent,
+        "event": event,
+        "message": message,
+        "prompt": prompt,
+        "state": state,
+        "holder": holder,
+        "ts": iso(),
+        "source": {"tool": "m8shift-runtime.py", "version": VERSION},
+    }
+    delivered = []
+    skipped = []
+
+    if "stdout" in tiers:
+        delivered.append("stdout")
+        if not json_output:
+            print(f"notify {event} {agent}: {message}")
+            if prompt:
+                print(f"prompt: {prompt}")
+
+    if "file" in tiers:
+        try:
+            write_notify_text(notify_prompt_path(agent), prompt + "\n")
+            write_notify_json(notify_event_path(agent), payload)
+            delivered.append("file")
+        except OSError as e:
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.notify_file",
+                "message": f"cannot write notification sidecar: {e}; degraded to stdout",
+            })
+
+    if "bell" in tiers:
+        if os.environ.get("CI") or not sys.stdout.isatty():
+            skipped.append("bell")
+        else:
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+            delivered.append("bell")
+
+    if "os" in tiers:
+        if os.environ.get("CI"):
+            skipped.append("os")
+        else:
+            argv, preset = os_notify_argv(config.get("os_preset", "auto"), event, message)
+            if argv and run_argv(argv, "os", findings):
+                delivered.append(f"os:{preset}")
+
+    if "hook" in tiers:
+        if os.environ.get("CI"):
+            skipped.append("hook")
+        elif config.get("hook"):
+            argv = render_hook_argv(config["hook"], agent=agent, event=event, state=state)
+            if run_argv(argv, "hook", findings):
+                delivered.append("hook")
+        else:
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.notify_hook",
+                "message": "hook tier enabled but no hook argv configured",
+            })
+
+    if set(tiers) - {"stdout"}:
+        append_notify_log(runtime_event(
+            "notify.delivered",
+            agent=agent,
+            payload={
+                "agent": agent,
+                "event": event,
+                "message": message,
+                "prompt": prompt,
+                "state": state,
+                "holder": holder,
+                "tiers": delivered,
+                "skipped": skipped,
+                "findings": findings,
+            },
+        ))
+    return {
+        "ok": True,
+        "delivered": bool(delivered),
+        "suppressed": "",
+        "tiers": delivered,
+        "skipped": skipped,
+        "findings": findings,
+        "event": payload,
+    }
 
 
 def validate_session_id(session_id):
@@ -791,6 +1165,21 @@ def run_core_json(*args):
     return json.loads(r.stdout)
 
 
+def watch_notification_event(lk, agent, prompt, blocked):
+    state = lk.get("state", "")
+    if blocked:
+        return "blocked"
+    if state == "DONE":
+        return "done"
+    if prompt and state == f"AWAITING_{agent.upper()}":
+        return "turn-ready"
+    if state.startswith("WORKING_"):
+        expires = parse_utc(lk.get("expires", ""))
+        if expires and now() > expires:
+            return "stale"
+    return ""
+
+
 def cmd_watch(args):
     if args.interval < 1:
         sys.exit("m8shift-runtime: --interval must be >= 1")
@@ -817,6 +1206,16 @@ def cmd_watch(args):
         if lk.get("state") in ("IDLE", f"AWAITING_{agent.upper()}"):
             prompt = f"python3 m8shift.py next {agent}"
         blocked = row.get("no_progress_status") == "blocked"
+        notify_result = None
+        event = watch_notification_event(lk, agent, prompt, blocked)
+        if event and not args.json and not args.no_notify:
+            notify_result = emit_notification(
+                agent, event,
+                row.get("no_progress_hint") if event == "blocked" else (prompt or lk.get("state", "")),
+                prompt=prompt,
+                state=lk.get("state", ""),
+                holder=lk.get("holder", ""),
+            )
         if args.json:
             print(json.dumps({
                 "presence": row,
@@ -831,11 +1230,112 @@ def cmd_watch(args):
                 print(f"{finding['severity']} {finding['check']}: {finding['message']}")
                 if finding.get("hint"):
                     print(f"hint: {finding['hint']}")
+            if notify_result:
+                for finding in notify_result.get("findings", []):
+                    print(f"{finding['severity']} {finding['check']}: {finding['message']}")
         if blocked:
             return 2
         if args.once:
             return 0
         time.sleep(args.interval)
+
+
+def cmd_notify(args):
+    if args.target == "config":
+        return cmd_notify_config(args)
+    return cmd_notify_event(args)
+
+
+def cmd_notify_config(args):
+    raw, err = read_json_diagnostic(NOTIFY_CONFIG, {})
+    config, findings = normalize_notify_config(raw)
+    if err:
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.notify_config",
+            "message": f"{os.path.relpath(NOTIFY_CONFIG, HERE)}: {err}",
+        })
+    changed = False
+    if args.enable:
+        tiers = split_csv(args.enable)
+        unknown = [t for t in tiers if t not in NOTIFY_TIERS]
+        if unknown:
+            sys.exit(f"m8shift-runtime: unknown notify tier(s): {', '.join(sorted(unknown))}")
+        if "stdout" not in tiers:
+            tiers.insert(0, "stdout")
+        config["tiers"] = tiers
+        changed = True
+    if args.os_preset:
+        config["os_preset"] = args.os_preset
+        changed = True
+    if args.hook_argv is not None and args.hook_json:
+        sys.exit("m8shift-runtime: use either --hook-argv or --hook-json, not both")
+    if args.hook_argv is not None:
+        if not args.hook_argv:
+            sys.exit("m8shift-runtime: --hook-argv requires at least one argv item")
+        config["hook"] = args.hook_argv
+        changed = True
+    if args.hook_json:
+        try:
+            hook = json.loads(args.hook_json)
+        except json.JSONDecodeError as e:
+            sys.exit(f"m8shift-runtime: invalid --hook-json: {e}")
+        if not isinstance(hook, list) or not all(isinstance(item, str) and item for item in hook):
+            sys.exit("m8shift-runtime: --hook-json must be a JSON array of non-empty strings")
+        config["hook"] = hook
+        changed = True
+    if args.dedup_window_seconds is not None:
+        if args.dedup_window_seconds < 0:
+            sys.exit("m8shift-runtime: --dedup-window-seconds must be >= 0")
+        config["dedup_window_seconds"] = args.dedup_window_seconds
+        changed = True
+    config, post_findings = normalize_notify_config(config)
+    findings.extend(post_findings)
+    if changed:
+        ensure_runtime_dirs()
+        atomic_write_json(NOTIFY_CONFIG, config)
+        ensure_runtime_gitignore()
+    payload = {
+        "config": config,
+        "config_path": os.path.relpath(NOTIFY_CONFIG, HERE),
+        "findings": findings,
+        "runtime_version": VERSION,
+        "written": changed,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    print(json.dumps(config, ensure_ascii=False, sort_keys=True, indent=2))
+    for finding in findings:
+        print(f"{finding['severity']} {finding['check']}: {finding['message']}")
+    return 0
+
+
+def cmd_notify_event(args):
+    core = load_core()
+    agent = validate_agent(core, args.target)
+    if not args.event:
+        sys.exit("m8shift-runtime: notify requires --event")
+    if args.event not in NOTIFY_EVENTS:
+        sys.exit(f"m8shift-runtime: invalid notify event {args.event!r}")
+    _, lk = load_status(core)
+    prompt = read_prompt_source(args.prompt_file) or default_resume_prompt(agent, args.event)
+    message = args.message or prompt or args.event
+    result = emit_notification(
+        agent, args.event, message,
+        prompt=prompt,
+        state=lk.get("state", ""),
+        holder=lk.get("holder", ""),
+        json_output=args.json,
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        if result.get("suppressed"):
+            print(f"notify suppressed: {result['suppressed']}")
+        for finding in result.get("findings", []):
+            print(f"{finding['severity']} {finding['check']}: {finding['message']}")
+    return 0
 
 
 def idempotency_seen(key):
@@ -975,6 +1475,8 @@ def cmd_runtime_init(args):
         created.append(".m8shift/providers.json")
     if write_json_if_missing(PRESENCE, {}, args.force):
         created.append(".m8shift/runtime/presence.json")
+    if write_json_if_missing(NOTIFY_CONFIG, default_notify_config(), args.force):
+        created.append(".m8shift/runtime/notify.config.json")
     for path, label in (
         (RUNS, ".m8shift/runtime/runs.jsonl"),
         (PROGRESS, ".m8shift/runtime/progress.jsonl"),
@@ -1189,6 +1691,8 @@ def cmd_report(args):
 
 def runtime_ledger_paths():
     paths = [RUNS, PROGRESS, IDEMPOTENCY, APPROVALS]
+    if os.path.exists(NOTIFY_LOG):
+        paths.append(NOTIFY_LOG)
     if os.path.isdir(INBOX_DIR):
         for name in sorted(os.listdir(INBOX_DIR)):
             if name.endswith(".jsonl"):
@@ -1779,6 +2283,17 @@ def cmd_doctor(args):
             "check": "runtime.gitignore",
             "message": ".m8shift/runtime exists but .m8shift/ is not gitignored",
         })
+    notify_config, notify_findings = load_notify_config()
+    findings.extend(notify_findings)
+    if "os" in notify_config.get("tiers", []):
+        argv, exe = os_notify_argv(notify_config.get("os_preset", "auto"), "turn-ready", "test")
+        if argv and ((os.path.isabs(argv[0]) and not os.path.exists(argv[0]))
+                     or (not os.path.isabs(argv[0]) and shutil.which(argv[0]) is None)):
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.notify_os",
+                "message": f"OS notifier {exe or argv[0]!r} is enabled but not found on PATH",
+            })
     presence, err = read_json_diagnostic(PRESENCE, {})
     if err:
         findings.append({"severity": "warning", "check": "runtime.json", "message": f"{os.path.relpath(PRESENCE, HERE)}: {err}"})
@@ -1872,8 +2387,27 @@ def main():
     w.add_argument("--takeover-stale", action="store_true",
                    help="explicitly take over a different session only when its lane is stale")
     w.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
+    w.add_argument("--no-notify", action="store_true",
+                   help="do not emit local notifications from this watch loop")
     w.add_argument("--json", action="store_true")
     w.set_defaults(fn=cmd_watch)
+
+    nt = sub.add_parser("notify", help="one-shot local notification or notification config")
+    nt.add_argument("target", help="agent name, or 'config' for notification settings")
+    nt.add_argument("--event", choices=tuple(sorted(NOTIFY_EVENTS)), default="")
+    nt.add_argument("--message", default="")
+    nt.add_argument("--prompt-file", default="", help="read exact resume prompt from file")
+    nt.add_argument("--enable", default="", help="config: comma-separated tiers stdout,file,bell,os,hook")
+    nt.add_argument("--os-preset", default="", help="config: auto, off, osascript, notify-send, powershell, or executable")
+    nt.add_argument("--hook-argv", nargs="+", default=None,
+                    help="config: argv list for hook tier; placeholders must be literal argv items")
+    nt.add_argument("--hook-json", default="",
+                    help="config: JSON argv array for hook tier, useful for argv items beginning with '-'")
+    nt.add_argument("--dedup-window-seconds", type=int, default=None,
+                    help="config: duplicate suppression window in seconds")
+    nt.add_argument("--show", action="store_true", help="config: show effective config")
+    nt.add_argument("--json", action="store_true")
+    nt.set_defaults(fn=cmd_notify)
 
     op = sub.add_parser("operator", help="queue an operator message for one agent lane")
     op.add_argument("agent")

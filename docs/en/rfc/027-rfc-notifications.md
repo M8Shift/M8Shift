@@ -1,6 +1,6 @@
 # RFC — Local notification mechanisms
 
-**Status:** design finalized (this RFC) · implementation tracked in #46 · **Source:** deferred from [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md) · **Answers:** the notification open question in [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md) (§watch, open question 2)
+**Status:** implemented in v3.32.0 (#46) · **Source:** deferred from [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md) · **Answers:** the notification open question in [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md) (§watch, open question 2)
 
 ## Scope
 
@@ -119,6 +119,21 @@ python3 m8shift-runtime.py notify config --show
 `watch <agent>` (RFC 009) calls the same `notify` path internally on each transition, so
 interactive and headless flows share one notification code path.
 
+Implementation notes:
+
+- Notification state is companion-only and lives under `.m8shift/runtime/notify/` plus
+  `.m8shift/runtime/notify.config.json`; deleting the directory loses only notifications.
+- `notify config --enable stdout` is the minimal stdout-only mode. Default config is
+  `stdout,file` in headless/CI and `stdout,file,bell` on an interactive TTY.
+- Tier-3 OS presets and tier-4 hooks are opt-in. They run with `subprocess.run(argv,
+  shell=False)` and degrade to stdout/file warnings; they never block or mutate the relay.
+- Hook placeholders are replaced only when they are complete argv items (`{agent}`,
+  `{event}`, `{state}`), not when embedded in a larger string.
+- Hook configuration accepts either `--hook-argv ...` for simple argv lists or
+  `--hook-json '["prog","-flag","{agent}"]'` when argv items start with `-`.
+- Duplicate `(agent, event)` notifications are suppressed for
+  `dedup_window_seconds` (300 by default) and audited in `notify/log.jsonl`.
+
 ## Defaults
 
 - **Headless / CI** (`not isatty()` or `CI` set): tiers 0 + 1 only. Bell, OS, and hook
@@ -162,17 +177,17 @@ that could spam an operator):
 
 ## Acceptance criteria
 
-- With only `stdout` enabled, `notify` prints the event and writes nothing else; the
+- ✅ With only `stdout` enabled, `notify` prints the event and writes nothing else; the
   relay is unchanged.
-- On a non-TTY / CI runtime, `bell`, `os`, and `hook` are auto-suppressed.
-- An `os` preset whose binary is absent produces a single warning and a tier 0–1
+- ✅ On a non-TTY / CI runtime, `bell`, `os`, and `hook` are auto-suppressed.
+- ✅ An `os` preset whose binary is absent produces a single warning and a tier 0–1
   fallback, never a non-zero relay-affecting error.
-- A configured hook that exits non-zero is logged and does not block or alter the turn.
-- Deleting `.m8shift/runtime/notify/` loses only notifications; the relay log and `LOCK`
+- ✅ A configured hook that exits non-zero is logged and does not block or alter the turn.
+- ✅ Deleting `.m8shift/runtime/notify/` loses only notifications; the relay log and `LOCK`
   are intact.
-- Two identical `(agent, event)` notifications inside `dedup_window_seconds` produce one
+- ✅ Two identical `(agent, event)` notifications inside `dedup_window_seconds` produce one
   delivered notification.
-- No notification path calls a core mutating command or makes a forbidden transition
+- ✅ No notification path calls a core mutating command or makes a forbidden transition
   legal.
 
 ## Resolved questions

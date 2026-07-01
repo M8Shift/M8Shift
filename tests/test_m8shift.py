@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.31.0"
+VERSION = "3.32.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -3720,6 +3720,14 @@ class TestRuntimeCompanion(CLIBase):
             cwd=self.d, capture_output=True, text=True,
         )
 
+    def rt_env(self, env_overrides, *args):
+        env = os.environ.copy()
+        env.update(env_overrides)
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", *args],
+            cwd=self.d, env=env, capture_output=True, text=True,
+        )
+
     def test_watch_operator_progress_and_status_runtime(self):
         self.init()
         before = self.md()
@@ -3972,6 +3980,141 @@ class TestRuntimeCompanion(CLIBase):
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as fh:
             events = [json.loads(line) for line in fh if line.strip()]
         self.assertIn("headroom.checkpoint", {row.get("event") for row in events})
+
+    def test_notify_stdout_only_prints_and_keeps_relay_unchanged(self):
+        self.init()
+        before = self.md()
+        cfg = self.rt("notify", "config", "--enable", "stdout", "--json")
+        self.assertEqual(cfg.returncode, 0, cfg.stderr)
+        self.assertEqual(json.loads(cfg.stdout)["config"]["tiers"], ["stdout"])
+
+        r = self.rt("notify", "codex", "--event", "turn-ready", "--message", "codex is ready")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("notify turn-ready codex: codex is ready", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "notify")))
+        self.assertEqual(self.md(), before)
+
+    def test_notify_writes_prompt_event_log_and_deduplicates(self):
+        self.init()
+        before = self.md()
+        first = self.rt("notify", "codex", "--event", "turn-ready", "--message", "ready", "--json")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        payload = json.loads(first.stdout)
+        self.assertTrue(payload["delivered"])
+        self.assertIn("file", payload["tiers"])
+        prompt = os.path.join(self.d, ".m8shift", "runtime", "notify", "codex.prompt")
+        event = os.path.join(self.d, ".m8shift", "runtime", "notify", "codex.event.json")
+        log = os.path.join(self.d, ".m8shift", "runtime", "notify", "log.jsonl")
+        self.assertTrue(os.path.exists(prompt))
+        self.assertTrue(os.path.exists(event))
+        with open(prompt, encoding="utf-8") as fh:
+            self.assertIn("python3 m8shift.py next codex", fh.read())
+
+        second = self.rt("notify", "codex", "--event", "turn-ready", "--message", "ready", "--json")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(second.stdout)["suppressed"], "dedup")
+        with open(log, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(sum(1 for row in rows if row["type"] == "notify.delivered"), 1)
+        self.assertEqual(sum(1 for row in rows if row["type"] == "notify.suppressed"), 1)
+        self.assertEqual(self.md(), before)
+
+    def test_notify_ci_suppresses_bell_os_and_hook(self):
+        self.init()
+        marker = os.path.join(self.d, "hook-ran.txt")
+        hook = os.path.join(self.d, "notify_hook.py")
+        with open(hook, "w", encoding="utf-8") as fh:
+            fh.write("import sys, pathlib\npathlib.Path(sys.argv[1]).write_text('ran')\n")
+        cfg = self.rt(
+            "notify", "config",
+            "--enable", "stdout,file,bell,os,hook",
+            "--os-preset", "definitely-missing-m8shift-notifier",
+            "--hook-argv", sys.executable, hook, marker,
+            "--json",
+        )
+        self.assertEqual(cfg.returncode, 0, cfg.stderr)
+        r = self.rt_env(
+            {"CI": "1"},
+            "notify", "codex", "--event", "blocked", "--message", "blocked", "--json",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertIn("bell", payload["skipped"])
+        self.assertIn("os", payload["skipped"])
+        self.assertIn("hook", payload["skipped"])
+        self.assertFalse(os.path.exists(marker))
+
+    def test_notify_missing_os_binary_warns_and_falls_back(self):
+        self.init()
+        cfg = self.rt(
+            "notify", "config",
+            "--enable", "stdout,file,os",
+            "--os-preset", "definitely-missing-m8shift-notifier",
+            "--json",
+        )
+        self.assertEqual(cfg.returncode, 0, cfg.stderr)
+        r = self.rt("notify", "codex", "--event", "stale", "--message", "stale", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertIn("stdout", payload["tiers"])
+        self.assertIn("file", payload["tiers"])
+        self.assertIn("runtime.notify_os", {f["check"] for f in payload["findings"]})
+        doctor = json.loads(self.rt("doctor", "--json").stdout)
+        self.assertIn("runtime.notify_os", {f["check"] for f in doctor["findings"]})
+
+    def test_notify_hook_nonzero_is_logged_and_nonblocking(self):
+        self.init()
+        cfg = self.rt(
+            "notify", "config",
+            "--enable", "stdout,file,hook",
+            "--hook-json", json.dumps([sys.executable, "-c", "import sys; sys.exit(7)"]),
+            "--json",
+        )
+        self.assertEqual(cfg.returncode, 0, cfg.stderr)
+        r = self.rt("notify", "codex", "--event", "done", "--message", "done", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertIn("runtime.notify_hook", {f["check"] for f in payload["findings"]})
+        with open(os.path.join(self.d, ".m8shift", "runtime", "notify", "log.jsonl"), encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        delivered = [row for row in rows if row.get("type") == "notify.delivered"]
+        self.assertTrue(delivered)
+        self.assertIn("runtime.notify_hook", {f["check"] for f in delivered[-1]["payload"]["findings"]})
+
+    def test_notify_hook_placeholders_are_literal_argv_items(self):
+        self.init()
+        argv_file = os.path.join(self.d, "argv.json")
+        hook = os.path.join(self.d, "argv_hook.py")
+        with open(hook, "w", encoding="utf-8") as fh:
+            fh.write("import json, sys\nopen(sys.argv[1], 'w').write(json.dumps(sys.argv[2:]))\n")
+        cfg = self.rt(
+            "notify", "config",
+            "--enable", "stdout,file,hook",
+            "--hook-argv", sys.executable, hook, argv_file,
+            "{agent}", "{event}", "{state}", "prefix-{agent}", "x;y",
+            "--json",
+        )
+        self.assertEqual(cfg.returncode, 0, cfg.stderr)
+        self.assertIn("runtime.notify_hook", {f["check"] for f in json.loads(cfg.stdout)["findings"]})
+        r = self.rt("notify", "codex", "--event", "turn-ready", "--message", "ready", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(argv_file, encoding="utf-8") as fh:
+            argv = json.load(fh)
+        self.assertEqual(argv[:3], ["codex", "turn-ready", self.lock()["state"]])
+        self.assertIn("prefix-{agent}", argv)
+        self.assertIn("x;y", argv)
+
+    def test_deleting_notify_sidecars_loses_only_notifications(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("notify", "codex", "--event", "turn-ready", "--message", "ready").returncode, 0)
+        notify_dir = os.path.join(self.d, ".m8shift", "runtime", "notify")
+        self.assertTrue(os.path.isdir(notify_dir))
+        shutil.rmtree(notify_dir)
+        status = self.rt("status-runtime", "codex", "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["runtime_findings"], [])
+        self.assertEqual(self.md(), before)
 
     def test_runtime_retention_prunes_and_archives_ledgers_without_core_mutation(self):
         self.init()
@@ -4226,6 +4369,7 @@ class TestRuntimeCompanion(CLIBase):
         created = json.loads(r.stdout)["created"]
         self.assertIn(".m8shift/providers.json", created)
         self.assertIn(".m8shift/runtime/presence.json", created)
+        self.assertIn(".m8shift/runtime/notify.config.json", created)
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl")))
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "inbox")))
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "roles", "implementer.md")))
