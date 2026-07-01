@@ -1,6 +1,6 @@
 # RFC — Runtime sidecar retention and archive policy
 
-**Status:** baseline implemented · policy draft remains open · **Source:** deferred from
+**Status:** baseline implemented · policy design finalized (this RFC) · implementation tracked in #45 · **Source:** deferred from
 [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md)
 
 ## Scope
@@ -32,18 +32,77 @@ The command:
 This is intentionally not a full policy engine. It is a manual/operator command
 for bounded local sidecars.
 
-## Open design question
+## Policy design (finalized)
 
-Should retention be fixed-count, age-based, explicit archive-only, or a combination?
+The baseline stays as the manual, always-available command. On top of it, RFC 026 adds an **opt-in,
+operator-owned policy** that a new `retention apply` evaluates. The policy is advisory, stdlib-only,
+**no daemon** (a one-shot command the operator runs, or wires into their own scheduler / the runtime
+`watch` loop), no network, and it **never** touches the core.
 
-Subquestions:
+### Manifest — `.m8shift/runtime/retention.json` (gitignored, host-local)
 
-- Which files are safe to prune automatically, and which require explicit operator action?
-- Should pruning preserve a compact summary before deleting raw rows?
-- How should retention interact with session reports and project memory?
-- Should retention be disabled by default until the operator opts in?
+Schema `m8shift.runtime.retention.v1`. Ships as an example and is **disabled by default**
+(`enabled: false`), so nothing prunes automatically until the operator opts in.
 
-## Non-goal
+```json
+{
+  "schema": "m8shift.runtime.retention.v1",
+  "enabled": false,
+  "default": {"strategy": "fixed-count", "keep": 1000, "archive": true},
+  "ledgers": {
+    "runs.jsonl":        {"strategy": "fixed-count", "keep": 2000, "archive": true},
+    "progress.jsonl":    {"strategy": "age",      "max_age_days": 14, "archive": true},
+    "idempotency.jsonl": {"strategy": "combined", "keep": 500, "max_age_days": 30, "archive": false},
+    "inbox/*.jsonl":     {"strategy": "fixed-count", "keep": 200, "archive": true}
+  }
+}
+```
 
-Never prune `M8SHIFT.md` through runtime retention. Core archive remains the only mechanism for the
-relay journal.
+### Strategies
+
+- **`fixed-count`** — keep the newest `keep` rows; prune the rest (the shipped baseline, now
+  expressible per-ledger).
+- **`age`** — keep rows whose timestamp is newer than `max_age_days`; prune older. A row whose
+  timestamp is missing or unparseable is **never pruned by age** (fail-safe: never delete what you
+  cannot date) and is reported.
+- **`combined`** — keep a row if it is **either** within the newest `keep` rows **or** newer than
+  `max_age_days` (a union — the safe interpretation; never over-prunes). At least the newest `keep`
+  always survive.
+
+### Command surface (additions; baseline unchanged)
+
+```bash
+python3 m8shift-runtime.py retention prune --keep N               # shipped baseline (unchanged)
+python3 m8shift-runtime.py retention apply [--dry-run] [--json]   # evaluate the manifest policy
+python3 m8shift-runtime.py retention policy show [--json]         # print the effective policy
+```
+
+- `retention apply` reads the manifest; if it is absent or `enabled:false`, it does nothing and says
+  so (the baseline manual command remains the way to prune without a policy).
+- `--dry-run` prints what each ledger would prune/archive, changing nothing.
+- Malformed JSONL in a ledger is reported and that ledger is left untouched (baseline behavior).
+
+### Archive + audit
+
+Archiving keeps pruned rows under `.m8shift/runtime/archive/` (baseline). `retention apply` also
+appends one compact audit row per pruned ledger to `.m8shift/runtime/archive/index.jsonl`
+(`{ledger, strategy, pruned, kept, oldest_ts, newest_ts, archived_at}`) — this is the "compact
+summary before deleting raw rows." `--no-archive` (baseline flag) discards instead of archiving.
+
+## Resolved subquestions
+
+- **Which files auto-prunable vs explicit?** Only the `.m8shift/runtime/` JSONL ledgers named in the
+  manifest, and only when `enabled:true` **and** the operator runs `retention apply`. Nothing prunes
+  on its own.
+- **Preserve a compact summary before deleting?** Yes — the archive keeps the raw rows and
+  `archive/index.jsonl` records a per-apply summary.
+- **Interaction with session reports and project memory?** None — retention touches only runtime
+  sidecars. Session reports, project memory, and `M8SHIFT.md` are out of scope and never pruned.
+- **Disabled by default?** Yes — `enabled:false` ships; the policy engine is strictly opt-in.
+
+## Non-goals
+
+- **Never** prune `M8SHIFT.md`, the core turn log, the `LOCK`, session reports, or project memory
+  through runtime retention. Core archive remains the only mechanism for the relay journal.
+- **No daemon / no background pruning.** `retention apply` is a one-shot operator command; M8Shift
+  never spawns a retention process, and it never requires the network.
