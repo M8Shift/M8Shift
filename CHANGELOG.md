@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.28.1 — 2026-07-01
+
+Release scope:
+
+- #72 — Hardened the `commit-msg` hook fail-open guarantee: a non-UTF-8
+  `COMMIT_EDITMSG` now exits 0 and leaves the message unchanged instead of
+  aborting the commit.
+
+Validation:
+
+- Added a regression test with a Latin-1 commit message byte.
+- Lockstep version surfaces bumped from `3.28.0` to `3.28.1` across distributed
+  scripts and tests.
+
 ## v3.28.0 — 2026-07-01
 
 Release scope:
