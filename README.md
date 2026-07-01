@@ -244,7 +244,7 @@ published site, or use the repository-local docs when working from a clone.
 | 024 | [Doctor split](docs/en/rfc/024-rfc-doctor-split.md) | Split core doctor vs companion diagnostics | baseline impl. | v3.27.0 · 2026-06-26 | core doctor owns relay hygiene; runtime doctor owns sidecar diagnostics |
 | 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | Runtime status over core + sidecars | baseline impl. | v3.27.0 · 2026-06-26 | `status-runtime [--brief] [--json]`; JSON contract remains separate |
 | 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | Bound / prune runtime sidecar ledgers | baseline impl. · policy draft | v3.26.0 · 2026-06-26 | baseline `retention prune --keep N`; policy still draft |
-| 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | Local notifications for handoffs / stale turns | draft | — | deferred from RFC 010 |
+| 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | Local notifications for handoffs / stale turns | shipped | v3.32.0 · 2026-07-01 | `m8shift-runtime.py notify`, stdout/file/bell/OS/hook tiers |
 | 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | Safe headless command templates | draft | — | deferred from RFC 010 |
 | 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | Richer companion workboard outside core | draft | — | deferred from RFC 010 |
 | 030 | [Tamper evidence](docs/en/rfc/030-rfc-tamper-evidence.md) | Hash-chain tamper-evidence for relay records | draft | — | detection/warning only; git remains the strong anchor |
@@ -401,6 +401,7 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 | Local integration layer | ✅ Shipped | installers, checksums, version surfaces, `examples/headless_runner.py`, `m8shift-runtime.py` | local convenience layer; no provider SDK in the core |
 | Degree-2 parallel work | ✅ Shipped, opt-in | [`m8shift-worktree.py`](docs/en/rfc/008-rfc-worktree-companion.md) | isolated git worktrees; serialized integration pen; core remains degree-1 |
 | Provider/runtime companion | ✅ Shipped v1 | `m8shift-runtime.py init/providers/roles/workflows/approve/report` | host-side config and reports; no secrets, no second routing authority |
+| Local notifications | ✅ Shipped | `m8shift-runtime.py notify`, `watch` notification path | stdout/file/bell/OS/hook tiers; advisory only, no daemon, no network in M8Shift |
 | `subturn` provenance ledger | ❌ Rejected | [rationale](docs/en/rfc/007-rfc-subturn.md) | redundant with advisory fields and `remember` |
 | Hosted control plane / IDE integrations | 🔭 Future companion | [RFC](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | optional layer outside the passive core |
 
