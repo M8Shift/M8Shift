@@ -1,6 +1,6 @@
 # RFC 034 — Companion Adapter Interface and native context companion
 
-- **Status:** Phase 1 + Phase 2 implemented; RTK default-if-pinned shipped in v3.34.0 (#76)
+- **Status:** Phase 1 + Phase 2 implemented; RTK default-if-pinned shipped in v3.34.0 (#76); corrupt-manifest auto fallback shipped in v3.34.1
 - **Date:** 2026-06-30
 - **Scope:** optional companion interface for context tools around M8Shift, with a first
   stdlib-only native context companion.
@@ -235,6 +235,11 @@ when `rtk` is present **and** the manifest is identity-pinned
 (`trusted_executable.path` + SHA-256). If RTK is absent, unpinned, or invalid, the
 pack silently degrades to the native stdlib path. Operators can opt out explicitly
 with `pack --adapter native` / `--no-rtk`.
+
+Since v3.34.1, automatic adapter selection also treats a corrupt, unreadable, or
+non-object on-disk RTK manifest as a diagnostic error finding and degrades to the
+native pack path. Explicit operator selection remains fail-closed: `pack
+--adapter rtk-shell-output` aborts on corrupt or invalid manifests.
 
 The RTK manifest recommends `err`, `test`, `log`, and `ls` for noisy shell output,
 and forbids `git-diff` for code review because Round 2 measurements showed it

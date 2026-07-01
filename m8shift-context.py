@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.34.0"
+VERSION = "3.34.1"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -805,6 +805,22 @@ def load_adapter(root, name):
     return data
 
 
+def load_adapter_for_auto(root, name):
+    path = adapter_path(root, name)
+    if not os.path.exists(path):
+        if name in DEFAULT_ADAPTERS:
+            return DEFAULT_ADAPTERS[name], []
+        return None, [finding("error", "adapter.missing", f"adapter manifest not found: {name}")]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        return None, [finding("error", "adapter.manifest_unreadable", f"{name}: cannot read adapter manifest: {e}")]
+    if not isinstance(data, dict):
+        return None, [finding("error", "adapter.schema", f"{name}: manifest is not a JSON object")]
+    return data, []
+
+
 def adapter_identity_for_program(program):
     resolved = shutil_which(program)
     if not resolved:
@@ -1087,12 +1103,24 @@ def select_context_adapter(root, args):
     choice = getattr(args, "adapter", "auto") or "auto"
     if choice == "native":
         return {"selected": "native", "manifest": None, "reason": "operator opt-out"}
-    manifest = load_adapter(root, "rtk-shell-output")
+    if choice == "rtk-shell-output":
+        manifest = load_adapter(root, "rtk-shell-output")
+        findings = adapter_findings(manifest)
+        errors = [row for row in findings if row["severity"] == "error"]
+        if errors:
+            die("; ".join(row["message"] for row in errors))
+        return {"selected": "rtk-shell-output", "manifest": manifest, "reason": "operator-selected adapter"}
+    manifest, findings = load_adapter_for_auto(root, "rtk-shell-output")
+    if findings or manifest is None:
+        return {
+            "selected": "native",
+            "manifest": None,
+            "reason": "rtk manifest invalid; native fallback",
+            "findings": findings,
+        }
     findings = adapter_findings(manifest)
     errors = [row for row in findings if row["severity"] == "error"]
     if errors:
-        if choice == "rtk-shell-output":
-            die("; ".join(row["message"] for row in errors))
         return {
             "selected": "native",
             "manifest": None,
