@@ -52,3 +52,7 @@ assignees: []
 ## 🧾 Decision log
 
 > _Record decisions, agreements, and disagreements here as the task progresses, using the shape in **`docs/decisions/DECISION_TEMPLATE.md`** (Decision · Context · Options · Positions FOR/AGAINST · Divergence · Resolution · Trace). Keep **Divergence** explicit even on consensus. Close the ticket with the wrap-up in **`docs/en/issue-lifecycle.md`**._
+
+## 🏷️ Provenance
+
+> _Filled as work lands (and at close): the **M8Shift version** used (`m8shift.py --version` / the `Coordinated-With` trailer) and the **agent model-versions** that worked (the `Agent-Model` trailers), e.g. `claude-opus-4-8` · `gpt-5-codex`._

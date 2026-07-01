@@ -313,8 +313,12 @@ Every issue follows the same shape, so any agent can pick it up cold:
 `Task` create template — under [`.gitea/issue_template/`](../../.gitea/issue_template/) (Forgejo,
 priority), [`.github/ISSUE_TEMPLATE/`](../../.github/ISSUE_TEMPLATE/) (GitHub), and
 [`.gitlab/issue_templates/`](../../.gitlab/issue_templates/) (GitLab) — so the shape (Goal · Context
-· Scope · Acceptance · Charter · Roles · Workflow · RFC · Decision-log) is filled from the start. The
-full open → decide → close convention is [`issue-lifecycle.md`](issue-lifecycle.md).
+· Scope · Acceptance · Charter · Roles · Workflow · RFC · Decision-log · **Provenance**) is filled from
+the start. The **Provenance** section (and the close/decision templates) records **which M8Shift
+version** (`m8shift.py --version` / `Coordinated-With`) and **which agent model-versions**
+(`Agent-Model`) produced the work — so a ticket shows not just *what* changed but *with which engine
+and which models*. The full open → decide → close convention is
+[`issue-lifecycle.md`](issue-lifecycle.md).
 
 > [!TIP]
 > **Log decisions as you work.** The issue (or the GitHub/forge ticket) is the running

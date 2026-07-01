@@ -4,6 +4,8 @@
 - Traceability target: md | git | forge | github | both
 - Source journal: M8SHIFT session `<session-id>`
 - Source turns: #...
+- M8Shift version: `vX.Y.Z` (`m8shift.py --version`)
+- Agents (models): `claude-opus-4-8` · `gpt-5-codex` (the `Agent-Model` trailers)
 
 ## Decision
 
