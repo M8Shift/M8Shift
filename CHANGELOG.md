@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.35.0 — 2026-07-01
+
+Release scope:
+
+- #59 Phase 1 — Added advisory-only model/task routing recommendations in
+  `m8shift-runtime.py route recommend`.
+- Added empty, provider-neutral `.m8shift/routing/models.json` and
+  `.m8shift/routing/skills.json` manifests during runtime init; no vendor list,
+  no bundled prices, no launch path.
+- Selection is capability-first: task floor, required capabilities, and context
+  gates are hard filters; cost is minimized only among eligible models and
+  latency breaks ties.
+- Unknown task types, missing manifests, and no eligible model fail safe to the
+  pen-holder/self path, or report no delegation recommendation when no self model
+  is known.
+- Runtime `doctor` validates routing manifests.
+
+Validation:
+
+- Added tests for missing manifests, cheapest eligible selection, floor
+  preservation, self fail-safe, adversarial-verify pinning, and doctor manifest
+  errors.
+- Lockstep version surfaces bumped from `3.34.2` to `3.35.0` across distributed
+  scripts and tests.
+
 ## v3.34.2 — 2026-07-01
 
 Release scope:

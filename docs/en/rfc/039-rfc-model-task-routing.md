@@ -1,6 +1,6 @@
 # RFC 039 — CLI agent launching + model / task-type cost routing
 
-- **Status:** draft (authored by Claude; Codex-reviewed, stabilized)
+- **Status:** Phase 1 implemented in v3.35.0 (#59): `route recommend` advisory-only; `route delegate` remains future
 - **Builds on:** [032-rfc-tiered-delegation.md](032-rfc-tiered-delegation.md) (the delegation charter this operationalizes), [014-rfc-provider-management.md](014-rfc-provider-management.md) (provider registry + capability vocabulary + `providers render`), [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md) + [020-rfc-headless-runner-hardening.md](020-rfc-headless-runner-hardening.md) (safe argv launch), [018-rfc-agent-runtime-architecture.md](018-rfc-agent-runtime-architecture.md) (roles / agent registry / run ledger), [008-rfc-worktree-companion.md](008-rfc-worktree-companion.md) (degree-2 isolation), [034-rfc-companion-adapter-interface.md](034-rfc-companion-adapter-interface.md) (hardened subprocess runner), [031-rfc-decision-traceability.md](031-rfc-decision-traceability.md) (decision record), [040-rfc-ai-session-usage-monitoring.md](040-rfc-ai-session-usage-monitoring.md) (usage/cooldown — the orthogonal cost axis).
 - **Core invariant:** routing is an **advisory, degree-2 companion**. The passive, stdlib-only, degree-1 core (`m8shift.py`, the `LOCK`, `M8SHIFT.md`) never learns a model name, never scores a provider, and never gates `claim`/`append` on routing metadata. Removing `.m8shift/routing/` loses only recommendations, never the relay or its journal.
 
@@ -244,8 +244,9 @@ any new subprocess path before merge.
 5. **Fail-safe identity**: resolved in §8 step 3 — strict precedence (runtime-lane verified `Agent-Model`
    → explicit `--self` → unique RFC 014 binding → else refuse and hand to the human). The companion never
    guesses a default/cheap model.
-6. **Manifest lint**: `route recommend` **warns** on a floor referencing an unreachable tier/model;
-   `route delegate` **hard-fails**; `doctor` reports it (warning by default, error under `--strict`).
+6. **Manifest lint**: unresolved tier/model references are manifest errors in
+   Phase 1; `route recommend` returns a read-only error and `doctor` reports it.
+   Future `route delegate` must also hard-fail before any launch.
 7. **RFC 040 interaction**: skip a cooled-down model **only if** the next eligible candidate still clears
    the floor/capability/context gates; if all eligible candidates are cooling down, recommend cooldown/wait
    or the self/manual path — never drop below the floor.

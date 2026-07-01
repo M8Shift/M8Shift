@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "3.34.2"
+VERSION = "3.35.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 LIVE_ENV = "M8SHIFT_LIVE_E2E"      # truthy => attempt Tier B
