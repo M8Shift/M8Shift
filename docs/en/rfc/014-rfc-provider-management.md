@@ -73,6 +73,32 @@ The shipped companion uses a stdlib-friendly JSON registry at
 
 This file is not a core protocol file. It is host/runtime configuration.
 
+Since v3.33.0 / RFC 028, generated registries may also include an opt-in
+`examples` section with curated cooperative CLI samples and optional
+`argv_by_platform` arrays:
+
+```json
+{
+  "examples": [
+    {
+      "//": "Opt-in sample; copy into agents and adapt locally before running.",
+      "name": "claude",
+      "provider": "anthropic-claude",
+      "mode": "headless",
+      "argv": ["claude", "-p", "$M8SHIFT_PROMPT"],
+      "argv_by_platform": {
+        "default": ["claude", "-p", "$M8SHIFT_PROMPT"],
+        "win32": ["claude.cmd", "-p", "$M8SHIFT_PROMPT"]
+      },
+      "env_allowlist": ["HOME", "PATH", "M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID"]
+    }
+  ]
+}
+```
+
+Examples are not active launchers. Operators copy/adapt them into `agents` when
+they explicitly opt in to a local headless CLI setup.
+
 ## 6. Adapter contract
 
 Each adapter should answer:
@@ -183,6 +209,11 @@ python3 m8shift-runtime.py providers render <agent> --prompt "..." [--run RUN] [
 
 `render` substitutes only explicit placeholders such as `$M8SHIFT_PROMPT` inside
 argv elements. It never evaluates a shell string.
+
+`render` also supports RFC 028 `argv_by_platform` maps: it selects the current
+`sys.platform` entry, a platform-family fallback, or `default`, then performs the
+same literal marker substitution. Platform differences are always separate argv
+arrays, never shell conditionals.
 
 ## 14. Open questions
 
