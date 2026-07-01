@@ -313,7 +313,8 @@ python3 m8shift.py cooldown \
   --reason "claude primary window at 91%; wait for reset" \
   [--for claude] \
   [--source usage-monitor] \
-  [--wait-interval 300]
+  [--wait-interval 300] \
+  [--replace]
 ```
 
 ### Semantics
@@ -821,10 +822,13 @@ usage watch --apply
 
 ### Phase 4 — core cooldown command
 
+Status: shipped in core. The command is dependency-free and records only passive
+session events; provider adapters and automatic resume remain runtime companion work.
+
 Add:
 
 ```bash
-m8shift.py cooldown --until ISO --reason TEXT [--for AGENT] [--source SOURCE] [--wait-interval N]
+m8shift.py cooldown --until ISO --reason TEXT [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ```
 
 Acceptance requirement: remove `.m8shift/runtime/` and M8Shift still works.

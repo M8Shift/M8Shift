@@ -394,6 +394,7 @@ same metadata and serializes unavailable values as `null`.
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
@@ -4311,6 +4312,68 @@ def cmd_pause(args):
     return 0
 
 
+def cmd_cooldown(args):
+    reason = clean_field("--reason", args.reason)
+    if not reason:
+        sys.exit("refused: cooldown requires --reason.")
+    until_raw = clean_field("--until", args.until)
+    until = parse_iso(until_raw)
+    if until is None:
+        sys.exit("refused: cooldown requires --until as canonical UTC ISO timestamp (YYYY-MM-DDTHH:MM:SSZ).")
+    source = clean_field("--source", args.source) or "manual"
+    wait_interval = int(args.wait_interval)
+    if wait_interval < 1:
+        sys.exit("refused: cooldown requires --wait-interval >= 1.")
+
+    with file_lock() as guard:
+        text = load_or_die()
+        lk = get_lock(text)
+        st = lk.get("state", "")
+        _guard_integrating(args, lk, "cooldown")
+        resume_for = "any"
+        if args.for_agent:
+            resume_for = need_agent(args.for_agent)
+        if st.startswith("WORKING_") or st == "DONE":
+            sys.exit(f"refused: cannot start usage cooldown from state={st}.")
+        if st == "PAUSED" and not getattr(args, "replace", False):
+            sys.exit("refused: session is already PAUSED; use cooldown --replace to update a cooldown.")
+        if st not in ("IDLE", "PAUSED") and not st.startswith("AWAITING_"):
+            sys.exit(f"refused: cannot start usage cooldown from state={st}.")
+        if st.startswith("AWAITING_"):
+            awaited = st[len("AWAITING_"):].lower()
+            if args.for_agent and resume_for != awaited:
+                sys.exit(f"refused: --for {resume_for} does not match current awaiting agent {awaited}.")
+            if not args.for_agent:
+                resume_for = awaited
+
+        t = now()
+        session_id = lk.get("session")
+        lk.update(
+            holder="none",
+            state="PAUSED",
+            since=iso(t),
+            expires="-",
+            note=f"cooldown until {until_raw} for {resume_for}: {reason}",
+        )
+        guard.require_owned()
+        write(set_lock(text, lk))
+        if session_id:
+            guard.require_owned()
+            append_session_event(
+                "pause", session_id, timestamp=t,
+                kind="usage_cooldown",
+                until=until_raw,
+                resume_for=resume_for,
+                source=source,
+                recommended_wait_interval_seconds=wait_interval,
+                reason=reason,
+                previous_state=st,
+                turn=lk.get("turn", "0"),
+            )
+    print(f"✓ usage cooldown active until {until_raw} for {resume_for}; relay is PAUSED.")
+    return 0
+
+
 def cmd_resume(args):
     reason = clean_field("--reason", args.reason)
     if not reason:
@@ -4752,6 +4815,16 @@ def main():
     ps.add_argument("--reason", required=True,
                     help="why no agent should hold the pen until new user scope arrives")
     ps.set_defaults(fn=cmd_pause)
+
+    cd = sub.add_parser("cooldown", help="park an idle/awaiting relay for an external usage cooldown")
+    cd.add_argument("--until", required=True, help="cooldown end as YYYY-MM-DDTHH:MM:SSZ")
+    cd.add_argument("--reason", required=True, help="why the relay is cooling down")
+    cd.add_argument("--for", dest="for_agent", default="", help="agent to resume for; inferred from AWAITING_*")
+    cd.add_argument("--source", default="manual", help="cooldown source label (default: manual)")
+    cd.add_argument("--wait-interval", type=int, default=300,
+                    help="recommended quiet wait interval in seconds (default: 300)")
+    cd.add_argument("--replace", action="store_true", help="replace/update an existing PAUSED state")
+    cd.set_defaults(fn=cmd_cooldown)
 
     rs = sub.add_parser("resume", help="resume a PAUSED session for one agent")
     rs.add_argument("agent")

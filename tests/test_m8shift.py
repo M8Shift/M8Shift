@@ -3118,6 +3118,162 @@ class TestPauseResume(CLIBase):
         self.assertIn('"event": "pause"', ledger)
         self.assertIn('"event": "resume"', ledger)
 
+    def test_cooldown_from_idle_records_usage_event_and_status_json(self):
+        self.init()
+        until = "2030-01-02T03:04:05Z"
+        r = self.cw(
+            "cooldown",
+            "--until", until,
+            "--reason", "claude primary window reset",
+            "--for", "claude",
+            "--source", "usage-monitor",
+            "--wait-interval", "300",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lk = self.lock()
+        self.assertEqual(lk["state"], "PAUSED")
+        self.assertEqual(lk["holder"], "none")
+        self.assertEqual(lk["expires"], "-")
+        self.assertIn("cooldown until 2030-01-02T03:04:05Z for claude", lk["note"])
+
+        status = json.loads(self.cw("status", "--json").stdout)
+        self.assertEqual(status["state"], "PAUSED")
+        self.assertIn("cooldown until", status["note"])
+        doctor = json.loads(self.cw("doctor", "--json").stdout)
+        self.assertNotIn("sessions.event_invalid", {f["check"] for f in doctor["findings"]})
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
+            ledger = fh.read()
+        self.assertIn('"event": "pause"', ledger)
+        self.assertIn('"kind": "usage_cooldown"', ledger)
+        self.assertIn(f'"until": "{until}"', ledger)
+        self.assertIn('"resume_for": "claude"', ledger)
+        self.assertIn('"source": "usage-monitor"', ledger)
+        self.assertIn('"recommended_wait_interval_seconds": 300', ledger)
+
+        resumed = self.cw("resume", "claude", "--reason", "usage window reset elapsed")
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+
+    def test_cooldown_from_awaiting_infers_resume_agent_and_rejects_mismatch(self):
+        self.init()
+        self.cw("claim", "claude")
+        self.cw("append", "claude", "--to", "codex", "--ask", "review", "--done", "draft")
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
+        mismatch = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "wrong lane",
+            "--for", "claude",
+        )
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("does not match", mismatch.stderr + mismatch.stdout)
+
+        r = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "codex window reset",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lock()["state"], "PAUSED")
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
+            self.assertIn('"resume_for": "codex"', fh.read())
+
+    def test_cooldown_replace_updates_paused_cooldown(self):
+        self.init()
+        first = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "first cooldown",
+            "--for", "claude",
+            "--source", "monitor-a",
+            "--wait-interval", "300",
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        refused = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T04:04:05Z",
+            "--reason", "missing replace",
+            "--for", "codex",
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--replace", refused.stderr + refused.stdout)
+
+        replacement = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T04:04:05Z",
+            "--reason", "clearer reset time",
+            "--for", "codex",
+            "--source", "monitor-b",
+            "--wait-interval", "120",
+            "--replace",
+        )
+        self.assertEqual(replacement.returncode, 0, replacement.stderr)
+        lk = self.lock()
+        self.assertEqual(lk["state"], "PAUSED")
+        self.assertEqual(lk["holder"], "none")
+        self.assertIn("cooldown until 2030-01-02T04:04:05Z for codex: clearer reset time", lk["note"])
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
+            ledger = fh.read()
+        self.assertEqual(ledger.count('"kind": "usage_cooldown"'), 2)
+        self.assertIn('"previous_state": "PAUSED"', ledger)
+        self.assertIn('"resume_for": "codex"', ledger)
+        self.assertIn('"source": "monitor-b"', ledger)
+        self.assertIn('"recommended_wait_interval_seconds": 120', ledger)
+
+    def test_cooldown_refuses_working_and_done_states(self):
+        self.init()
+        self.cw("claim", "claude")
+        working = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "would interrupt holder",
+        )
+        self.assertNotEqual(working.returncode, 0)
+        self.assertIn("WORKING_CLAUDE", working.stderr + working.stdout)
+
+        self.init("--force")
+        self.cw("done", "claude")
+        done = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "closed session",
+        )
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("DONE", done.stderr + done.stdout)
+
+    def test_cooldown_validates_required_fields_iso_agent_and_wait_interval(self):
+        self.init()
+        self.assertNotEqual(
+            self.cw("cooldown", "--reason", "missing until").returncode,
+            0,
+        )
+        self.assertNotEqual(
+            self.cw("cooldown", "--until", "2030-01-02T03:04:05Z").returncode,
+            0,
+        )
+        bad_iso = self.cw(
+            "cooldown",
+            "--until", "2030-01-02 03:04:05",
+            "--reason", "bad timestamp",
+        )
+        self.assertNotEqual(bad_iso.returncode, 0)
+        self.assertIn("canonical UTC ISO", bad_iso.stderr + bad_iso.stdout)
+        bad_agent = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "bad agent",
+            "--for", "nobody",
+        )
+        self.assertNotEqual(bad_agent.returncode, 0)
+        bad_interval = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "bad interval",
+            "--wait-interval", "0",
+        )
+        self.assertNotEqual(bad_interval.returncode, 0)
+
     def test_wait_from_paused_stays_armed_and_wakes_on_resume_without_spam(self):
         self.init()
         self.cw("claim", "claude")
