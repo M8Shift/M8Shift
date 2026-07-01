@@ -36,7 +36,7 @@ M8Shift is **free and open source**, released under the
 | [security-research-and-frameworks.md](security-research-and-frameworks.md) | M8Shift against external security frameworks (arXiv, MITRE ATLAS, NIST/CISA/ANSSI, IBM AI Risk Atlas). |
 | [stage2-rationale.md](stage2-rationale.md) | Design rationale behind the N-agent relay model. |
 | [context-pack-measurements.md](context-pack-measurements.md) | DoD evidence log: measured token reduction + output equivalence of the context companion (RFC 034), for Claude and Codex. |
-| [rtk-shell-output-policy.md](rtk-shell-output-policy.md) | Usage policy for the optional RTK shell-output adapter: recommended modes and forbidden diff mode. |
+| [rtk-shell-output-policy.md](rtk-shell-output-policy.md) | Usage policy for the optional RTK shell-output adapter: recommended modes, forbidden diff mode, self-declared RTK visibility, and `rtk discover` audit guidance. |
 
 ## Design decisions
 
@@ -84,7 +84,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [031-rfc-decision-traceability.md](rfc/031-rfc-decision-traceability.md) | Shipped tool-independent decision traceability — forge / GitHub / both / git or a markdown ADR fallback; structured contradictory-decision records (positions for/against + resolution). |
 | [032-rfc-tiered-delegation.md](rfc/032-rfc-tiered-delegation.md) | Capability-tiered sub-agent delegation charter; Phase 1 advisory `route recommend` is shipped, while actual delegated launch remains future. |
 | [033-rfc-context-economy.md](rfc/033-rfc-context-economy.md) | Draft context economy & handoff protocol — exchange compact Task Packets, not full context; three context layers; advisory budgets; economy never starves verification; companion + agents-guide discipline. |
-| [034-rfc-companion-adapter-interface.md](rfc/034-rfc-companion-adapter-interface.md) | Native context companion plus Phase-2 shell-output adapter runner; RTK defaults on when present + identity-pinned, degrades to native otherwise, and telemetry is disabled on setup. |
+| [034-rfc-companion-adapter-interface.md](rfc/034-rfc-companion-adapter-interface.md) | Native context companion plus Phase-2 shell-output adapter runner; RTK defaults on when present + identity-pinned, degrades to native otherwise, telemetry is disabled on setup, and runtime/context status surfaces RTK ON/OFF visibility. |
 | [035-rfc-interactive-listener-gap.md](rfc/035-rfc-interactive-listener-gap.md) | Proposed runtime listener fix for the gap between `wait` readiness and interactive UI resumption. |
 | [036-rfc-token-window-exhaustion.md](rfc/036-rfc-token-window-exhaustion.md) | Shipped runtime `headroom` guard for proxy context exhaustion detection, checkpointing, status/doctor surfacing, and explicit pause. |
 | [038-rfc-multi-session.md](rfc/038-rfc-multi-session.md) | Draft parallel multi-session model — named sessions namespace the relay per session (default preserves today's behavior); N independent degree-1 relays, file isolation via worktrees (RFC 008). |

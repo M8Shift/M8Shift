@@ -14,12 +14,13 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
 import time
 
-VERSION = "3.35.0"
+VERSION = "3.36.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -37,6 +38,7 @@ FIELD_RE = re.compile(r"^- (?P<key>[a-z_]+):\s*(?P<value>.*)$")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 PROFILE_NAMES = ("implementer", "reviewer", "tester", "gatekeeper", "maintainer")
 GIT_TIMEOUT_SECONDS = 10
+MAX_HASH_BYTES = 512 * 1024 * 1024
 ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
@@ -235,6 +237,17 @@ def read_json(path, default=None):
         die(f"cannot read JSON {path}: {e}")
 
 
+def read_json_diagnostic(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return default, None
+    except (OSError, json.JSONDecodeError, RecursionError, ValueError) as e:
+        return default, str(e)
+    return data, None
+
+
 def read_jsonl(path):
     rows = []
     try:
@@ -253,11 +266,54 @@ def read_jsonl(path):
     return rows
 
 
+def read_jsonl_diagnostic(path):
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, RecursionError, ValueError) as e:
+                    return rows, f"{path}:{n}: {e}"
+                if isinstance(row, dict):
+                    rows.append(row)
+    except FileNotFoundError:
+        return [], None
+    except OSError as e:
+        return [], str(e)
+    return rows, None
+
+
+def latest_context_metrics(root):
+    rows, err = read_jsonl_diagnostic(metrics_path(root))
+    findings = []
+    if err:
+        findings.append(finding("warning", "metrics.unreadable", f"{rel(root, metrics_path(root))}: {err}"))
+    if not rows:
+        return None, findings
+    row = rows[-1]
+    return {
+        "pack_id": row.get("pack_id", ""),
+        "profile": row.get("profile", ""),
+        "compression_ratio": row.get("compression_ratio"),
+        "estimated_proxy_tokens_before": row.get("estimated_proxy_tokens_before"),
+        "estimated_proxy_tokens_after": row.get("estimated_proxy_tokens_after"),
+        "timestamp_utc": row.get("timestamp_utc", ""),
+    }, findings
+
+
 def sha256_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def sha256_file(path):
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("not a regular file")
+    if st.st_size > MAX_HASH_BYTES:
+        raise ValueError(f"file too large to hash ({st.st_size} bytes > {MAX_HASH_BYTES})")
     h = hashlib.sha256()
     try:
         with open(path, "rb") as fh:
@@ -805,6 +861,20 @@ def load_adapter(root, name):
     return data
 
 
+def load_adapter_diagnostic(root, name):
+    path = adapter_path(root, name)
+    data, err = read_json_diagnostic(path, None)
+    if err:
+        return None, [finding("error", "adapter.manifest_unreadable", f"{name}: cannot read adapter manifest: {err}")]
+    if data is None:
+        if name in DEFAULT_ADAPTERS:
+            return DEFAULT_ADAPTERS[name], []
+        return None, [finding("error", "adapter.missing", f"adapter manifest not found: {name}")]
+    if not isinstance(data, dict):
+        return None, [finding("error", "adapter.schema", f"{name}: manifest is not a JSON object")]
+    return data, []
+
+
 def load_adapter_for_auto(root, name):
     path = adapter_path(root, name)
     if not os.path.exists(path):
@@ -826,10 +896,14 @@ def adapter_identity_for_program(program):
     if not resolved:
         return None
     real = os.path.realpath(resolved)
+    try:
+        digest = sha256_file(real)
+    except (OSError, ValueError):
+        return None
     return {
         "program": program,
         "path": real,
-        "sha256": sha256_file(real),
+        "sha256": digest,
     }
 
 
@@ -937,7 +1011,10 @@ def adapter_identity_findings(manifest, program, resolved):
     real = os.path.realpath(resolved)
     if real != expected_path:
         return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} resolved to {real}, expected {expected_path}")]
-    actual_sha = sha256_file(real)
+    try:
+        actual_sha = sha256_file(real)
+    except (OSError, ValueError) as e:
+        return [finding("error", "adapter.program_identity_mismatch", f"{name}: cannot hash executable {program!r}: {e}")]
     if actual_sha != expected_sha:
         return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} sha256 {actual_sha} does not match trusted sha256 {expected_sha}")]
     return []
@@ -1208,19 +1285,31 @@ def rtk_telemetry_status():
 
 def rtk_status(root):
     resolved = shutil_which("rtk")
+    last_pack, findings = latest_context_metrics(root)
+    manifest, manifest_findings = load_adapter_diagnostic(root, "rtk-shell-output")
+    findings.extend(manifest_findings)
     status = {
         "present": bool(resolved),
         "pinned": False,
         "path": os.path.realpath(resolved) if resolved else "",
         "telemetry": rtk_telemetry_status(),
         "network": "M8Shift uses RTK only as a local argv subprocess and disables telemetry on context setup.",
+        "last_pack": last_pack,
     }
     if not resolved:
+        status["state"] = "off"
+        status["label"] = "RTK: OFF (native)"
+        status["reason"] = "rtk not found; native context pack path"
+        status["findings"] = findings
         return status
-    manifest = load_adapter(root, "rtk-shell-output")
-    errors = [row for row in adapter_findings(manifest) if row["severity"] == "error"]
+    errors = [row for row in findings if row["severity"] == "error"]
+    if manifest is not None:
+        errors.extend(row for row in adapter_findings(manifest) if row["severity"] == "error")
     status["pinned"] = not errors
-    status["findings"] = errors
+    status["findings"] = findings + [row for row in errors if row not in findings]
+    status["state"] = "on" if status["pinned"] else "off"
+    status["label"] = "RTK: ON (pinned, compressing packs)" if status["pinned"] else "RTK: OFF (native)"
+    status["reason"] = "pinned, compressing packs" if status["pinned"] else "rtk absent, unpinned, or invalid; native context pack path"
     return status
 
 
@@ -1329,6 +1418,34 @@ def finding(severity, check, message):
     return {"severity": severity, "check": check, "message": message}
 
 
+def print_rtk_status(rtk):
+    print(rtk.get("label", "RTK: OFF (native)"))
+    print(
+        "  detail: "
+        f"present={str(rtk.get('present')).lower()} "
+        f"pinned={str(rtk.get('pinned')).lower()} "
+        f"telemetry={rtk.get('telemetry', {}).get('state', 'unknown')}"
+    )
+    if rtk.get("last_pack"):
+        last = rtk["last_pack"]
+        print(
+            "  last pack: "
+            f"{last.get('pack_id') or '-'} ratio={last.get('compression_ratio')} "
+            f"proxy={last.get('estimated_proxy_tokens_before')}→{last.get('estimated_proxy_tokens_after')}"
+        )
+
+
+def cmd_status(args):
+    root = root_from(args)
+    rtk = rtk_status(root)
+    if args.json:
+        print(json.dumps({"rtk": rtk}, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"m8shift-context.py v{VERSION}")
+        print_rtk_status(rtk)
+    return 0
+
+
 def cmd_doctor(args):
     root = root_from(args)
     findings = []
@@ -1339,7 +1456,10 @@ def cmd_doctor(args):
             findings.append(finding("warning", "profile.missing", f"missing profile {rel(root, path)}"))
         elif not isinstance(data, dict) or data.get("schema") != SCHEMA_PROFILE:
             findings.append(finding("error", "profile.schema", f"invalid profile {rel(root, path)}"))
-    for row in read_jsonl(metrics_path(root)):
+    metrics_rows, metrics_err = read_jsonl_diagnostic(metrics_path(root))
+    if metrics_err:
+        findings.append(finding("warning", "metrics.unreadable", f"{rel(root, metrics_path(root))}: {metrics_err}"))
+    for row in metrics_rows:
         if row.get("schema") != SCHEMA_METRICS:
             findings.append(finding("error", "metrics.schema", "metrics row has invalid schema"))
         if row.get("real_tokens_before") is None:
@@ -1354,19 +1474,20 @@ def cmd_doctor(args):
     if os.path.isdir(adapters_dir(root)):
         adapter_names.update(entry[:-5] for entry in os.listdir(adapters_dir(root)) if entry.endswith(".json"))
     for name in sorted(adapter_names):
-        findings.extend(adapter_findings(load_adapter(root, name), check_executable=False))
+        manifest, manifest_findings = load_adapter_diagnostic(root, name)
+        findings.extend(manifest_findings)
+        if manifest is not None:
+            findings.extend(adapter_findings(manifest, check_executable=False))
     rtk = rtk_status(root)
+    for row in rtk.get("findings", []):
+        if row not in findings:
+            findings.append(row)
     if args.json:
         print(json.dumps({"findings": findings, "rtk": rtk}, ensure_ascii=False, sort_keys=True))
     else:
         if not findings:
             print("✓ m8shift-context doctor: no findings")
-        print(
-            "rtk: "
-            f"present={str(rtk.get('present')).lower()} "
-            f"pinned={str(rtk.get('pinned')).lower()} "
-            f"telemetry={rtk.get('telemetry', {}).get('state', 'unknown')}"
-        )
+        print_rtk_status(rtk)
         for row in findings:
             print(f"{row['severity']}: {row['check']}: {row['message']}")
     return 1 if any(row["severity"] == "error" for row in findings) else 0
@@ -1406,6 +1527,10 @@ def main(argv=None):
     sm.add_argument("--last", action="store_true")
     sm.add_argument("--json", action="store_true")
     sm.set_defaults(func=cmd_metrics)
+
+    ss = sub.add_parser("status", help="show context companion status, including RTK adapter state")
+    ss.add_argument("--json", action="store_true")
+    ss.set_defaults(func=cmd_status)
 
     sb = sub.add_parser("benchmark", help="benchmark raw context versus native pack fixtures")
     sb.add_argument("--profile", choices=PROFILE_NAMES, default="reviewer")

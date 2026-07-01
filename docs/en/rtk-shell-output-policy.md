@@ -43,6 +43,28 @@ python3 m8shift-context.py adapters init --force
 python3 m8shift-context.py adapters check rtk-shell-output
 ```
 
+Visibility:
+
+```bash
+M8SHIFT_RTK=on python3 m8shift-runtime.py watch codex --once
+python3 m8shift-runtime.py status-runtime
+python3 m8shift-context.py status
+python3 m8shift-context.py doctor
+```
+
+`M8SHIFT_RTK=on|off` is self-declared by each agent lane. It is intentionally not
+evidence of actual command usage. M8Shift never probes an agent shell over the
+network and never re-enables RTK telemetry.
+
+To audit an agent's actual local RTK command usage, use RTK's own local audit
+tooling:
+
+```bash
+rtk discover
+```
+
+This is the intended audit path because RTK telemetry remains disabled by design.
+
 Typical usage:
 
 ```bash

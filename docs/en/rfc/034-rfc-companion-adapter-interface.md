@@ -1,6 +1,6 @@
 # RFC 034 — Companion Adapter Interface and native context companion
 
-- **Status:** Phase 1 + Phase 2 implemented; RTK default-if-pinned shipped in v3.34.0 (#76); corrupt-manifest auto fallback shipped in v3.34.1
+- **Status:** Phase 1 + Phase 2 implemented; RTK default-if-pinned shipped in v3.34.0 (#76); corrupt-manifest auto fallback shipped in v3.34.1; RTK visibility shipped in v3.36.0 (#79)
 - **Date:** 2026-06-30
 - **Scope:** optional companion interface for context tools around M8Shift, with a first
   stdlib-only native context companion.
@@ -248,6 +248,20 @@ remote RTK services; install/setup runs `rtk telemetry disable` when RTK is pres
 or installed, and `doctor --json` surfaces RTK presence, pin status, and telemetry
 state.
 
+Since v3.36.0 (#79), `m8shift-context.py status` and `doctor` also print a
+prominent local state line:
+
+- `RTK: ON (pinned, compressing packs)` when the RTK adapter is present and
+  identity-pinned;
+- `RTK: OFF (native)` when RTK is absent, unpinned, invalid, or deliberately
+  bypassed.
+
+Both commands include the last context-pack compression ratio from
+`.m8shift/context/metrics.jsonl` when available. `m8shift-runtime.py
+status-runtime` surfaces the same context-adapter state and each agent lane's
+self-declared `M8SHIFT_RTK=on|off` presence field. This is visibility only:
+M8Shift never probes an agent's shell remotely and never re-enables RTK telemetry.
+
 ## 10. Authority levels
 
 | Authority | Meaning | Examples |
@@ -328,7 +342,9 @@ Phase 1 is acceptable when:
 - RTK present and identity-pinned is selected by default for supported shell-output sources;
 - operators can opt out with `pack --adapter native` / `--no-rtk`;
 - setup attempts `rtk telemetry disable` when RTK is present;
-- doctor surfaces RTK presence, pin status, and telemetry state;
+- doctor/status surfaces RTK presence, pin status, telemetry state, ON/OFF
+  adapter state, and the last-pack compression ratio when available;
+- runtime presence records self-declared `M8SHIFT_RTK=on|off` per agent lane;
 - tests cover init/doctor, pack preservation, receipts/metrics, and benchmark gates;
 - the full test suite remains green.
 
