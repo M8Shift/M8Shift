@@ -216,6 +216,7 @@ loop:
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
+./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # 永続的なメモリのメモを追記（advisory）
 ./m8shift.py task {add,done,drop,list,show} …  # advisory なタスク台帳（エージェントごとの ToDo）
