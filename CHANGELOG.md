@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.34.2 — 2026-07-01
+
+Release scope:
+
+- #73 — Hardened runtime retention path handling as defense-in-depth:
+  backslash-separated parent segments in ledger policy patterns are rejected, and
+  runtime JSONL append paths refuse symlink redirection before archive/index
+  writes.
+- Normal retention behavior is unchanged for real runtime ledger/archive files.
+
+Validation:
+
+- Added regression coverage for unsafe `..\\...` retention patterns and
+  symlinked archive targets.
+- Lockstep version surfaces bumped from `3.34.1` to `3.34.2` across distributed
+  scripts and tests.
+
 ## v3.34.1 — 2026-07-01
 
 Release scope:
