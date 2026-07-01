@@ -277,6 +277,15 @@ Use the project forge to make work auditable:
   findings, verification result, and trade-offs as a ticket comment; `Closes #N` alone is
   **not** enough. The forge ticket is the living decision log (see
   [031-rfc-decision-traceability.md](rfc/031-rfc-decision-traceability.md)).
+- **use the shared decision template (mandatory).** Every decision recorded on a ticket — by
+  **any** agent — fills the shared template rather than free-form prose:
+  [`docs/decisions/DECISION_TEMPLATE.md`](../../docs/decisions/DECISION_TEMPLATE.md) (ADR) and the
+  matching issue templates
+  ([`.gitea/issue_template/decision.md`](../../.gitea/issue_template/decision.md),
+  [`.github/ISSUE_TEMPLATE/decision.md`](../../.github/ISSUE_TEMPLATE/decision.md)). Fill its
+  sections — **Decision · Context · Options · Positions** (named FOR/AGAINST) **· Divergence ·
+  Resolution · Trace** — so a contested choice is auditable: who argued what, and how it was
+  reconciled (RFC 031). Keep **Divergence** explicit even when the outcome was consensus.
 
 ### Issue format
 
@@ -367,3 +376,24 @@ chmod +x .git/hooks/pre-commit
 The hook is **advisory and local** — not a security boundary, no network. It narrows but
 does not fully close the check-then-commit race; see the SEC-7 / TOCTOU note in
 [`protocol-reference.md`](protocol-reference.md).
+
+## 10. Token economy — use RTK when present
+
+When [RTK](https://github.com/rtk-ai/rtk) is installed on the machine, **every agent must** route
+its **locate / scan** shell commands through `rtk` — it strips whitespace, truncates, and groups
+output, cutting the tokens a command spends. Use `rtk grep` (not `grep -n`), `rtk git`
+(show / log / status), `rtk ls`, `rtk find`, `rtk read` (large files), `rtk wc`, `rtk test`,
+`rtk err`, `rtk gh` / `rtk glab`. This is **mandatory wherever RTK is present and handles the
+command** — a large, measured saving (a single `rtk discover` run showed ~1.5M tokens over 30 days
+left on the table by raw commands).
+
+> [!WARNING]
+> **The exception is load-bearing.** Never route **verification-critical output** through `rtk`. A
+> diff you review for correctness — `rtk diff` is lossy on hunks and is *forbidden for code review*
+> by [`rtk-shell-output-policy.md`](rtk-shell-output-policy.md) — a checksum, or a byte-level
+> assertion is read **raw**. RTK compresses *finding and scanning*; raw output is the reference for
+> *verifying*.
+
+RTK is optional and fully degrading: when it is absent, agents fall back to the raw commands and lose
+only the saving; M8Shift's core stays stdlib-only either way. Whether M8Shift installs/enables RTK by
+default (with telemetry off) is tracked separately as a product feature.
