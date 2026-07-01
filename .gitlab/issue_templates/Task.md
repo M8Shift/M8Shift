@@ -1,12 +1,4 @@
----
-name: "📋 Task / Feature"
-about: "A unit of work on M8Shift — issue → branch → MR → review → merge"
-title: "<type>: <short summary>"
-labels: []
-assignees: []
----
-
-<!-- Fill every section. Keep the tables — they render on Forgejo, GitHub and GitLab. -->
+<!-- 📋 M8Shift Task / Feature — fill every section. Keep the tables. -->
 
 ## 🎯 Goal
 
@@ -52,3 +44,5 @@ assignees: []
 ## 🧾 Decision log
 
 > _Record decisions, agreements, and disagreements here as the task progresses, using the shape in **`docs/decisions/DECISION_TEMPLATE.md`** (Decision · Context · Options · Positions FOR/AGAINST · Divergence · Resolution · Trace). Keep **Divergence** explicit even on consensus. Close the ticket with the wrap-up in **`docs/en/issue-lifecycle.md`**._
+
+/label ~task
