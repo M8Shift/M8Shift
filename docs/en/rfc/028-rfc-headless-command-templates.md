@@ -1,6 +1,6 @@
 # RFC — Headless command templates
 
-**Status:** design finalized (this RFC) · implementation tracked in #47 · **Builds on:** [014-rfc-provider-management.md](014-rfc-provider-management.md) (provider argv rendering) + [020-rfc-headless-runner-hardening.md](020-rfc-headless-runner-hardening.md) (hardened runner, immutable run plan, post-run LOCK verification) · **Source:** deferred from [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md)
+**Status:** implemented in v3.33.0 (#47) · **Builds on:** [014-rfc-provider-management.md](014-rfc-provider-management.md) (provider argv rendering) + [020-rfc-headless-runner-hardening.md](020-rfc-headless-runner-hardening.md) (hardened runner, immutable run plan, post-run LOCK verification) · **Source:** deferred from [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md)
 
 ## Scope
 
@@ -79,3 +79,37 @@ short of all four is reported as **failed/partial**, never a false success.
 - **No new launcher.** RFC 028 curates + specifies over RFC 014/020; it does not add a second
   headless execution path.
 - **No shell strings, no secret injection.** argv arrays only; env is an explicit allowlist.
+
+## Implementation notes (v3.33.0)
+
+- `m8shift-runtime.py init` and `providers init` keep the active `agents` entries
+  host-editable and add an `examples` section in `.m8shift/providers.json`.
+  Examples are opt-in samples only; operators copy/adapt them into active agents.
+- Curated samples currently cover `codex exec` and `claude -p`, include `//`
+  guidance markers, explicit `env_allowlist`, and `argv_by_platform` maps with
+  `default` and `win32` argv arrays.
+- `providers check` validates `argv_by_platform` as arrays only and rejects
+  shell-string values. `providers render` selects `sys.platform` / platform-family
+  / `default`, substitutes only explicit markers, and never invokes a shell.
+- `examples/headless_runner.py` keeps the existing RFC 020 runner path. It now
+  writes top-level run-plan fields for `agent`, `argv`, `cwd`, `run_id`,
+  `prompt_hash`, `env_allowlist`, `timeout`, `kill_grace`, and
+  `expected_transition`; the legacy `command.argv` mirrors top-level `argv` for
+  compatibility.
+- Child processes run with resolved argv, explicit `cwd`, and an explicit env
+  allowlist. `M8SHIFT_ROOT`, `M8SHIFT_AGENT`, `M8SHIFT_RUN_ID`, and
+  `M8SHIFT_TURN` are always added.
+- A run is successful only when process exit is `0`, post-run validation matches
+  `expected_transition`, the lock was not stolen, and run ledger events exist.
+  Otherwise the run is reported as failed/partial.
+
+## Acceptance criteria
+
+- ✅ Existing RFC 014 provider rendering is reused; no new provider store.
+- ✅ Existing RFC 020 runner loop is reused; no new launcher.
+- ✅ Curated `codex exec` and `claude -p` examples are shipped as opt-in samples.
+- ✅ `argv_by_platform` arrays are selected without shell strings.
+- ✅ The run-plan validator refuses incomplete plans and shell-string argv.
+- ✅ Post-run validation fails on missing transition, stolen lock, non-zero exit,
+  or missing ledger events.
+- ✅ Tests cover the above behavior.

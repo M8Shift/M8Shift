@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.32.0"
+VERSION = "3.33.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -3118,8 +3118,17 @@ subprocess.check_call([
             plan = json.load(f)
         self.assertEqual(plan["schema"], "m8shift.headless.run_plan.v1")
         self.assertEqual(plan["agent"], "claude")
+        for field in ("argv", "cwd", "run_id", "prompt_hash", "env_allowlist",
+                      "timeout", "kill_grace", "expected_transition"):
+            self.assertIn(field, plan)
+        self.assertRegex(plan["prompt_hash"], r"^[0-9a-f]{64}$")
+        self.assertEqual(plan["argv"], plan["command"]["argv"])
+        self.assertTrue(os.path.isabs(plan["cwd"]))
+        self.assertIn("M8SHIFT_RUN_ID", plan["env_allowlist"])
+        self.assertIn("M8SHIFT_ROOT", plan["env_allowlist"])
         self.assertFalse(plan["command"]["shell"])
         self.assertEqual(plan["command"]["argv"][0], sys.executable)
+        self.assertEqual(plan["expected_transition"]["type"], "core_state_advanced")
         self.assertEqual(plan["expected_post_run"]["type"], "core_state_advanced")
 
     def test_done_release_are_baton_owner_ops(self):
@@ -3179,13 +3188,48 @@ subprocess.check_call([
         spec = importlib.util.spec_from_file_location("headless_runner", rp)
         hr = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hr)
-        plan = {"schema": hr.RUN_PLAN_SCHEMA, "run_id": "fixed-run", "agent": "claude"}
+        class Args:
+            cmd = [sys.executable, "-c", "print('x')"]
+            cwd = self.d
+            env_allowlist = ""
+            turn_timeout = 0
+            kill_grace = 10
+            expected_transition = "none"
+        plan = hr.make_run_plan(Args, "fixed-run", "claude", {"state": "IDLE", "turn": "0"})
         path = hr.write_run_plan(os.path.join(self.d, ".m8shift", "runtime"), plan)
         with self.assertRaises(FileExistsError):
             hr.write_run_plan(os.path.join(self.d, ".m8shift", "runtime"),
-                              {"schema": hr.RUN_PLAN_SCHEMA, "run_id": "fixed-run", "agent": "codex"})
+                              dict(plan, agent="codex"))
         with open(path, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["agent"], "claude")
+
+    def test_headless_runner_validates_run_plan_fields_and_argv(self):
+        import importlib.util
+        rp = os.path.join(REPO, "examples", "headless_runner.py")
+        spec = importlib.util.spec_from_file_location("headless_runner", rp)
+        hr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hr)
+
+        good = {
+            "schema": hr.RUN_PLAN_SCHEMA,
+            "created_at": "2026-01-01T00:00:00Z",
+            "agent": "claude",
+            "argv": [sys.executable, "-c", "print('x')"],
+            "cwd": self.d,
+            "run_id": "fixed-run",
+            "prompt_hash": "a" * 64,
+            "env_allowlist": ["M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TURN"],
+            "timeout": 0,
+            "kill_grace": 10,
+            "expected_transition": {"type": "none", "agent": "claude", "pre_turn": "0"},
+            "command": {"argv": [sys.executable, "-c", "print('x')"], "shell": False},
+        }
+        self.assertTrue(hr.validate_run_plan(good))
+        with self.assertRaises(SystemExit):
+            hr.validate_run_plan({k: v for k, v in good.items() if k != "prompt_hash"})
+        bad = dict(good, argv="python -c print(1)", command={"argv": "python -c print(1)", "shell": False})
+        with self.assertRaises(SystemExit):
+            hr.validate_run_plan(bad)
 
     def test_headless_runner_post_run_verification_detects_mismatch(self):
         self.init()
@@ -3210,7 +3254,58 @@ subprocess.check_call([
         self.assertEqual(ended["status"], "no_progress")
         self.assertFalse(ended["verification_ok"])
         self.assertEqual(ended["verification_status"], "no_progress")
+        self.assertFalse(ended["success"])
         self.assertIn("headless.post_run_core_state", {f["check"] for f in ended["runtime_findings"]})
+
+    def test_headless_runner_post_run_validation_rejects_stolen_lock_and_nonzero_exit(self):
+        self.init()
+        runner = os.path.join(REPO, "examples", "headless_runner.py")
+        stolen = """
+import subprocess
+import sys
+subprocess.check_call([sys.executable, "m8shift.py", "claim", "claude"])
+subprocess.check_call([
+    sys.executable, "m8shift.py", "release", "claude", "--to", "codex",
+    "--force", "--reason", "simulate lost handoff without append",
+])
+"""
+        r = subprocess.run(
+            [sys.executable, runner, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--start-on-idle", "--once",
+             "--interval", "1", "--max-retries", "1", "--cmd", sys.executable, "-c", stolen],
+            cwd=self.d, capture_output=True, text=True, timeout=8,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        ended = [row for row in rows if row["event"] == "run.ended"][-1]
+        self.assertEqual(ended["verification_status"], "lock_stolen")
+        self.assertFalse(ended["success"])
+
+        self.init("--force")
+        nonzero = """
+import subprocess
+import sys
+subprocess.check_call([sys.executable, "m8shift.py", "claim", "claude"])
+subprocess.check_call([
+    sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
+    "--ask", "review", "--done", "progressed then failed",
+])
+sys.exit(7)
+"""
+        r2 = subprocess.run(
+            [sys.executable, runner, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--start-on-idle", "--once",
+             "--interval", "1", "--max-retries", "1", "--cmd", sys.executable, "-c", nonzero],
+            cwd=self.d, capture_output=True, text=True, timeout=8,
+        )
+        self.assertEqual(r2.returncode, 1, r2.stdout + r2.stderr)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as fh:
+            rows2 = [json.loads(line) for line in fh if line.strip()]
+        ended2 = [row for row in rows2 if row["event"] == "run.ended"][-1]
+        self.assertEqual(ended2["status"], "failed_partial")
+        self.assertTrue(ended2["verification_ok"])
+        self.assertFalse(ended2["success"])
 
     def test_headless_runner_dry_run_and_argument_validation(self):
         runner = os.path.join(REPO, "examples", "headless_runner.py")
@@ -4376,6 +4471,17 @@ class TestRuntimeCompanion(CLIBase):
 
         plist = json.loads(self.rt("providers", "list", "--json").stdout)
         self.assertEqual([row["name"] for row in plist["agents"]], ["claude", "codex", "gemini"])
+        with open(os.path.join(self.d, ".m8shift", "providers.json"), encoding="utf-8") as fh:
+            registry = json.load(fh)
+        self.assertIn("examples", registry)
+        examples = {row["name"]: row for row in registry["examples"]}
+        self.assertIn("codex", examples)
+        self.assertIn("claude", examples)
+        self.assertEqual(examples["codex"]["argv"], ["codex", "exec", "$M8SHIFT_PROMPT"])
+        self.assertEqual(examples["claude"]["argv"], ["claude", "-p", "$M8SHIFT_PROMPT"])
+        self.assertIn("//", examples["codex"])
+        self.assertIn("argv_by_platform", examples["codex"])
+        self.assertIn("env_allowlist", examples["codex"])
         check = json.loads(self.rt("providers", "check", "--json").stdout)
         self.assertTrue(check["ok"], check)
         rendered = json.loads(self.rt("providers", "render", "codex",
@@ -4439,6 +4545,37 @@ class TestRuntimeCompanion(CLIBase):
         findings = json.loads(r.stdout)["findings"]
         self.assertTrue(any(f["check"] == "providers.argv_string" for f in findings))
         self.assertTrue(any(f["check"] == "providers.env_missing" for f in findings))
+
+    def test_provider_platform_argv_selection_and_validation(self):
+        self.init()
+        self.rt("providers", "init", "--force")
+        path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["agents"][0]["mode"] = "headless"
+        data["agents"][0]["argv"] = ["missing-default-provider-binary", "$M8SHIFT_PROMPT"]
+        data["agents"][0]["argv_by_platform"] = {
+            sys.platform: [sys.executable, "-c", "$M8SHIFT_PROMPT"],
+            "default": ["missing-default-provider-binary", "$M8SHIFT_PROMPT"],
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        rendered = json.loads(self.rt("providers", "render", data["agents"][0]["name"],
+                                      "--prompt", "print('ok')", "--json").stdout)
+        self.assertEqual(rendered["argv"], [sys.executable, "-c", "print('ok')"])
+        self.assertEqual(rendered["platform"], sys.platform)
+        check = json.loads(self.rt("providers", "check", "--json").stdout)
+        self.assertTrue(check["ok"], check)
+
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["agents"][0]["argv_by_platform"] = {"default": "python -c bad"}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        bad = self.rt("providers", "check", "--json")
+        self.assertNotEqual(bad.returncode, 0)
+        findings = json.loads(bad.stdout)["findings"]
+        self.assertIn("providers.argv_by_platform_string", {f["check"] for f in findings})
 
     def test_report_write_rejects_path_traversal_run_ids(self):
         self.init()

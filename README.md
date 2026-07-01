@@ -245,7 +245,7 @@ published site, or use the repository-local docs when working from a clone.
 | 025 | [Runtime status composition](docs/en/rfc/025-rfc-status-runtime.md) | Runtime status over core + sidecars | baseline impl. | v3.27.0 · 2026-06-26 | `status-runtime [--brief] [--json]`; JSON contract remains separate |
 | 026 | [Sidecar retention](docs/en/rfc/026-rfc-sidecar-retention.md) | Bound / prune runtime sidecar ledgers | baseline impl. · policy draft | v3.26.0 · 2026-06-26 | baseline `retention prune --keep N`; policy still draft |
 | 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | Local notifications for handoffs / stale turns | shipped | v3.32.0 · 2026-07-01 | `m8shift-runtime.py notify`, stdout/file/bell/OS/hook tiers |
-| 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | Safe headless command templates | draft | — | deferred from RFC 010 |
+| 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | Safe headless command templates | shipped | v3.33.0 · 2026-07-01 | provider examples, `argv_by_platform`, strict run-plan validation |
 | 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | Richer companion workboard outside core | draft | — | deferred from RFC 010 |
 | 030 | [Tamper evidence](docs/en/rfc/030-rfc-tamper-evidence.md) | Hash-chain tamper-evidence for relay records | draft | — | detection/warning only; git remains the strong anchor |
 | 031 | [Decision traceability](docs/en/rfc/031-rfc-decision-traceability.md) | Durable decision records from turn journal | shipped | v3.31.0 · 2026-07-01 | `decisions target/scaffold`, `append --stance`, ADR fallback |
