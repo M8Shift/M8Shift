@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.34.1"
+VERSION = "3.34.2"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -337,17 +337,54 @@ def atomic_write_json(path, data):
 
 def append_jsonl(path, row):
     ensure_runtime_dirs()
-    with open(path, "a", encoding="utf-8") as fh:
+    with open_append_jsonl_no_follow(path) as fh:
         fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def append_jsonl_rows(path, rows):
     if not rows:
         return
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
+    with open_append_jsonl_no_follow(path) as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def reject_symlinked_runtime_path(path):
+    runtime_abs = os.path.abspath(RUNTIME_DIR)
+    candidate = os.path.abspath(path)
+    try:
+        if os.path.commonpath([runtime_abs, candidate]) != runtime_abs:
+            return
+    except ValueError:
+        return
+    current = runtime_abs
+    if os.path.lexists(current) and os.path.islink(current):
+        sys.exit(f"m8shift-runtime: refusing to append through symlink {os.path.relpath(current, HERE)}")
+    relpath = os.path.relpath(candidate, runtime_abs)
+    if relpath in ("", "."):
+        return
+    for part in relpath.split(os.sep):
+        if not part or part == ".":
+            continue
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and os.path.islink(current):
+            sys.exit(f"m8shift-runtime: refusing to append through symlink {os.path.relpath(current, HERE)}")
+        if not os.path.exists(current):
+            break
+
+
+def open_append_jsonl_no_follow(path):
+    reject_symlinked_runtime_path(path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    reject_symlinked_runtime_path(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as e:
+        sys.exit(f"m8shift-runtime: cannot append {os.path.relpath(path, HERE)}: {e}")
+    return os.fdopen(fd, "a", encoding="utf-8")
 
 
 def atomic_write_jsonl(path, rows):
@@ -1979,7 +2016,8 @@ def retention_rules_for_existing_ledgers(policy):
         for path in paths:
             rules[path] = default_rule
     for pattern, raw_rule in policy.get("ledgers", {}).items():
-        if not isinstance(pattern, str) or pattern.startswith(("/", "\\")) or ".." in pattern.split("/"):
+        normalized_pattern = pattern.replace("\\", "/") if isinstance(pattern, str) else pattern
+        if not isinstance(pattern, str) or pattern.startswith(("/", "\\")) or ".." in normalized_pattern.split("/"):
             findings.append({
                 "severity": "error",
                 "check": "runtime.retention_policy",

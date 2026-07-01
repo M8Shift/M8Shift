@@ -1,6 +1,6 @@
 # RFC — Runtime sidecar retention and archive policy
 
-**Status:** implemented in v3.29.0 · **Source:** deferred from
+**Status:** implemented in v3.29.0; path hardening shipped in v3.34.2 (#73) · **Source:** deferred from
 [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md)
 
 ## Scope
@@ -89,6 +89,12 @@ appends one compact audit row per pruned ledger to `.m8shift/runtime/archive/ind
 (`{ledger, strategy, pruned, kept, oldest_ts, newest_ts, archived_at}`) — this is the "compact
 summary before deleting raw rows." `--no-archive` (baseline flag) discards instead of archiving.
 
+Since v3.34.2 (#73), retention policy ledger patterns normalize `\` to `/` before
+parent-segment checks, so `..\\...` cannot bypass the unsafe-pattern guard.
+Runtime JSONL append paths also refuse symlink redirection before archive and
+archive-index writes; when the platform exposes `O_NOFOLLOW`, append opens use it
+as an additional final-component guard.
+
 ## Resolved subquestions
 
 - **Which files auto-prunable vs explicit?** Only the `.m8shift/runtime/` JSONL ledgers named in the
@@ -99,6 +105,8 @@ summary before deleting raw rows." `--no-archive` (baseline flag) discards inste
 - **Interaction with session reports and project memory?** None — retention touches only runtime
   sidecars. Session reports, project memory, and `M8SHIFT.md` are out of scope and never pruned.
 - **Disabled by default?** Yes — `enabled:false` ships; the policy engine is strictly opt-in.
+- **Symlinked archive/ledger path?** Refused. Retention reports a hard failure
+  instead of following a symlink to a file outside `.m8shift/runtime/`.
 
 ## Non-goals
 
