@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.28.0"
+VERSION = "3.28.1"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.28.0"
+VERSION = "3.28.1"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2713,6 +2713,27 @@ class TestAuditFixes(CLIBase):
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             with open(msg, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_non_utf8_message_fail_open(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            original = b"subject latin-1: \xe9\n"
+            with open(msg, "wb") as f:
+                f.write(original)
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env["M8SHIFT_AGENT_MODEL"] = "codex-gpt-5.1"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, "rb") as f:
                 self.assertEqual(f.read(), original)
         finally:
             shutil.rmtree(app, ignore_errors=True)
