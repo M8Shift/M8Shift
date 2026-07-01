@@ -183,10 +183,10 @@ Every change follows the same branch-based flow.
    valid, scope clean. The reviewer approves or returns ranked findings.
 8. **Stabilize, then merge.** `main` receives the change **only once the version is
    stable and reviewed**, via the merge request. Tag the release if it is a version
-   bump. **When the change bumps the version, update the published site
-   ([m8shift.ai](https://m8shift.ai/)) in the same cycle** — version references, the RFC
-   table and statuses, and any new feature surfaces — so the site never lags the
-   release. Delete the work branch after merge.
+   bump. **After every tag, updating the published site
+   ([m8shift.ai](https://m8shift.ai/)) is mandatory, in the same cycle** — version references,
+   the RFC table and statuses, and any new feature surfaces — so the site never lags a released
+   version. A tag is not complete until the site reflects it. Delete the work branch after merge.
 
 Intermediate, work-in-progress commits live **only on the work branch**. `main` stays
 releasable at all times.
@@ -248,6 +248,10 @@ Use the project forge to make work auditable:
 - the work **branch** references the issue;
 - the **merge request** links the issue and is reviewed before merge;
 - close the issue when the MR merges; tag the version if applicable.
+- **log the decisions on the ticket at each implementation** — post the design choices,
+  findings, verification result, and trade-offs as a ticket comment; `Closes #N` alone is
+  **not** enough. The forge ticket is the living decision log (see
+  [031-rfc-decision-traceability.md](rfc/031-rfc-decision-traceability.md)).
 
 ### Issue format
 
