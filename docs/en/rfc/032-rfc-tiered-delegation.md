@@ -1,6 +1,6 @@
 # RFC — Capability-tiered sub-agent delegation
 
-**Status:** proposed (design) · **Builds on:** [002-rfc-n-agents.md](002-rfc-n-agents.md) (degree-1 core), [008-rfc-worktree-companion.md](008-rfc-worktree-companion.md) (degree-2 worktrees), [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md), [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md) · **Source:** maintainer request — let a pen-holding agent delegate simpler sub-tasks to cheaper/weaker models, in parallel where safe, while keeping the degree-1 core.
+**Status:** design finalized — the four open questions are resolved by the routing RFC [039-rfc-model-task-routing.md](039-rfc-model-task-routing.md); implementation tracked in #59 · **Builds on:** [002-rfc-n-agents.md](002-rfc-n-agents.md) (degree-1 core), [008-rfc-worktree-companion.md](008-rfc-worktree-companion.md) (degree-2 worktrees), [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md), [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md), [039-rfc-model-task-routing.md](039-rfc-model-task-routing.md) (the routing layer that operationalises this) · **Source:** maintainer request — let a pen-holding agent delegate simpler sub-tasks to cheaper/weaker models, in parallel where safe, while keeping the degree-1 core.
 
 ## Question
 
@@ -84,12 +84,24 @@ model-identification work) in the run ledger, so the trail shows which tier did 
 - Removing all delegation state loses only orchestration telemetry, never the relay log or
   mutex.
 
-## Open questions (designed solo — flagged for review)
+## Resolved questions (via RFC 039)
 
-1. **Tier expression.** Per-sub-task field, an operator policy file, or the orchestrator's
-   judgment?
-2. **Command surface.** Should the runtime companion expose a `delegate` verb (spawn a tiered
-   sub-agent in a worktree, await, verify), or stay example-only?
-3. **Cost bounding.** A per-turn sub-agent budget so delegation cannot fan out unboundedly?
-4. **Same-family vs cross-provider.** Opus → Haiku vs Claude → a different vendor — any
-   difference in the verification contract or the provenance fields?
+The routing RFC [039-rfc-model-task-routing.md](039-rfc-model-task-routing.md) operationalises this
+delegation charter and resolves all four:
+
+1. **Tier expression.** Per task-type in the `skills.json` manifest — `min_model` / `optimum_model` /
+   `downgradable` (RFC 039 §7) — not the orchestrator's ad-hoc judgment.
+2. **Command surface.** A runtime-companion `route recommend | delegate` verb (RFC 039 §9):
+   `recommend` is read-only advisory; `delegate` spawns a routed sub-agent in a worktree behind an
+   **explicit confirmation gate** (`--confirm-route` / `--yes` + an RFC 031 decision), reusing the RFC
+   028/020 hardened launch machinery. It lives in the companion, never the core, with no hidden
+   auto-scoring.
+3. **Cost bounding.** Advisory warn by default, opt-in fail-closed per-turn/session budget, reusing the
+   RFC 040 usage snapshots rather than a second cost meter (RFC 039 §14).
+4. **Same-family vs cross-provider.** Provenance records the model + version + tier regardless; a
+   *different-family* verifier is a policy knob recommended for high-stakes `downgradable:false` tasks
+   (adversarial-verify / security / legal), otherwise human verification plus a recorded waiver
+   (RFC 039 §14).
+
+Implementation of the delegation runtime — the `route` verb, worktree-parallel sub-agents, and
+verify-before-integrate — is tracked in **#59**, building on this charter and RFC 039's routing layer.
