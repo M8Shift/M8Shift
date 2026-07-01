@@ -35,9 +35,11 @@ perform exactly one turn against this project's M8SHIFT.md (claim → work → a
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -45,12 +47,15 @@ import uuid
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.32.0"
+VERSION = "3.33.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
+DEFAULT_ENV_ALLOWLIST = "HOME,PATH,LANG,LC_ALL,LC_CTYPE,TERM,USER"
+MANDATORY_ENV = ("M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TURN")
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 
 
 def read_lock(m8shift_path):
@@ -94,6 +99,97 @@ def run_plan_path(runtime_dir, run_id):
     return os.path.join(runtime_dir, "run-plans", f"{run_id}.json")
 
 
+def sha256_text(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def canonical_json(data):
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def prompt_hash_for_argv(argv):
+    """Hash the exact child input this runner controls.
+
+    The reference runner remains provider-neutral: it receives an already-rendered
+    argv command and does not parse provider-specific prompt flags. For RFC 028 the
+    audited prompt hash is therefore the canonical rendered argv handed to the child.
+    """
+    return sha256_text(canonical_json({"argv": list(argv)}))
+
+
+def normalize_env_allowlist(raw):
+    names = []
+    for token in (raw or "").split(","):
+        name = token.strip()
+        if not name:
+            continue
+        if not ENV_RE.fullmatch(name):
+            raise SystemExit(f"invalid env allowlist entry {name!r}")
+        if name not in names:
+            names.append(name)
+    for name in MANDATORY_ENV:
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def resolve_argv(argv):
+    if isinstance(argv, str):
+        raise SystemExit("command argv must be an array, not a shell string")
+    if not isinstance(argv, list) or not all(isinstance(arg, str) and arg for arg in argv):
+        raise SystemExit("command argv must be a non-empty list of non-empty strings")
+    exe = argv[0]
+    if any(ch.isspace() for ch in exe):
+        raise SystemExit("argv[0] must be one executable token, not a shell command")
+    if os.path.isabs(exe):
+        if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
+            raise SystemExit(f"argv[0] executable not found or not executable: {exe}")
+        resolved = exe
+    elif "/" in exe or "\\" in exe:
+        raise SystemExit("argv[0] must be a bare PATH program or an absolute path")
+    else:
+        resolved = shutil.which(exe)
+        if not resolved:
+            raise SystemExit(f"argv[0] executable not found on PATH: {exe}")
+    return [resolved] + list(argv[1:])
+
+
+def validate_run_plan(plan):
+    required = {
+        "schema", "created_at", "agent", "argv", "cwd", "run_id", "prompt_hash",
+        "env_allowlist", "timeout", "kill_grace", "expected_transition",
+    }
+    missing = sorted(required - set(plan))
+    if missing:
+        raise SystemExit(f"run plan missing required field(s): {', '.join(missing)}")
+    if plan["schema"] != RUN_PLAN_SCHEMA:
+        raise SystemExit(f"run plan schema must be {RUN_PLAN_SCHEMA}")
+    if not AGENT_RE.fullmatch(plan["agent"]):
+        raise SystemExit("run plan agent is invalid")
+    validate_run_id(plan["run_id"])
+    if not isinstance(plan["cwd"], str) or not os.path.isabs(plan["cwd"]) or not os.path.isdir(plan["cwd"]):
+        raise SystemExit("run plan cwd must be an existing absolute directory")
+    if not re.fullmatch(r"[0-9a-f]{64}", plan["prompt_hash"]):
+        raise SystemExit("run plan prompt_hash must be a sha256 hex digest")
+    if not isinstance(plan["env_allowlist"], list) or not all(ENV_RE.fullmatch(v or "") for v in plan["env_allowlist"]):
+        raise SystemExit("run plan env_allowlist must be an array of environment variable names")
+    if not isinstance(plan["timeout"], int) or plan["timeout"] < 0:
+        raise SystemExit("run plan timeout must be a non-negative integer")
+    if not isinstance(plan["kill_grace"], int) or plan["kill_grace"] < 0:
+        raise SystemExit("run plan kill_grace must be a non-negative integer")
+    resolve_argv(plan["argv"])
+    expected = plan["expected_transition"]
+    if not isinstance(expected, dict) or expected.get("type") not in {"core_state_advanced", "none"}:
+        raise SystemExit("run plan expected_transition must be an object with type core_state_advanced or none")
+    command = plan.get("command", {})
+    if command:
+        if command.get("shell") is not False:
+            raise SystemExit("run plan command.shell must be false")
+        if command.get("argv") != plan["argv"]:
+            raise SystemExit("run plan command.argv must match top-level argv")
+    return True
+
+
 def expected_post_run(me, lk):
     return {
         "type": "core_state_advanced",
@@ -106,21 +202,42 @@ def expected_post_run(me, lk):
 
 
 def make_run_plan(args, run_id, me, lk):
+    argv = resolve_argv(list(args.cmd))
+    cwd = os.path.abspath(args.cwd)
+    if not os.path.isdir(cwd):
+        raise SystemExit(f"--cwd is not a directory: {args.cwd}")
+    expected = expected_post_run(me, lk)
+    if args.expected_transition == "none":
+        expected = {
+            "type": "none",
+            "pre_state": lk.get("state", ""),
+            "pre_turn": lk.get("turn", ""),
+            "agent": me,
+            "success_rule": "read-only run; no relay state transition required",
+        }
     return {
         "schema": RUN_PLAN_SCHEMA,
         "created_at": iso_now(),
         "run_id": run_id,
         "agent": me,
+        "argv": argv,
+        "cwd": cwd,
+        "prompt_hash": prompt_hash_for_argv(argv),
+        "env_allowlist": normalize_env_allowlist(args.env_allowlist),
+        "timeout": args.turn_timeout,
+        "kill_grace": args.kill_grace,
+        "expected_transition": expected,
         "command": {
-            "argv": list(args.cmd),
+            "argv": argv,
             "shell": False,
         },
-        "expected_post_run": expected_post_run(me, lk),
+        "expected_post_run": expected,
         "source": {"tool": "headless_runner.py", "version": VERSION},
     }
 
 
 def write_run_plan(runtime_dir, plan):
+    validate_run_plan(plan)
     os.makedirs(os.path.join(runtime_dir, "run-plans"), exist_ok=True)
     path = run_plan_path(runtime_dir, plan["run_id"])
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -138,7 +255,7 @@ def write_run_plan(runtime_dir, plan):
 
 
 def verify_post_run(plan, after):
-    expected = plan["expected_post_run"]
+    expected = plan.get("expected_transition") or plan["expected_post_run"]
     actual = {
         "state": after.get("state", ""),
         "holder": after.get("holder", ""),
@@ -148,8 +265,15 @@ def verify_post_run(plan, after):
     pre_turn = expected.get("pre_turn", "")
     stuck_state = expected.get("stuck_state", "")
     me = expected.get("agent", "")
+    stolen = actual["turn"] == pre_turn and actual["holder"] not in ("", "none", me)
     progressed = actual["turn"] != pre_turn or actual["state"] not in (pre_state, stuck_state)
-    if actual["state"] == stuck_state and actual["holder"] == me:
+    if stolen:
+        status = "lock_stolen"
+        ok = False
+    elif expected.get("type") == "none":
+        status = "not_required"
+        ok = True
+    elif actual["state"] == stuck_state and actual["holder"] == me:
         status = "stuck_working"
         ok = False
     elif progressed:
@@ -176,6 +300,40 @@ def verify_post_run(plan, after):
         "actual": actual,
         "finding": finding,
     }
+
+
+def run_ledger_has_event(args, run_id, event):
+    if args.no_run_log:
+        return False
+    path = os.path.join(args.runtime_dir, "runs.jsonl")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("run_id") == run_id and row.get("event") == event:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def child_env_for_plan(plan, lk, m8shift_path):
+    env = {}
+    for name in plan["env_allowlist"]:
+        if name in os.environ:
+            env[name] = os.environ[name]
+    env.update({
+        "M8SHIFT_ROOT": os.path.dirname(os.path.abspath(m8shift_path)) or os.getcwd(),
+        "M8SHIFT_RUN_ID": plan["run_id"],
+        "M8SHIFT_AGENT": plan["agent"],
+        "M8SHIFT_TURN": lk.get("turn", ""),
+    })
+    return env
 
 
 def append_run_event(args, event, run_id, agent, **fields):
@@ -310,6 +468,12 @@ def main():
     p.add_argument("--runtime-dir", default=os.path.join(".m8shift", "runtime"),
                    help="local runtime sidecar dir for runs.jsonl (default: .m8shift/runtime)")
     p.add_argument("--run-id", default="", help="optional path-safe run id (default: generated)")
+    p.add_argument("--cwd", default=".", help="working directory for the child command; default current directory")
+    p.add_argument("--env-allowlist", default=DEFAULT_ENV_ALLOWLIST,
+                   help="comma-separated host env vars copied to the child; M8SHIFT_* vars are always added")
+    p.add_argument("--expected-transition", choices=("core_state_advanced", "none"),
+                   default="core_state_advanced",
+                   help="post-run relay transition expectation; default requires core state progress")
     p.add_argument("--no-run-log", action="store_true",
                    help="disable .m8shift/runtime/runs.jsonl lifecycle logging")
     p.add_argument("--once", action="store_true",
@@ -328,7 +492,8 @@ def main():
     me_awaiting = f"AWAITING_{me.upper()}"
     fails = 0
     if args.dry_run:
-        print(json.dumps({"agent": me, "cmd": args.cmd, "runner_version": VERSION}, sort_keys=True))
+        plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, read_lock(args.m8shift) or {"state": "IDLE", "turn": "0"})
+        print(json.dumps({"agent": me, "cmd": plan["argv"], "run_plan": plan, "runner_version": VERSION}, sort_keys=True))
         return 0
 
     while True:
@@ -359,14 +524,9 @@ def main():
             return 2
         append_run_event(args, "run.started", run_id, me, relay_state=state, relay_turn=lk.get("turn", ""),
                          run_plan=plan_path, run_plan_schema=RUN_PLAN_SCHEMA)
-        child_env = dict(os.environ)
-        child_env.update({
-            "M8SHIFT_RUN_ID": run_id,
-            "M8SHIFT_AGENT": me,
-            "M8SHIFT_TURN": lk.get("turn", ""),
-        })
+        child_env = child_env_for_plan(plan, lk, args.m8shift)
         try:
-            proc = subprocess.Popen(args.cmd, env=child_env)
+            proc = subprocess.Popen(plan["argv"], cwd=plan["cwd"], env=child_env)
         except OSError as e:
             log(f"could not launch the agent: {e}")
             append_run_event(args, "run.launch_failed", run_id, me, detail=str(e))
@@ -395,9 +555,18 @@ def main():
         verification = verify_post_run(plan, after)
         finding = verification.get("finding")
         findings = [finding] if finding else []
+        ledger_ok = run_ledger_has_event(args, run_id, "run.started")
+        if not ledger_ok:
+            findings.append({
+                "severity": "error",
+                "check": "headless.run_ledger",
+                "message": f"run {run_id} has no run.started ledger event",
+            })
         if finding:
             append_run_event(args, "run.verification_failed", run_id, me,
                              verification=verification, runtime_findings=findings)
+        process_ok = proc.returncode == 0
+        success = (not timed_out) and process_ok and verification["ok"] and ledger_ok
         if timed_out:
             fails += 1
             append_run_event(args, "run.ended", run_id, me, status="timeout",
@@ -405,6 +574,8 @@ def main():
                              relay_turn=after.get("turn", ""),
                              verification_ok=verification["ok"],
                              verification_status=verification["status"],
+                             ledger_ok=ledger_ok,
+                             success=False,
                              runtime_findings=findings)
         elif verification["status"] == "stuck_working":
             # claimed but exited without append → crashed mid-turn.
@@ -415,26 +586,39 @@ def main():
                              relay_turn=after.get("turn", ""),
                              verification_ok=False,
                              verification_status=verification["status"],
+                             ledger_ok=ledger_ok,
+                             success=False,
                              runtime_findings=findings)
-        elif verification["ok"]:
+        elif success:
             fails = 0  # a turn was posted / the state advanced — real progress.
-            status = "ok" if proc.returncode == 0 else "progressed_with_error"
-            append_run_event(args, "run.ended", run_id, me, status=status,
+            append_run_event(args, "run.ended", run_id, me, status="ok",
                              returncode=proc.returncode, relay_state=after.get("state", ""),
                              relay_turn=after.get("turn", ""),
                              verification_ok=True,
                              verification_status=verification["status"],
+                             ledger_ok=True,
+                             success=True,
                              runtime_findings=[])
             if args.once:
                 return 0
         else:
             fails += 1
-            log(f"agent ran but did not take the turn ({fails}/{args.max_retries}).")
-            append_run_event(args, "run.ended", run_id, me, status="no_progress",
+            if verification["ok"] and not process_ok:
+                status = "failed_partial"
+                log(f"agent advanced the relay but exited non-zero ({fails}/{args.max_retries}).")
+            elif verification["ok"] and not ledger_ok:
+                status = "failed_missing_ledger"
+                log(f"agent advanced the relay but run ledger is incomplete ({fails}/{args.max_retries}).")
+            else:
+                status = verification["status"] if verification["status"] != "not_required" else "failed_partial"
+                log(f"agent ran but did not satisfy run-plan validation ({fails}/{args.max_retries}).")
+            append_run_event(args, "run.ended", run_id, me, status=status,
                              returncode=proc.returncode, relay_state=after.get("state", ""),
                              relay_turn=after.get("turn", ""),
-                             verification_ok=False,
+                             verification_ok=verification["ok"],
                              verification_status=verification["status"],
+                             ledger_ok=ledger_ok,
+                             success=False,
                              runtime_findings=findings)
 
         if fails >= args.max_retries:

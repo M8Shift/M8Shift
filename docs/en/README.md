@@ -77,7 +77,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [025-rfc-status-runtime.md](rfc/025-rfc-status-runtime.md) | Baseline runtime status composition over core status plus presence/progress/inbox/run sidecars. |
 | [026-rfc-sidecar-retention.md](rfc/026-rfc-sidecar-retention.md) | Baseline fixed-count sidecar pruning is shipped; richer retention policy remains draft. |
 | [027-rfc-notifications.md](rfc/027-rfc-notifications.md) | Shipped tiered local notifications (stdout/file/bell/OS/hook) for handoffs and stale turns — advisory, no-daemon, no-network. |
-| [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | Draft safe headless command templates for cooperative CLIs. |
+| [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | Shipped safe headless command templates: opt-in provider examples, platform argv arrays, strict run-plan validation. |
 | [029-rfc-m8shift-board.md](rfc/029-rfc-m8shift-board.md) | Draft richer companion workboard concept outside the core task board. |
 | [030-rfc-tamper-evidence.md](rfc/030-rfc-tamper-evidence.md) | Proposed stdlib hash-chain for tamper-evidence — detection + warning, not prevention/identity/encryption; git as the strong anchor. |
 | [031-rfc-decision-traceability.md](rfc/031-rfc-decision-traceability.md) | Shipped tool-independent decision traceability — forge / GitHub / both / git or a markdown ADR fallback; structured contradictory-decision records (positions for/against + resolution). |
