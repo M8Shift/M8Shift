@@ -1,6 +1,6 @@
 # RFC — Local notification mechanisms
 
-**Status:** proposed (design specified; implementation deferred) · **Source:** deferred from [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md) · **Answers:** the notification open question in [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md) (§watch, open question 2)
+**Status:** design finalized (this RFC) · implementation tracked in #46 · **Source:** deferred from [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md) · **Answers:** the notification open question in [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md) (§watch, open question 2)
 
 ## Scope
 
@@ -175,20 +175,21 @@ that could spam an operator):
 - No notification path calls a core mutating command or makes a forbidden transition
   legal.
 
-## Open questions (flagged for review — designed solo, pending Codex)
+## Resolved questions
 
-1. **OS tier vs hook-only.** Should M8Shift ship the tier-3 OS presets (`osascript` /
-   `notify-send` / PowerShell), or ship only tiers 0–2 + the generic hook (tier 4) and
-   document the OS commands as example hooks? Shipping presets is friendlier; hook-only
-   keeps M8Shift's invoked-binary surface at zero. *Recommendation:* ship tiers 0–2 by
-   default, implement tier 4 (hook), and treat tier-3 presets as thin, opt-in,
-   fully-degrading convenience over the hook.
-2. **`notify` standalone vs watch-only.** Keep `notify` as a standalone command (so the
-   headless runner and operator hooks can fire it) in addition to `watch` calling it
-   internally. *Recommendation:* both, sharing one path.
-3. **Dedup window default.** Is 300 s a sane default for stale re-notification, or should
-   it scale with the lock TTL?
-4. **Placeholder safety.** Confirm that hook placeholder substitution as discrete argv
-   items (never a joined shell string) is sufficient to keep tier 4 free of injection,
-   consistent with the argv-only direction of
-   [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md).
+1. **OS tier vs hook-only.** Ship **tiers 0–2** (stdout, prompt file, bell) as the always-safe
+   floor and **tier 4** (the generic operator hook) as the external-channel escape hatch; implement
+   **tier 3** (OS presets: `osascript` / `notify-send` / PowerShell toast) as a thin, **opt-in,
+   off-by-default, fully-degrading** convenience over the hook. This keeps M8Shift's invoked-binary
+   surface minimal while staying friendly.
+2. **`notify` standalone vs watch-only.** **Both, one code path** — `notify` is a standalone command
+   (so the headless runner and operator hooks can fire it) and `watch` calls the same `notify` path
+   internally on each transition.
+3. **Dedup window default.** **Fixed 300 s default, operator-overridable** via `dedup_window_seconds`;
+   not auto-scaled with the lock TTL — a fixed, predictable window is simpler and enough (a `stale`
+   event never re-notifies more than once per window).
+4. **Placeholder safety.** **Confirmed.** Tier-4 placeholders (`{agent}` / `{event}` / `{state}`) are
+   substituted as **discrete literal argv items**, never concatenated into a shell string; the hook is
+   run via `subprocess` with an argv list, never `shell=True` — consistent with the argv-only direction
+   of [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md). `doctor` warns if
+   a configured hook looks like a single shell string with metacharacters.
