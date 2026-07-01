@@ -821,6 +821,9 @@ usage watch --apply
 
 ### Phase 4 — core cooldown command
 
+Status: shipped in core. The command is dependency-free and records only passive
+session events; provider adapters and automatic resume remain runtime companion work.
+
 Add:
 
 ```bash
