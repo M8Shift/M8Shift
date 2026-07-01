@@ -166,6 +166,9 @@ from raw output. RTK is **complementary** to the native pack (a different token 
 `rtk err` *preserves* critical error lines that the native pack's line-truncation would drop —
 the two cover each other's blind spots.
 
+**Adoption:** M8Shift ships an optional RTK `shell_output_filter` adapter manifest and
+runner policy, but not the RTK binary. See [rtk-shell-output-policy.md](rtk-shell-output-policy.md).
+
 ## Round 3 — Headroom (context compressor): parked, not run · 2026-06-30
 
 Both agents — Claude (analysis) and Codex (independent review) — agreed **not** to run Round 3
