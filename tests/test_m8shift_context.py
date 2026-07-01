@@ -171,6 +171,29 @@ class TestContextInitDoctor(ContextBase):
         self.assertIn("RTK: ON (pinned, compressing packs)", doctor.stdout)
         self.assertIn("last pack:", doctor.stdout)
 
+    def test_status_doctor_report_corrupt_rtk_manifest_and_metrics_without_abort(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        adapter = os.path.join(self.d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
+        with open(adapter, "w", encoding="utf-8") as fh:
+            fh.write("{not-json")
+        with open(os.path.join(self.d, ".m8shift", "context", "metrics.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("{bad-json}\n")
+
+        status = self.ctx("status", "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        status_payload = json.loads(status.stdout)
+        self.assertEqual(status_payload["rtk"]["state"], "off")
+        self.assertIn("adapter.manifest_unreadable", {f["check"] for f in status_payload["rtk"]["findings"]})
+        self.assertIn("metrics.unreadable", {f["check"] for f in status_payload["rtk"]["findings"]})
+
+        doctor = self.ctx("doctor", "--json")
+        self.assertNotIn("m8shift-context:", doctor.stderr)
+        self.assertIn(doctor.returncode, (0, 1))
+        doctor_payload = json.loads(doctor.stdout)
+        checks = {f["check"] for f in doctor_payload["findings"]}
+        self.assertIn("adapter.manifest_unreadable", checks)
+        self.assertIn("metrics.unreadable", checks)
+
 
 class TestContextPack(ContextBase):
     def test_pack_preserves_handoff_fields_verbatim_and_writes_receipt_metrics(self):

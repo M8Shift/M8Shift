@@ -3969,6 +3969,44 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(payload["presence"]["rtk"]["self_declared"], "off")
         self.assertIn("runtime.rtk_decl", {f["check"] for f in payload["runtime_findings"]})
 
+    def test_runtime_context_rtk_nonregular_path_is_off_not_hang(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("mkfifo unavailable")
+        self.init()
+        context_dir = os.path.join(self.d, ".m8shift", "context")
+        adapters = os.path.join(context_dir, "adapters")
+        os.makedirs(adapters, exist_ok=True)
+        fifo = os.path.join(self.d, "rtk-fifo")
+        os.mkfifo(fifo)
+        with open(os.path.join(adapters, "rtk-shell-output.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.adapter.v1",
+                "name": "rtk-shell-output",
+                "type": "shell_output_filter",
+                "authority": "advisory",
+                "command": ["rtk", "$M8SHIFT_ADAPTER_MODE_ARGS"],
+                "mutates_core": False,
+                "mutates_repo": False,
+                "trusted_executable": {
+                    "program": "rtk",
+                    "path": fifo,
+                    "sha256": "0" * 64,
+                },
+            }, fh)
+        status = subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "status-runtime", "codex", "--json"],
+            cwd=self.d, capture_output=True, text=True, timeout=4,
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["context_rtk"]["state"], "off")
+        self.assertIn("not a regular file", payload["context_rtk"]["reason"])
+        doctor = subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "doctor", "--json"],
+            cwd=self.d, capture_output=True, text=True, timeout=4,
+        )
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+
     def test_runtime_lane_takeover_requires_stale_presence(self):
         self.init()
         before = self.md()

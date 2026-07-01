@@ -42,4 +42,7 @@ through M8Shift telemetry.
 - Operators get useful local visibility without adding a network primitive.
 - The context adapter state is independently visible even when agents do not
   self-declare.
+- Read-only status paths treat non-regular trusted executable paths as RTK OFF
+  and report corrupt context-sidecar JSON as findings instead of hanging or
+  aborting.
 - For forensic audit, operators must use RTK's own local `rtk discover`.

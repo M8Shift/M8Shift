@@ -14,6 +14,9 @@ Release scope:
   when metrics are available.
 - `m8shift-context.py status` was added, and `doctor` now uses the same
   prominent RTK state line and last-pack metric summary.
+- Read-only RTK status paths fail closed without hanging/aborting: non-regular
+  trusted executable paths are treated as RTK OFF, and corrupt RTK manifests or
+  malformed metrics rows are reported as findings.
 - Documentation now states that `rtk discover` is the audit path for an agent's
   actual shell command usage; M8Shift does not re-enable RTK telemetry.
 
@@ -22,6 +25,8 @@ Validation:
 - Added regression coverage for self-declared `M8SHIFT_RTK`, absent/invalid RTK
   declarations, context-adapter ON/OFF surfacing, last-pack ratio display, and
   no network-client imports in the touched scripts.
+- Added adversarial negative tests for FIFO/device-like trusted executable paths
+  and corrupt context-sidecar JSON.
 - Lockstep version surfaces bumped from `3.35.0` to `3.36.0` across distributed
   scripts and tests.
 
