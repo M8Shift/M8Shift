@@ -2708,12 +2708,43 @@ class TestAuditFixes(CLIBase):
                 f.write(original)
             env = os.environ.copy()
             env.pop("M8SHIFT_ROOT", None)
+            env.pop("M8SHIFT_AGENT_MODEL", None)
 
             r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             with open(msg, encoding="utf-8") as f:
                 self.assertEqual(f.read(), original)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_stamps_agent_model_without_configured_relay(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject only\n")
+            env = os.environ.copy()
+            env.pop("M8SHIFT_ROOT", None)
+            env["M8SHIFT_AGENT_MODEL"] = "codex-gpt-5.1"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("Agent-Model: codex-gpt-5.1", body)
+            self.assertNotIn("Coordinated-With:", body)
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertEqual(body.count("Agent-Model:"), 1)
+            self.assertNotIn("Coordinated-With:", body)
         finally:
             shutil.rmtree(app, ignore_errors=True)
 
