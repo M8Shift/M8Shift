@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.32.0 — 2026-07-01
+
+Release scope:
+
+- #46 — Implemented RFC 027 local notifications in the runtime companion:
+  `m8shift-runtime.py notify <agent> --event turn-ready|stale|blocked|done`
+  and `notify config`.
+- Added local notification tiers: stdout, prompt/event sidecar files, terminal
+  bell, opt-in OS presets, and opt-in operator hook argv templates.
+- Added deduplication for repeated `(agent, event)` notifications, notification
+  audit rows under `.m8shift/runtime/notify/log.jsonl`, and runtime doctor checks
+  for malformed config, missing OS notifier binaries, unsafe hook shape, and
+  sidecar hygiene.
+- `watch` now uses the same notification path for human-mode state transitions;
+  JSON mode remains machine-readable.
+
+Validation:
+
+- Added tests for stdout-only mode, prompt/event/log sidecars, deduplication,
+  CI suppression, missing OS notifier fallback, hook non-zero logging, literal
+  argv placeholder substitution, removable notify sidecars, and runtime init
+  scaffolding.
+- Lockstep version surfaces bumped from `3.31.0` to `3.32.0` across distributed
+  scripts and tests.
+
 ## v3.31.0 — 2026-07-01
 
 Release scope:
