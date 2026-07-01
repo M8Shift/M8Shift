@@ -15,8 +15,8 @@ Release scope:
 - `m8shift-context.py status` was added, and `doctor` now uses the same
   prominent RTK state line and last-pack metric summary.
 - Read-only RTK status paths fail closed without hanging/aborting: non-regular
-  trusted executable paths are treated as RTK OFF, and corrupt RTK manifests or
-  malformed metrics rows are reported as findings.
+  trusted executable paths and >512 MiB RTK binaries are treated as RTK OFF, and
+  corrupt RTK manifests or malformed metrics rows are reported as findings.
 - Documentation now states that `rtk discover` is the audit path for an agent's
   actual shell command usage; M8Shift does not re-enable RTK telemetry.
 

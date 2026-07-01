@@ -38,7 +38,7 @@ FIELD_RE = re.compile(r"^- (?P<key>[a-z_]+):\s*(?P<value>.*)$")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 PROFILE_NAMES = ("implementer", "reviewer", "tester", "gatekeeper", "maintainer")
 GIT_TIMEOUT_SECONDS = 10
-MAX_HASH_BYTES = 64 * 1024 * 1024
+MAX_HASH_BYTES = 512 * 1024 * 1024
 ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
@@ -896,10 +896,14 @@ def adapter_identity_for_program(program):
     if not resolved:
         return None
     real = os.path.realpath(resolved)
+    try:
+        digest = sha256_file(real)
+    except (OSError, ValueError):
+        return None
     return {
         "program": program,
         "path": real,
-        "sha256": sha256_file(real),
+        "sha256": digest,
     }
 
 
@@ -1007,7 +1011,10 @@ def adapter_identity_findings(manifest, program, resolved):
     real = os.path.realpath(resolved)
     if real != expected_path:
         return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} resolved to {real}, expected {expected_path}")]
-    actual_sha = sha256_file(real)
+    try:
+        actual_sha = sha256_file(real)
+    except (OSError, ValueError) as e:
+        return [finding("error", "adapter.program_identity_mismatch", f"{name}: cannot hash executable {program!r}: {e}")]
     if actual_sha != expected_sha:
         return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} sha256 {actual_sha} does not match trusted sha256 {expected_sha}")]
     return []
