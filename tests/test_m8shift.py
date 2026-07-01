@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.28.0"
+VERSION = "3.28.1"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -306,6 +306,7 @@ class TestInit(CLIBase):
         with open(hook, encoding="utf-8") as f:
             body = f.read()
         self.assertIn("Coordinated-With: M8Shift vX.Y.Z", body)
+        self.assertIn("M8SHIFT_AGENT_MODEL", body)
         self.assertIn("M8SHIFT_ROOT", body)
         if os.name != "nt":
             self.assertTrue(os.access(hook, os.X_OK), "hook template should be executable")
@@ -2595,6 +2596,107 @@ class TestAuditFixes(CLIBase):
         finally:
             shutil.rmtree(app, ignore_errors=True)
 
+    def test_commit_msg_hook_stamps_agent_model_when_declared(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject\n\nBody.\n")
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env["M8SHIFT_AGENT_MODEL"] = "codex-gpt-5.1/test"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            model = "Agent-Model: codex-gpt-5.1/test"
+            trailer = f"Coordinated-With: M8Shift v{cowork.VERSION}"
+            self.assertIn(model, body)
+            self.assertIn(trailer, body)
+            self.assertLess(body.index(model), body.index(trailer))
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertEqual(body.count("Agent-Model:"), 1)
+            self.assertEqual(body.count("Coordinated-With:"), 1)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_skips_absent_agent_model(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject\n")
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env.pop("M8SHIFT_AGENT_MODEL", None)
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertNotIn("Agent-Model:", body)
+            self.assertIn(f"Coordinated-With: M8Shift v{cowork.VERSION}", body)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_rejects_malformed_agent_model_fail_open(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject\n")
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env["M8SHIFT_AGENT_MODEL"] = "bad model\nAgent-Model: forged"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertNotIn("Agent-Model:", body)
+            self.assertIn(f"Coordinated-With: M8Shift v{cowork.VERSION}", body)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_keeps_existing_agent_model_idempotent(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject\n\nAgent-Model: existing-model\n")
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env["M8SHIFT_AGENT_MODEL"] = "new-model"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertEqual(body.count("Agent-Model:"), 1)
+            self.assertIn("Agent-Model: existing-model", body)
+            self.assertNotIn("Agent-Model: new-model", body)
+            self.assertIn(f"Coordinated-With: M8Shift v{cowork.VERSION}", body)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
     def test_commit_msg_hook_skips_without_configured_relay(self):
         self.init()
         hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
@@ -2606,11 +2708,63 @@ class TestAuditFixes(CLIBase):
                 f.write(original)
             env = os.environ.copy()
             env.pop("M8SHIFT_ROOT", None)
+            env.pop("M8SHIFT_AGENT_MODEL", None)
 
             r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             with open(msg, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_stamps_agent_model_without_configured_relay(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject only\n")
+            env = os.environ.copy()
+            env.pop("M8SHIFT_ROOT", None)
+            env["M8SHIFT_AGENT_MODEL"] = "codex-gpt-5.1"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("Agent-Model: codex-gpt-5.1", body)
+            self.assertNotIn("Coordinated-With:", body)
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertEqual(body.count("Agent-Model:"), 1)
+            self.assertNotIn("Coordinated-With:", body)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_non_utf8_message_fail_open(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            original = b"subject latin-1: \xe9\n"
+            with open(msg, "wb") as f:
+                f.write(original)
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env["M8SHIFT_AGENT_MODEL"] = "codex-gpt-5.1"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, "rb") as f:
                 self.assertEqual(f.read(), original)
         finally:
             shutil.rmtree(app, ignore_errors=True)
