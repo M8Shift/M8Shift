@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.34.2"
+VERSION = "3.35.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -26,6 +26,11 @@ CORE_PATH = os.path.join(HERE, "m8shift.py")
 RUNTIME_DIR = os.path.join(HERE, ".m8shift", "runtime")
 PROJECT_DIR = os.path.join(HERE, ".m8shift")
 PROVIDERS = os.path.join(PROJECT_DIR, "providers.json")
+ROUTING_DIR = os.path.join(PROJECT_DIR, "routing")
+ROUTING_SKILLS = os.path.join(ROUTING_DIR, "skills.json")
+ROUTING_MODELS = os.path.join(ROUTING_DIR, "models.json")
+ROUTING_SKILLS_SCHEMA = "m8shift.routing.skills.v1"
+ROUTING_MODELS_SCHEMA = "m8shift.routing.models.v1"
 ROLES_DIR = os.path.join(PROJECT_DIR, "roles")
 WORKFLOWS_DIR = os.path.join(PROJECT_DIR, "workflows")
 POLICIES_DIR = os.path.join(PROJECT_DIR, "policies")
@@ -50,7 +55,13 @@ SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 PLATFORM_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
+ROUTING_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 PROVIDER_MODES = {"interactive", "headless", "hybrid", "local"}
+DEFAULT_TIER_ORDER = ["economy", "balanced", "flagship"]
+DEFAULT_COST_ORDER = ["$", "$$", "$$$", "$$$$"]
+DEFAULT_LATENCY_ORDER = ["fast", "medium", "slow"]
+DEFAULT_CONTEXT_ORDER = ["small", "large", "xlarge"]
+HIGH_STAKES_TASK_TYPES = {"adversarial-verify", "security-review", "legal-compliance-review", "legal-review"}
 DEFAULT_CAPABILITIES = {
     "claude": ["read_repo", "write_repo", "review", "long_context"],
     "codex": ["read_repo", "write_repo", "run_tests"],
@@ -100,6 +111,7 @@ def ensure_notify_dir():
 
 def ensure_project_dirs():
     os.makedirs(PROJECT_DIR, exist_ok=True)
+    os.makedirs(ROUTING_DIR, exist_ok=True)
     os.makedirs(ROLES_DIR, exist_ok=True)
     os.makedirs(WORKFLOWS_DIR, exist_ok=True)
     os.makedirs(POLICIES_DIR, exist_ok=True)
@@ -230,6 +242,38 @@ def default_provider_registry(agents):
     }
 
 
+def default_routing_models_manifest():
+    return {
+        "schema": ROUTING_MODELS_SCHEMA,
+        "authority": "advisory",
+        "enabled": False,
+        "cost_basis": "operator-supplied relative bands; NOT currency; no bundled vendor prices",
+        "tiers": DEFAULT_TIER_ORDER,
+        "cost_bands": DEFAULT_COST_ORDER,
+        "latency_bands": DEFAULT_LATENCY_ORDER,
+        "context_classes": DEFAULT_CONTEXT_ORDER,
+        "models": [],
+    }
+
+
+def default_routing_skills_manifest():
+    return {
+        "schema": ROUTING_SKILLS_SCHEMA,
+        "authority": "advisory",
+        "enabled": False,
+        "default_on_missing": "escalate_to_pen_holder",
+        "defaults": {
+            "min_model": "balanced",
+            "optimum_model": "flagship",
+            "downgradable": True,
+            "required_capabilities": [],
+            "required_context_class": "small",
+            "verify": ["pen-holder verifies against source before integrate"],
+        },
+        "task_types": {},
+    }
+
+
 RUNTIME_README = """# M8Shift runtime companion
 
 This directory is optional. It belongs to `m8shift-runtime.py`, not to the passive
@@ -238,6 +282,8 @@ core relay.
 - `providers.json`: host-side agent/provider registry. Keep secrets out of it.
   Generated registries include opt-in `examples` for cooperative headless CLIs;
   copy/adapt them into active agents before use.
+- `routing/`: optional advisory model/task routing manifests. Defaults are empty,
+  provider-neutral, and contain no vendor prices.
 - `roles/`: stable behavioral role contracts.
 - `workflows/`: simple local workflow definitions.
 - `policies/`: human approval and runtime policy notes.
@@ -1632,6 +1678,10 @@ def cmd_runtime_init(args):
         created.append(".m8shift/policies/approvals.md")
     if write_json_if_missing(PROVIDERS, default_provider_registry(agents), args.force):
         created.append(".m8shift/providers.json")
+    if write_json_if_missing(ROUTING_MODELS, default_routing_models_manifest(), args.force):
+        created.append(".m8shift/routing/models.json")
+    if write_json_if_missing(ROUTING_SKILLS, default_routing_skills_manifest(), args.force):
+        created.append(".m8shift/routing/skills.json")
     if write_json_if_missing(PRESENCE, {}, args.force):
         created.append(".m8shift/runtime/presence.json")
     if write_json_if_missing(NOTIFY_CONFIG, default_notify_config(), args.force):
@@ -1731,6 +1781,353 @@ def cmd_providers_render(args):
     else:
         print(json.dumps(argv, ensure_ascii=False))
     return 0
+
+
+def routing_order(manifest, key, default):
+    value = manifest.get(key, default)
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        return list(default)
+    out = []
+    for item in value:
+        if item not in out:
+            out.append(item)
+    return out or list(default)
+
+
+def order_index(order, value):
+    try:
+        return order.index(value)
+    except ValueError:
+        return len(order) + 1000
+
+
+def order_max(order, left, right):
+    return left if order_index(order, left) >= order_index(order, right) else right
+
+
+def list_strings(value):
+    return isinstance(value, list) and all(isinstance(v, str) and v for v in value)
+
+
+def load_routing_manifests():
+    models, models_err = read_json_diagnostic(ROUTING_MODELS, default_routing_models_manifest())
+    skills, skills_err = read_json_diagnostic(ROUTING_SKILLS, default_routing_skills_manifest())
+    findings = []
+    if models_err:
+        findings.append({"severity": "error", "check": "routing.models",
+                         "message": f"{os.path.relpath(ROUTING_MODELS, HERE)}: {models_err}"})
+    if skills_err:
+        findings.append({"severity": "error", "check": "routing.skills",
+                         "message": f"{os.path.relpath(ROUTING_SKILLS, HERE)}: {skills_err}"})
+    return models, skills, findings
+
+
+def model_by_id(models_manifest):
+    rows = models_manifest.get("models", [])
+    if not isinstance(rows, list):
+        return {}
+    return {row["id"]: row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)}
+
+
+def resolve_model_ref(value, models_manifest, tiers, *, label):
+    if not isinstance(value, str) or not value:
+        return "", {"severity": "error", "check": "routing.skill", "message": f"{label} must be a non-empty string"}
+    if value in tiers:
+        return value, None
+    row = model_by_id(models_manifest).get(value)
+    if row and row.get("tier") in tiers:
+        return row["tier"], None
+    return "", {"severity": "error", "check": "routing.model_ref",
+                "message": f"{label} references unresolved tier/model {value!r}"}
+
+
+def routing_model_findings(models_manifest):
+    findings = []
+    if not isinstance(models_manifest, dict):
+        return [{"severity": "error", "check": "routing.models", "message": "models manifest is not an object"}]
+    if models_manifest.get("schema") != ROUTING_MODELS_SCHEMA:
+        findings.append({"severity": "error", "check": "routing.models.schema", "message": f"expected {ROUTING_MODELS_SCHEMA}"})
+    tiers = routing_order(models_manifest, "tiers", DEFAULT_TIER_ORDER)
+    costs = routing_order(models_manifest, "cost_bands", DEFAULT_COST_ORDER)
+    latencies = routing_order(models_manifest, "latency_bands", DEFAULT_LATENCY_ORDER)
+    contexts = routing_order(models_manifest, "context_classes", DEFAULT_CONTEXT_ORDER)
+    for key in ("tiers", "cost_bands", "latency_bands", "context_classes"):
+        value = models_manifest.get(key, [])
+        if value not in (None, "") and not list_strings(value):
+            findings.append({"severity": "error", "check": f"routing.models.{key}", "message": f"{key} must be a list of strings"})
+    rows = models_manifest.get("models", [])
+    if not isinstance(rows, list):
+        return findings + [{"severity": "error", "check": "routing.models.models", "message": "models must be a list"}]
+    seen = set()
+    for idx, row in enumerate(rows):
+        prefix = f"models[{idx}]"
+        if not isinstance(row, dict):
+            findings.append({"severity": "error", "check": "routing.model", "message": f"{prefix} is not an object"})
+            continue
+        model_id = row.get("id", "")
+        if not isinstance(model_id, str) or not ROUTING_ID_RE.fullmatch(model_id):
+            findings.append({"severity": "error", "check": "routing.model.id", "message": f"{prefix}.id is invalid"})
+        elif model_id in seen:
+            findings.append({"severity": "error", "check": "routing.model.id_duplicate", "message": f"duplicate model id {model_id}"})
+        else:
+            seen.add(model_id)
+        if not isinstance(row.get("provider", ""), str):
+            findings.append({"severity": "error", "check": "routing.model.provider", "message": f"{prefix}.provider must be a string"})
+        if row.get("tier") not in tiers:
+            findings.append({"severity": "error", "check": "routing.model.tier", "message": f"{model_id or prefix}: unknown tier {row.get('tier')!r}"})
+        if row.get("cost_band") not in costs:
+            findings.append({"severity": "error", "check": "routing.model.cost_band", "message": f"{model_id or prefix}: unknown cost_band {row.get('cost_band')!r}"})
+        if row.get("latency") not in latencies:
+            findings.append({"severity": "error", "check": "routing.model.latency", "message": f"{model_id or prefix}: unknown latency {row.get('latency')!r}"})
+        if row.get("context_class") not in contexts:
+            findings.append({"severity": "error", "check": "routing.model.context_class", "message": f"{model_id or prefix}: unknown context_class {row.get('context_class')!r}"})
+        if not list_strings(row.get("capabilities", [])):
+            findings.append({"severity": "error", "check": "routing.model.capabilities", "message": f"{model_id or prefix}: capabilities must be a list of strings"})
+    return findings
+
+
+def routing_skill_findings(skills_manifest, models_manifest):
+    findings = []
+    if not isinstance(skills_manifest, dict):
+        return [{"severity": "error", "check": "routing.skills", "message": "skills manifest is not an object"}]
+    if skills_manifest.get("schema") != ROUTING_SKILLS_SCHEMA:
+        findings.append({"severity": "error", "check": "routing.skills.schema", "message": f"expected {ROUTING_SKILLS_SCHEMA}"})
+    if skills_manifest.get("authority", "advisory") != "advisory":
+        findings.append({"severity": "error", "check": "routing.skills.authority", "message": "routing skills authority must be advisory"})
+    tiers = routing_order(models_manifest, "tiers", DEFAULT_TIER_ORDER)
+    contexts = routing_order(models_manifest, "context_classes", DEFAULT_CONTEXT_ORDER)
+    task_types = skills_manifest.get("task_types", {})
+    if not isinstance(task_types, dict):
+        return findings + [{"severity": "error", "check": "routing.skills.task_types", "message": "task_types must be an object"}]
+    defaults = skills_manifest.get("defaults", {})
+    if defaults not in ({}, None) and not isinstance(defaults, dict):
+        findings.append({"severity": "error", "check": "routing.skills.defaults", "message": "defaults must be an object"})
+        defaults = {}
+    for task_type, raw_rule in task_types.items():
+        if not isinstance(task_type, str) or not ROUTING_ID_RE.fullmatch(task_type):
+            findings.append({"severity": "error", "check": "routing.skill.name", "message": f"invalid task-type {task_type!r}"})
+            continue
+        if not isinstance(raw_rule, dict):
+            findings.append({"severity": "error", "check": "routing.skill", "message": f"{task_type}: rule must be an object"})
+            continue
+        rule = dict(defaults or {})
+        rule.update(raw_rule)
+        min_tier, finding = resolve_model_ref(rule.get("min_model", ""), models_manifest, tiers, label=f"{task_type}.min_model")
+        if finding:
+            findings.append(finding)
+        optimum_tier, finding = resolve_model_ref(rule.get("optimum_model", rule.get("min_model", "")), models_manifest, tiers, label=f"{task_type}.optimum_model")
+        if finding:
+            findings.append(finding)
+        if not isinstance(rule.get("downgradable", True), bool):
+            findings.append({"severity": "error", "check": "routing.skill.downgradable", "message": f"{task_type}: downgradable must be boolean"})
+        if not list_strings(rule.get("required_capabilities", [])):
+            findings.append({"severity": "error", "check": "routing.skill.capabilities", "message": f"{task_type}: required_capabilities must be a list of strings"})
+        if not list_strings(rule.get("verify", [])):
+            findings.append({"severity": "error", "check": "routing.skill.verify", "message": f"{task_type}: verify must be a list of strings"})
+        required_context = rule.get("required_context_class", "small")
+        if required_context not in contexts:
+            findings.append({"severity": "error", "check": "routing.skill.context", "message": f"{task_type}: unknown required_context_class {required_context!r}"})
+        if task_type in HIGH_STAKES_TASK_TYPES:
+            top_tier = tiers[-1] if tiers else "flagship"
+            if rule.get("downgradable") is not False or min_tier != top_tier or optimum_tier != top_tier:
+                findings.append({"severity": "error", "check": "routing.skill.pinned",
+                                 "message": f"{task_type}: high-stakes routes must be pinned to {top_tier} and downgradable=false"})
+    return findings
+
+
+def routing_findings(models_manifest, skills_manifest):
+    return routing_model_findings(models_manifest) + routing_skill_findings(skills_manifest, models_manifest)
+
+
+def context_class_for_tokens(tokens, context_order):
+    if tokens is None or tokens <= 0:
+        return context_order[0] if context_order else "small"
+    if "small" in context_order and tokens <= 8000:
+        return "small"
+    if "large" in context_order and tokens <= 64000:
+        return "large"
+    if "xlarge" in context_order:
+        return "xlarge"
+    return context_order[-1] if context_order else "xlarge"
+
+
+def current_holder():
+    try:
+        status = run_core_json("status", "--json")
+    except Exception:  # noqa: BLE001 - routing fail-safe must not traceback
+        return ""
+    holder = status.get("holder", "")
+    return holder if isinstance(holder, str) and AGENT_RE.fullmatch(holder) else ""
+
+
+def provider_self_model(holder):
+    if not holder:
+        return "", ""
+    registry = load_provider_registry()
+    matches = []
+    for row in registry.get("agents", []):
+        if isinstance(row, dict) and row.get("name") == holder:
+            model = row.get("model_id") or row.get("model")
+            if isinstance(model, str) and model:
+                matches.append(model)
+    unique = sorted(set(matches))
+    return (unique[0], "provider") if len(unique) == 1 else ("", "")
+
+
+def resolve_self_model(args, holder):
+    presence, _err = read_json_diagnostic(PRESENCE, {})
+    if holder and isinstance(presence.get(holder), dict):
+        row = presence[holder]
+        model = row.get("agent_model") or row.get("model") or row.get("Agent-Model")
+        verified = (
+            row.get("agent_model_verified") is True
+            or row.get("verified_agent_model") is True
+            or row.get("agent_model_source") == "Agent-Model"
+        )
+        if isinstance(model, str) and model and verified:
+            return model, "runtime-lane"
+    if getattr(args, "self_model", ""):
+        return args.self_model, "operator"
+    return provider_self_model(holder)
+
+
+def fail_safe_recommendation(args, reason, findings, *, floor="", optimum="", verify=None):
+    holder = current_holder()
+    self_model, self_source = resolve_self_model(args, holder)
+    if not self_model:
+        reason = "no delegation recommendation; use the pen-holder manually"
+    return {
+        "ok": True,
+        "route": "recommend",
+        "authority": "advisory",
+        "launch": False,
+        "task_type": args.task_type,
+        "skill": args.skill,
+        "holder": holder,
+        "floor": floor,
+        "optimum": optimum,
+        "required_capabilities": [],
+        "required_context_class": "",
+        "feasible": [],
+        "picked": self_model,
+        "picked_tier": "",
+        "picked_cost_band": "",
+        "reason": reason,
+        "self_model": self_model,
+        "self_source": self_source,
+        "saved_vs": "",
+        "verify": verify or [],
+        "findings": findings,
+    }
+
+
+def route_recommendation(args):
+    models_manifest, skills_manifest, findings = load_routing_manifests()
+    findings.extend(routing_findings(models_manifest, skills_manifest))
+    if any(f.get("severity") == "error" for f in findings):
+        return {"ok": False, "route": "recommend", "authority": "advisory", "launch": False,
+                "task_type": args.task_type, "skill": args.skill,
+                "reason": "routing manifest error", "findings": findings}
+    tiers = routing_order(models_manifest, "tiers", DEFAULT_TIER_ORDER)
+    costs = routing_order(models_manifest, "cost_bands", DEFAULT_COST_ORDER)
+    latencies = routing_order(models_manifest, "latency_bands", DEFAULT_LATENCY_ORDER)
+    contexts = routing_order(models_manifest, "context_classes", DEFAULT_CONTEXT_ORDER)
+    task_types = skills_manifest.get("task_types", {}) if isinstance(skills_manifest.get("task_types", {}), dict) else {}
+    if args.task_type not in task_types:
+        return fail_safe_recommendation(args, f"unknown task-type {args.task_type!r}; fail-safe to pen-holder", findings)
+    defaults = skills_manifest.get("defaults", {}) if isinstance(skills_manifest.get("defaults", {}), dict) else {}
+    rule = dict(defaults)
+    rule.update(task_types[args.task_type])
+    floor, finding = resolve_model_ref(rule.get("min_model", ""), models_manifest, tiers, label=f"{args.task_type}.min_model")
+    if finding:
+        findings.append(finding)
+    optimum, finding = resolve_model_ref(rule.get("optimum_model", rule.get("min_model", "")), models_manifest, tiers, label=f"{args.task_type}.optimum_model")
+    if finding:
+        findings.append(finding)
+    if any(f.get("severity") == "error" for f in findings):
+        return {"ok": False, "route": "recommend", "authority": "advisory", "launch": False,
+                "task_type": args.task_type, "skill": args.skill,
+                "reason": "routing manifest error", "findings": findings}
+    required_caps = rule.get("required_capabilities", [])
+    required_context = rule.get("required_context_class", contexts[0] if contexts else "small")
+    required_context = order_max(contexts, required_context, context_class_for_tokens(args.input_tokens, contexts))
+    verify = rule.get("verify", [])
+    eligible = []
+    for row in [r for r in models_manifest.get("models", []) if isinstance(r, dict)]:
+        if order_index(tiers, row.get("tier")) < order_index(tiers, floor):
+            continue
+        if not set(required_caps).issubset(set(row.get("capabilities", []))):
+            continue
+        if order_index(contexts, row.get("context_class")) < order_index(contexts, required_context):
+            continue
+        eligible.append(row)
+    sort_key = lambda r: (order_index(costs, r.get("cost_band")), order_index(latencies, r.get("latency")), r.get("id", ""))
+    feasible_rows = sorted(eligible, key=sort_key)
+    feasible = [{
+        "id": row.get("id"),
+        "tier": row.get("tier"),
+        "cost_band": row.get("cost_band"),
+        "latency": row.get("latency"),
+        "context_class": row.get("context_class"),
+    } for row in feasible_rows]
+    if not feasible_rows:
+        return fail_safe_recommendation(
+            args,
+            "no eligible model clears floor/capabilities/context; fail-safe to pen-holder",
+            findings,
+            floor=floor,
+            optimum=optimum,
+            verify=verify,
+        )
+    picked = feasible_rows[0]
+    optimum_candidates = [row for row in feasible_rows if order_index(tiers, row.get("tier")) >= order_index(tiers, optimum)]
+    saved_vs = ""
+    if optimum_candidates and optimum_candidates[0].get("id") != picked.get("id"):
+        saved_vs = optimum_candidates[0].get("id", "")
+    return {
+        "ok": True,
+        "route": "recommend",
+        "authority": "advisory",
+        "launch": False,
+        "task_type": args.task_type,
+        "skill": args.skill,
+        "holder": current_holder(),
+        "floor": floor,
+        "optimum": optimum,
+        "downgradable": bool(rule.get("downgradable", True)),
+        "required_capabilities": required_caps,
+        "required_context_class": required_context,
+        "feasible": feasible,
+        "picked": picked.get("id", ""),
+        "picked_tier": picked.get("tier", ""),
+        "picked_cost_band": picked.get("cost_band", ""),
+        "picked_latency": picked.get("latency", ""),
+        "below_optimum": order_index(tiers, picked.get("tier")) < order_index(tiers, optimum),
+        "reason": "cheapest eligible model; latency tie-break",
+        "saved_vs": saved_vs,
+        "verify": verify,
+        "findings": findings,
+    }
+
+
+def cmd_route_recommend(args):
+    result = route_recommendation(args)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"m8shift-runtime.py v{VERSION}")
+        print("── route recommendation ───────────────")
+        print(f"authority: {result.get('authority')}")
+        print(f"task_type: {result.get('task_type')}")
+        print(f"floor: {result.get('floor', '-') or '-'}")
+        print(f"optimum: {result.get('optimum', '-') or '-'}")
+        print(f"picked: {result.get('picked', '-') or '-'}")
+        print(f"reason: {result.get('reason', '-')}")
+        verify = ", ".join(result.get("verify") or []) or "-"
+        print(f"verify: {verify}")
+        for finding in result.get("findings", []):
+            print(f"{finding['severity']} {finding['check']}: {finding['message']}")
+    return 0 if result.get("ok") else 1
 
 
 def list_named_files(directory, suffix):
@@ -2499,6 +2896,10 @@ def cmd_doctor(args):
         findings.append({"severity": "warning", "check": "runtime.headroom", "message": str(e)})
     if os.path.exists(PROVIDERS):
         findings.extend(provider_findings(load_provider_registry()))
+    if os.path.exists(ROUTING_MODELS) or os.path.exists(ROUTING_SKILLS):
+        models_manifest, skills_manifest, route_findings = load_routing_manifests()
+        findings.extend(route_findings)
+        findings.extend(routing_findings(models_manifest, skills_manifest))
     ok = not any(f["severity"] == "error" for f in findings)
     if args.json:
         print(json.dumps({
@@ -2635,6 +3036,16 @@ def main():
     pvr.add_argument("--run", default="")
     pvr.add_argument("--json", action="store_true")
     pvr.set_defaults(fn=cmd_providers_render)
+
+    route = sub.add_parser("route", help="advisory model/task routing")
+    route_sub = route.add_subparsers(dest="route_verb", required=True)
+    rr = route_sub.add_parser("recommend", help="recommend a capable-enough model without launching")
+    rr.add_argument("--task-type", required=True)
+    rr.add_argument("--skill", default="")
+    rr.add_argument("--input-tokens", type=int, default=0)
+    rr.add_argument("--self", dest="self_model", default="", help="explicit pen-holder model id for fail-safe")
+    rr.add_argument("--json", action="store_true")
+    rr.set_defaults(fn=cmd_route_recommend)
 
     roles = sub.add_parser("roles", help="runtime role contracts")
     roles_sub = roles.add_subparsers(dest="verb", required=True)

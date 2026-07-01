@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.34.2"
+VERSION = "3.35.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -4624,6 +4624,143 @@ class TestRuntimeCompanion(CLIBase):
         self.assertNotEqual(bad.returncode, 0)
         findings = json.loads(bad.stdout)["findings"]
         self.assertIn("providers.argv_by_platform_string", {f["check"] for f in findings})
+
+    def write_routing_manifests(self, models, task_types, defaults=None):
+        routing_dir = os.path.join(self.d, ".m8shift", "routing")
+        os.makedirs(routing_dir, exist_ok=True)
+        with open(os.path.join(routing_dir, "models.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.routing.models.v1",
+                "authority": "advisory",
+                "tiers": ["economy", "balanced", "flagship"],
+                "cost_bands": ["$", "$$", "$$$", "$$$$"],
+                "latency_bands": ["fast", "medium", "slow"],
+                "context_classes": ["small", "large", "xlarge"],
+                "models": models,
+            }, fh)
+        with open(os.path.join(routing_dir, "skills.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.routing.skills.v1",
+                "authority": "advisory",
+                "default_on_missing": "escalate_to_pen_holder",
+                "defaults": defaults or {
+                    "min_model": "balanced",
+                    "optimum_model": "flagship",
+                    "downgradable": True,
+                    "required_capabilities": [],
+                    "required_context_class": "small",
+                    "verify": ["pen-holder verifies"],
+                },
+                "task_types": task_types,
+            }, fh)
+
+    def route_models(self):
+        return [
+            {"id": "MODEL_ECON", "provider": "p", "tier": "economy", "cost_band": "$",
+             "latency": "medium", "context_class": "large", "capabilities": ["read_repo"]},
+            {"id": "MODEL_BAL", "provider": "p", "tier": "balanced", "cost_band": "$$",
+             "latency": "fast", "context_class": "large", "capabilities": ["read_repo", "review"]},
+            {"id": "MODEL_TOP", "provider": "p", "tier": "flagship", "cost_band": "$$$$",
+             "latency": "slow", "context_class": "xlarge", "capabilities": ["read_repo", "review", "legal_review"]},
+        ]
+
+    def test_route_recommend_missing_manifest_is_clean_fail_safe(self):
+        self.init()
+        r = self.rt("route", "recommend", "--task-type", "mechanical-edit", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["authority"], "advisory")
+        self.assertFalse(payload["launch"])
+        self.assertEqual(payload["picked"], "")
+        self.assertIn("no delegation recommendation", payload["reason"])
+        self.assertFalse(any(f["severity"] == "error" for f in payload["findings"]))
+
+    def test_route_recommend_picks_cheapest_eligible_model(self):
+        self.init()
+        self.write_routing_manifests(self.route_models(), {
+            "mechanical-edit": {
+                "min_model": "economy",
+                "optimum_model": "balanced",
+                "downgradable": True,
+                "required_capabilities": ["read_repo"],
+                "required_context_class": "small",
+                "verify": ["byte-diff", "build"],
+            },
+        })
+        r = self.rt("route", "recommend", "--task-type", "mechanical-edit", "--input-tokens", "1000", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["picked"], "MODEL_ECON")
+        self.assertEqual(payload["floor"], "economy")
+        self.assertEqual(payload["optimum"], "balanced")
+        self.assertEqual(payload["saved_vs"], "MODEL_BAL")
+        self.assertEqual(payload["verify"], ["byte-diff", "build"])
+        self.assertEqual(payload["authority"], "advisory")
+        self.assertFalse(payload["launch"])
+
+    def test_route_recommend_never_violates_floor(self):
+        self.init()
+        self.write_routing_manifests(self.route_models(), {
+            "review-critique": {
+                "min_model": "balanced",
+                "optimum_model": "flagship",
+                "downgradable": True,
+                "required_capabilities": ["read_repo"],
+                "required_context_class": "small",
+                "verify": ["pen-holder triage"],
+            },
+        })
+        r = self.rt("route", "recommend", "--task-type", "review-critique", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["picked"], "MODEL_BAL")
+        self.assertNotIn("MODEL_ECON", [row["id"] for row in payload["feasible"]])
+
+    def test_route_recommend_unknown_task_fails_safe_to_self(self):
+        self.init()
+        r = self.rt("route", "recommend", "--task-type", "unknown-kind", "--self", "codex-gpt-5", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["picked"], "codex-gpt-5")
+        self.assertEqual(payload["self_source"], "operator")
+        self.assertIn("fail-safe", payload["reason"])
+
+    def test_route_recommend_adversarial_verify_is_pinned(self):
+        self.init()
+        self.write_routing_manifests(self.route_models(), {
+            "adversarial-verify": {
+                "min_model": "flagship",
+                "optimum_model": "flagship",
+                "downgradable": False,
+                "required_capabilities": ["read_repo", "review"],
+                "required_context_class": "large",
+                "verify": ["hunt is authority"],
+            },
+        })
+        r = self.rt("route", "recommend", "--task-type", "adversarial-verify", "--input-tokens", "9000", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["picked"], "MODEL_TOP")
+        self.assertEqual(payload["floor"], "flagship")
+        self.assertFalse(payload["downgradable"])
+        self.assertFalse(payload["below_optimum"])
+
+    def test_route_doctor_reports_unresolved_model_ref(self):
+        self.init()
+        self.write_routing_manifests(self.route_models(), {
+            "mechanical-edit": {
+                "min_model": "MISSING_MODEL",
+                "optimum_model": "balanced",
+                "downgradable": True,
+                "required_capabilities": ["read_repo"],
+                "verify": ["byte-diff"],
+            },
+        })
+        r = self.rt("doctor", "--json")
+        self.assertEqual(r.returncode, 1)
+        findings = json.loads(r.stdout)["findings"]
+        self.assertIn("routing.model_ref", {f["check"] for f in findings})
 
     def test_report_write_rejects_path_traversal_run_ids(self):
         self.init()
