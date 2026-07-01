@@ -257,6 +257,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py decline-turn <détenteur> --request N --reason "..."   # refuse une demande coopérative de tour
 ./m8shift.py steer-turn <agent> --from <détenteur> --request N --force --reason "..."  # redirige un détenteur idle AWAITING
 ./m8shift.py pause <détenteur> --reason "..."       # met la session ouverte en attente utilisateur (state=PAUSED)
+./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."          # reprend PAUSED pour un agent précis avant claim
 ./m8shift.py remember <agent> "<note>"  # ajoute une note mémoire durable (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registre de tâches advisory (todos par agent)
