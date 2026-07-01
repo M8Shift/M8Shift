@@ -215,7 +215,12 @@ Every change follows the same branch-based flow.
    the release history plus the headline user-facing advances made transparent (e.g. token
    compression with the measured RTK average %, parallelism, model/task routing, the economic usage
    view) — with strong GitHub anchoring and consistent iconography.
-   Delete the work branch after merge.
+9. **Delete the work branch on *both* remotes immediately after merge.** A merged branch is
+   deleted the moment `main` contains it — never left to accumulate on either forge. Verify it
+   is a true ancestor of `main` first (`git merge-base --is-ancestor <branch> main`), then
+   `git push origin --delete <branch>` **and** `git push github --delete <branch>`, and
+   `git remote prune origin && git remote prune github` to drop stale tracking refs. The only
+   branches that ever live on a remote are `main` and the branches of open, in-flight work.
 
 Intermediate, work-in-progress commits live **only on the work branch**. `main` stays
 releasable at all times.
@@ -305,7 +310,7 @@ Every issue follows the same shape, so any agent can pick it up cold:
   (stdlib-only, no daemon, no network, advisory companions, read-only doctor).
 - **Roles** — who analyses/implements vs who reviews (see §2).
 - **Workflow** — the branch → MR (`Closes #N`) → independent review → merge-when-stable →
-  push forge-first then GitHub order (see §3).
+  push forge-first then GitHub → **delete the branch on both remotes** (see §3).
 - **Decision log** — decisions, agreements, and disagreements recorded in the thread as
   the task progresses, plus a short closing wrap-up.
 

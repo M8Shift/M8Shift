@@ -28,7 +28,7 @@ Paste this into the **closing comment** and fill every row before you close the 
 | Field | Value |
 |-------|-------|
 | 📦 Delivered | <what shipped> |
-| 🌿 Branch | `feat/…` (deleted after merge) |
+| 🌿 Branch | `feat/…` (deleted on **both** remotes after merge) |
 | 🔀 Merge | `<merge-commit>` · `Closes #N` |
 | 🏷️ M8Shift version | vX.Y.Z (`m8shift.py --version`; or "unreleased — accumulates on main") |
 | 🤖 Agents (models) | the model-versions that worked, e.g. `claude-opus-4-8` · `gpt-5-codex` (the `Agent-Model` trailers on the commits) |
