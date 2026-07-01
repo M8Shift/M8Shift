@@ -202,6 +202,45 @@ M8Shift backend deliberately does **not** start those modes. `headroom_ext` is t
 optional RFC 034 adapter hook: it runs only when the operator provides and pins a local argv
 subprocess that reads redacted stdin and writes compact stdout.
 
+### Follow-up feasibility pass — library mode evaluated, wrapper not promoted · 2026-07-02
+
+After v3.39.0, the operators asked whether M8Shift should ship a local Headroom wrapper instead
+of leaving `headroom_ext` as a contract-only adapter. The feasibility result is split:
+
+- **Library mode exists:** `headroom-ai==0.28.0` exposes `headroom.compress.compress(messages, ...)`,
+  used by Headroom's own MCP/shared-context code path. It can run in-process and does not require
+  the `headroom proxy` or MCP server.
+- **Cold-cache risk exists:** the default Kompress path may start a background HuggingFace model
+  download on first use. A M8Shift-compatible wrapper would therefore need to force offline/cache-only
+  execution (`HEADROOM_OFFLINE=1`, `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`) and refuse to run
+  unless the ONNX model is already installed.
+- **The real-token comparison did not justify promotion:** on the synthetic broad-context cases
+  below, Headroom's compact output was much larger than the builtin digest when counted with
+  `tiktoken` `o200k_base`. These are not final product benchmarks, but they are enough to block
+  a default wrapper promotion.
+
+| Case | Raw `o200k_base` tokens | Builtin compact | Headroom compact | Verdict |
+|------|-------------------------:|----------------:|-----------------:|---------|
+| `conversation` | 19,800 | 1,829 | 14,651 | builtin much smaller |
+| `file` | 15,200 | 474 | 15,200 | Headroom no-op; builtin smaller |
+| `diff` | 14,599 | 1,081 | 14,599 | Headroom no-op; builtin smaller |
+| `report` | 17,500 | 748 | 12,237 | builtin much smaller |
+
+Test conditions:
+
+- `headroom-ai==0.28.0` with the proxy/ONNX dependencies in a temporary virtualenv;
+- Kompress ONNX model preloaded once, then compression run with offline/cache-only environment;
+- `KompressCompressor().preload(allow_download=False)` succeeded before the measured calls;
+- Headroom transforms observed: `router:text:0.70`, `router:kompress:0.73`, or `router:noop`;
+- token counts: `tiktoken.get_encoding("o200k_base")`;
+- Claude/Anthropic `count_tokens` was not measured in this pass, so no Claude-token gain is claimed.
+
+**Decision:** do not ship or promote an official Headroom wrapper until a representative workload
+shows a meaningful real-token gain over the builtin digest **and** passes the equivalence check.
+The existing `headroom_ext` adapter hook remains available for operator experiments, but M8Shift
+should not treat a local Headroom command as the preferred broad-context backend merely because it
+is installed.
+
 **Parked behind a concrete use case.** Headroom may become worth measuring for: large supporting
 source sections; archive / RAG retrieval bundles; reports exceeding the pack budget; or
 conversation/history/file records intentionally stored as raw compression records. **Hard
