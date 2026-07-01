@@ -1782,7 +1782,10 @@ def compression_rtk_result(root, args, redacted, config, explicit=False):
             finding("warning", "compression.rtk_fallback", f"RTK invalid; builtin fallback: {reason}")
         ])
     mode = rtk_mode_for_content_type(args.type)
-    compact, error, stderr = run_adapter_process(root, manifest, mode, redacted)
+    try:
+        compact, error, stderr = run_adapter_process(root, manifest, mode, redacted)
+    except SystemExit as e:
+        compact, error, stderr = None, str(e), ""
     if compact is None:
         reason = error or "rtk-shell-output adapter failed"
         if explicit:
