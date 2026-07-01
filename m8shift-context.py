@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.37.0"
+VERSION = "3.38.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -50,6 +50,7 @@ MAX_RETRIEVAL_LINES = 500
 MAX_GREP_PATTERN_CHARS = 128
 MAX_GREP_SCAN_BYTES = 1024 * 1024
 MAX_GREP_LINE_CHARS = 4096
+COMPRESSION_RTK_CONTENT_TYPES = {"shell_output", "test_output", "logs", "log", "git_output"}
 ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
@@ -103,7 +104,7 @@ DEFAULT_ADAPTERS = {
 DEFAULT_COMPRESSION_CONFIG = {
     "schema": SCHEMA_COMPRESSION_CONFIG,
     "enabled": True,
-    "default_backend": "builtin",
+    "default_backend": "auto",
     "measurement": {
         "estimate_basis": "proxy_bytes_div_4",
         "measure_before_send": True,
@@ -1633,6 +1634,45 @@ def render_builtin_digest(record_id, text, content_type, config):
     return "\n".join(out).rstrip() + "\n", signals, repeated_groups, omitted
 
 
+def render_external_backend_digest(record_id, backend, text, compact_text, content_type, config):
+    max_lines = retrieval_int(config, "max_lines", MAX_RETRIEVAL_LINES, 1, MAX_RETRIEVAL_LINES)
+    line_limit = retrieval_int(config, "default_lines", DEFAULT_RETRIEVAL_LINES, 1, max_lines)
+    signals = extract_builtin_signals(text)
+    excerpt_lines, omitted = head_tail_lines(compact_text.splitlines(), line_limit)
+    status = "failed" if signals["errors"] or any(code not in {"0", ""} for code in signals["exit_codes"]) else "unknown"
+    out = [
+        f"# M8Shift {backend} context digest",
+        "",
+        f"- record_id: `{record_id}`",
+        f"- backend: `{backend}`",
+        f"- content_type: `{content_type}`",
+        f"- status: `{status}`",
+        f"- source_lines: `{len(text.splitlines())}`",
+        f"- compact_lines: `{len(compact_text.splitlines())}`",
+        f"- bounded_raw_retrieval: `true`",
+        "",
+    ]
+    if signals["exit_codes"]:
+        out.extend(["## Exit codes preserved from redacted raw", ""])
+        out.extend(f"- `{code}`" for code in signals["exit_codes"])
+        out.append("")
+    if signals["errors"]:
+        out.extend(["## Error / warning lines preserved from redacted raw", ""])
+        for row in signals["errors"]:
+            out.append(f"- L{row['line']}: {row['text']}")
+        out.append("")
+    if signals["paths"]:
+        out.extend(["## Paths detected in redacted raw", ""])
+        out.extend(f"- `{path}`" for path in signals["paths"])
+        out.append("")
+    out.extend(["## Adapter compact output", "", "```text"])
+    out.extend(excerpt_lines)
+    out.append("```")
+    if omitted:
+        out.extend(["", f"> {omitted} compact lines omitted. Use bounded retrieval for raw evidence."])
+    return "\n".join(out).rstrip() + "\n", signals, [], omitted
+
+
 def reference_only_text(record_id, raw_ref, reason):
     return (
         "# M8Shift reference-only context digest\n\n"
@@ -1654,7 +1694,7 @@ def make_context_digest(record_id, content_type, raw_ref, compact_ref, signals, 
         "record_id": record_id,
         "content_type": content_type,
         "status": status,
-        "summary": reason if fallback_used else "Builtin digest generated from redacted raw content.",
+        "summary": reason if fallback_used else "Compact digest generated from redacted raw content.",
         "errors": errors[:10],
         "exit_codes": exit_codes,
         "paths": (signals.get("paths", []) if isinstance(signals, dict) else [])[:20],
@@ -1689,15 +1729,104 @@ def compression_record_id(args):
     return valid_record_id(f"ccr-{stamp}-{suffix}")
 
 
+def compression_backend_result(*, filtered, error="", extras=None, manifest=None, backend="", mode="", findings=None):
+    return {
+        "filtered": filtered,
+        "error": error,
+        "extras": extras or ({}, [], 0),
+        "manifest": manifest or builtin_manifest(),
+        "backend": backend or "builtin",
+        "mode": mode or "",
+        "findings": findings or [],
+    }
+
+
+def builtin_backend_result(args, redacted, config, findings=None):
+    filtered, signals, repeated_groups, omitted_lines = render_builtin_digest(args.id, redacted, args.type, config)
+    return compression_backend_result(
+        filtered=filtered,
+        extras=(signals, repeated_groups, omitted_lines),
+        manifest=builtin_manifest(),
+        backend="builtin",
+        mode=args.type,
+        findings=findings,
+    )
+
+
+def rtk_mode_for_content_type(content_type):
+    return {
+        "test_output": "test",
+        "shell_output": "err",
+        "logs": "log",
+        "log": "log",
+        "git_output": "log",
+    }.get(content_type, "err")
+
+
+def compression_rtk_result(root, args, redacted, config, explicit=False):
+    manifest, findings = load_adapter_for_auto(root, "rtk-shell-output")
+    if manifest is None:
+        reason = "; ".join(row["message"] for row in findings) or "rtk-shell-output adapter unavailable"
+        if explicit:
+            return compression_backend_result(filtered=None, error=reason, backend="rtk-shell-output", findings=findings)
+        return builtin_backend_result(args, redacted, config, findings + [
+            finding("warning", "compression.rtk_fallback", f"RTK unavailable; builtin fallback: {reason}")
+        ])
+    findings.extend(adapter_findings(manifest))
+    errors = [row for row in findings if row["severity"] == "error"]
+    if errors:
+        reason = "; ".join(row["message"] for row in errors)
+        if explicit:
+            return compression_backend_result(filtered=None, error=reason, manifest=manifest, backend="rtk-shell-output", findings=findings)
+        return builtin_backend_result(args, redacted, config, findings + [
+            finding("warning", "compression.rtk_fallback", f"RTK invalid; builtin fallback: {reason}")
+        ])
+    mode = rtk_mode_for_content_type(args.type)
+    try:
+        compact, error, stderr = run_adapter_process(root, manifest, mode, redacted)
+    except SystemExit as e:
+        compact, error, stderr = None, str(e), ""
+    if compact is None:
+        reason = error or "rtk-shell-output adapter failed"
+        if explicit:
+            return compression_backend_result(filtered=None, error=reason, manifest=manifest, backend="rtk-shell-output", mode=mode, findings=findings)
+        return builtin_backend_result(args, redacted, config, findings + [
+            finding("warning", "compression.rtk_fallback", f"RTK failed; builtin fallback: {reason}")
+        ])
+    filtered, signals, repeated_groups, omitted_lines = render_external_backend_digest(
+        args.id,
+        "rtk-shell-output",
+        redacted,
+        compact,
+        args.type,
+        config,
+    )
+    if stderr:
+        findings.append(finding("info", "compression.rtk_stderr", stderr[:500]))
+    return compression_backend_result(
+        filtered=filtered,
+        extras=(signals, repeated_groups, omitted_lines),
+        manifest=manifest,
+        backend="rtk-shell-output",
+        mode=mode,
+        findings=findings,
+    )
+
+
 def compact_backend(root, args, redacted, config, config_fail_safe):
     if config_fail_safe:
-        return None, "missing or malformed compression config", {}
+        return compression_backend_result(filtered=None, error="missing or malformed compression config", backend=args.backend)
     if not ADAPTER_NAME_RE.fullmatch(args.backend or ""):
-        return None, f"unsafe backend id {args.backend!r}", {}
-    if args.backend != "builtin":
-        return None, f"unsupported or unavailable backend {args.backend!r}", {}
-    filtered, signals, repeated_groups, omitted_lines = render_builtin_digest(args.id, redacted, args.type, config)
-    return filtered, "", (signals, repeated_groups, omitted_lines)
+        return compression_backend_result(filtered=None, error=f"unsafe backend id {args.backend!r}", backend=args.backend)
+    if args.backend == "builtin":
+        return builtin_backend_result(args, redacted, config)
+    if args.backend == "rtk-shell-output":
+        return compression_rtk_result(root, args, redacted, config, explicit=True)
+    if args.backend == "auto":
+        if args.type in COMPRESSION_RTK_CONTENT_TYPES:
+            return compression_rtk_result(root, args, redacted, config, explicit=False)
+        return builtin_backend_result(args, redacted, config)
+    return compression_backend_result(filtered=None, error=f"unsupported or unavailable backend {args.backend!r}", backend=args.backend)
 
 
 def cmd_compress(args):
@@ -1711,7 +1840,7 @@ def cmd_compress(args):
     except Exception as e:  # defensive fail-closed boundary; redaction should not raise.
         config_findings.append(finding("error", "compression.redaction_failed", f"redaction failed: {e}"))
         redacted = ""
-        redaction = {"enabled": True, "pattern_set": "m8shift.secret_patterns.v1", "applied_count": 0, "matches": {}, "failed": True}
+        redaction = {"enabled": True, "pattern_set": "m8shift.secret_patterns.v2", "applied_count": 0, "matches": {}, "failed": True}
         config_fail_safe = True
     raw_path = record_raw_path(root, args.id)
     compact_path = record_compact_path(root, args.id)
@@ -1720,8 +1849,12 @@ def cmd_compress(args):
     raw_ref = rel(root, raw_path)
     compact_ref = rel(root, compact_path)
 
-    compact_result = compact_backend(root, args, redacted, config, config_fail_safe)
-    filtered, backend_error, extras = compact_result
+    backend_result = compact_backend(root, args, redacted, config, config_fail_safe)
+    filtered = backend_result["filtered"]
+    backend_error = backend_result["error"]
+    extras = backend_result["extras"]
+    manifest = backend_result["manifest"]
+    backend_findings = backend_result["findings"]
     fallback_used = filtered is None
     signals = {}
     repeated_groups = []
@@ -1732,10 +1865,9 @@ def cmd_compress(args):
         signals, repeated_groups, omitted_lines = extras
     write_text(compact_path, filtered)
 
-    manifest = builtin_manifest()
     result = adapter_result(
         manifest,
-        mode=args.type,
+        mode=backend_result["mode"] or args.type,
         original=raw,
         filtered=filtered,
         fallback_used=fallback_used,
@@ -1763,7 +1895,9 @@ def cmd_compress(args):
         "created_at": iso(),
         "agent": args.agent or "",
         "content_type": args.type,
-        "backend": args.backend,
+        "backend": backend_result["backend"],
+        "requested_backend": args.backend,
+        "backend_version": manifest.get("version", ""),
         "adapter_result": result,
         "context_digest": context_digest,
         "handoff_digest": handoff_digest,
@@ -1790,7 +1924,7 @@ def cmd_compress(args):
             "repeated_groups": repeated_groups[:20],
             "omitted_excerpt_lines": omitted_lines,
         },
-        "findings": config_findings,
+        "findings": config_findings + backend_findings,
         "warning": "Compressed context is operational orientation, not evidence; verify against bounded raw references.",
     }
     write_json(record_path, record)
@@ -2209,7 +2343,7 @@ def main(argv=None):
     sc.add_argument("--id", help="record id (safe id only)")
     sc.add_argument("--agent", default="")
     sc.add_argument("--type", default="context", help="content type label, e.g. test_output or shell_output")
-    sc.add_argument("--backend", default="builtin", help="compression backend id (default: builtin)")
+    sc.add_argument("--backend", default="auto", help="compression backend id (default: auto)")
     csrc = sc.add_mutually_exclusive_group(required=True)
     csrc.add_argument("--stdin", action="store_true", help="read raw content from stdin")
     csrc.add_argument("--input", help="read raw content from a project-relative file")
