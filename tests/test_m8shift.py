@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.34.1"
+VERSION = "3.34.2"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -4456,6 +4456,54 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [1])
         self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "archive", "runs.jsonl")))
         self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "archive", "index.jsonl")))
+
+    def test_runtime_retention_rejects_backslash_parent_pattern(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 1000, "archive": True},
+            "ledgers": {
+                "..\\outside.jsonl": {"strategy": "fixed-count", "keep": 1, "archive": True},
+            },
+        })
+        self.write_runtime_rows("runs.jsonl", [{"n": 1}, {"n": 2}])
+
+        r = self.rt("retention", "apply", "--json")
+        self.assertEqual(r.returncode, 1)
+        payload = json.loads(r.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(any("..\\\\outside.jsonl" in f["message"] for f in payload["findings"]))
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [1, 2])
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink not available")
+    def test_runtime_retention_refuses_symlinked_archive_target(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 1, "archive": True},
+        })
+        self.write_runtime_rows("runs.jsonl", [{"n": 0}, {"n": 1}])
+        outside = os.path.join(self.d, "outside.jsonl")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("sentinel\n")
+        archive_dir = os.path.join(self.d, ".m8shift", "runtime", "archive")
+        os.makedirs(archive_dir, exist_ok=True)
+        try:
+            os.symlink(outside, os.path.join(archive_dir, "runs.jsonl"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink not available")
+
+        r = self.rt("retention", "apply", "--json")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("symlink", r.stderr + r.stdout)
+        self.assertNotIn("Traceback", r.stderr + r.stdout)
+        with open(outside, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "sentinel\n")
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [0, 1])
 
     def test_runtime_init_providers_roles_workflows_and_report(self):
         self.init("--agents", "claude,codex,gemini")
