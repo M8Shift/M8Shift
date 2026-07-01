@@ -1,6 +1,6 @@
 # RFC — Capability-tiered sub-agent delegation
 
-**Status:** design finalized — the four open questions are resolved by the routing RFC [039-rfc-model-task-routing.md](039-rfc-model-task-routing.md); implementation tracked in #59 · **Builds on:** [002-rfc-n-agents.md](002-rfc-n-agents.md) (degree-1 core), [008-rfc-worktree-companion.md](008-rfc-worktree-companion.md) (degree-2 worktrees), [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md), [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md), [039-rfc-model-task-routing.md](039-rfc-model-task-routing.md) (the routing layer that operationalises this) · **Source:** maintainer request — let a pen-holding agent delegate simpler sub-tasks to cheaper/weaker models, in parallel where safe, while keeping the degree-1 core.
+**Status:** design finalized; Phase 1 advisory `route recommend` implemented in v3.35.0 (#59); `route delegate` remains future — the four open questions are resolved by the routing RFC [039-rfc-model-task-routing.md](039-rfc-model-task-routing.md) · **Builds on:** [002-rfc-n-agents.md](002-rfc-n-agents.md) (degree-1 core), [008-rfc-worktree-companion.md](008-rfc-worktree-companion.md) (degree-2 worktrees), [009-rfc-runtime-companion.md](009-rfc-runtime-companion.md), [028-rfc-headless-command-templates.md](028-rfc-headless-command-templates.md), [039-rfc-model-task-routing.md](039-rfc-model-task-routing.md) (the routing layer that operationalises this) · **Source:** maintainer request — let a pen-holding agent delegate simpler sub-tasks to cheaper/weaker models, in parallel where safe, while keeping the degree-1 core.
 
 ## Question
 
@@ -103,5 +103,7 @@ delegation charter and resolves all four:
    (adversarial-verify / security / legal), otherwise human verification plus a recorded waiver
    (RFC 039 §14).
 
-Implementation of the delegation runtime — the `route` verb, worktree-parallel sub-agents, and
-verify-before-integrate — is tracked in **#59**, building on this charter and RFC 039's routing layer.
+Implementation of the delegation runtime is staged in **#59**. Phase 1 ships the
+read-only `route recommend` advisory layer. The launching/integration side —
+`route delegate`, worktree-parallel sub-agents, and verify-before-integrate
+execution — remains future work under the same charter and RFC 039's routing layer.

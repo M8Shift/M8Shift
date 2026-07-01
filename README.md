@@ -249,6 +249,8 @@ published site, or use the repository-local docs when working from a clone.
 | 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | Richer companion workboard outside core | draft | — | deferred from RFC 010 |
 | 030 | [Tamper evidence](docs/en/rfc/030-rfc-tamper-evidence.md) | Hash-chain tamper-evidence for relay records | draft | — | detection/warning only; git remains the strong anchor |
 | 031 | [Decision traceability](docs/en/rfc/031-rfc-decision-traceability.md) | Durable decision records from turn journal | shipped | v3.31.0 · 2026-07-01 | `decisions target/scaffold`, `append --stance`, ADR fallback |
+| 032 | [Tiered delegation](docs/en/rfc/032-rfc-tiered-delegation.md) | Capability-tiered delegation charter | Phase 1 shipped | v3.35.0 · 2026-07-01 | `route recommend` advisory only; launch/delegate future |
+| 039 | [Model/task routing](docs/en/rfc/039-rfc-model-task-routing.md) | Capability-first model/task routing | Phase 1 shipped | v3.35.0 · 2026-07-01 | operator manifests, no baked-in vendors/prices, no launch |
 
 ## 🔁 How it works
 
