@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.30.0"
+VERSION = "3.31.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -2515,6 +2515,162 @@ class TestSessionReports(CLIBase):
         self.turn("claude", "codex", done="approved in prose only")
         out = self.cw("session", "decisions", "current").stdout
         self.assertIn("None recorded", out)
+
+
+class TestDecisionTraceability(CLIBase):
+    """Decision records are advisory exports; the turn journal remains authority."""
+
+    def _contested_review_session(self):
+        self.init()
+        sid = self.lock()["session"]
+        r = self.cw("claim", "claude")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.cw(
+            "append", "claude", "--to", "codex",
+            "--ask", "review the decision trace fallback",
+            "--done", "proposed markdown ADR fallback",
+            "--stance", "FOR: markdown ADR fallback",
+            "--body", "-",
+            stdin="- Option A: markdown fallback\n- Option B: tracker-only",
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.cw("claim", "codex")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.cw(
+            "append", "codex", "--to", "claude",
+            "--ask", "record the decision",
+            "--done", "approved ADR fallback",
+            "--schema", "stage4.v1",
+            "--relation", "review_result",
+            "--decision", "approve",
+            "--evidence", "keeps a durable record without tracker dependency",
+            "--stance", "FOR: markdown ADR fallback",
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return sid
+
+    def test_decisions_scaffold_writes_markdown_record_without_mutating_journal(self):
+        sid = self._contested_review_session()
+        before = self.md()
+        r = self.cw(
+            "decisions", "scaffold",
+            "--title", "Markdown ADR fallback",
+            "--json",
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertTrue(payload["journal_source_of_truth"])
+        self.assertEqual(payload["session_id"], sid)
+        self.assertEqual(payload["target"], "md")
+        self.assertEqual(payload["decisions"], 1)
+        self.assertEqual(payload["stances"], 2)
+        self.assertEqual(self.md(), before)
+
+        self.assertRegex(payload["path"], r"^docs/decisions/0001-markdown-adr-fallback\.md$")
+        path = os.path.join(self.d, payload["path"])
+        self.assertTrue(os.path.exists(path), path)
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        for needle in (
+            "# Markdown ADR fallback",
+            "## Decision",
+            "## Context",
+            "## Options",
+            "## Positions",
+            "## Divergence",
+            "## Resolution",
+            "## Trace",
+            f"M8SHIFT session `{sid}`",
+            "claude (turn #1): FOR: markdown ADR fallback",
+            "codex (turn #2): FOR: markdown ADR fallback",
+            "`approve` — keeps a durable record without tracker dependency",
+        ):
+            self.assertIn(needle, body)
+
+    def test_decisions_scaffold_single_file_variant(self):
+        self._contested_review_session()
+        r = self.cw("decisions", "scaffold", "--single", "--title", "One file")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        path = os.path.join(self.d, "DECISIONS.md")
+        self.assertTrue(os.path.exists(path))
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn("# Decisions", body)
+        self.assertIn("# One file", body)
+        self.assertIn("## Positions", body)
+
+    def test_decision_target_inference_and_config_override(self):
+        self.init()
+        subprocess.run(["git", "init"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "remote", "add", "origin",
+                        "https://github.com/M8Shift/M8Shift.git"],
+                       cwd=self.d, check=True, capture_output=True, text=True)
+        payload = json.loads(self.cw("decisions", "target", "--json").stdout)
+        self.assertEqual(payload["target"], "github")
+        self.assertEqual(payload["target_source"], "inferred")
+
+        subprocess.run(["git", "remote", "add", "forge",
+                        "http://127.0.0.1:3000/example-owner/M8Shift.git"],
+                       cwd=self.d, check=True, capture_output=True, text=True)
+        payload = json.loads(self.cw("decisions", "target", "--json").stdout)
+        self.assertEqual(payload["target"], "both")
+
+        payload = json.loads(
+            self.cw("decisions", "target", "--set", "md", "--json").stdout
+        )
+        self.assertEqual(payload["target"], "md")
+        self.assertEqual(payload["target_source"], "config")
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "decisions.json")))
+
+    def test_decision_target_defaults_to_markdown_without_tracker(self):
+        self.init()
+        payload = json.loads(self.cw("decisions", "target", "--json").stdout)
+        self.assertEqual(payload["target"], "md")
+        self.assertEqual(payload["target_source"], "default")
+
+    def test_decisions_honor_m8shift_root_for_outputs_and_config(self):
+        self.init()
+        runner = tempfile.mkdtemp(prefix="m8shift-runner-")
+        try:
+            shutil.copy(SCRIPT, os.path.join(runner, "m8shift.py"))
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            r = subprocess.run(
+                [sys.executable, "m8shift.py", "decisions", "target", "--set", "md", "--json"],
+                cwd=runner, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "decisions.json")))
+            self.assertFalse(os.path.exists(os.path.join(runner, ".m8shift", "decisions.json")))
+
+            r = subprocess.run(
+                [sys.executable, "m8shift.py", "decisions", "scaffold", "--title", "Rooted", "--json"],
+                cwd=runner, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            payload = json.loads(r.stdout)
+            self.assertEqual(payload["path"], "docs/decisions/0001-rooted.md")
+            self.assertTrue(os.path.exists(os.path.join(self.d, payload["path"])))
+            self.assertFalse(os.path.exists(os.path.join(runner, "docs", "decisions")))
+        finally:
+            shutil.rmtree(runner, ignore_errors=True)
+
+    def test_decision_templates_are_shipped_for_markdown_and_forges(self):
+        for rel in (
+            "docs/decisions/DECISION_TEMPLATE.md",
+            "docs/decisions/DECISIONS_TEMPLATE.md",
+            ".gitea/issue_template/decision.md",
+            ".github/ISSUE_TEMPLATE/decision.md",
+        ):
+            with self.subTest(rel=rel):
+                with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                    body = fh.read()
+                for heading in (
+                    "## Decision", "## Context", "## Options", "## Positions",
+                    "## Divergence", "## Resolution", "## Trace",
+                ):
+                    self.assertIn(heading, body)
 
 
 # ───────────── regressions from the Codex audit round (v3.x) ────────────────
