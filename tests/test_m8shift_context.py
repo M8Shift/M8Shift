@@ -370,6 +370,115 @@ class TestContextBenchmark(ContextBase):
         self.assertTrue(all(row["real_token_reduction"] > 0 for row in payload["fixtures"]))
 
 
+class TestContextCompression(ContextBase):
+    def test_compress_writes_redacted_record_and_bounded_retrieve(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        raw = "\n".join([
+            "INFO boot",
+            "password=super-secret",
+            "ERROR failed in /tmp/project/tests/test_app.py",
+            "exit code 2",
+            *(["NOISY repeated line"] * 5),
+        ]) + "\n"
+
+        result = self.ctx(
+            "compress", "--id", "rec1", "--type", "test_output", "--agent", "codex", "--stdin", "--json",
+            stdin=raw,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["schema"], "m8shift.compressed_context_record.v1")
+        self.assertEqual(payload["adapter_result"]["schema"], "m8shift.adapter.result.v1")
+        self.assertEqual(payload["context_digest"]["schema"], "m8shift.context_digest.v1")
+        self.assertEqual(payload["handoff_digest"]["schema"], "m8shift.handoff_digest.v1")
+        self.assertEqual(payload["raw_output_reference"]["schema"], "m8shift.raw_output_reference.v1")
+        self.assertEqual(payload["status"], "ok")
+        self.assertFalse(payload["fallback_used"])
+        self.assertIn("[REDACTED]", payload["adapter_result"]["filtered_text"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+        raw_path = os.path.join(self.d, ".m8shift", "context", "compression", "raw", "rec1.raw.txt")
+        with open(raw_path, encoding="utf-8") as fh:
+            stored_raw = fh.read()
+        self.assertIn("password=[REDACTED]", stored_raw)
+        self.assertNotIn("super-secret", stored_raw)
+
+        retrieved = self.ctx("retrieve", "rec1", "--lines", "3", "--json")
+        self.assertEqual(retrieved.returncode, 0, retrieved.stderr)
+        retrieved_payload = json.loads(retrieved.stdout)
+        self.assertTrue(retrieved_payload["bounded"])
+        self.assertLessEqual(len(retrieved_payload["content"].splitlines()), 3)
+
+    def test_compress_rejects_traversal_record_id(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        result = self.ctx("compress", "--id", "../bad", "--stdin", stdin="raw\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe record id", result.stderr)
+        self.assertNotIn("Traceback", result.stderr + result.stdout)
+
+    def test_retrieve_rejects_redos_and_oversize_grep(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        result = self.ctx("compress", "--id", "grep1", "--stdin", stdin="aaaaaaaaaaaaaaaaaaaa\nERROR line\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        redos = self.ctx("retrieve", "grep1", "--grep", "(a+)+$")
+        self.assertNotEqual(redos.returncode, 0)
+        self.assertIn("unsafe grep pattern", redos.stderr)
+        self.assertNotIn("Traceback", redos.stderr + redos.stdout)
+
+        too_long = self.ctx("retrieve", "grep1", "--grep", "a" * 129)
+        self.assertNotEqual(too_long.returncode, 0)
+        self.assertIn("unsafe grep pattern", too_long.stderr)
+        self.assertNotIn("Traceback", too_long.stderr + too_long.stdout)
+
+    def test_missing_or_malformed_config_redacts_and_reference_only_fail_safe(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        config = os.path.join(self.d, ".m8shift", "context-compression.json")
+        os.unlink(config)
+
+        missing = self.ctx(
+            "compress", "--id", "missingcfg", "--stdin", "--json",
+            stdin="token=abc123secret\nERROR raw remains referenced\n",
+        )
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+        payload = json.loads(missing.stdout)
+        self.assertEqual(payload["status"], "reference_only")
+        self.assertTrue(payload["fallback_used"])
+        self.assertIn("compression.config_missing", {row["check"] for row in payload["findings"]})
+        self.assertNotIn("abc123secret", json.dumps(payload))
+        with open(os.path.join(self.d, ".m8shift", "context", "compression", "raw", "missingcfg.raw.txt"), encoding="utf-8") as fh:
+            self.assertNotIn("abc123secret", fh.read())
+
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write("{not-json")
+        malformed = self.ctx(
+            "compress", "--id", "badcfg", "--stdin", "--json",
+            stdin="api_key=abc123secret\n",
+        )
+        self.assertEqual(malformed.returncode, 0, malformed.stderr)
+        payload = json.loads(malformed.stdout)
+        self.assertEqual(payload["status"], "reference_only")
+        self.assertIn("compression.config_unreadable", {row["check"] for row in payload["findings"]})
+        self.assertNotIn("abc123secret", json.dumps(payload))
+
+    def test_backend_error_falls_back_to_reference_only_not_raw(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        result = self.ctx(
+            "compress", "--id", "backenderr", "--backend", "missing-backend", "--stdin", "--json",
+            stdin="password=super-secret\nfull raw should not be inline\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "reference_only")
+        self.assertTrue(payload["fallback_used"])
+        self.assertIn("unsupported or unavailable backend", payload["adapter_result"]["error"])
+        self.assertIn("reference-only", payload["adapter_result"]["filtered_text"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+        self.assertNotIn("full raw should not be inline", payload["adapter_result"]["filtered_text"])
+        with open(os.path.join(self.d, ".m8shift", "context", "compression", "raw", "backenderr.raw.txt"), encoding="utf-8") as fh:
+            self.assertNotIn("super-secret", fh.read())
+
+
 class TestContextAdapters(ContextBase):
     def test_rtk_manifest_policy_and_forbidden_git_diff_mode(self):
         self.assertEqual(self.ctx("init").returncode, 0)
