@@ -86,3 +86,4 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [034-rfc-companion-adapter-interface.md](rfc/034-rfc-companion-adapter-interface.md) | Native context companion plus Phase-2 shell-output adapter runner and shipped RTK manifest/policy. |
 | [035-rfc-interactive-listener-gap.md](rfc/035-rfc-interactive-listener-gap.md) | Proposed runtime listener fix for the gap between `wait` readiness and interactive UI resumption. |
 | [036-rfc-token-window-exhaustion.md](rfc/036-rfc-token-window-exhaustion.md) | Shipped runtime `headroom` guard for proxy context exhaustion detection, checkpointing, status/doctor surfacing, and explicit pause. |
+| [038-rfc-multi-session.md](rfc/038-rfc-multi-session.md) | Draft parallel multi-session model — named sessions namespace the relay per session (default preserves today's behavior); N independent degree-1 relays, file isolation via worktrees (RFC 008). |
