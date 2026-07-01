@@ -302,8 +302,12 @@ Every issue follows the same shape, so any agent can pick it up cold:
 - **Decision log** — decisions, agreements, and disagreements recorded in the thread as
   the task progresses, plus a short closing wrap-up.
 
-The forge issue templates under [`.gitea/issue_template/`](../../.gitea/issue_template/)
-and [`.github/ISSUE_TEMPLATE/`](../../.github/ISSUE_TEMPLATE/) pre-fill this shape.
+**Open with the create template (mandatory).** Every issue is opened with the shared, visual
+`Task` create template — under [`.gitea/issue_template/`](../../.gitea/issue_template/) (Forgejo,
+priority), [`.github/ISSUE_TEMPLATE/`](../../.github/ISSUE_TEMPLATE/) (GitHub), and
+[`.gitlab/issue_templates/`](../../.gitlab/issue_templates/) (GitLab) — so the shape (Goal · Context
+· Scope · Acceptance · Charter · Roles · Workflow · RFC · Decision-log) is filled from the start. The
+full open → decide → close convention is [`issue-lifecycle.md`](issue-lifecycle.md).
 
 > [!TIP]
 > **Log decisions as you work.** The issue (or the GitHub/forge ticket) is the running
@@ -312,10 +316,12 @@ and [`.github/ISSUE_TEMPLATE/`](../../.github/ISSUE_TEMPLATE/) pre-fill this sha
 > progresses* — not only at the end. This builds a permanent, local, auditable
 > reference of *why* the code is the way it is.
 
-**Close cleanly at the end.** When the task is done, **systematically close** the issue
-with a short wrap-up: the affected branch(es), the merged MR, the decisions taken, and
-the final outcome — enough that a future reader reconstructs the choices without
-re-reading every commit. An open task is never left dangling after the work ships.
+**Close cleanly at the end (mandatory close template).** When the task is done,
+**systematically close** the issue using the **close template** in
+[`issue-lifecycle.md`](issue-lifecycle.md) — the outcome, a Summary table (delivered · branch ·
+merge · version · tests), decisions taken, verification, and follow-ups — enough that a future
+reader reconstructs *what shipped and why* without re-reading every commit. A bare `Closes #N` is
+not a close record; an open task is never left dangling after the work ships.
 
 If the forge is temporarily unavailable, record the same intent in the relay task
 ledger (`m8shift.py task add …`) and reconcile to a forge issue when possible.

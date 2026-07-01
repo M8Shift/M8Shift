@@ -22,6 +22,7 @@ M8Shift is **free and open source**, released under the
 | [protocol-reference.md](protocol-reference.md) | On-demand reference: mental model, full command reference, project adoption. |
 | [specification.md](specification.md) | Full functional and non-functional specification. |
 | [agents-guide.md](agents-guide.md) | What is expected of AI agents: collaboration, branch/MR workflow, and the code-quality bar. |
+| [issue-lifecycle.md](issue-lifecycle.md) | The mandatory open → decide → close ticket convention: the visual create template, the decision template, and the close template — for Forgejo, GitHub, and GitLab. |
 
 ## Explanation
 

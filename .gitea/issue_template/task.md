@@ -1,40 +1,53 @@
 ---
-name: "Task"
-about: "A unit of work on M8Shift (issue → branch → MR → review → merge)"
+name: "📋 Task / Feature"
+about: "A unit of work on M8Shift — issue → branch → MR → review → merge"
 title: "<type>: <short summary>"
 labels: []
 ---
 
-## Goal
+<!-- Fill every section. Keep the tables — they render on Forgejo, GitHub and GitLab. -->
 
-<!-- The outcome this change delivers, in one or two sentences. -->
+## 🎯 Goal
 
-## Scope
+> _The outcome this delivers, in one or two sentences._
 
-- **In:**
-- **Out:**
+## 🧭 Context — why now
 
-## Acceptance criteria
+> _The problem, constraint, or opportunity behind it. What breaks, what is missing, or what becomes possible._
 
-- [ ] Tests added/updated and green (`python3 -m unittest discover -s tests`)
-- [ ] Docs updated in the same change (and the site, if this bumps the version)
+## 📦 Scope
+
+| ✅ In scope | 🚫 Out of scope |
+|-------------|-----------------|
+|             |                 |
+
+## ☑️ Acceptance criteria
+
+- [ ] Tests added/updated and green — `python3 -m unittest discover -s tests`
+- [ ] Docs updated in the same change (spec + site if this bumps the version)
+- [ ] `checksums.sha256` refreshed if a checksummed script changed
 - [ ]
 
-## Charter constraints
+## 🛡️ Charter constraints
 
-<!-- Invariants this must respect, when relevant: stdlib-only, no daemon, no network,
-     advisory companions, read-only doctor. Write N/A if none apply. -->
+> _Invariants to respect (write **N/A** if none): stdlib-only core · no daemon · no network · advisory companions · read-only doctor · argv-only subprocess · the journal stays the source of truth._
 
-## Roles
+## 👥 Roles
 
-- **Implementer:**
-- **Reviewer:** <!-- independent — the author never green-lights their own work -->
+| 🛠️ Analyse / implement | 🔍 Review (independent) |
+|------------------------|-------------------------|
+|                        |                         |
 
-## Workflow
+> _The author never green-lights their own work._
 
-`branch` → MR (`Closes #<n>`) → independent review → merge when stable → push forge-first then GitHub.
+## 🔀 Workflow
 
-## Decision log
+> `branch (feat/fix/docs/…) → MR (Closes #N) → independent review → merge-when-stable → 🏷️ tag if version bump → push forge-first then GitHub → delete branch`
 
-<!-- Record decisions, agreements, and disagreements here as the task progresses;
-     close with a short wrap-up (affected branches, merged MR, final outcome). -->
+## 🗂️ RFC & references
+
+> _Link the RFC(s) driving the technical choices, and any related issues._
+
+## 🧾 Decision log
+
+> _Record decisions, agreements, and disagreements here as the task progresses, using the shape in **`docs/decisions/DECISION_TEMPLATE.md`** (Decision · Context · Options · Positions FOR/AGAINST · Divergence · Resolution · Trace). Keep **Divergence** explicit even on consensus. Close the ticket with the wrap-up in **`docs/en/issue-lifecycle.md`**._
