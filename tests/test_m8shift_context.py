@@ -60,6 +60,18 @@ class ContextBase(unittest.TestCase):
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
         return env
 
+    def fake_headroom_env(self, body):
+        bindir = os.path.join(self.d, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        path = os.path.join(bindir, "headroom")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env python3\n" + body)
+        os.chmod(path, 0o755)
+        self.fake_headroom_path = path
+        env = os.environ.copy()
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        return env
+
     def trusted_rtk_identity(self, path=None):
         path = path or self.fake_rtk_path
         real = os.path.realpath(path)
@@ -68,6 +80,15 @@ class ContextBase(unittest.TestCase):
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 h.update(chunk)
         return {"program": "rtk", "path": real, "sha256": h.hexdigest()}
+
+    def trusted_headroom_identity(self, path=None):
+        path = path or self.fake_headroom_path
+        real = os.path.realpath(path)
+        h = hashlib.sha256()
+        with open(real, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return {"program": "headroom", "path": real, "sha256": h.hexdigest()}
 
     def symlinked_rtk_to_core_env(self):
         bindir = os.path.join(self.d, "bin")
@@ -624,6 +645,101 @@ class TestContextCompression(ContextBase):
         self.assertEqual(payload["status"], "reference_only")
         self.assertTrue(payload["fallback_used"])
         self.assertIn("adapter mode 'test' is not declared", payload["adapter_result"]["error"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+    def test_auto_headroom_backend_uses_pinned_adapter_for_broad_type(self):
+        marker = os.path.join(self.d, "headroom-compress.txt")
+        env = self.fake_headroom_env(
+            "import sys\n"
+            f"open({marker!r}, 'a', encoding='utf-8').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "data = sys.stdin.read()\n"
+            "sys.stdout.write('HEADROOM_COMPACT mode=' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "sys.stdout.write(data.replace('VERBOSE filler\\n', ''))\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        result = self.ctx(
+            "compress", "--id", "headroom1", "--type", "report", "--stdin", "--json",
+            stdin="password=super-secret\nVERBOSE filler\nERROR failed\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "headroom_ext")
+        self.assertEqual(payload["adapter_result"]["adapter"], "headroom_ext")
+        self.assertEqual(payload["adapter_result"]["mode"], "report")
+        self.assertIn("HEADROOM_COMPACT mode=m8shift-transform report", payload["adapter_result"]["filtered_text"])
+        self.assertIn("exit code 1", payload["adapter_result"]["filtered_text"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+        with open(marker, encoding="utf-8") as fh:
+            self.assertIn("m8shift-transform report", fh.read())
+
+    def test_headroom_unpinned_or_absent_degrades_by_backend_mode(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        auto = self.ctx(
+            "compress", "--id", "headroom-absent-auto", "--type", "report", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+        )
+        self.assertEqual(auto.returncode, 0, auto.stderr + auto.stdout)
+        payload = json.loads(auto.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "builtin")
+        self.assertIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+        explicit = self.ctx(
+            "compress", "--id", "headroom-absent-explicit", "--type", "report", "--backend", "headroom_ext", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+        )
+        self.assertEqual(explicit.returncode, 0, explicit.stderr + explicit.stdout)
+        payload = json.loads(explicit.stdout)
+        self.assertEqual(payload["requested_backend"], "headroom_ext")
+        self.assertEqual(payload["backend"], "headroom_ext")
+        self.assertEqual(payload["status"], "reference_only")
+        self.assertTrue(payload["fallback_used"])
+        self.assertIn("headroom_ext", payload["adapter_result"]["adapter"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+    def test_drifted_headroom_manifest_mode_error_degrades_without_crash(self):
+        env = self.fake_headroom_env(
+            "import sys\n"
+            "sys.stdout.write(sys.stdin.read())\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        adapter = os.path.join(self.d, ".m8shift", "context", "adapters", "headroom_ext.json")
+        with open(adapter, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        del manifest["modes"]["report"]
+        with open(adapter, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh)
+
+        auto = self.ctx(
+            "compress", "--id", "headroom-drift-auto", "--type", "report", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(auto.returncode, 0, auto.stderr + auto.stdout)
+        self.assertNotIn("Traceback", auto.stderr + auto.stdout)
+        payload = json.loads(auto.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "builtin")
+        self.assertFalse(payload["fallback_used"])
+        self.assertIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+        explicit = self.ctx(
+            "compress", "--id", "headroom-drift-explicit", "--type", "report", "--backend", "headroom_ext", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(explicit.returncode, 0, explicit.stderr + explicit.stdout)
+        self.assertNotIn("Traceback", explicit.stderr + explicit.stdout)
+        payload = json.loads(explicit.stdout)
+        self.assertEqual(payload["requested_backend"], "headroom_ext")
+        self.assertEqual(payload["backend"], "headroom_ext")
+        self.assertEqual(payload["status"], "reference_only")
+        self.assertTrue(payload["fallback_used"])
+        self.assertIn("adapter mode 'report' is not declared", payload["adapter_result"]["error"])
         self.assertNotIn("super-secret", json.dumps(payload))
 
     def test_valid_schema_config_bad_numeric_values_do_not_traceback(self):

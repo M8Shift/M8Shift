@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.38.0"
+VERSION = "3.39.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -51,12 +51,25 @@ MAX_GREP_PATTERN_CHARS = 128
 MAX_GREP_SCAN_BYTES = 1024 * 1024
 MAX_GREP_LINE_CHARS = 4096
 COMPRESSION_RTK_CONTENT_TYPES = {"shell_output", "test_output", "logs", "log", "git_output"}
+COMPRESSION_HEADROOM_CONTENT_TYPES = {
+    "conversation",
+    "history",
+    "file",
+    "report",
+    "diff",
+    "large-context",
+    "large_context",
+}
+COMPRESSION_AUTO_BACKEND_BY_CONTENT_TYPE = {
+    **{name: "rtk-shell-output" for name in COMPRESSION_RTK_CONTENT_TYPES},
+    **{name: "headroom_ext" for name in COMPRESSION_HEADROOM_CONTENT_TYPES},
+}
 ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
 ADAPTER_NAME_RE = re.compile(r"[a-z][a-z0-9_.:-]{0,127}\Z")
 ADAPTER_PROGRAM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}\Z")
-ALLOWED_ADAPTER_PROGRAMS = {"rtk"}
+ALLOWED_ADAPTER_PROGRAMS = {"rtk", "headroom"}
 DENIED_ADAPTER_PROGRAMS = {"m8shift.py", "m8shift-runtime.py", "m8shift-worktree.py", "m8shift-context.py"}
 
 
@@ -96,6 +109,38 @@ DEFAULT_ADAPTERS = {
             "not_evidence": True,
             "operator_installs": "RTK is not bundled; install rtk separately on the host.",
             "network": "M8Shift invokes RTK only as a local argv subprocess; telemetry is disabled on init/adapters init when rtk is present.",
+        },
+    },
+    "headroom_ext": {
+        "schema": SCHEMA_ADAPTER,
+        "name": "headroom_ext",
+        "type": "context_transform",
+        "version": "0.1.0",
+        "authority": "advisory",
+        "command": ["headroom", "m8shift-transform", "$M8SHIFT_ADAPTER_MODE"],
+        "capabilities": ["compact_context", "compact_history", "compact_files", "compact_reports", "compact_diffs"],
+        "input_schema": "text/plain",
+        "output_schema": SCHEMA_COMPRESSED_CONTEXT_RECORD,
+        "mutates_core": False,
+        "mutates_repo": False,
+        "requires_env": [],
+        "timeout_seconds": 30,
+        "max_stdout_bytes": 1048576,
+        "max_stderr_bytes": 65536,
+        "failure_policy": "fail_closed",
+        "modes": {
+            "conversation": ["conversation"],
+            "history": ["history"],
+            "file": ["file"],
+            "report": ["report"],
+            "diff": ["diff"],
+            "large-context": ["large-context"],
+        },
+        "policy": {
+            "recommended_modes": ["conversation", "history", "file", "report", "diff", "large-context"],
+            "not_evidence": True,
+            "operator_installs": "Headroom is not bundled; install and pin an adapter-compatible local headroom command separately.",
+            "network": "M8Shift invokes Headroom only as a local argv subprocess; proxy, MCP server, daemon, and network modes are outside this adapter contract.",
         },
     },
 }
@@ -928,6 +973,7 @@ def cmd_init(args):
             "Packs are operational views only; verification uses original sources.\n"
             "Compression records store redacted raw references and compact digests under `compression/`.\n"
             "When RTK is present and identity-pinned, packs may use the RTK shell-output adapter by default; use `pack --adapter native` to opt out.\n"
+            "When an adapter-compatible Headroom command is present and identity-pinned, `compress --backend auto` may use `headroom_ext` for broad context records.\n"
         ))
         wrote.append(rel(root, readme))
     telemetry = rtk_telemetry_disable()
@@ -1451,6 +1497,13 @@ def run_adapter_process(root, manifest, mode, text):
     return stdout, "", stderr
 
 
+def safe_run_adapter_process(root, manifest, mode, text):
+    try:
+        return run_adapter_process(root, manifest, mode, text)
+    except SystemExit as e:
+        return None, str(e), ""
+
+
 def select_context_adapter(root, args):
     choice = getattr(args, "adapter", "auto") or "auto"
     if choice == "native":
@@ -1486,7 +1539,7 @@ def filter_shell_output(root, args, adapter_status, text, mode):
     manifest = adapter_status.get("manifest")
     if not manifest:
         return text, {}
-    filtered, error, stderr = run_adapter_process(root, manifest, mode, text)
+    filtered, error, stderr = safe_run_adapter_process(root, manifest, mode, text)
     if filtered is None:
         if manifest.get("failure_policy") != "fallback_original":
             die(error or "adapter failed")
@@ -1763,54 +1816,95 @@ def rtk_mode_for_content_type(content_type):
     }.get(content_type, "err")
 
 
-def compression_rtk_result(root, args, redacted, config, explicit=False):
-    manifest, findings = load_adapter_for_auto(root, "rtk-shell-output")
+def headroom_mode_for_content_type(content_type):
+    return {
+        "conversation": "conversation",
+        "history": "history",
+        "file": "file",
+        "report": "report",
+        "diff": "diff",
+        "large-context": "large-context",
+        "large_context": "large-context",
+    }.get(content_type, content_type)
+
+
+def compression_mode_for_backend(backend, content_type):
+    if backend == "rtk-shell-output":
+        return rtk_mode_for_content_type(content_type)
+    if backend == "headroom_ext":
+        return headroom_mode_for_content_type(content_type)
+    return content_type
+
+
+def compression_backend_label(backend):
+    return {
+        "rtk-shell-output": "RTK",
+        "headroom_ext": "Headroom",
+    }.get(backend, backend)
+
+
+def compression_backend_fallback_check(backend):
+    return {
+        "rtk-shell-output": "compression.rtk_fallback",
+        "headroom_ext": "compression.headroom_fallback",
+    }.get(backend, "compression.backend_fallback")
+
+
+def compression_adapter_result(root, args, redacted, config, backend, explicit=False):
+    manifest, findings = load_adapter_for_auto(root, backend)
+    label = compression_backend_label(backend)
+    fallback_check = compression_backend_fallback_check(backend)
     if manifest is None:
-        reason = "; ".join(row["message"] for row in findings) or "rtk-shell-output adapter unavailable"
+        reason = "; ".join(row["message"] for row in findings) or f"{backend} adapter unavailable"
         if explicit:
-            return compression_backend_result(filtered=None, error=reason, backend="rtk-shell-output", findings=findings)
+            return compression_backend_result(filtered=None, error=reason, backend=backend, findings=findings)
         return builtin_backend_result(args, redacted, config, findings + [
-            finding("warning", "compression.rtk_fallback", f"RTK unavailable; builtin fallback: {reason}")
+            finding("warning", fallback_check, f"{label} unavailable; builtin fallback: {reason}")
         ])
     findings.extend(adapter_findings(manifest))
     errors = [row for row in findings if row["severity"] == "error"]
     if errors:
         reason = "; ".join(row["message"] for row in errors)
         if explicit:
-            return compression_backend_result(filtered=None, error=reason, manifest=manifest, backend="rtk-shell-output", findings=findings)
+            return compression_backend_result(filtered=None, error=reason, manifest=manifest, backend=backend, findings=findings)
         return builtin_backend_result(args, redacted, config, findings + [
-            finding("warning", "compression.rtk_fallback", f"RTK invalid; builtin fallback: {reason}")
+            finding("warning", fallback_check, f"{label} invalid; builtin fallback: {reason}")
         ])
-    mode = rtk_mode_for_content_type(args.type)
-    try:
-        compact, error, stderr = run_adapter_process(root, manifest, mode, redacted)
-    except SystemExit as e:
-        compact, error, stderr = None, str(e), ""
+    mode = compression_mode_for_backend(backend, args.type)
+    compact, error, stderr = safe_run_adapter_process(root, manifest, mode, redacted)
     if compact is None:
-        reason = error or "rtk-shell-output adapter failed"
+        reason = error or f"{backend} adapter failed"
         if explicit:
-            return compression_backend_result(filtered=None, error=reason, manifest=manifest, backend="rtk-shell-output", mode=mode, findings=findings)
+            return compression_backend_result(filtered=None, error=reason, manifest=manifest, backend=backend, mode=mode, findings=findings)
         return builtin_backend_result(args, redacted, config, findings + [
-            finding("warning", "compression.rtk_fallback", f"RTK failed; builtin fallback: {reason}")
+            finding("warning", fallback_check, f"{label} failed; builtin fallback: {reason}")
         ])
     filtered, signals, repeated_groups, omitted_lines = render_external_backend_digest(
         args.id,
-        "rtk-shell-output",
+        backend,
         redacted,
         compact,
         args.type,
         config,
     )
     if stderr:
-        findings.append(finding("info", "compression.rtk_stderr", stderr[:500]))
+        findings.append(finding("info", f"compression.{backend}.stderr", stderr[:500]))
     return compression_backend_result(
         filtered=filtered,
         extras=(signals, repeated_groups, omitted_lines),
         manifest=manifest,
-        backend="rtk-shell-output",
+        backend=backend,
         mode=mode,
         findings=findings,
     )
+
+
+def compression_rtk_result(root, args, redacted, config, explicit=False):
+    return compression_adapter_result(root, args, redacted, config, "rtk-shell-output", explicit=explicit)
+
+
+def compression_headroom_result(root, args, redacted, config, explicit=False):
+    return compression_adapter_result(root, args, redacted, config, "headroom_ext", explicit=explicit)
 
 
 def compact_backend(root, args, redacted, config, config_fail_safe):
@@ -1822,9 +1916,14 @@ def compact_backend(root, args, redacted, config, config_fail_safe):
         return builtin_backend_result(args, redacted, config)
     if args.backend == "rtk-shell-output":
         return compression_rtk_result(root, args, redacted, config, explicit=True)
+    if args.backend == "headroom_ext":
+        return compression_headroom_result(root, args, redacted, config, explicit=True)
     if args.backend == "auto":
-        if args.type in COMPRESSION_RTK_CONTENT_TYPES:
+        backend = COMPRESSION_AUTO_BACKEND_BY_CONTENT_TYPE.get(args.type)
+        if backend == "rtk-shell-output":
             return compression_rtk_result(root, args, redacted, config, explicit=False)
+        if backend == "headroom_ext":
+            return compression_headroom_result(root, args, redacted, config, explicit=False)
         return builtin_backend_result(args, redacted, config)
     return compression_backend_result(filtered=None, error=f"unsupported or unavailable backend {args.backend!r}", backend=args.backend)
 
