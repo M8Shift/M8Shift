@@ -1,5 +1,28 @@
 # Changelog
 
+## v3.29.0 — 2026-07-01
+
+Release scope:
+
+- #45 — Implemented RFC 026 runtime sidecar retention policy:
+  `m8shift-runtime.py retention apply [--dry-run] [--json] [--no-archive]`
+  reads `.m8shift/runtime/retention.json`, while
+  `retention policy show [--json]` reports the effective policy.
+- Added opt-in retention strategies: `fixed-count`, `age`, and `combined`
+  union semantics. Age-based policies keep undatable rows fail-safe and report
+  them instead of pruning unknown timestamps.
+- Policy pruning archives raw rows under `.m8shift/runtime/archive/` when enabled
+  and appends compact audit rows to `archive/index.jsonl`; malformed JSONL
+  ledgers are reported and left untouched.
+
+Validation:
+
+- Added policy tests for disabled no-op, policy show, each strategy, undatable
+  row fail-safe, dry-run immutability, malformed JSONL, `--no-archive`, and
+  archive index writes.
+- Lockstep version surfaces bumped from `3.28.1` to `3.29.0` across distributed
+  scripts and tests.
+
 ## v3.28.1 — 2026-07-01
 
 Release scope:
