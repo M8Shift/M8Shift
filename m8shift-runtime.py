@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -87,6 +88,7 @@ HEADROOM_DEFAULTS = {
     "pause_recommendation_after_relay_bytes": 500000,
 }
 HEADROOM_LEVEL = {"ok": 0, "warning": 1, "high": 2}
+MAX_HASH_BYTES = 64 * 1024 * 1024
 
 
 def now():
@@ -519,6 +521,11 @@ def declared_rtk_state():
 
 
 def sha256_file(path):
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("not a regular file")
+    if st.st_size > MAX_HASH_BYTES:
+        raise ValueError(f"file too large to hash ({st.st_size} bytes > {MAX_HASH_BYTES})")
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
@@ -573,7 +580,7 @@ def context_rtk_status():
             else:
                 try:
                     actual = sha256_file(path)
-                except OSError as e:
+                except (OSError, ValueError) as e:
                     reason = f"rtk trusted executable cannot be read: {e}; native context pack path"
                 else:
                     if actual == expected:
