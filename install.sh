@@ -20,7 +20,9 @@ LANG_CODE=""
 RUN_INIT=1
 WITH_WORKTREE=1
 WITH_RUNTIME=1
+WITH_CONTEXT=1
 FORCE_INIT=0
+RTK_CHOICE="${M8SHIFT_INSTALL_RTK:-ask}"  # ask|yes|no
 VERIFY_EXPLICIT=""   # --verify sets 1, --no-verify sets 0; otherwise env/default decide
 VERIFY_DOWNLOADS=1   # resolved after arg parsing (verification is ON by default)
 CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
@@ -45,6 +47,9 @@ Options:
   --no-init           Download files only; do not run init.
   --no-worktree       Do not download m8shift-worktree.py.
   --no-runtime        Do not download m8shift-runtime.py.
+  --no-context        Do not download m8shift-context.py.
+  --with-rtk          With consent already given, install optional RTK via Homebrew if absent.
+  --no-rtk            Do not prompt for or install RTK; if present, telemetry is still disabled.
   --ref REF            Git ref used for downloads when --base-url is not set (default: main).
   --base-url URL      Download base URL (default: GitHub raw for --ref).
   --verify            Force checksum verification (already the default).
@@ -58,6 +63,8 @@ The installer is local-only: no sudo, no PATH mutation, no background service.
 Verification is enabled by default; --no-verify disables it.
 Security note: verification checks integrity against the selected ref's manifest;
 for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
+RTK is optional. When installed or already present, this installer runs
+`rtk telemetry disable` to keep telemetry off by default.
 EOF
 }
 
@@ -149,8 +156,8 @@ add_expected_sha256() {
     *) die "--sha256 expects FILE:HEX" ;;
   esac
   case "$name" in
-    m8shift.py|m8shift-worktree.py|m8shift-runtime.py) ;;
-    *) die "--sha256 file must be m8shift.py, m8shift-worktree.py, or m8shift-runtime.py" ;;
+    m8shift.py|m8shift-worktree.py|m8shift-runtime.py|m8shift-context.py) ;;
+    *) die "--sha256 file must be m8shift.py, m8shift-worktree.py, m8shift-runtime.py, or m8shift-context.py" ;;
   esac
   printf '%s' "$hex" | grep -Eiq '^[0-9a-f]{64}$' || die "--sha256 expects a 64-char hex digest"
   EXPECTED_SHA256S="${EXPECTED_SHA256S}${hex} ${name}
@@ -202,6 +209,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-runtime)
       WITH_RUNTIME=0
+      shift
+      ;;
+    --no-context)
+      WITH_CONTEXT=0
+      shift
+      ;;
+    --with-rtk)
+      RTK_CHOICE=yes
+      shift
+      ;;
+    --no-rtk)
+      RTK_CHOICE=no
       shift
       ;;
     --ref)
@@ -285,7 +304,60 @@ pins_cover_downloads() {
   if [ "$WITH_RUNTIME" -eq 1 ]; then
     printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-runtime.py$' || return 1
   fi
+  if [ "$WITH_CONTEXT" -eq 1 ]; then
+    printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-context.py$' || return 1
+  fi
   return 0
+}
+
+rtk_disable_telemetry() {
+  if command -v rtk >/dev/null 2>&1; then
+    if rtk telemetry disable >/dev/null 2>&1; then
+      printf '✓ rtk telemetry disabled\n'
+    else
+      printf 'warning: could not disable rtk telemetry; run `rtk telemetry disable` manually\n' >&2
+    fi
+  fi
+}
+
+install_rtk_with_brew() {
+  if command -v rtk >/dev/null 2>&1; then
+    rtk_disable_telemetry
+    return 0
+  fi
+  command -v brew >/dev/null 2>&1 || die "Homebrew is required for --with-rtk; install RTK manually or rerun with --no-rtk"
+  printf '→ installing optional RTK via Homebrew\n'
+  brew install rtk
+  command -v rtk >/dev/null 2>&1 || die "brew completed but rtk was not found on PATH"
+  rtk_disable_telemetry
+}
+
+offer_rtk() {
+  case "$RTK_CHOICE" in
+    yes|YES|1|true|True|TRUE)
+      install_rtk_with_brew
+      ;;
+    no|NO|0|false|False|FALSE)
+      rtk_disable_telemetry
+      ;;
+    ask|"")
+      if command -v rtk >/dev/null 2>&1; then
+        rtk_disable_telemetry
+      elif [ -t 0 ]; then
+        printf 'Install optional RTK for token-saving shell output filtering via Homebrew? [y/N] '
+        IFS= read -r answer || answer=""
+        case "$answer" in
+          y|Y|yes|YES) install_rtk_with_brew ;;
+          *) printf '→ skipping optional RTK install\n' ;;
+        esac
+      else
+        printf '→ optional RTK not installed; rerun with --with-rtk to install via Homebrew\n'
+      fi
+      ;;
+    *)
+      die "invalid RTK choice: $RTK_CHOICE (expected ask, yes, or no)"
+      ;;
+  esac
 }
 
 if [ "$VERIFY_DOWNLOADS" = "1" ] && ! pins_cover_downloads; then
@@ -323,6 +395,11 @@ fi
 if [ "$WITH_RUNTIME" -eq 1 ]; then
   download_file "m8shift-runtime.py"
 fi
+if [ "$WITH_CONTEXT" -eq 1 ]; then
+  download_file "m8shift-context.py"
+fi
+
+offer_rtk
 
 if [ "$RUN_INIT" -eq 1 ]; then
   init_cmd=("$PYTHON_BIN" "./m8shift.py" "init" "--agents" "$AGENTS")
