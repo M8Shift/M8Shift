@@ -1,5 +1,47 @@
 # Changelog
 
+## v3.34.1 — 2026-07-01
+
+Release scope:
+
+- #76 / CTX-1 — `m8shift-context.py pack` now degrades to the native stdlib
+  pack path when the RTK manifest is corrupt, unreadable, or not a JSON object in
+  automatic adapter mode.
+- Explicit operator selection remains fail-closed: `pack --adapter
+  rtk-shell-output` still aborts on corrupt or invalid manifests.
+
+Validation:
+
+- Added regression coverage for broken JSON and non-object
+  `rtk-shell-output.json` manifests in automatic pack mode.
+- Lockstep version surfaces bumped from `3.34.0` to `3.34.1` across distributed
+  scripts and tests.
+
+## v3.34.0 — 2026-07-01
+
+Release scope:
+
+- #76 — Enabled the RTK shell-output adapter by default for context packs only
+  when `rtk` is present and identity-pinned. If RTK is absent, unpinned, or
+  invalid, `m8shift-context.py pack` degrades to the native stdlib pack path.
+- Added explicit operator opt-out for context packing with
+  `pack --adapter native` / `--no-rtk`.
+- `m8shift-context.py init` and `adapters init` now attempt
+  `rtk telemetry disable` whenever RTK is present; `doctor --json` surfaces RTK
+  presence, pin status, telemetry state, and the no-network/local-subprocess
+  boundary.
+- `install.sh` now downloads `m8shift-context.py` by default and offers optional
+  RTK installation via Homebrew only with operator consent (`--with-rtk`, prompt,
+  or `--no-rtk`), then runs `rtk telemetry disable` when RTK is present.
+
+Validation:
+
+- Added tests for pinned-RTK default selection, absent-RTK native degradation,
+  operator opt-out, telemetry-disable setup, doctor RTK status, installer RTK
+  telemetry handling, and existing identity-pin fail-closed behavior.
+- Lockstep version surfaces bumped from `3.33.0` to `3.34.0` across distributed
+  scripts and tests.
+
 ## v3.33.0 — 2026-07-01
 
 Release scope:

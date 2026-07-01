@@ -1,6 +1,6 @@
 # RFC 034 — Companion Adapter Interface and native context companion
 
-- **Status:** Phase 1 implemented
+- **Status:** Phase 1 + Phase 2 implemented; RTK default-if-pinned shipped in v3.34.0 (#76); corrupt-manifest auto fallback shipped in v3.34.1
 - **Date:** 2026-06-30
 - **Scope:** optional companion interface for context tools around M8Shift, with a first
   stdlib-only native context companion.
@@ -82,8 +82,8 @@ This RFC creates a boundary: the center stays boring; the edges can become usefu
 |---|---|---|
 | 1 | Native `m8shift-context.py`: pack, receipts, metrics, benchmark, doctor | implemented |
 | 2 | External adapter subprocess runner: manifest validation, allowlisted argv execution, timeout, stdout/stderr caps, env allowlist, fallback policy | shipped for `shell_output_filter` adapters in `m8shift-context.py` |
-| 3 | Optional example manifests for Headroom-style, RTK-style, and repo-packer tools | RTK shell-output manifest shipped; others deferred |
-| 4 | Agent-guide/runtime documentation integration, including the condensed waiting-cost rule from RFC 033 | deferred |
+| 3 | Optional example manifests for Headroom-style, RTK-style, and repo-packer tools | RTK shell-output manifest shipped; context packs default to pinned RTK when present |
+| 4 | Agent-guide/runtime documentation integration, including the condensed waiting-cost rule from RFC 033 | RTK agent-guide rule shipped; broader runtime docs ongoing |
 
 Phase 1 must not implement all adapter types. It establishes the data model and
 measures whether native context packing actually reduces context.
@@ -229,10 +229,24 @@ Phase 2 constraints:
 - adapter failure follows the declared fallback policy;
 - adapters do not mutate core relay files directly.
 
-The shipped RTK manifest is advisory and operator-installed: M8Shift does not
-bundle or auto-install RTK. It recommends `err`, `test`, `log`, and `ls` for noisy
-shell output, and forbids `git-diff` for code review because Round 2 measurements
-showed it drops hunks.
+The shipped RTK manifest is advisory and operator-installed. Since v3.34.0 (#76),
+`m8shift-context.py pack` defaults to the RTK `shell_output_filter` adapter only
+when `rtk` is present **and** the manifest is identity-pinned
+(`trusted_executable.path` + SHA-256). If RTK is absent, unpinned, or invalid, the
+pack silently degrades to the native stdlib path. Operators can opt out explicitly
+with `pack --adapter native` / `--no-rtk`.
+
+Since v3.34.1, automatic adapter selection also treats a corrupt, unreadable, or
+non-object on-disk RTK manifest as a diagnostic error finding and degrades to the
+native pack path. Explicit operator selection remains fail-closed: `pack
+--adapter rtk-shell-output` aborts on corrupt or invalid manifests.
+
+The RTK manifest recommends `err`, `test`, `log`, and `ls` for noisy shell output,
+and forbids `git-diff` for code review because Round 2 measurements showed it
+drops hunks. M8Shift invokes RTK only as a local argv subprocess. It does not call
+remote RTK services; install/setup runs `rtk telemetry disable` when RTK is present
+or installed, and `doctor --json` surfaces RTK presence, pin status, and telemetry
+state.
 
 ## 10. Authority levels
 
@@ -293,7 +307,7 @@ Companions and future adapters must:
 7. never mutate `LOCK` or `M8SHIFT.md` directly;
 8. never decide claimability from adapter metadata;
 9. never auto-force a fresh holder;
-10. never auto-install dependencies;
+10. never auto-install dependencies from the companion; installers may offer optional dependencies only with explicit operator consent;
 11. treat compressed or compacted context as an operational view, not evidence.
 
 ## 14. Acceptance criteria
@@ -310,6 +324,11 @@ Phase 1 is acceptable when:
 - the benchmark distinguishes proxy estimates from real token counts;
 - `--require-real-tokens` fails unless real measured counts show reduction;
 - `m8shift-context.py doctor --json` reports context-sidecar findings;
+- RTK absent or unpinned degrades to native packing without error;
+- RTK present and identity-pinned is selected by default for supported shell-output sources;
+- operators can opt out with `pack --adapter native` / `--no-rtk`;
+- setup attempts `rtk telemetry disable` when RTK is present;
+- doctor surfaces RTK presence, pin status, and telemetry state;
 - tests cover init/doctor, pack preservation, receipts/metrics, and benchmark gates;
 - the full test suite remains green.
 

@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.33.0"
+VERSION = "3.34.1"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -81,6 +81,7 @@ DEFAULT_ADAPTERS = {
             },
             "not_evidence": True,
             "operator_installs": "RTK is not bundled; install rtk separately on the host.",
+            "network": "M8Shift invokes RTK only as a local argv subprocess; telemetry is disabled on init/adapters init when rtk is present.",
         },
     },
 }
@@ -381,6 +382,7 @@ def collect_context(root, args, profile):
     lock = parse_lock(relay)
     turns = parse_turns(relay)
     selected = latest_turns(turns, args.turns)
+    adapter_status = select_context_adapter(root, args)
     sources = [
         source("relay_lock", "core_status", json.dumps(lock, ensure_ascii=False, sort_keys=True), "M8SHIFT.md"),
         source("latest_turns", "handoff_turns", json.dumps(selected, ensure_ascii=False, sort_keys=True), "M8SHIFT.md"),
@@ -406,7 +408,8 @@ def collect_context(root, args, profile):
         "$ git diff --name-only",
         git(root, ["diff", "--name-only"]),
     ]).strip() + "\n"
-    sources.append(source("git_summary", "git_summary", git_summary, None))
+    git_summary, git_adapter = filter_shell_output(root, args, adapter_status, git_summary, "log")
+    sources.append(source("git_summary", "git_summary", git_summary, None, adapter=git_adapter))
 
     for i, relpath in enumerate(args.include or [], 1):
         path = safe_join(root, relpath, "include path")
@@ -492,6 +495,13 @@ def render_pack(root, profile_name, profile, collected, args, pack_id):
         ])
         if src.get("truncated"):
             lines.append("- truncated: `true`")
+        if src.get("adapter", {}).get("name"):
+            adapter = src["adapter"]
+            lines.append(f"- adapter: `{adapter.get('name')}`")
+            lines.append(f"- adapter_mode: `{adapter.get('mode')}`")
+            lines.append(f"- adapter_status: `{adapter.get('status')}`")
+            if adapter.get("fallback_reason"):
+                lines.append(f"- adapter_fallback_reason: `{adapter.get('fallback_reason')}`")
         lines.append("")
 
     lines.extend([
@@ -586,11 +596,15 @@ def cmd_init(args):
             "# M8Shift context companion\n\n"
             "Generated context packs, receipts, metrics, adapter manifests, and benchmarks live here.\n"
             "Packs are operational views only; verification uses original sources.\n"
+            "When RTK is present and identity-pinned, packs may use the RTK shell-output adapter by default; use `pack --adapter native` to opt out.\n"
         ))
         wrote.append(rel(root, readme))
+    telemetry = rtk_telemetry_disable()
     print(f"✓ context companion initialized ({len(wrote)} files written)")
     for path in wrote:
         print(f"  {path}")
+    if telemetry.get("present"):
+        print(f"✓ rtk telemetry disable attempted (disabled={str(telemetry.get('disabled')).lower()})")
     return 0
 
 
@@ -789,6 +803,22 @@ def load_adapter(root, name):
     if not isinstance(data, dict):
         die(f"adapter manifest not found: {name}")
     return data
+
+
+def load_adapter_for_auto(root, name):
+    path = adapter_path(root, name)
+    if not os.path.exists(path):
+        if name in DEFAULT_ADAPTERS:
+            return DEFAULT_ADAPTERS[name], []
+        return None, [finding("error", "adapter.missing", f"adapter manifest not found: {name}")]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        return None, [finding("error", "adapter.manifest_unreadable", f"{name}: cannot read adapter manifest: {e}")]
+    if not isinstance(data, dict):
+        return None, [finding("error", "adapter.schema", f"{name}: manifest is not a JSON object")]
+    return data, []
 
 
 def adapter_identity_for_program(program):
@@ -1069,6 +1099,131 @@ def run_adapter_process(root, manifest, mode, text):
     return stdout, "", stderr
 
 
+def select_context_adapter(root, args):
+    choice = getattr(args, "adapter", "auto") or "auto"
+    if choice == "native":
+        return {"selected": "native", "manifest": None, "reason": "operator opt-out"}
+    if choice == "rtk-shell-output":
+        manifest = load_adapter(root, "rtk-shell-output")
+        findings = adapter_findings(manifest)
+        errors = [row for row in findings if row["severity"] == "error"]
+        if errors:
+            die("; ".join(row["message"] for row in errors))
+        return {"selected": "rtk-shell-output", "manifest": manifest, "reason": "operator-selected adapter"}
+    manifest, findings = load_adapter_for_auto(root, "rtk-shell-output")
+    if findings or manifest is None:
+        return {
+            "selected": "native",
+            "manifest": None,
+            "reason": "rtk manifest invalid; native fallback",
+            "findings": findings,
+        }
+    findings = adapter_findings(manifest)
+    errors = [row for row in findings if row["severity"] == "error"]
+    if errors:
+        return {
+            "selected": "native",
+            "manifest": None,
+            "reason": "rtk absent, unpinned, or invalid; native fallback",
+            "findings": errors,
+        }
+    return {"selected": "rtk-shell-output", "manifest": manifest, "reason": "rtk present and identity-pinned"}
+
+
+def filter_shell_output(root, args, adapter_status, text, mode):
+    manifest = adapter_status.get("manifest")
+    if not manifest:
+        return text, {}
+    filtered, error, stderr = run_adapter_process(root, manifest, mode, text)
+    if filtered is None:
+        if manifest.get("failure_policy") != "fallback_original":
+            die(error or "adapter failed")
+        return text, {
+            "name": manifest.get("name", ""),
+            "mode": mode,
+            "status": "fallback",
+            "fallback_reason": error,
+            "stderr": stderr,
+        }
+    return filtered, {
+        "name": manifest.get("name", ""),
+        "mode": mode,
+        "status": "ok",
+    }
+
+
+def rtk_telemetry_disable():
+    resolved = shutil_which("rtk")
+    if not resolved:
+        return {"present": False, "disabled": False, "detail": "rtk not found"}
+    try:
+        proc = subprocess.run(
+            [resolved, "telemetry", "disable"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": os.environ.get("PATH", os.defpath)},
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"present": True, "disabled": False, "path": os.path.realpath(resolved), "detail": str(e)}
+    return {
+        "present": True,
+        "disabled": proc.returncode == 0,
+        "path": os.path.realpath(resolved),
+        "returncode": proc.returncode,
+        "detail": (proc.stdout or proc.stderr).strip(),
+    }
+
+
+def rtk_telemetry_status():
+    resolved = shutil_which("rtk")
+    if not resolved:
+        return {"present": False, "state": "absent", "detail": "rtk not found"}
+    try:
+        proc = subprocess.run(
+            [resolved, "telemetry", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={"PATH": os.environ.get("PATH", os.defpath)},
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"present": True, "state": "unknown", "path": os.path.realpath(resolved), "detail": str(e)}
+    detail = (proc.stdout or proc.stderr).strip()
+    lowered = detail.lower()
+    if "disabled" in lowered or "off" in lowered:
+        state = "disabled"
+    elif "enabled" in lowered or "on" in lowered:
+        state = "enabled"
+    else:
+        state = "unknown" if proc.returncode != 0 else "reported"
+    return {
+        "present": True,
+        "state": state,
+        "path": os.path.realpath(resolved),
+        "returncode": proc.returncode,
+        "detail": detail,
+    }
+
+
+def rtk_status(root):
+    resolved = shutil_which("rtk")
+    status = {
+        "present": bool(resolved),
+        "pinned": False,
+        "path": os.path.realpath(resolved) if resolved else "",
+        "telemetry": rtk_telemetry_status(),
+        "network": "M8Shift uses RTK only as a local argv subprocess and disables telemetry on context setup.",
+    }
+    if not resolved:
+        return status
+    manifest = load_adapter(root, "rtk-shell-output")
+    errors = [row for row in adapter_findings(manifest) if row["severity"] == "error"]
+    status["pinned"] = not errors
+    status["findings"] = errors
+    return status
+
+
 def cmd_adapters_init(args):
     root = root_from(args)
     ensure_dirs(root)
@@ -1079,12 +1234,15 @@ def cmd_adapters_init(args):
             continue
         write_json(path, default_adapter_manifest(name))
         wrote.append(rel(root, path))
+    telemetry = rtk_telemetry_disable()
     if args.json:
-        print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS)}, ensure_ascii=False, sort_keys=True))
+        print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS), "rtk_telemetry": telemetry}, ensure_ascii=False, sort_keys=True))
     else:
         print(f"✓ adapter manifests ready ({len(wrote)} file(s) written)")
         for path in wrote:
             print(f"  {path}")
+        if telemetry.get("present"):
+            print(f"✓ rtk telemetry disable attempted (disabled={str(telemetry.get('disabled')).lower()})")
     return 0
 
 
@@ -1197,11 +1355,18 @@ def cmd_doctor(args):
         adapter_names.update(entry[:-5] for entry in os.listdir(adapters_dir(root)) if entry.endswith(".json"))
     for name in sorted(adapter_names):
         findings.extend(adapter_findings(load_adapter(root, name), check_executable=False))
+    rtk = rtk_status(root)
     if args.json:
-        print(json.dumps({"findings": findings}, ensure_ascii=False, sort_keys=True))
+        print(json.dumps({"findings": findings, "rtk": rtk}, ensure_ascii=False, sort_keys=True))
     else:
         if not findings:
             print("✓ m8shift-context doctor: no findings")
+        print(
+            "rtk: "
+            f"present={str(rtk.get('present')).lower()} "
+            f"pinned={str(rtk.get('pinned')).lower()} "
+            f"telemetry={rtk.get('telemetry', {}).get('state', 'unknown')}"
+        )
         for row in findings:
             print(f"{row['severity']}: {row['check']}: {row['message']}")
     return 1 if any(row["severity"] == "error" for row in findings) else 0
@@ -1224,6 +1389,10 @@ def main(argv=None):
     sp.add_argument("--include", action="append", default=[], help="include one project-relative file excerpt")
     sp.add_argument("--write", action="store_true", help="write pack, receipt, and metrics under .m8shift/context/")
     sp.add_argument("--output", help="write pack to this project-relative path")
+    sp.add_argument("--adapter", choices=("auto", "native", "rtk-shell-output"), default="auto",
+                    help="shell-output adapter for noisy context sources; default auto uses pinned RTK when available")
+    sp.add_argument("--no-rtk", action="store_const", const="native", dest="adapter",
+                    help="alias for --adapter native")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_pack)
 
