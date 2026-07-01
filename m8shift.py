@@ -4823,7 +4823,7 @@ def main():
     cd.add_argument("--source", default="manual", help="cooldown source label (default: manual)")
     cd.add_argument("--wait-interval", type=int, default=300,
                     help="recommended quiet wait interval in seconds (default: 300)")
-    cd.add_argument("--replace", action="store_true", help="replace an existing PAUSED cooldown note")
+    cd.add_argument("--replace", action="store_true", help="replace/update an existing PAUSED state")
     cd.set_defaults(fn=cmd_cooldown)
 
     rs = sub.add_parser("resume", help="resume a PAUSED session for one agent")

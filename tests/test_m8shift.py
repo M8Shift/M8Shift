@@ -3179,6 +3179,48 @@ class TestPauseResume(CLIBase):
         with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
             self.assertIn('"resume_for": "codex"', fh.read())
 
+    def test_cooldown_replace_updates_paused_cooldown(self):
+        self.init()
+        first = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T03:04:05Z",
+            "--reason", "first cooldown",
+            "--for", "claude",
+            "--source", "monitor-a",
+            "--wait-interval", "300",
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        refused = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T04:04:05Z",
+            "--reason", "missing replace",
+            "--for", "codex",
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--replace", refused.stderr + refused.stdout)
+
+        replacement = self.cw(
+            "cooldown",
+            "--until", "2030-01-02T04:04:05Z",
+            "--reason", "clearer reset time",
+            "--for", "codex",
+            "--source", "monitor-b",
+            "--wait-interval", "120",
+            "--replace",
+        )
+        self.assertEqual(replacement.returncode, 0, replacement.stderr)
+        lk = self.lock()
+        self.assertEqual(lk["state"], "PAUSED")
+        self.assertEqual(lk["holder"], "none")
+        self.assertIn("cooldown until 2030-01-02T04:04:05Z for codex: clearer reset time", lk["note"])
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
+            ledger = fh.read()
+        self.assertEqual(ledger.count('"kind": "usage_cooldown"'), 2)
+        self.assertIn('"previous_state": "PAUSED"', ledger)
+        self.assertIn('"resume_for": "codex"', ledger)
+        self.assertIn('"source": "monitor-b"', ledger)
+        self.assertIn('"recommended_wait_interval_seconds": 120', ledger)
+
     def test_cooldown_refuses_working_and_done_states(self):
         self.init()
         self.cw("claim", "claude")
