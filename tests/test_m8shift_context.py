@@ -210,6 +210,26 @@ class TestContextPack(ContextBase):
         self.assertEqual(absent.returncode, 0, absent.stderr)
         self.assertNotIn("adapter: `rtk-shell-output`", absent.stdout)
 
+    def test_pack_auto_degrades_corrupt_rtk_manifest_to_native(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        adapter = os.path.join(self.d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
+        cases = {
+            "broken_json": "{not valid json",
+            "non_object_json": "[1, 2, 3]",
+        }
+        for label, body in cases.items():
+            with self.subTest(label=label):
+                with open(adapter, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+                auto = self.ctx("pack", "--profile", "reviewer", "--turns", "1")
+                self.assertEqual(auto.returncode, 0, auto.stderr)
+                self.assertIn("M8Shift Context Pack", auto.stdout)
+                self.assertNotIn("adapter: `rtk-shell-output`", auto.stdout)
+
+                explicit = self.ctx("pack", "--profile", "reviewer", "--turns", "1", "--adapter", "rtk-shell-output")
+                self.assertNotEqual(explicit.returncode, 0)
+                self.assertIn("m8shift-context:", explicit.stderr)
+
 
 class TestContextBenchmark(ContextBase):
     def test_benchmark_requires_real_token_counts_for_ship_gate(self):

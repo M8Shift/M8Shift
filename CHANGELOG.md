@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.34.1 — 2026-07-01
+
+Release scope:
+
+- #76 / CTX-1 — `m8shift-context.py pack` now degrades to the native stdlib
+  pack path when the RTK manifest is corrupt, unreadable, or not a JSON object in
+  automatic adapter mode.
+- Explicit operator selection remains fail-closed: `pack --adapter
+  rtk-shell-output` still aborts on corrupt or invalid manifests.
+
+Validation:
+
+- Added regression coverage for broken JSON and non-object
+  `rtk-shell-output.json` manifests in automatic pack mode.
+- Lockstep version surfaces bumped from `3.34.0` to `3.34.1` across distributed
+  scripts and tests.
+
 ## v3.34.0 — 2026-07-01
 
 Release scope:
