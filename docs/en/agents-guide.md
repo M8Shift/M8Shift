@@ -13,6 +13,28 @@ delivery workflow, and the code-quality bar. It complements:
 
 The relay coordinates *who writes when*. This guide covers *how the work is done*.
 
+## This guide vs. the generated anchors (`AGENTS.md` / `CLAUDE.md`)
+
+M8Shift deliberately keeps **two distinct kinds** of agent instruction, and does **not**
+maintain a hand-written root `AGENTS.md`:
+
+- **The generated anchors** — root `AGENTS.md` (Codex) and `CLAUDE.md` (Claude) — are the
+  `init`-produced **relay stanza**: self-contained coordination *mechanics* (claim the pen,
+  one turn, `append`, guard before writing). They are installed in every repo that adopts
+  M8Shift, marked *do not edit by hand*, and kept minimal so they survive host-tool
+  truncation. On the M8Shift repo they are **generated and gitignored** (like `M8SHIFT.md`),
+  so there is no tracked root anchor to curate — this guide is the single tracked source.
+- **This guide** (`docs/en/agents-guide.md`) is the **curated, human-authored discipline** —
+  *how the work is done*: roles and honesty (§2), the mandatory branch → MR → review → merge
+  workflow (§3), the quality bar (§4), hygiene (§5), forge tracking (§6), and dogfooding
+  (§7). It lives with the source and on the site; it is *not* auto-installed.
+
+**Decision (issue #44):** the curated agent guide is *this file*, promoted as the canonical
+reference — **not** a second, hand-edited root `AGENTS.md`, which would duplicate this
+content and fight the `init` generator that owns the root anchors (which are gitignored
+generated artifacts anyway, so there is no tracked root `AGENTS.md` to curate). Adopting
+projects get the generated stanza; agents working *on M8Shift* follow this guide.
+
 ## 1. The agents
 
 M8Shift is built by two or more cooperating agents plus a human maintainer. Each
