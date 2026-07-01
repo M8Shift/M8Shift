@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.29.0"
+VERSION = "3.30.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -310,6 +310,75 @@ class TestInit(CLIBase):
         self.assertIn("M8SHIFT_ROOT", body)
         if os.name != "nt":
             self.assertTrue(os.access(hook, os.X_OK), "hook template should be executable")
+
+    def gitignore(self):
+        with open(os.path.join(self.d, ".gitignore"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_init_creates_gitignore_block_when_absent(self):
+        self.init()
+        body = self.gitignore()
+        self.assertIn(cowork.GITIGNORE_BEGIN, body)
+        self.assertIn(cowork.GITIGNORE_END, body)
+        for entry in cowork.GITIGNORE_ENTRIES:
+            self.assertIn(entry, body)
+        self.assertNotIn("CLAUDE.md", body)
+        self.assertNotIn("AGENTS.md", body)
+
+    def test_init_gitignore_preserves_user_entries_and_excludes_anchors(self):
+        with open(os.path.join(self.d, ".gitignore"), "w", encoding="utf-8") as f:
+            f.write("node_modules/\n.DS_Store\n")
+        self.init()
+        body = self.gitignore()
+        self.assertTrue(body.startswith("node_modules/\n.DS_Store\n"))
+        self.assertIn(cowork.GITIGNORE_BEGIN, body)
+        self.assertIn(".m8shift/\n", body)
+        self.assertNotIn("CLAUDE.md", body)
+        self.assertNotIn("AGENTS.md", body)
+
+    def test_init_gitignore_is_idempotent(self):
+        self.init()
+        first = self.gitignore()
+        self.init()
+        second = self.gitignore()
+        self.assertEqual(second, first)
+        self.assertEqual(second.count(cowork.GITIGNORE_BEGIN), 1)
+        self.assertEqual(second.count(cowork.GITIGNORE_END), 1)
+
+    def test_init_gitignore_rerun_refreshes_stale_block(self):
+        stale = "\n".join([
+            "user-entry",
+            cowork.GITIGNORE_BEGIN,
+            "M8SHIFT.md",
+            cowork.GITIGNORE_END,
+            "other-entry",
+            "",
+        ])
+        with open(os.path.join(self.d, ".gitignore"), "w", encoding="utf-8") as f:
+            f.write(stale)
+        self.init()
+        body = self.gitignore()
+        self.assertTrue(body.startswith("user-entry\n"))
+        self.assertTrue(body.endswith("other-entry\n"))
+        for entry in cowork.GITIGNORE_ENTRIES:
+            self.assertIn(entry, body)
+        self.assertEqual(body.count(cowork.GITIGNORE_BEGIN), 1)
+
+    def test_init_no_gitignore_skips_file(self):
+        r = self.init("--no-gitignore")
+        self.assertIn("skipped", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".gitignore")))
+
+    def test_init_gitignore_incomplete_block_refused_without_clobber(self):
+        path = os.path.join(self.d, ".gitignore")
+        original = "user-entry\n" + cowork.GITIGNORE_BEGIN + "\nM8SHIFT.md\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(original)
+        r = self.cw("init")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("incomplete M8Shift block", r.stderr)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), original)
 
     def test_init_project_name(self):
         self.init("--name", "My Great Project")
