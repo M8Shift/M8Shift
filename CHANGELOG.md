@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.34.0 — 2026-07-01
+
+Release scope:
+
+- #76 — Enabled the RTK shell-output adapter by default for context packs only
+  when `rtk` is present and identity-pinned. If RTK is absent, unpinned, or
+  invalid, `m8shift-context.py pack` degrades to the native stdlib pack path.
+- Added explicit operator opt-out for context packing with
+  `pack --adapter native` / `--no-rtk`.
+- `m8shift-context.py init` and `adapters init` now attempt
+  `rtk telemetry disable` whenever RTK is present; `doctor --json` surfaces RTK
+  presence, pin status, telemetry state, and the no-network/local-subprocess
+  boundary.
+- `install.sh` now downloads `m8shift-context.py` by default and offers optional
+  RTK installation via Homebrew only with operator consent (`--with-rtk`, prompt,
+  or `--no-rtk`), then runs `rtk telemetry disable` when RTK is present.
+
+Validation:
+
+- Added tests for pinned-RTK default selection, absent-RTK native degradation,
+  operator opt-out, telemetry-disable setup, doctor RTK status, installer RTK
+  telemetry handling, and existing identity-pin fail-closed behavior.
+- Lockstep version surfaces bumped from `3.33.0` to `3.34.0` across distributed
+  scripts and tests.
+
 ## v3.33.0 — 2026-07-01
 
 Release scope:
