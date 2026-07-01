@@ -1,6 +1,6 @@
 # RFC — Decision traceability (forge, git, or a markdown fallback)
 
-**Status:** proposed (design) · **Builds on:** [022-rfc-session-reports.md](022-rfc-session-reports.md) (decision ledger derived from turns), [agents-guide.md](../agents-guide.md) §6 (forge tracking) and its §2 *surface-disagreement-explicitly* rule · **Source:** maintainer request — guarantee a durable record of *why* decisions were made, including contradictory ones, **whatever tooling the project has or lacks**.
+**Status:** design finalized (this RFC) · implementation tracked in #55 · **Builds on:** [022-rfc-session-reports.md](022-rfc-session-reports.md) (decision ledger derived from turns), [agents-guide.md](../agents-guide.md) §6 (forge tracking) and its §2 *surface-disagreement-explicitly* rule · **Source:** maintainer request — guarantee a durable record of *why* decisions were made, including contradictory ones, **whatever tooling the project has or lacks**.
 
 ## Question
 
@@ -124,14 +124,23 @@ setup; `md` is the default when nothing else is configured.
 - Agents establish (ask / config) the target before producing decisions; absent any, they use
   the markdown fallback rather than logging nowhere.
 
-## Open questions (designed solo — flagged for review)
+## Resolved questions
 
-1. **One file per decision vs a single `DECISIONS.md`.** ADR-per-file scales and supports
-   `superseded-by`; a single log is simpler for small projects. Offer both, default by repo
-   size?
-2. **How the target is configured** — a relay/config field set at `init`, an explicit
-   `decisions target` command, or inferred (forge remote present → forge; else git → md)?
-3. **Auto-scaffold trigger.** Should `append --done` optionally offer to capture a decision
-   when a turn resolved a disagreement, or stay fully manual?
-4. **Inferring positions.** How much can `session decisions` infer for / against stances from
-   turn text safely, vs requiring agents to tag their stance explicitly?
+1. **One file per decision vs a single `DECISIONS.md`.** Default to **ADR-per-file**
+   (`docs/decisions/NNNN-*.md`) — it scales and supports `superseded-by` chains — with a single
+   append-only `DECISIONS.md` as an opt-in lighter variant (config / `--single`) for small projects.
+2. **How the target is configured.** **Inference with override.** At setup, infer from the git
+   remotes: a forge remote → `forge`; a GitHub remote → `github`; both mirrored → `both`; git with
+   no tracker → `git` (a `Decision:`/`Decided-by:` commit trailer **plus** `docs/decisions/`); no git
+   → `md`. An explicit config field / `decisions target <t>` overrides the inference. When nothing
+   resolves, default to **`md`** so a decision is never logged into a void.
+3. **Auto-scaffold trigger.** **Manual + advisory, never automatic in the core.** The core write path
+   (`append`) is unchanged — no new prompt on the hot path. Capturing a decision is the explicit
+   `decisions scaffold` command; the runtime companion *may* advisorily detect a resolved
+   disagreement and **suggest** scaffolding, but never writes a record on its own.
+4. **Inferring positions.** **Explicit tag first; inference only scaffolds, never asserts.** Agents
+   tag their stance explicitly (a structured stance field, e.g. `--stance FOR|AGAINST:<option>`, on
+   the turn); `session decisions` builds the record from those tags. Where no tag exists, it emits a
+   **draft** that quotes the relevant turn text with the positions left blank for a human/agent to
+   complete — it never fabricates a FOR/AGAINST attribution from prose, because misattributing a
+   stance is worse than leaving it blank.
