@@ -45,4 +45,7 @@ through M8Shift telemetry.
 - Read-only status paths treat non-regular trusted executable paths as RTK OFF
   and report corrupt context-sidecar JSON as findings instead of hanging or
   aborting.
+- Trusted executable hashing keeps a 512 MiB sanity cap: large enough for real
+  local RTK binaries, bounded enough to avoid accidental multi-gigabyte reads in
+  status paths. Oversized binaries are unpinned and reported as RTK OFF.
 - For forensic audit, operators must use RTK's own local `rtk discover`.

@@ -194,6 +194,66 @@ class TestContextInitDoctor(ContextBase):
         self.assertIn("adapter.manifest_unreadable", checks)
         self.assertIn("metrics.unreadable", checks)
 
+    def test_status_doctor_report_oversize_and_nonregular_rtk_without_traceback(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        adapter = os.path.join(self.d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
+        bindir = os.path.join(self.d, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        env = os.environ.copy()
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+
+        def write_manifest(trusted_path):
+            with open(adapter, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "schema": "m8shift.adapter.v1",
+                    "name": "rtk-shell-output",
+                    "type": "shell_output_filter",
+                    "authority": "advisory",
+                    "command": ["rtk", "$M8SHIFT_ADAPTER_MODE_ARGS"],
+                    "mutates_core": False,
+                    "mutates_repo": False,
+                    "trusted_executable": {
+                        "program": "rtk",
+                        "path": trusted_path,
+                        "sha256": "0" * 64,
+                    },
+                }, fh)
+
+        def assert_safe():
+            status = subprocess.run(
+                [sys.executable, "m8shift-context.py", "status", "--json"],
+                cwd=self.d, env=env, capture_output=True, text=True, timeout=4,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertNotIn("Traceback", status.stderr + status.stdout)
+            status_payload = json.loads(status.stdout)
+            self.assertEqual(status_payload["rtk"]["state"], "off")
+            self.assertIn("adapter.program_identity_mismatch", {f["check"] for f in status_payload["rtk"]["findings"]})
+
+            doctor = subprocess.run(
+                [sys.executable, "m8shift-context.py", "doctor", "--json"],
+                cwd=self.d, env=env, capture_output=True, text=True, timeout=4,
+            )
+            self.assertIn(doctor.returncode, (0, 1))
+            self.assertNotIn("Traceback", doctor.stderr + doctor.stdout)
+            self.assertIn("adapter.program_identity_mismatch", {f["check"] for f in json.loads(doctor.stdout)["findings"]})
+
+        rtk = os.path.join(bindir, "rtk")
+        with open(rtk, "wb") as fh:
+            fh.truncate(513 * 1024 * 1024)
+        os.chmod(rtk, 0o755)
+        write_manifest(os.path.realpath(rtk))
+        assert_safe()
+
+        with open(rtk, "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env python3\nimport sys\nsys.stdout.write('ok')\n")
+        os.chmod(rtk, 0o755)
+        if hasattr(os, "mkfifo"):
+            fifo = os.path.join(self.d, "rtk-fifo")
+            os.mkfifo(fifo)
+            write_manifest(fifo)
+            assert_safe()
+
 
 class TestContextPack(ContextBase):
     def test_pack_preserves_handoff_fields_verbatim_and_writes_receipt_metrics(self):

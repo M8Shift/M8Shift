@@ -88,7 +88,7 @@ HEADROOM_DEFAULTS = {
     "pause_recommendation_after_relay_bytes": 500000,
 }
 HEADROOM_LEVEL = {"ok": 0, "warning": 1, "high": 2}
-MAX_HASH_BYTES = 64 * 1024 * 1024
+MAX_HASH_BYTES = 512 * 1024 * 1024
 
 
 def now():
