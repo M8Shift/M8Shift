@@ -205,10 +205,17 @@ Every change follows the same branch-based flow.
    valid, scope clean. The reviewer approves or returns ranked findings.
 8. **Stabilize, then merge.** `main` receives the change **only once the version is
    stable and reviewed**, via the merge request. Tag the release if it is a version
-   bump. **After every tag, updating the published site
-   ([m8shift.ai](https://m8shift.ai/)) is mandatory, in the same cycle** — version references,
-   the RFC table and statuses, and any new feature surfaces — so the site never lags a released
-   version. A tag is not complete until the site reflects it. Delete the work branch after merge.
+   bump. **At every release/tag the docs and the site are refreshed in the same cycle** — a tag is
+   not complete until they reflect it:
+   (a) **exhaustively update the specification docs** from the implemented RFCs — schemas, features,
+   mechanisms, extensions — with each technical choice referenced to its RFC; refresh the **colour
+   Mermaid architecture diagrams** (the module map — core + companions + what each serves) so a
+   newcomer grasps the growing system visually;
+   (b) **update the published site** ([m8shift.ai](https://m8shift.ai/)) with a **feature-focus** —
+   the release history plus the headline user-facing advances made transparent (e.g. token
+   compression with the measured RTK average %, parallelism, model/task routing, the economic usage
+   view) — with strong GitHub anchoring and consistent iconography.
+   Delete the work branch after merge.
 
 Intermediate, work-in-progress commits live **only on the work branch**. `main` stays
 releasable at all times.
