@@ -1,5 +1,31 @@
 # Changelog
 
+## v3.37.0 — 2026-07-01
+
+Release scope:
+
+- #81 / RFC 037 Phase B — Added the local foundation for agent context
+  compression in `m8shift-context.py`.
+- `m8shift-context.py compress` now writes `compressed_context_record` JSON
+  records that wrap `m8shift.adapter.result.v1`, with `context_digest`,
+  `handoff_digest`, and `raw_output_reference` objects.
+- Added the in-process builtin compressor: bounded head/tail digest, repeated
+  line collapse, error/warning extraction, path extraction, and exit-code
+  preservation.
+- Raw evidence is redacted before local storage by default; missing or malformed
+  `.m8shift/context-compression.json` fails safe to redacted reference-only.
+- `m8shift-context.py retrieve` performs mandatory bounded retrieval by safe
+  record id, with native stdlib `re` grep guarded by pattern length and simple
+  ReDoS heuristics.
+
+Validation:
+
+- Added negative tests for traversal record ids, ReDoS/oversized grep patterns,
+  secret-bearing raw content, missing/malformed compression config fail-safe,
+  and backend-error reference-only fallback.
+- Lockstep version surfaces bumped from `3.36.0` to `3.37.0` across distributed
+  scripts and tests.
+
 ## v3.36.0 — 2026-07-01
 
 Release scope:
