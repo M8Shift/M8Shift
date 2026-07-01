@@ -41,6 +41,7 @@ TURN_RE = re.compile(
 )
 FIELD_RE = re.compile(r"^- (?P<key>[a-z_]+):\s*(?P<value>.*)$")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+COMPRESSION_RECORD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 PROFILE_NAMES = ("implementer", "reviewer", "tester", "gatekeeper", "maintainer")
 GIT_TIMEOUT_SECONDS = 10
 MAX_HASH_BYTES = 512 * 1024 * 1024
@@ -48,6 +49,7 @@ DEFAULT_RETRIEVAL_LINES = 80
 MAX_RETRIEVAL_LINES = 500
 MAX_GREP_PATTERN_CHARS = 128
 MAX_GREP_SCAN_BYTES = 1024 * 1024
+MAX_GREP_LINE_CHARS = 4096
 ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
@@ -125,9 +127,10 @@ DEFAULT_COMPRESSION_CONFIG = {
         "max_lines": MAX_RETRIEVAL_LINES,
         "max_grep_pattern_chars": MAX_GREP_PATTERN_CHARS,
         "max_grep_scan_bytes": MAX_GREP_SCAN_BYTES,
+        "max_grep_line_chars": MAX_GREP_LINE_CHARS,
     },
     "redaction": {
-        "pattern_set": "m8shift.secret_patterns.v1",
+        "pattern_set": "m8shift.secret_patterns.v2",
     },
 }
 
@@ -153,6 +156,21 @@ SECRET_PATTERNS = (
         "[REDACTED_GITHUB_TOKEN]",
     ),
     (
+        "slack_token",
+        re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+        "[REDACTED_SLACK_TOKEN]",
+    ),
+    (
+        "google_api_key",
+        re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+        "[REDACTED_GOOGLE_API_KEY]",
+    ),
+    (
+        "stripe_key",
+        re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}\b"),
+        "[REDACTED_STRIPE_KEY]",
+    ),
+    (
         "openai_key",
         re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
         "[REDACTED_API_KEY]",
@@ -173,6 +191,20 @@ SECRET_PATTERNS = (
         "[REDACTED_JWT]",
     ),
     (
+        "url_inline_credentials",
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+(@)"),
+        r"\1[REDACTED]\2",
+    ),
+    (
+        "assignment_secret_identifier",
+        re.compile(
+            r"(?i)\b([A-Za-z0-9_.-]*(?:secret|token|api[_-]?key|apikey|password|passwd|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)"
+            r"(\s*[:=]\s*)"
+            r"([\"']?)[^\s\"']+([\"']?)"
+        ),
+        r"\1\2\3[REDACTED]\4",
+    ),
+    (
         "assignment_secret",
         re.compile(
             r"(?i)\b(api[_-]?key|token|password|passwd|secret|access[_-]?token|private[_-]?key)\b"
@@ -186,7 +218,7 @@ SECRET_PATTERNS = (
 ERROR_LINE_RE = re.compile(r"\b(error|exception|traceback|failed|failure|fatal|warning|assertionerror)\b", re.IGNORECASE)
 EXIT_CODE_RE = re.compile(r"\b(?:exit(?:ed)?(?:\s+code)?|returncode|return code|rc)\s*[:=]?\s*(-?\d+)\b", re.IGNORECASE)
 PATH_RE = re.compile(r"(?:(?:[A-Za-z]:)?[/\\][^\s:;]+|[A-Za-z0-9_.@%+=:-]+(?:/[A-Za-z0-9_.@%+=:-]+)+)")
-UNSAFE_GREP_RE = re.compile(r"(\([^)]*[+*][^)]*\)[+*?{]|\[[^\]]*[+*][^\]]*\][+*?{]|(?:\.\*){3,})")
+UNSAFE_GREP_RE = re.compile(r"(\([^)]*[+*?][^)]*\)[+*?{]|\[[^\]]*[+*?][^\]]*\][+*?{]|(?:\.\*){3,}|\{\d+(?:,\d*)?\})")
 
 
 DEFAULT_PROFILES = {
@@ -507,6 +539,18 @@ def compression_retrieval(config):
     return retrieval if isinstance(retrieval, dict) else {}
 
 
+def bounded_int(value, default, minimum, maximum):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def retrieval_int(config, key, default, minimum, maximum):
+    return bounded_int(compression_retrieval(config).get(key, default), default, minimum, maximum)
+
+
 def redaction_enabled(config):
     return bool(compression_policy(config).get("redact_before_store", True))
 
@@ -531,14 +575,14 @@ def redact_text(text, config):
             applied += count
     return redacted, {
         "enabled": True,
-        "pattern_set": "m8shift.secret_patterns.v1",
+        "pattern_set": "m8shift.secret_patterns.v2",
         "applied_count": applied,
         "matches": matches,
     }
 
 
 def valid_record_id(record_id, label="record id"):
-    if not SAFE_ID_RE.fullmatch(record_id or ""):
+    if not COMPRESSION_RECORD_ID_RE.fullmatch(record_id or ""):
         die(f"unsafe {label}: {record_id!r}")
     return record_id
 
@@ -1545,9 +1589,8 @@ def extract_builtin_signals(text):
 
 
 def render_builtin_digest(record_id, text, content_type, config):
-    retrieval = compression_retrieval(config)
-    line_limit = int(retrieval.get("default_lines", DEFAULT_RETRIEVAL_LINES) or DEFAULT_RETRIEVAL_LINES)
-    line_limit = max(1, min(line_limit, int(retrieval.get("max_lines", MAX_RETRIEVAL_LINES) or MAX_RETRIEVAL_LINES)))
+    max_lines = retrieval_int(config, "max_lines", MAX_RETRIEVAL_LINES, 1, MAX_RETRIEVAL_LINES)
+    line_limit = retrieval_int(config, "default_lines", DEFAULT_RETRIEVAL_LINES, 1, max_lines)
     lines = text.splitlines()
     collapsed, repeated_groups = collapse_repeated_lines(lines)
     excerpt_lines, omitted = head_tail_lines(collapsed, line_limit)
@@ -1642,7 +1685,7 @@ def compression_record_id(args):
     if args.id:
         return valid_record_id(args.id)
     stamp = iso().replace("-", "").replace(":", "")
-    suffix = re.sub(r"[^A-Za-z0-9_.:-]+", "-", (args.type or "context").strip("-"))[:40] or "context"
+    suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", (args.type or "context").strip("-"))[:40] or "context"
     return valid_record_id(f"ccr-{stamp}-{suffix}")
 
 
@@ -1761,10 +1804,8 @@ def cmd_compress(args):
 
 
 def parse_line_selector(selector, config):
-    retrieval = compression_retrieval(config)
-    default_lines = int(retrieval.get("default_lines", DEFAULT_RETRIEVAL_LINES) or DEFAULT_RETRIEVAL_LINES)
-    max_lines = int(retrieval.get("max_lines", MAX_RETRIEVAL_LINES) or MAX_RETRIEVAL_LINES)
-    max_lines = max(1, min(max_lines, MAX_RETRIEVAL_LINES))
+    max_lines = retrieval_int(config, "max_lines", MAX_RETRIEVAL_LINES, 1, MAX_RETRIEVAL_LINES)
+    default_lines = retrieval_int(config, "default_lines", DEFAULT_RETRIEVAL_LINES, 1, max_lines)
     if not selector:
         return 1, min(default_lines, max_lines)
     if ":" in selector:
@@ -1783,8 +1824,7 @@ def parse_line_selector(selector, config):
 
 
 def validate_grep_pattern(pattern, config):
-    retrieval = compression_retrieval(config)
-    max_chars = int(retrieval.get("max_grep_pattern_chars", MAX_GREP_PATTERN_CHARS) or MAX_GREP_PATTERN_CHARS)
+    max_chars = retrieval_int(config, "max_grep_pattern_chars", MAX_GREP_PATTERN_CHARS, 1, MAX_GREP_PATTERN_CHARS)
     if len(pattern) > max_chars:
         die(f"unsafe grep pattern: too long ({len(pattern)} > {max_chars})")
     if "\x00" in pattern:
@@ -1806,14 +1846,15 @@ def bounded_text_window(text, start, end):
 
 
 def bounded_grep(text, pattern, config, limit):
-    retrieval = compression_retrieval(config)
-    max_bytes = int(retrieval.get("max_grep_scan_bytes", MAX_GREP_SCAN_BYTES) or MAX_GREP_SCAN_BYTES)
+    max_bytes = retrieval_int(config, "max_grep_scan_bytes", MAX_GREP_SCAN_BYTES, 1, MAX_GREP_SCAN_BYTES)
+    max_line_chars = retrieval_int(config, "max_grep_line_chars", MAX_GREP_LINE_CHARS, 1, MAX_GREP_LINE_CHARS)
     chunk = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="replace")
     regex = validate_grep_pattern(pattern, config)
     matches = []
     for number, line in enumerate(chunk.splitlines(), 1):
-        if regex.search(line):
-            matches.append({"line": number, "text": line})
+        bounded_line = line[:max_line_chars]
+        if regex.search(bounded_line):
+            matches.append({"line": number, "text": bounded_line})
             if len(matches) >= limit:
                 break
     scanned_truncated = len(text.encode("utf-8")) > max_bytes
