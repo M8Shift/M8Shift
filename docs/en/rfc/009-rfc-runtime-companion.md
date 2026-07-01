@@ -60,7 +60,11 @@ The companion must preserve M8Shift's core qualities:
 
 ## Implemented file layout
 
-Runtime state is local, generated, and gitignored:
+Runtime state is local, generated, and gitignored. Since v3.30.0, `m8shift.py init`
+adds or refreshes a marker-delimited M8Shift block in the host `.gitignore` by
+default; `--no-gitignore` opts out. The block covers relay state and runtime
+sidecars, but deliberately does **not** add agent anchors such as `CLAUDE.md` or
+`AGENTS.md` because those may be real project instructions in adopting repos.
 
 ```text
 .m8shift/
@@ -328,9 +332,14 @@ No v1 feature may require changing the core `LOCK` format.
 
 ## Open questions
 
-1. Should `init` optionally add `.m8shift/` to the host project's `.gitignore`, or
-   should each companion provide its own `install` command?
-2. What is the safest cross-platform notification mechanism that keeps the stdlib-only
+1. What is the safest cross-platform notification mechanism that keeps the stdlib-only
    constraint? If none is acceptable, v1 should print/write prompts only.
-3. Should the deferred `run` mode live in `m8shift-runtime.py` or remain as a
+2. Should the deferred `run` mode live in `m8shift-runtime.py` or remain as a
    dedicated example runner?
+
+## Resolved decisions
+
+- **Host `.gitignore` management (#56).** Resolved in v3.30.0: core `init`
+  manages a marker-delimited M8Shift block in `.gitignore` by default, with
+  `--gitignore` / `--no-gitignore` for non-interactive callers. It refreshes only
+  the generated block and preserves all user-managed entries in place.

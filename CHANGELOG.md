@@ -1,5 +1,26 @@
 # Changelog
 
+## v3.30.0 — 2026-07-01
+
+Release scope:
+
+- #56 — `m8shift.py init` now manages a marker-delimited M8Shift block in the
+  host `.gitignore` by default, keeping relay state artifacts local and
+  uncommitted.
+- Added non-interactive flags `--gitignore` / `--no-gitignore`; headless init
+  defaults to adding/refreshing the block without prompting.
+- The generated block covers relay state, sidecars, temp files, backups, and
+  session reports, but deliberately does not add agent anchors such as
+  `CLAUDE.md` or `AGENTS.md`.
+
+Validation:
+
+- Added tests for absent `.gitignore` creation, user-entry preservation,
+  idempotency, stale-block refresh, `--no-gitignore`, anchor exclusion, and
+  malformed marker-block refusal without clobbering user content.
+- Lockstep version surfaces bumped from `3.29.0` to `3.30.0` across distributed
+  scripts and tests.
+
 ## v3.29.0 — 2026-07-01
 
 Release scope:

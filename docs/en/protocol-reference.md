@@ -201,6 +201,11 @@ hint; it never runs force recovery automatically.
   tags an aborted commit; it inserts the trailer into the message body — inside the
   trailer block, above any `git commit -v` `>8` scissors line — so verbose commits
   keep the trailer instead of dropping it below the cut with the diff;
+- manages a marker-delimited M8Shift block in the host `.gitignore` by default
+  (use `--no-gitignore` to skip). The block keeps relay state local
+  (`M8SHIFT.md`, runtime sidecars, temporary files, backups, reports) without adding
+  agent anchors such as `CLAUDE.md` or `AGENTS.md`; re-init refreshes only this block
+  and preserves all user-managed `.gitignore` entries in place;
 - injects at the **top** a "M8Shift relay" block into **each active agent's anchor**
   (by default `CLAUDE.md` and `AGENTS.md`; created if missing), between
   `M8SHIFT:STANZA` markers → **idempotent** re-injection (moves/updates the block
