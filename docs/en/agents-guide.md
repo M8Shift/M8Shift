@@ -237,6 +237,9 @@ releasable at all times.
   outside the repo being changed; it stamps the final saved message (never an aborted
   one) and inserts the trailers into the body above any `git commit -v` scissors line,
   so verbose commits keep them instead of dropping them with the diff.
+  To let the hook stamp the executing model, export a single-line safe identifier
+  before committing, for example `M8SHIFT_AGENT_MODEL=codex-gpt-5.1`. Malformed
+  values are ignored fail-open and never block the commit.
 - **No relay artefacts committed.** `M8SHIFT.md`, `M8SHIFT.archive.md`,
   `.m8shift.lock`, and other generated relay state stay out of the repo.
 

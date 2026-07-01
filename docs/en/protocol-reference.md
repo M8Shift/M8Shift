@@ -193,8 +193,10 @@ hint; it never runs force recovery automatically.
   `--force`) → the state of the ongoing relay is preserved;
 - writes `.m8shift/hooks/commit-msg`, a Git hook template that adds the
   `Coordinated-With: M8Shift vX.Y.Z` trailer by reading the active relay version from
-  `$M8SHIFT_ROOT` (or the current directory when it contains a relay); if no relay is
-  configured, it exits 0 without changing the commit message. It is a `commit-msg`
+  `$M8SHIFT_ROOT` (or the current directory when it contains a relay). If
+  `M8SHIFT_AGENT_MODEL` is set to a safe self-declared model id, the hook also stamps
+  `Agent-Model: <id>`. If no relay is configured, it exits 0 without changing the
+  commit message. It is a `commit-msg`
   hook (not `prepare-commit-msg`) so it stamps the *final* saved message and never
   tags an aborted commit; it inserts the trailer into the message body — inside the
   trailer block, above any `git commit -v` `>8` scissors line — so verbose commits
