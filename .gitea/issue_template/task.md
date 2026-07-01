@@ -42,7 +42,7 @@ labels: []
 
 ## 🔀 Workflow
 
-> `branch (feat/fix/docs/…) → MR (Closes #N) → independent review → merge-when-stable → 🏷️ tag if version bump → push forge-first then GitHub → delete branch`
+> `branch (feat/fix/docs/…) → MR (Closes #N) → independent review → merge-when-stable → 🏷️ tag if version bump → push forge-first then GitHub → delete branch on both remotes (forge + GitHub)`
 
 ## 🗂️ RFC & references
 
