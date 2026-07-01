@@ -374,6 +374,7 @@ class TestContextCompression(ContextBase):
     def test_compress_writes_redacted_record_and_bounded_retrieve(self):
         self.assertEqual(self.ctx("init").returncode, 0)
         slack_token = "xoxb-" + "1234567890-" + "abcdefghijklmnop"
+        stripe_key = "sk_" + "live_" + "1234567890abcdef"
         raw = "\n".join([
             "INFO boot",
             "password=super-secret",
@@ -381,7 +382,7 @@ class TestContextCompression(ContextBase):
             "aws_secret_access_key=aws-secret-value",
             f"SLACK={slack_token}",
             "GOOGLE=AIza" + ("A" * 35),
-            "STRIPE=sk_live_1234567890abcdef",
+            f"STRIPE={stripe_key}",
             "URL=https://user:urlpassword@example.com/db",
             "ERROR failed in /tmp/project/tests/test_app.py",
             "exit code 2",
@@ -389,7 +390,7 @@ class TestContextCompression(ContextBase):
         ]) + "\n"
 
         result = self.ctx(
-            "compress", "--id", "rec1", "--type", "test_output", "--agent", "codex", "--stdin", "--json",
+            "compress", "--id", "rec1", "--type", "test_output", "--agent", "codex", "--backend", "builtin", "--stdin", "--json",
             stdin=raw,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -408,7 +409,7 @@ class TestContextCompression(ContextBase):
             "aws-secret-value",
             slack_token,
             "AIza" + ("A" * 35),
-            "sk_live_1234567890abcdef",
+            stripe_key,
             "urlpassword",
         ):
             self.assertNotIn(secret, json.dumps(payload))
@@ -425,7 +426,7 @@ class TestContextCompression(ContextBase):
             "aws-secret-value",
             slack_token,
             "AIza" + ("A" * 35),
-            "sk_live_1234567890abcdef",
+            stripe_key,
             "urlpassword",
         ):
             self.assertNotIn(secret, stored_raw)
@@ -519,6 +520,64 @@ class TestContextCompression(ContextBase):
         self.assertNotIn("full raw should not be inline", payload["adapter_result"]["filtered_text"])
         with open(os.path.join(self.d, ".m8shift", "context", "compression", "raw", "backenderr.raw.txt"), encoding="utf-8") as fh:
             self.assertNotIn("super-secret", fh.read())
+
+    def test_auto_rtk_backend_uses_pinned_adapter_for_test_output(self):
+        marker = os.path.join(self.d, "rtk-compress.txt")
+        env = self.fake_rtk_env(
+            "import sys\n"
+            f"open({marker!r}, 'a', encoding='utf-8').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1:] == ['telemetry', 'disable']:\n"
+            "    print('disabled')\n"
+            "elif sys.argv[1:] == ['telemetry', 'status']:\n"
+            "    print('telemetry disabled')\n"
+            "else:\n"
+            "    data = sys.stdin.read()\n"
+            "    sys.stdout.write('RTK_COMPACT mode=' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "    sys.stdout.write(data.replace('INFO noisy\\n', ''))\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        result = self.ctx(
+            "compress", "--id", "rtk1", "--type", "test_output", "--stdin", "--json",
+            stdin="password=super-secret\nINFO noisy\nERROR failed\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "rtk-shell-output")
+        self.assertEqual(payload["adapter_result"]["adapter"], "rtk-shell-output")
+        self.assertEqual(payload["adapter_result"]["mode"], "test")
+        self.assertIn("RTK_COMPACT mode=test", payload["adapter_result"]["filtered_text"])
+        self.assertIn("exit code 1", payload["adapter_result"]["filtered_text"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+        with open(marker, encoding="utf-8") as fh:
+            self.assertIn("test", fh.read())
+
+    def test_auto_rtk_backend_error_falls_back_to_builtin_not_raw(self):
+        env = self.fake_rtk_env(
+            "import sys\n"
+            "if sys.argv[1:] == ['telemetry', 'disable']:\n"
+            "    print('disabled')\n"
+            "elif sys.argv[1:] == ['telemetry', 'status']:\n"
+            "    print('telemetry disabled')\n"
+            "else:\n"
+            "    sys.stderr.write('rtk failed')\n"
+            "    raise SystemExit(9)\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        result = self.ctx(
+            "compress", "--id", "rtkfail", "--type", "test_output", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "builtin")
+        self.assertEqual(payload["adapter_result"]["adapter"], "builtin")
+        self.assertFalse(payload["fallback_used"])
+        self.assertIn("compression.rtk_fallback", {row["check"] for row in payload["findings"]})
+        self.assertNotIn("super-secret", json.dumps(payload))
 
     def test_valid_schema_config_bad_numeric_values_do_not_traceback(self):
         self.assertEqual(self.ctx("init").returncode, 0)

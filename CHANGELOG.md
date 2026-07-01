@@ -1,5 +1,28 @@
 # Changelog
 
+## v3.38.0 — 2026-07-01
+
+Release scope:
+
+- #82 / RFC 037 Phase C — Added compression backend dispatch in
+  `m8shift-context.py compress`.
+- `compress --backend auto` now selects the existing RFC 034 `rtk-shell-output`
+  adapter for shell/tool content types (`shell_output`, `test_output`, `logs`,
+  `git_output`) when RTK is present and identity-pinned; otherwise it falls back
+  to the builtin compressor without inserting raw content.
+- Explicit `--backend rtk-shell-output` uses the same argv-only, identity-pinned,
+  output-capped `run_adapter_process` path as adapter runs. Invalid/unavailable
+  explicit backends fail closed to reference-only.
+- Compression records now distinguish `requested_backend`, actual `backend`, and
+  `backend_version`.
+
+Validation:
+
+- Added RTK compression backend tests for pinned auto-selection and RTK failure
+  fallback to builtin without raw bleed-through.
+- Lockstep version surfaces bumped from `3.37.0` to `3.38.0` across distributed
+  scripts and tests.
+
 ## v3.37.0 — 2026-07-01
 
 Release scope:

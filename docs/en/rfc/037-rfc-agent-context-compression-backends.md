@@ -1,6 +1,6 @@
 # RFC 037 — Agent Context Compression Backends and Digest-Based Handoffs
 
-- Status: draft; Phase B local records + builtin fallback shipped in v3.37.0
+- Status: draft; Phase C local records + builtin/RTK backend dispatch shipped in v3.38.0
 - Target stage: optional context companion (`m8shift-context.py`) — policy + file protocol
 - Builds on: [RFC 033 Context Economy](033-rfc-context-economy.md) (policy), [RFC 034 Companion Adapter Interface](034-rfc-companion-adapter-interface.md) (mechanism), [RFC 026 sidecar retention](026-rfc-sidecar-retention.md)
 - Related: [RFC 036 Token-window exhaustion](036-rfc-token-window-exhaustion.md), [RFC 040 AI session usage monitoring](040-rfc-ai-session-usage-monitoring.md)
