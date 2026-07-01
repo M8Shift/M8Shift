@@ -204,6 +204,7 @@ Garanzia:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # timeline del relay (sola lettura)
 ./m8shift.py history [--limit N] [--oneline] [--json]  # cronologia di sessione (sola lettura)
 ./m8shift.py session {list,show,decisions,report} …  # viste sessione + report Markdown opzionale
+./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # attende se serve, poi claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /

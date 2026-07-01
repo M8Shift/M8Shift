@@ -247,6 +247,8 @@ published site, or use the repository-local docs when working from a clone.
 | 027 | [Notifications](docs/en/rfc/027-rfc-notifications.md) | Local notifications for handoffs / stale turns | draft | — | deferred from RFC 010 |
 | 028 | [Headless command templates](docs/en/rfc/028-rfc-headless-command-templates.md) | Safe headless command templates | draft | — | deferred from RFC 010 |
 | 029 | [Companion workboard](docs/en/rfc/029-rfc-m8shift-board.md) | Richer companion workboard outside core | draft | — | deferred from RFC 010 |
+| 030 | [Tamper evidence](docs/en/rfc/030-rfc-tamper-evidence.md) | Hash-chain tamper-evidence for relay records | draft | — | detection/warning only; git remains the strong anchor |
+| 031 | [Decision traceability](docs/en/rfc/031-rfc-decision-traceability.md) | Durable decision records from turn journal | shipped | v3.31.0 · 2026-07-01 | `decisions target/scaffold`, `append --stance`, ADR fallback |
 
 ## 🔁 How it works
 
@@ -390,6 +392,7 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 | N-agent roster, one pen | ✅ Shipped | `init --agents a,b,c…`, directed `append --to <agent>` | all agents can relay; still one writer at a time |
 | Read/handoff observability | ✅ Shipped | `recap`, `peek`, `log`, `history`, `status --json`, `watch` | read-only views; no routing decisions |
 | Session reports | ✅ Shipped | `session list/show/decisions/report`, `M8SHIFT.session-reports/` | derived Markdown memory; no lock mutation, no invented decisions |
+| Decision traceability | ✅ Shipped | `decisions target`, `decisions scaffold`, `append --stance`, `docs/decisions/` | durable ADR-style exports from journal turns; markdown fallback when no tracker exists |
 | Advisory pre-claim checks | ✅ Shipped | `claim --check [--files …] [--turns N]` | no pen taken; overlap is advisory |
 | Shared memory and tasks | ✅ Shipped | `remember`, `task add/done/drop/list/show`, recap headlines | append-only ledgers; never enforced by the mutex |
 | Stage 4 contracts | ✅ Shipped | `append --schema stage4.v1 …`, `contract validate`, `doctor --contracts` | typed metadata is validated only on explicit read-only commands |

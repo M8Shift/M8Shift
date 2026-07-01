@@ -1,5 +1,28 @@
 # Changelog
 
+## v3.31.0 — 2026-07-01
+
+Release scope:
+
+- #55 — Implemented RFC 031 decision traceability:
+  `decisions target` shows or persists the advisory target
+  (`forge`, `github`, `both`, `git`, `md`), while
+  `decisions scaffold` exports a durable decision record from existing turns.
+- Added the markdown fallback: ADR-style `docs/decisions/NNNN-*.md` records by
+  default, plus an append-only `DECISIONS.md` variant with `--single`.
+- Added explicit advisory stance tagging on turns via `append --stance …`; the
+  scaffold uses explicit stances and Stage-4 review decisions, never inferred
+  FOR/AGAINST positions from prose.
+- Shipped markdown, Gitea/Forgejo, and GitHub decision templates.
+
+Validation:
+
+- Added tests for markdown record creation, single-file fallback, target
+  inference/config override, no-tracker `md` default, shipped templates, and
+  proof that scaffolding leaves the journal/`LOCK` untouched.
+- Lockstep version surfaces bumped from `3.30.0` to `3.31.0` across distributed
+  scripts and tests.
+
 ## v3.30.0 — 2026-07-01
 
 Release scope:
