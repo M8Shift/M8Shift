@@ -190,3 +190,14 @@ retrieval bundles; or reports exceeding the pack budget. **Hard constraint for a
 integration:** compress only the *disposable / supporting* sections, **never** the
 `ask`/`done`/`decision` verbatim blocks, and only with a strict preserve-block mechanism + source
 references.
+
+## RFC 037 backends inherit this DoD
+
+[RFC 037](rfc/037-rfc-agent-context-compression-backends.md) formalizes the compression-backend
+layer (builtin / RTK / optional Headroom, all as RFC 034 adapters). Any compression gain it claims
+is held to the **same Definition of Done as this document**: real-tokenizer measurement (tiktoken
+`o200k_base` for Codex, Anthropic `count_tokens` for Claude, never mixed) **plus** an
+output-equivalence check (verbatim preserved, dropped content flagged and referenced by hash).
+Runtime records carry only the advisory `estimated_proxy_tokens_*` (bytes/4) for policy decisions —
+never presented as a measured gain. The Headroom constraint above (never compress the verbatim
+`ask`/`done`/`decision` blocks) is normative for the RFC 037 `context_transform` backend.
