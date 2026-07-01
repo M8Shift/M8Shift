@@ -579,6 +579,53 @@ class TestContextCompression(ContextBase):
         self.assertIn("compression.rtk_fallback", {row["check"] for row in payload["findings"]})
         self.assertNotIn("super-secret", json.dumps(payload))
 
+    def test_drifted_rtk_manifest_mode_error_degrades_without_crash(self):
+        env = self.fake_rtk_env(
+            "import sys\n"
+            "if sys.argv[1:] == ['telemetry', 'disable']:\n"
+            "    print('disabled')\n"
+            "elif sys.argv[1:] == ['telemetry', 'status']:\n"
+            "    print('telemetry disabled')\n"
+            "else:\n"
+            "    sys.stdout.write(sys.stdin.read())\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        adapter = os.path.join(self.d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
+        with open(adapter, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        del manifest["modes"]["test"]
+        with open(adapter, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh)
+
+        auto = self.ctx(
+            "compress", "--id", "drift-auto", "--type", "test_output", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(auto.returncode, 0, auto.stderr + auto.stdout)
+        self.assertNotIn("Traceback", auto.stderr + auto.stdout)
+        payload = json.loads(auto.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "builtin")
+        self.assertFalse(payload["fallback_used"])
+        self.assertIn("compression.rtk_fallback", {row["check"] for row in payload["findings"]})
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+        explicit = self.ctx(
+            "compress", "--id", "drift-explicit", "--type", "test_output", "--backend", "rtk-shell-output", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(explicit.returncode, 0, explicit.stderr + explicit.stdout)
+        self.assertNotIn("Traceback", explicit.stderr + explicit.stdout)
+        payload = json.loads(explicit.stdout)
+        self.assertEqual(payload["requested_backend"], "rtk-shell-output")
+        self.assertEqual(payload["backend"], "rtk-shell-output")
+        self.assertEqual(payload["status"], "reference_only")
+        self.assertTrue(payload["fallback_used"])
+        self.assertIn("adapter mode 'test' is not declared", payload["adapter_result"]["error"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+
     def test_valid_schema_config_bad_numeric_values_do_not_traceback(self):
         self.assertEqual(self.ctx("init").returncode, 0)
         self.write_json(".m8shift/context-compression.json", {
