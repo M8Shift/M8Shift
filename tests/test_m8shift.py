@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.28.1"
+VERSION = "3.29.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -3795,6 +3795,204 @@ class TestRuntimeCompanion(CLIBase):
         with open(runs_path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "{bad json}\n")
         self.assertEqual(self.md(), before)
+
+    def write_runtime_policy(self, policy):
+        runtime_dir = os.path.join(self.d, ".m8shift", "runtime")
+        os.makedirs(runtime_dir, exist_ok=True)
+        with open(os.path.join(runtime_dir, "retention.json"), "w", encoding="utf-8") as fh:
+            json.dump(policy, fh)
+
+    def write_runtime_rows(self, ledger, rows):
+        runtime_dir = os.path.join(self.d, ".m8shift", "runtime")
+        path = os.path.join(runtime_dir, ledger)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+        return path
+
+    def read_runtime_rows(self, ledger):
+        path = os.path.join(self.d, ".m8shift", "runtime", ledger)
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def test_runtime_retention_apply_disabled_by_default_noop_and_policy_show(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_rows("runs.jsonl", [{"n": 1}, {"n": 2}])
+
+        absent = self.rt("retention", "apply", "--json")
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        absent_payload = json.loads(absent.stdout)
+        self.assertFalse(absent_payload["enabled"])
+        self.assertEqual(absent_payload["ledgers"], [])
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [1, 2])
+
+        show = self.rt("retention", "policy", "show", "--json")
+        self.assertEqual(show.returncode, 0, show.stderr)
+        show_payload = json.loads(show.stdout)
+        self.assertEqual(show_payload["source"], "absent")
+        self.assertFalse(show_payload["policy"]["enabled"])
+
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": False,
+            "default": {"strategy": "fixed-count", "keep": 1, "archive": True},
+        })
+        disabled = self.rt("retention", "apply", "--json")
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        disabled_payload = json.loads(disabled.stdout)
+        self.assertFalse(disabled_payload["enabled"])
+        self.assertEqual(disabled_payload["ledgers"], [])
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [1, 2])
+        self.assertEqual(self.md(), before)
+
+    def test_runtime_retention_apply_fixed_count_archives_and_writes_index(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 2, "archive": True},
+        })
+        self.write_runtime_rows("runs.jsonl", [
+            {"n": 0, "ts": "2026-01-01T00:00:00Z"},
+            {"n": 1, "ts": "2026-01-02T00:00:00Z"},
+            {"n": 2, "ts": "2026-01-03T00:00:00Z"},
+            {"n": 3, "ts": "2026-01-04T00:00:00Z"},
+            {"n": 4, "ts": "2026-01-05T00:00:00Z"},
+        ])
+
+        r = self.rt("retention", "apply", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        run_result = next(row for row in payload["ledgers"] if row["ledger"] == "runs.jsonl")
+        self.assertEqual(run_result["strategy"], "fixed-count")
+        self.assertEqual(run_result["pruned"], 3)
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [3, 4])
+        archived = self.read_runtime_rows(os.path.join("archive", "runs.jsonl"))
+        self.assertEqual([row["n"] for row in archived], [0, 1, 2])
+        index = self.read_runtime_rows(os.path.join("archive", "index.jsonl"))
+        self.assertEqual(index[-1]["ledger"], "runs.jsonl")
+        self.assertEqual(index[-1]["strategy"], "fixed-count")
+        self.assertEqual(index[-1]["pruned"], 3)
+        self.assertEqual(index[-1]["kept"], 2)
+        self.assertEqual(index[-1]["oldest_ts"], "2026-01-01T00:00:00Z")
+        self.assertEqual(index[-1]["newest_ts"], "2026-01-03T00:00:00Z")
+        self.assertIn("archived_at", index[-1])
+        self.assertEqual(self.md(), before)
+
+    def test_runtime_retention_apply_age_keeps_undatable_rows_fail_safe(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 1000, "archive": True},
+            "ledgers": {
+                "runs.jsonl": {"strategy": "age", "max_age_days": 30, "archive": False},
+            },
+        })
+        self.write_runtime_rows("runs.jsonl", [
+            {"n": "old", "ts": "2020-01-01T00:00:00Z"},
+            {"n": "new", "ts": "2999-01-01T00:00:00Z"},
+            {"n": "missing"},
+            {"n": "bad", "ts": "not-a-date"},
+        ])
+
+        r = self.rt("retention", "apply", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")],
+                         ["new", "missing", "bad"])
+        self.assertTrue(any(f["check"] == "runtime.retention_undated" for f in payload["findings"]))
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "archive", "runs.jsonl")))
+        self.assertEqual(self.md(), before)
+
+    def test_runtime_retention_apply_combined_uses_union_semantics(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 1000, "archive": True},
+            "ledgers": {
+                "runs.jsonl": {"strategy": "combined", "keep": 2, "max_age_days": 30, "archive": False},
+            },
+        })
+        self.write_runtime_rows("runs.jsonl", [
+            {"n": "old0", "ts": "2020-01-01T00:00:00Z"},
+            {"n": "old1", "ts": "2020-01-02T00:00:00Z"},
+            {"n": "recent2", "ts": "2999-01-01T00:00:00Z"},
+            {"n": "old3", "ts": "2020-01-03T00:00:00Z"},
+            {"n": "old4", "ts": "2020-01-04T00:00:00Z"},
+        ])
+
+        r = self.rt("retention", "apply", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run_result = next(row for row in json.loads(r.stdout)["ledgers"] if row["ledger"] == "runs.jsonl")
+        self.assertEqual(run_result["pruned"], 2)
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")],
+                         ["recent2", "old3", "old4"])
+
+    def test_runtime_retention_apply_dry_run_changes_nothing(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 1, "archive": True},
+        })
+        self.write_runtime_rows("runs.jsonl", [{"n": 0}, {"n": 1}, {"n": 2}])
+
+        r = self.rt("retention", "apply", "--dry-run", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run_result = next(row for row in json.loads(r.stdout)["ledgers"] if row["ledger"] == "runs.jsonl")
+        self.assertEqual(run_result["pruned"], 2)
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [0, 1, 2])
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "archive", "runs.jsonl")))
+
+    def test_runtime_retention_apply_malformed_jsonl_is_reported_and_untouched(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 1, "archive": True},
+        })
+        runs_path = os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl")
+        with open(runs_path, "w", encoding="utf-8") as fh:
+            fh.write("{bad json}\n")
+
+        r = self.rt("retention", "apply", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertTrue(any(f["check"] == "runtime.jsonl" for f in payload["findings"]))
+        with open(runs_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "{bad json}\n")
+        self.assertEqual(self.md(), before)
+
+    def test_runtime_retention_apply_no_archive_discards_pruned_rows(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        self.write_runtime_policy({
+            "schema": "m8shift.runtime.retention.v1",
+            "enabled": True,
+            "default": {"strategy": "fixed-count", "keep": 1, "archive": True},
+        })
+        self.write_runtime_rows("runs.jsonl", [{"n": 0}, {"n": 1}])
+
+        r = self.rt("retention", "apply", "--no-archive", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run_result = next(row for row in json.loads(r.stdout)["ledgers"] if row["ledger"] == "runs.jsonl")
+        self.assertFalse(run_result["archive"])
+        self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [1])
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "archive", "runs.jsonl")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "archive", "index.jsonl")))
 
     def test_runtime_init_providers_roles_workflows_and_report(self):
         self.init("--agents", "claude,codex,gemini")

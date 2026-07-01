@@ -7,6 +7,7 @@ an authority for the pen; all routing remains owned by `m8shift.py`.
 """
 import argparse
 import datetime as dt
+import fnmatch
 import importlib.util
 import json
 import os
@@ -17,7 +18,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.28.1"
+VERSION = "3.29.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +36,9 @@ PROGRESS = os.path.join(RUNTIME_DIR, "progress.jsonl")
 IDEMPOTENCY = os.path.join(RUNTIME_DIR, "idempotency.jsonl")
 APPROVALS = os.path.join(RUNTIME_DIR, "approvals.jsonl")
 INBOX_DIR = os.path.join(RUNTIME_DIR, "inbox")
+RETENTION_POLICY = os.path.join(RUNTIME_DIR, "retention.json")
+RETENTION_ARCHIVE_INDEX = os.path.join(RUNTIME_DIR, "archive", "index.jsonl")
+RETENTION_SCHEMA = "m8shift.runtime.retention.v1"
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
@@ -186,9 +190,11 @@ deleted sidecars are diagnostics, not core relay failures. The runtime companion
 uses `presence.json` as one advisory lane per agent identity: a fresh lane blocks a
 second managed runtime, and stale takeover must be explicit. Optional no-progress
 thresholds warn or block only the companion loop when progress/run events stop. It
-also provides `retention prune --keep N` for basic fixed-count JSONL pruning, with
-older rows archived under `.m8shift/runtime/archive/` by default. It never edits
-`M8SHIFT.md` directly and never owns the pen.
+also provides `retention prune --keep N` for basic fixed-count JSONL pruning and
+`retention apply` / `retention policy show` for an opt-in
+`.m8shift/runtime/retention.json` policy. Older rows can be archived under
+`.m8shift/runtime/archive/` with an audit index. It never edits `M8SHIFT.md`
+directly and never owns the pen.
 """
 
 
@@ -1190,6 +1196,51 @@ def runtime_ledger_paths():
     return paths
 
 
+def default_retention_policy():
+    return {
+        "schema": RETENTION_SCHEMA,
+        "enabled": False,
+        "default": {"strategy": "fixed-count", "keep": 1000, "archive": True},
+        "ledgers": {},
+    }
+
+
+def load_retention_policy():
+    if not os.path.exists(RETENTION_POLICY):
+        return default_retention_policy(), [], "absent"
+    policy, err = read_json_diagnostic(RETENTION_POLICY, {})
+    if err:
+        return default_retention_policy(), [{
+            "severity": "error",
+            "check": "runtime.retention_policy",
+            "message": f"{os.path.relpath(RETENTION_POLICY, HERE)}: {err}",
+        }], "malformed"
+    findings = []
+    if policy.get("schema") and policy.get("schema") != RETENTION_SCHEMA:
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.retention_policy",
+            "message": f"unexpected retention schema {policy.get('schema')!r}",
+        })
+    effective = default_retention_policy()
+    effective.update({k: v for k, v in policy.items() if k in {"schema", "enabled", "default", "ledgers"}})
+    if not isinstance(effective.get("default"), dict):
+        effective["default"] = default_retention_policy()["default"]
+        findings.append({
+            "severity": "error",
+            "check": "runtime.retention_policy",
+            "message": "retention default must be an object",
+        })
+    if not isinstance(effective.get("ledgers"), dict):
+        effective["ledgers"] = {}
+        findings.append({
+            "severity": "error",
+            "check": "runtime.retention_policy",
+            "message": "retention ledgers must be an object",
+        })
+    return effective, findings, "configured"
+
+
 def archive_path_for(path):
     rel = os.path.relpath(path, RUNTIME_DIR).replace(os.sep, "--")
     return os.path.join(RUNTIME_DIR, "archive", rel)
@@ -1256,6 +1307,263 @@ def cmd_retention_prune(args):
     for finding in findings:
         print(f"{finding['severity']} {finding['check']}: {finding['message']}")
     return 0 if payload["ok"] else 1
+
+
+def normalize_retention_rule(rule, *, source):
+    if not isinstance(rule, dict):
+        return None, {
+            "severity": "error",
+            "check": "runtime.retention_policy",
+            "message": f"{source}: rule must be an object",
+        }
+    strategy = rule.get("strategy", "fixed-count")
+    if strategy not in {"fixed-count", "age", "combined"}:
+        return None, {
+            "severity": "error",
+            "check": "runtime.retention_policy",
+            "message": f"{source}: unsupported strategy {strategy!r}",
+        }
+    out = {"strategy": strategy, "archive": bool(rule.get("archive", True))}
+    if strategy in {"fixed-count", "combined"}:
+        keep = rule.get("keep")
+        if not isinstance(keep, int) or keep < 0:
+            return None, {
+                "severity": "error",
+                "check": "runtime.retention_policy",
+                "message": f"{source}: keep must be a non-negative integer",
+            }
+        out["keep"] = keep
+    if strategy in {"age", "combined"}:
+        max_age_days = rule.get("max_age_days")
+        if not isinstance(max_age_days, (int, float)) or max_age_days < 0:
+            return None, {
+                "severity": "error",
+                "check": "runtime.retention_policy",
+                "message": f"{source}: max_age_days must be a non-negative number",
+            }
+        out["max_age_days"] = float(max_age_days)
+    return out, None
+
+
+def retention_rules_for_existing_ledgers(policy):
+    paths = [path for path in runtime_ledger_paths() if os.path.exists(path)]
+    rules = {}
+    findings = []
+    default_rule, finding = normalize_retention_rule(policy.get("default", {}), source="default")
+    if finding:
+        findings.append(finding)
+    if default_rule:
+        for path in paths:
+            rules[path] = default_rule
+    for pattern, raw_rule in policy.get("ledgers", {}).items():
+        if not isinstance(pattern, str) or pattern.startswith(("/", "\\")) or ".." in pattern.split("/"):
+            findings.append({
+                "severity": "error",
+                "check": "runtime.retention_policy",
+                "message": f"unsafe ledger pattern {pattern!r}",
+            })
+            continue
+        rule, finding = normalize_retention_rule(raw_rule, source=f"ledgers.{pattern}")
+        if finding:
+            findings.append(finding)
+            continue
+        matched = False
+        for path in paths:
+            rel = os.path.relpath(path, RUNTIME_DIR).replace(os.sep, "/")
+            if fnmatch.fnmatch(rel, pattern):
+                rules[path] = rule
+                matched = True
+        if not matched:
+            findings.append({
+                "severity": "info",
+                "check": "runtime.retention_policy",
+                "message": f"ledger pattern {pattern!r} matched no existing JSONL ledger",
+            })
+    return rules, findings
+
+
+def retention_row_ts(row):
+    return parse_utc(row.get("ts", ""))
+
+
+def ts_bounds(rows):
+    dates = [retention_row_ts(row) for row in rows]
+    dates = [value for value in dates if value is not None]
+    if not dates:
+        return "", ""
+    return iso_from_dt(min(dates)), iso_from_dt(max(dates))
+
+
+def split_rows_by_retention(rows, rule, *, label):
+    strategy = rule["strategy"]
+    keep_indices = set()
+    findings = []
+    if strategy in {"fixed-count", "combined"}:
+        keep = rule.get("keep", 0)
+        if keep:
+            keep_indices.update(range(max(0, len(rows) - keep), len(rows)))
+    if strategy in {"age", "combined"}:
+        cutoff = now() - dt.timedelta(days=rule["max_age_days"])
+        undated = 0
+        for idx, row in enumerate(rows):
+            row_ts = retention_row_ts(row)
+            if row_ts is None:
+                keep_indices.add(idx)
+                undated += 1
+            elif row_ts >= cutoff:
+                keep_indices.add(idx)
+        if undated:
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.retention_undated",
+                "message": f"{label}: kept {undated} row(s) with missing or unparseable ts",
+            })
+    if strategy == "fixed-count":
+        kept = rows[-rule["keep"]:] if rule["keep"] else []
+        pruned = rows[:max(0, len(rows) - rule["keep"])] if rule["keep"] else list(rows)
+        return kept, pruned, findings
+    kept = []
+    pruned = []
+    for idx, row in enumerate(rows):
+        (kept if idx in keep_indices else pruned).append(row)
+    return kept, pruned, findings
+
+
+def apply_retention_to_ledger(path, rule, *, dry_run=False, no_archive=False):
+    label = os.path.relpath(path, RUNTIME_DIR).replace(os.sep, "/")
+    rows, err = read_jsonl_diagnostic(path)
+    if err:
+        return {
+            "ledger": label,
+            "path": os.path.relpath(path, HERE),
+            "strategy": rule["strategy"],
+            "before": None,
+            "after": None,
+            "kept": None,
+            "pruned": 0,
+            "archive": bool(rule.get("archive", True)) and not no_archive,
+            "archived_to": "",
+            "dry_run": dry_run,
+            "finding": {"severity": "warning", "check": "runtime.jsonl", "message": err},
+        }
+    kept, pruned, findings = split_rows_by_retention(rows, rule, label=label)
+    archive_enabled = bool(rule.get("archive", True)) and not no_archive
+    archived_to = ""
+    if pruned and not dry_run:
+        if archive_enabled:
+            archive_path = archive_path_for(path)
+            append_jsonl_rows(archive_path, pruned)
+            archived_to = os.path.relpath(archive_path, HERE)
+            oldest_ts, newest_ts = ts_bounds(pruned)
+            append_jsonl(RETENTION_ARCHIVE_INDEX, {
+                "ledger": label,
+                "strategy": rule["strategy"],
+                "pruned": len(pruned),
+                "kept": len(kept),
+                "oldest_ts": oldest_ts,
+                "newest_ts": newest_ts,
+                "archived_at": iso(),
+            })
+        atomic_write_jsonl(path, kept)
+    if pruned and dry_run and archive_enabled:
+        archived_to = os.path.relpath(archive_path_for(path), HERE)
+    result = {
+        "ledger": label,
+        "path": os.path.relpath(path, HERE),
+        "strategy": rule["strategy"],
+        "before": len(rows),
+        "after": len(kept),
+        "kept": len(kept),
+        "pruned": len(pruned),
+        "archive": archive_enabled,
+        "archived_to": archived_to,
+        "dry_run": dry_run,
+    }
+    if findings:
+        result["findings"] = findings
+    return result
+
+
+def cmd_retention_policy_show(args):
+    policy, findings, source = load_retention_policy()
+    payload = {
+        "ok": not any(f["severity"] == "error" for f in findings),
+        "policy_path": os.path.relpath(RETENTION_POLICY, HERE),
+        "source": source,
+        "policy": policy,
+        "runtime_version": VERSION,
+        "findings": findings,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0 if payload["ok"] else 1
+    print(f"m8shift-runtime.py v{VERSION}")
+    print("── runtime retention policy ───────────")
+    print(f"path: {payload['policy_path']}")
+    print(f"source: {source}")
+    print(f"enabled: {bool(policy.get('enabled'))}")
+    print(json.dumps(policy, ensure_ascii=False, sort_keys=True, indent=2))
+    for finding in findings:
+        print(f"{finding['severity']} {finding['check']}: {finding['message']}")
+    return 0 if payload["ok"] else 1
+
+
+def cmd_retention_apply(args):
+    ensure_runtime_dirs()
+    policy, findings, source = load_retention_policy()
+    ledgers = []
+    if source == "absent":
+        findings.append({
+            "severity": "info",
+            "check": "runtime.retention_policy",
+            "message": f"{os.path.relpath(RETENTION_POLICY, HERE)} absent; retention apply is a no-op",
+        })
+    elif not any(f["severity"] == "error" for f in findings) and not bool(policy.get("enabled")):
+        findings.append({
+            "severity": "info",
+            "check": "runtime.retention_policy",
+            "message": "retention policy disabled; retention apply is a no-op",
+        })
+    if source != "absent" and bool(policy.get("enabled")) and not any(f["severity"] == "error" for f in findings):
+        rules, rule_findings = retention_rules_for_existing_ledgers(policy)
+        findings.extend(rule_findings)
+        if not any(f["severity"] == "error" for f in findings):
+            for path in sorted(rules):
+                result = apply_retention_to_ledger(
+                    path, rules[path], dry_run=args.dry_run, no_archive=args.no_archive,
+                )
+                finding = result.pop("finding", None)
+                if finding:
+                    findings.append(finding)
+                findings.extend(result.pop("findings", []))
+                ledgers.append(result)
+    ok = not any(f["severity"] == "error" for f in findings)
+    payload = {
+        "ok": ok,
+        "policy": "runtime_retention_v1",
+        "policy_path": os.path.relpath(RETENTION_POLICY, HERE),
+        "source": source,
+        "enabled": bool(policy.get("enabled")) if source != "absent" else False,
+        "dry_run": args.dry_run,
+        "archive": not args.no_archive,
+        "ledgers": ledgers,
+        "findings": findings,
+        "runtime_version": VERSION,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0 if ok else 1
+    print(f"m8shift-runtime.py v{VERSION}")
+    print("── runtime retention apply ────────────")
+    if not ledgers:
+        print("no-op: no ledgers pruned.")
+    for row in ledgers:
+        print(f"{row['ledger']}: {row['before']} → {row['after']} (pruned {row['pruned']}, strategy {row['strategy']})")
+        if row.get("archived_to"):
+            print(f"  archived: {row['archived_to']}")
+    for finding in findings:
+        print(f"{finding['severity']} {finding['check']}: {finding['message']}")
+    return 0 if ok else 1
 
 
 def runtime_summary(agent=""):
@@ -1677,6 +1985,17 @@ def main():
                         help="discard pruned rows instead of appending them under .m8shift/runtime/archive/")
     rprune.add_argument("--json", action="store_true")
     rprune.set_defaults(fn=cmd_retention_prune)
+    rapp = ret_sub.add_parser("apply", help="apply .m8shift/runtime/retention.json policy")
+    rapp.add_argument("--dry-run", action="store_true", help="show planned pruning without changing files")
+    rapp.add_argument("--no-archive", action="store_true",
+                      help="discard pruned rows instead of archiving them")
+    rapp.add_argument("--json", action="store_true")
+    rapp.set_defaults(fn=cmd_retention_apply)
+    rpolicy = ret_sub.add_parser("policy", help="inspect runtime retention policy")
+    rpolicy_sub = rpolicy.add_subparsers(dest="policy_verb", required=True)
+    rpshow = rpolicy_sub.add_parser("show", help="show effective retention policy")
+    rpshow.add_argument("--json", action="store_true")
+    rpshow.set_defaults(fn=cmd_retention_policy_show)
 
     args = p.parse_args()
     sys.exit(args.fn(args))
