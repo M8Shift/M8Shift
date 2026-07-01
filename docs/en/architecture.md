@@ -163,6 +163,70 @@ sequenceDiagram
     B->>F: append to A (turn n+1, AWAITING_A)
 ```
 
+### 1.6.1 Module map — the full system (core + companions)
+
+The product grew past a single file into a **passive core plus advisory companions**. Nothing below
+the core holds the pen, writes `M8SHIFT.md`, requires the network, or runs a daemon; each companion is
+opt-in and fully removable. Colour: 🔒 core · 🧩 companions · ⚡ optional external · 📋 traceability.
+
+```mermaid
+flowchart TB
+    classDef core fill:#0b3d5c,stroke:#38bdf8,color:#e0f2fe;
+    classDef companion fill:#14432f,stroke:#4ade80,color:#dcfce7;
+    classDef external fill:#4a3410,stroke:#fbbf24,color:#fef3c7;
+    classDef forge fill:#3a1f4d,stroke:#c084fc,color:#f3e8ff;
+
+    AG["Agents — Claude · Codex · Gemini · …"]
+
+    subgraph CORE["🔒 Passive core — m8shift.py (stdlib-only · one pen · no network · no daemon)"]
+        LOCK["LOCK / mutex + turn journal<br/>claim · append · pause · resume · cooldown"]
+        LEDG["append-only ledgers<br/>memory · tasks · sessions · requests"]
+        INIT["init<br/>anchors (stanza) · host .gitignore block"]
+        DEC["decisions<br/>target · scaffold (ADR + issue templates)"]
+        HOOK["commit-msg hook<br/>Agent-Model + Coordinated-With trailers"]
+    end
+    class LOCK,LEDG,INIT,DEC,HOOK core
+
+    subgraph COMP["🧩 Advisory companions — no pen · never write M8SHIFT.md / LOCK"]
+        RT["m8shift-runtime.py<br/>presence · runs · progress · inbox · reports<br/>status-runtime · doctor · retention prune/apply<br/>notify (tiers 0–4) · usage-cooldown guard"]
+        CX["m8shift-context.py<br/>context packs · identity-pinned adapters"]
+        WT["m8shift-worktree.py<br/>degree-2 worktrees · serialized integration pen"]
+        I18["m8shift-i18n.py<br/>language packs"]
+        HR["examples/headless_runner.py<br/>immutable run plans · post-run LOCK verify"]
+    end
+    class RT,CX,WT,I18,HR companion
+
+    RTK["⚡ RTK — optional external filter<br/>argv-only · telemetry off · SHA-256 pinned<br/>default-if-pinned shell-output compression"]
+    class RTK external
+
+    subgraph TRACE["📋 Traceability"]
+        ISS["forge issues<br/>create · decision · close templates"]
+        ADR["docs/decisions/*.md<br/>ADR fallback (RFC 031)"]
+    end
+    class ISS,ADR forge
+
+    AG --> LOCK
+    AG --> ISS
+    RT -. "compose read-only" .-> LOCK
+    CX -. "pack the relay context" .-> LOCK
+    CX --> RTK
+    WT -. "one merge at a time" .-> LOCK
+    HR --> RT
+    DEC --> ADR
+    HOOK -. "stamps commits" .-> TRACE
+```
+
+**What each module serves.** The **core** is the mutex + immutable journal + the self-installing
+stanza; it is the only writer of relay state. **`m8shift-runtime.py`** turns that state into
+observability + advisory operations (presence, progress, notifications, usage cooldowns, bounded
+retention) without ever holding the pen. **`m8shift-context.py`** compresses the hand-off context
+into referenced packs and, when [RTK](rfc/034-rfc-companion-adapter-interface.md) is present and
+identity-pinned, runs it as an argv-only, telemetry-off shell-output filter. **`m8shift-worktree.py`**
+is the only sanctioned parallel-write path (degree-2), serialising merges through the canonical
+`LOCK`. **`headless_runner.py`** executes one hardened, immutable run plan and verifies the `LOCK`
+afterwards. Decisions and their contradictions are recorded through the **forge templates** or the
+**ADR fallback** — tool-independent by design.
+
 ### 1.7 Application flow matrix
 
 | Source | Destination | Channel | Mode |
