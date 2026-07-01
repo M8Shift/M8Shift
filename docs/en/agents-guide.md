@@ -230,16 +230,16 @@ releasable at all times.
     `claude-opus-4-8`, `claude-haiku-4-5`, the Codex model id);
   - `Coordinated-With: M8Shift vX.Y.Z` — which engine version coordinated it.
 
-  The two trailers travel **together**. `vX.Y.Z` is the active relay engine version
-  when a relay is running, otherwise the local `m8shift.py --version` — **solo commits
-  are stamped too**, not only relay-coordinated ones. Use the generated
+  `Agent-Model` is self-declared and can be stamped on its own when
+  `M8SHIFT_AGENT_MODEL` is set; `Coordinated-With` is stamped only when the hook can
+  read a relay/local `m8shift.py --version`. Use the generated
   `.m8shift/hooks/commit-msg` template and set `M8SHIFT_ROOT` when the relay lives
   outside the repo being changed; it stamps the final saved message (never an aborted
   one) and inserts the trailers into the body above any `git commit -v` scissors line,
-  so verbose commits keep them instead of dropping them with the diff.
-  To let the hook stamp the executing model, export a single-line safe identifier
-  before committing, for example `M8SHIFT_AGENT_MODEL=codex-gpt-5.1`. Malformed
-  values are ignored fail-open and never block the commit.
+  so verbose commits keep them instead of dropping them with the diff. To let the
+  hook stamp the executing model, export a single-line safe identifier before
+  committing, for example `M8SHIFT_AGENT_MODEL=codex-gpt-5.1`. Malformed values are
+  ignored fail-open and never block the commit.
 - **No relay artefacts committed.** `M8SHIFT.md`, `M8SHIFT.archive.md`,
   `.m8shift.lock`, and other generated relay state stay out of the repo.
 

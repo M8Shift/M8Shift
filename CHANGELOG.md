@@ -7,6 +7,9 @@ Release scope:
 - #72 — Hardened the `commit-msg` hook fail-open guarantee: a non-UTF-8
   `COMMIT_EDITMSG` now exits 0 and leaves the message unchanged instead of
   aborting the commit.
+- #58/#7 — `Agent-Model` provenance can now be stamped from
+  `M8SHIFT_AGENT_MODEL` even when no relay version is readable; `Coordinated-With`
+  remains gated on a readable relay/local version.
 
 Validation:
 
