@@ -349,7 +349,12 @@ python3 m8shift-context.py context stats --json
 - **Phase D — Headroom backend (optional).** Add a `context_transform` RFC 034 adapter manifest for
   Headroom-compatible local commands (`headroom_ext`), argv-only + identity-pinned; detect-and-use
   only when present and pinned; never require installation; preserve raw refs independently.
-  **Shipped in v3.39.0.**
+  **Shipped in v3.39.0.** A 2026-07-02 follow-up confirmed that `headroom-ai==0.28.0` has an
+  in-process library API, but a default M8Shift wrapper is **not promoted**: the Kompress path can
+  attempt a cold-cache model download unless forced offline/cache-only, and initial `o200k_base`
+  measurements were worse than the builtin digest on broad synthetic contexts. Keep `headroom_ext`
+  as an operator experiment until a representative workload shows meaningful real-token gain plus
+  output-equivalence.
 - **Phase E — handoff integration.** Agents receive `context_digest` + `handoff_digest` + compact
   summaries + raw refs by default — not full logs/diffs/trees/outputs/transcripts.
 - **Phase F — reporting.** Add `context stats` (`m8shift.context.stats.v1`): records, estimated
