@@ -8,6 +8,7 @@ an authority for the pen; all routing remains owned by `m8shift.py`.
 import argparse
 import datetime as dt
 import fnmatch
+import hashlib
 import importlib.util
 import json
 import os
@@ -18,13 +19,17 @@ import sys
 import time
 import uuid
 
-VERSION = "3.35.0"
+VERSION = "3.36.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE_PATH = os.path.join(HERE, "m8shift.py")
 RUNTIME_DIR = os.path.join(HERE, ".m8shift", "runtime")
 PROJECT_DIR = os.path.join(HERE, ".m8shift")
+CONTEXT_DIR = os.path.join(PROJECT_DIR, "context")
+CONTEXT_ADAPTERS_DIR = os.path.join(CONTEXT_DIR, "adapters")
+CONTEXT_RTK_ADAPTER = os.path.join(CONTEXT_ADAPTERS_DIR, "rtk-shell-output.json")
+CONTEXT_METRICS = os.path.join(CONTEXT_DIR, "metrics.jsonl")
 PROVIDERS = os.path.join(PROJECT_DIR, "providers.json")
 ROUTING_DIR = os.path.join(PROJECT_DIR, "routing")
 ROUTING_SKILLS = os.path.join(ROUTING_DIR, "skills.json")
@@ -491,6 +496,111 @@ def read_jsonl_diagnostic(path):
     except OSError as e:
         return [], str(e)
     return rows, None
+
+
+def declared_rtk_state():
+    raw = os.environ.get("M8SHIFT_RTK")
+    if raw is None or raw.strip() == "":
+        return {"self_declared": "off", "source": "default"}, None
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on", "enabled", "rtk"}:
+        return {"self_declared": "on", "source": "M8SHIFT_RTK"}, None
+    if value in {"0", "false", "no", "off", "disabled", "native"}:
+        return {"self_declared": "off", "source": "M8SHIFT_RTK"}, None
+    return {
+        "self_declared": "off",
+        "source": "M8SHIFT_RTK",
+        "raw": raw,
+    }, {
+        "severity": "warning",
+        "check": "runtime.rtk_decl",
+        "message": "M8SHIFT_RTK must be on/off; treating it as off",
+    }
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def latest_context_metrics():
+    rows, err = read_jsonl_diagnostic(CONTEXT_METRICS)
+    if err or not rows:
+        return None
+    row = rows[-1]
+    return {
+        "pack_id": row.get("pack_id", ""),
+        "profile": row.get("profile", ""),
+        "compression_ratio": row.get("compression_ratio"),
+        "estimated_proxy_tokens_before": row.get("estimated_proxy_tokens_before"),
+        "estimated_proxy_tokens_after": row.get("estimated_proxy_tokens_after"),
+        "timestamp_utc": row.get("timestamp_utc", ""),
+    }
+
+
+def context_rtk_status():
+    manifest, err = read_json_diagnostic(CONTEXT_RTK_ADAPTER, {})
+    findings = []
+    pinned = False
+    reason = "adapter manifest missing; native context pack path"
+    if err:
+        findings.append({
+            "severity": "warning",
+            "check": "runtime.context_rtk",
+            "message": f"{os.path.relpath(CONTEXT_RTK_ADAPTER, HERE)}: {err}",
+        })
+        reason = "adapter manifest unreadable; native context pack path"
+    elif manifest:
+        trusted = manifest.get("trusted_executable") if isinstance(manifest, dict) else None
+        command = manifest.get("command") if isinstance(manifest, dict) else None
+        program = command[0] if isinstance(command, list) and command else ""
+        if program != "rtk":
+            reason = "rtk adapter command is not rtk; native context pack path"
+        elif not isinstance(trusted, dict):
+            reason = "rtk adapter is not identity-pinned; native context pack path"
+        else:
+            path = trusted.get("path", "")
+            expected = trusted.get("sha256", "")
+            if not (isinstance(path, str) and os.path.isabs(path)):
+                reason = "rtk trusted executable path is invalid; native context pack path"
+            elif not (isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{64}", expected)):
+                reason = "rtk trusted executable hash is invalid; native context pack path"
+            elif not os.path.exists(path):
+                reason = "rtk trusted executable is absent; native context pack path"
+            else:
+                try:
+                    actual = sha256_file(path)
+                except OSError as e:
+                    reason = f"rtk trusted executable cannot be read: {e}; native context pack path"
+                else:
+                    if actual == expected:
+                        pinned = True
+                        reason = "pinned, compressing packs"
+                    else:
+                        reason = "rtk trusted executable hash mismatch; native context pack path"
+    state = "on" if pinned else "off"
+    return {
+        "state": state,
+        "pinned": pinned,
+        "label": "RTK: ON (pinned, compressing packs)" if pinned else "RTK: OFF (native)",
+        "reason": reason,
+        "last_pack": latest_context_metrics(),
+        "findings": findings,
+    }
+
+
+def presence_rtk_label(presence_row):
+    if not isinstance(presence_row, dict):
+        return "off"
+    rtk = presence_row.get("rtk")
+    if isinstance(rtk, dict):
+        return rtk.get("self_declared", "off")
+    if isinstance(rtk, str):
+        return rtk if rtk in {"on", "off"} else "off"
+    return "off"
 
 
 def headless_runtime():
@@ -1272,6 +1382,10 @@ def update_presence(core, agent, session_id, mode, state, run_id="", stale_after
         "m8shift_version": getattr(core, "VERSION", ""),
         "runtime_version": VERSION,
     }
+    rtk, rtk_finding = declared_rtk_state()
+    row["rtk"] = rtk
+    if rtk_finding:
+        findings.append(rtk_finding)
     if takeover_from:
         row["takeover_from"] = takeover_from
         row["takeover_at"] = row["last_seen"]
@@ -2679,6 +2793,8 @@ def cmd_status_runtime(args):
     if finding:
         findings.append(finding)
     findings.extend(headroom.get("runtime_findings", []))
+    context_rtk = context_rtk_status()
+    findings.extend(context_rtk.get("findings", []))
     if args.json:
         print(json.dumps({
             "m8shift_version": status.get("m8shift_version"),
@@ -2686,6 +2802,7 @@ def cmd_status_runtime(args):
             "relay": status,
             "runtime": summary,
             "headroom": headroom,
+            "context_rtk": context_rtk,
             "runtime_findings": findings,
         }, ensure_ascii=False, sort_keys=True))
         return 0
@@ -2693,13 +2810,21 @@ def cmd_status_runtime(args):
     print(f"relay: {status.get('state')} holder={status.get('holder')} turn={status.get('turn')}")
     reasons = "; ".join(headroom.get("reasons") or ["-"])
     print(f"headroom: {headroom.get('status')} — {reasons}")
+    print(context_rtk.get("label", "RTK: OFF (native)"))
+    if context_rtk.get("last_pack"):
+        last = context_rtk["last_pack"]
+        print(
+            "  last pack: "
+            f"{last.get('pack_id') or '-'} ratio={last.get('compression_ratio')} "
+            f"proxy={last.get('estimated_proxy_tokens_before')}→{last.get('estimated_proxy_tokens_after')}"
+        )
     if not args.brief:
         print(f"  next: {headroom.get('next')}")
     for ag, data in summary.items():
         pres = data.get("presence") or {}
         print(
             f"{ag}: presence={pres.get('state', '-')} session={pres.get('session_id', '-')} "
-            f"inbox={data.get('inbox_count', 0)}"
+            f"inbox={data.get('inbox_count', 0)} RTK={presence_rtk_label(pres)}"
         )
         if not args.brief and data.get("last_progress"):
             print(f"  last progress: {data['last_progress'].get('message')} ({data['last_progress'].get('ts')})")
@@ -2894,6 +3019,10 @@ def cmd_doctor(args):
         findings.extend(headroom.get("runtime_findings", []))
     except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
         findings.append({"severity": "warning", "check": "runtime.headroom", "message": str(e)})
+    try:
+        findings.extend(context_rtk_status().get("findings", []))
+    except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
+        findings.append({"severity": "warning", "check": "runtime.context_rtk", "message": str(e)})
     if os.path.exists(PROVIDERS):
         findings.extend(provider_findings(load_provider_registry()))
     if os.path.exists(ROUTING_MODELS) or os.path.exists(ROUTING_SKILLS):

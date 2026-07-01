@@ -250,6 +250,7 @@ published site, or use the repository-local docs when working from a clone.
 | 030 | [Tamper evidence](docs/en/rfc/030-rfc-tamper-evidence.md) | Hash-chain tamper-evidence for relay records | draft | — | detection/warning only; git remains the strong anchor |
 | 031 | [Decision traceability](docs/en/rfc/031-rfc-decision-traceability.md) | Durable decision records from turn journal | shipped | v3.31.0 · 2026-07-01 | `decisions target/scaffold`, `append --stance`, ADR fallback |
 | 032 | [Tiered delegation](docs/en/rfc/032-rfc-tiered-delegation.md) | Capability-tiered delegation charter | Phase 1 shipped | v3.35.0 · 2026-07-01 | `route recommend` advisory only; launch/delegate future |
+| 034 | [Companion adapter interface](docs/en/rfc/034-rfc-companion-adapter-interface.md) | Context packs + optional shell-output adapters | shipped · RTK visible | v3.36.0 · 2026-07-01 | `m8shift-context.py status`, RTK ON/OFF, `M8SHIFT_RTK=on/off`, last-pack ratio |
 | 039 | [Model/task routing](docs/en/rfc/039-rfc-model-task-routing.md) | Capability-first model/task routing | Phase 1 shipped | v3.35.0 · 2026-07-01 | operator manifests, no baked-in vendors/prices, no launch |
 
 ## 🔁 How it works
