@@ -111,6 +111,30 @@ class TestContextInitDoctor(ContextBase):
         dr = self.ctx("doctor", "--json")
         self.assertEqual(dr.returncode, 0, dr.stderr)
         self.assertEqual(json.loads(dr.stdout)["findings"], [])
+        self.assertIn("rtk", json.loads(dr.stdout))
+
+    def test_init_disables_rtk_telemetry_and_doctor_surfaces_state(self):
+        marker = os.path.join(self.d, "rtk-telemetry.txt")
+        env = self.fake_rtk_env(
+            "import sys\n"
+            f"open({marker!r}, 'a', encoding='utf-8').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1:] == ['telemetry', 'status']:\n"
+            "    print('telemetry disabled')\n"
+            "elif sys.argv[1:] == ['telemetry', 'disable']:\n"
+            "    print('disabled')\n"
+        )
+        r = self.ctx("init", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(marker, encoding="utf-8") as fh:
+            calls = fh.read()
+        self.assertIn("telemetry disable", calls)
+
+        dr = self.ctx("doctor", "--json", env=env)
+        self.assertEqual(dr.returncode, 0, dr.stderr)
+        payload = json.loads(dr.stdout)
+        self.assertTrue(payload["rtk"]["present"])
+        self.assertTrue(payload["rtk"]["pinned"])
+        self.assertEqual(payload["rtk"]["telemetry"]["state"], "disabled")
 
 
 class TestContextPack(ContextBase):
@@ -149,6 +173,42 @@ class TestContextPack(ContextBase):
         self.assertEqual(len(metrics), 1)
         self.assertEqual(metrics[0]["schema"], "m8shift.context.metrics.v1")
         self.assertTrue(metrics[0]["required_fields_preserved"])
+
+    def test_pack_defaults_to_pinned_rtk_when_present_else_native_and_opt_out(self):
+        marker = os.path.join(self.d, "rtk-run.txt")
+        env = self.fake_rtk_env(
+            "import sys\n"
+            f"open({marker!r}, 'a', encoding='utf-8').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1:] == ['telemetry', 'disable']:\n"
+            "    print('disabled')\n"
+            "elif sys.argv[1:] == ['telemetry', 'status']:\n"
+            "    print('telemetry disabled')\n"
+            "else:\n"
+            "    sys.stdout.write('RTK_FILTERED\\n' + sys.stdin.read())\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        auto = self.ctx("pack", "--profile", "reviewer", "--turns", "1", env=env)
+        self.assertEqual(auto.returncode, 0, auto.stderr)
+        self.assertIn("adapter: `rtk-shell-output`", auto.stdout)
+        self.assertIn("adapter_status: `ok`", auto.stdout)
+        with open(marker, encoding="utf-8") as fh:
+            calls = fh.read()
+        self.assertIn("git log", calls)
+
+        native = self.ctx("pack", "--profile", "reviewer", "--turns", "1", "--adapter", "native", env=env)
+        self.assertEqual(native.returncode, 0, native.stderr)
+        self.assertNotIn("adapter: `rtk-shell-output`", native.stdout)
+
+        absent_env = dict(os.environ)
+        absent_env["PATH"] = os.path.join(self.d, "empty-bin")
+        os.makedirs(absent_env["PATH"], exist_ok=True)
+        fake_git = os.path.join(absent_env["PATH"], "git")
+        with open(fake_git, "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env python3\n")
+        os.chmod(fake_git, 0o755)
+        absent = self.ctx("pack", "--profile", "reviewer", "--turns", "1", env=absent_env)
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        self.assertNotIn("adapter: `rtk-shell-output`", absent.stdout)
 
 
 class TestContextBenchmark(ContextBase):

@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.33.0"
+VERSION = "3.34.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -4723,12 +4723,12 @@ class TestInstallerVerifyDefault(unittest.TestCase):
     def setUp(self):
         self.src = tempfile.mkdtemp(prefix="m8shift-isrc-")
         self.addCleanup(shutil.rmtree, self.src, True)
-        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "checksums.sha256"):
+        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py", "checksums.sha256"):
             shutil.copy(os.path.join(REPO, f), self.src)
         with open(os.path.join(self.src, "m8shift.py"), "a") as fh:
             fh.write("\n# tampered\n")              # hash no longer matches the manifest
 
-    def _rc(self, extra_args, env_extra=None):
+    def _run(self, extra_args, env_extra=None):
         target = tempfile.mkdtemp(prefix="m8shift-idst-")
         self.addCleanup(shutil.rmtree, target, True)
         env = dict(os.environ)
@@ -4739,7 +4739,10 @@ class TestInstallerVerifyDefault(unittest.TestCase):
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-worktree", "--no-init", *extra_args],
             capture_output=True, text=True, env=env,
-        ).returncode
+        )
+
+    def _rc(self, extra_args, env_extra=None):
+        return self._run(extra_args, env_extra).returncode
 
     def test_default_verifies_and_rejects_tampered(self):
         self.assertNotEqual(self._rc([]), 0)
@@ -4776,12 +4779,29 @@ class TestInstallerVerifyDefault(unittest.TestCase):
             self.addCleanup(shutil.rmtree, target, True)
             return subprocess.run(
                 ["bash", os.path.join(REPO, "install.sh"), "--dir", target,
-                 "--base-url", "file://" + bare, "--no-worktree", "--no-runtime", "--no-init", *extra],
+                 "--base-url", "file://" + bare, "--no-worktree", "--no-runtime", "--no-context", "--no-init", *extra],
                 capture_output=True, text=True).returncode
 
         self.assertEqual(rc(["--sha256", "m8shift.py:" + good]), 0)
         self.assertNotEqual(rc(["--sha256", "m8shift.py:" + "0" * 64]), 0)
         self.assertNotEqual(rc([]), 0)
+
+    def test_with_rtk_disables_existing_rtk_telemetry(self):
+        bindir = tempfile.mkdtemp(prefix="m8shift-rtk-bin-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        marker = os.path.join(bindir, "rtk-calls.txt")
+        rtk = os.path.join(bindir, "rtk")
+        with open(rtk, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                f"open({marker!r}, 'a', encoding='utf-8').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            )
+        os.chmod(rtk, 0o755)
+        result = self._run(["--no-verify", "--with-rtk"], {"PATH": bindir + os.pathsep + os.environ.get("PATH", "")})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertIn("telemetry disable", fh.read())
 
 
 class TestChecksumsManifest(unittest.TestCase):
