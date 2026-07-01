@@ -1,6 +1,6 @@
 # RFC — Runtime sidecar retention and archive policy
 
-**Status:** baseline implemented · policy design finalized (this RFC) · implementation tracked in #45 · **Source:** deferred from
+**Status:** implemented in v3.29.0 · **Source:** deferred from
 [010-rfc-runtime-patterns.md](010-rfc-runtime-patterns.md)
 
 ## Scope
@@ -32,7 +32,7 @@ The command:
 This is intentionally not a full policy engine. It is a manual/operator command
 for bounded local sidecars.
 
-## Policy design (finalized)
+## Policy design (implemented)
 
 The baseline stays as the manual, always-available command. On top of it, RFC 026 adds an **opt-in,
 operator-owned policy** that a new `retention apply` evaluates. The policy is advisory, stdlib-only,
