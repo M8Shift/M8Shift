@@ -136,6 +136,41 @@ class TestContextInitDoctor(ContextBase):
         self.assertTrue(payload["rtk"]["pinned"])
         self.assertEqual(payload["rtk"]["telemetry"]["state"], "disabled")
 
+    def test_status_and_doctor_show_rtk_state_and_last_pack_ratio(self):
+        off = self.ctx("status")
+        self.assertEqual(off.returncode, 0, off.stderr)
+        self.assertIn("RTK: OFF (native)", off.stdout)
+
+        env = self.fake_rtk_env(
+            "import sys\n"
+            "if sys.argv[1:] == ['telemetry', 'disable']:\n"
+            "    print('disabled')\n"
+            "elif sys.argv[1:] == ['telemetry', 'status']:\n"
+            "    print('telemetry disabled')\n"
+            "else:\n"
+            "    sys.stdout.write('RTK_FILTERED\\n' + sys.stdin.read())\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        packed = self.ctx("pack", "--profile", "reviewer", "--turns", "1", "--write", "--json", env=env)
+        self.assertEqual(packed.returncode, 0, packed.stderr)
+
+        status = self.ctx("status", "--json", env=env)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["rtk"]["state"], "on")
+        self.assertTrue(payload["rtk"]["pinned"])
+        self.assertIsNotNone(payload["rtk"]["last_pack"]["compression_ratio"])
+
+        human = self.ctx("status", env=env)
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertIn("RTK: ON (pinned, compressing packs)", human.stdout)
+        self.assertIn("last pack:", human.stdout)
+
+        doctor = self.ctx("doctor", env=env)
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        self.assertIn("RTK: ON (pinned, compressing packs)", doctor.stdout)
+        self.assertIn("last pack:", doctor.stdout)
+
 
 class TestContextPack(ContextBase):
     def test_pack_preserves_handoff_fields_verbatim_and_writes_receipt_metrics(self):

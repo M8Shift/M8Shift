@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.35.0"
+VERSION = "3.36.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -3823,6 +3823,45 @@ class TestRuntimeCompanion(CLIBase):
             cwd=self.d, env=env, capture_output=True, text=True,
         )
 
+    def write_context_rtk_state(self, *, pinned=True):
+        context_dir = os.path.join(self.d, ".m8shift", "context")
+        adapters = os.path.join(context_dir, "adapters")
+        os.makedirs(adapters, exist_ok=True)
+        bindir = os.path.join(self.d, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        rtk = os.path.join(bindir, "rtk")
+        with open(rtk, "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env python3\nimport sys\nsys.stdout.write(sys.stdin.read())\n")
+        os.chmod(rtk, 0o755)
+        with open(rtk, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        manifest = {
+            "schema": "m8shift.adapter.v1",
+            "name": "rtk-shell-output",
+            "type": "shell_output_filter",
+            "authority": "advisory",
+            "command": ["rtk", "$M8SHIFT_ADAPTER_MODE_ARGS"],
+            "mutates_core": False,
+            "mutates_repo": False,
+            "trusted_executable": {
+                "program": "rtk",
+                "path": os.path.realpath(rtk),
+                "sha256": digest if pinned else "0" * 64,
+            },
+        }
+        with open(os.path.join(adapters, "rtk-shell-output.json"), "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh)
+        with open(os.path.join(context_dir, "metrics.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "schema": "m8shift.context.metrics.v1",
+                "timestamp_utc": "2026-07-01T12:00:00Z",
+                "pack_id": "ctx_rtk_visible",
+                "profile": "reviewer",
+                "estimated_proxy_tokens_before": 1000,
+                "estimated_proxy_tokens_after": 400,
+                "compression_ratio": 0.4,
+            }) + "\n")
+
     def test_watch_operator_progress_and_status_runtime(self):
         self.init()
         before = self.md()
@@ -3892,6 +3931,43 @@ class TestRuntimeCompanion(CLIBase):
         self.assertNotIn("last run", brief.stdout)
         doctor = json.loads(self.rt("doctor", "--json").stdout)
         self.assertTrue(doctor["ok"])
+
+    def test_runtime_surfaces_self_declared_and_context_rtk_state(self):
+        self.init()
+        absent = self.rt("watch", "codex", "--session", "rtk-ui", "--once", "--json")
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        absent_payload = json.loads(absent.stdout)
+        self.assertEqual(absent_payload["presence"]["rtk"]["self_declared"], "off")
+        absent_status = json.loads(self.rt("status-runtime", "codex", "--json").stdout)
+        self.assertEqual(absent_status["context_rtk"]["state"], "off")
+        self.assertFalse(absent_status["context_rtk"]["pinned"])
+        self.assertEqual(absent_status["runtime"]["codex"]["presence"]["rtk"]["self_declared"], "off")
+
+        declared = self.rt_env({"M8SHIFT_RTK": "on"}, "watch", "codex", "--session", "rtk-ui", "--once", "--json")
+        self.assertEqual(declared.returncode, 0, declared.stderr)
+        declared_payload = json.loads(declared.stdout)
+        self.assertEqual(declared_payload["presence"]["rtk"]["self_declared"], "on")
+        self.write_context_rtk_state(pinned=True)
+
+        status = json.loads(self.rt("status-runtime", "codex", "--json").stdout)
+        self.assertEqual(status["context_rtk"]["state"], "on")
+        self.assertTrue(status["context_rtk"]["pinned"])
+        self.assertEqual(status["context_rtk"]["last_pack"]["compression_ratio"], 0.4)
+        self.assertEqual(status["runtime"]["codex"]["presence"]["rtk"]["self_declared"], "on")
+
+        human = self.rt("status-runtime", "codex")
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertIn("RTK: ON (pinned, compressing packs)", human.stdout)
+        self.assertIn("last pack: ctx_rtk_visible ratio=0.4", human.stdout)
+        self.assertIn("RTK=on", human.stdout)
+
+    def test_runtime_rtk_invalid_env_is_warning_and_off(self):
+        self.init()
+        result = self.rt_env({"M8SHIFT_RTK": "maybe"}, "watch", "codex", "--session", "bad-rtk", "--once", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["presence"]["rtk"]["self_declared"], "off")
+        self.assertIn("runtime.rtk_decl", {f["check"] for f in payload["runtime_findings"]})
 
     def test_runtime_lane_takeover_requires_stale_presence(self):
         self.init()
@@ -5009,6 +5085,13 @@ class TestChecksumsManifest(unittest.TestCase):
 
 class TestRepositoryHygiene(unittest.TestCase):
     """Repository-local coordination files are generated dogfood state, not public artifacts."""
+
+    def test_runtime_and_context_scripts_do_not_import_network_clients(self):
+        forbidden = re.compile(r"(?m)^\s*(?:import|from)\s+(socket|urllib|http\.client|ftplib|smtplib|requests|httpx)\b")
+        for rel in ("m8shift-runtime.py", "m8shift-context.py"):
+            with self.subTest(rel=rel):
+                with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                    self.assertIsNone(forbidden.search(fh.read()))
 
     def test_generated_relay_files_are_gitignored(self):
         with open(os.path.join(REPO, ".gitignore"), encoding="utf-8") as fh:

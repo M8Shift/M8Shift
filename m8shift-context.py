@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.35.0"
+VERSION = "3.36.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -251,6 +251,21 @@ def read_jsonl(path):
     except FileNotFoundError:
         return []
     return rows
+
+
+def latest_context_metrics(root):
+    rows = read_jsonl(metrics_path(root))
+    if not rows:
+        return None
+    row = rows[-1]
+    return {
+        "pack_id": row.get("pack_id", ""),
+        "profile": row.get("profile", ""),
+        "compression_ratio": row.get("compression_ratio"),
+        "estimated_proxy_tokens_before": row.get("estimated_proxy_tokens_before"),
+        "estimated_proxy_tokens_after": row.get("estimated_proxy_tokens_after"),
+        "timestamp_utc": row.get("timestamp_utc", ""),
+    }
 
 
 def sha256_text(text):
@@ -1214,13 +1229,20 @@ def rtk_status(root):
         "path": os.path.realpath(resolved) if resolved else "",
         "telemetry": rtk_telemetry_status(),
         "network": "M8Shift uses RTK only as a local argv subprocess and disables telemetry on context setup.",
+        "last_pack": latest_context_metrics(root),
     }
     if not resolved:
+        status["state"] = "off"
+        status["label"] = "RTK: OFF (native)"
+        status["reason"] = "rtk not found; native context pack path"
         return status
     manifest = load_adapter(root, "rtk-shell-output")
     errors = [row for row in adapter_findings(manifest) if row["severity"] == "error"]
     status["pinned"] = not errors
     status["findings"] = errors
+    status["state"] = "on" if status["pinned"] else "off"
+    status["label"] = "RTK: ON (pinned, compressing packs)" if status["pinned"] else "RTK: OFF (native)"
+    status["reason"] = "pinned, compressing packs" if status["pinned"] else "rtk absent, unpinned, or invalid; native context pack path"
     return status
 
 
@@ -1329,6 +1351,34 @@ def finding(severity, check, message):
     return {"severity": severity, "check": check, "message": message}
 
 
+def print_rtk_status(rtk):
+    print(rtk.get("label", "RTK: OFF (native)"))
+    print(
+        "  detail: "
+        f"present={str(rtk.get('present')).lower()} "
+        f"pinned={str(rtk.get('pinned')).lower()} "
+        f"telemetry={rtk.get('telemetry', {}).get('state', 'unknown')}"
+    )
+    if rtk.get("last_pack"):
+        last = rtk["last_pack"]
+        print(
+            "  last pack: "
+            f"{last.get('pack_id') or '-'} ratio={last.get('compression_ratio')} "
+            f"proxy={last.get('estimated_proxy_tokens_before')}→{last.get('estimated_proxy_tokens_after')}"
+        )
+
+
+def cmd_status(args):
+    root = root_from(args)
+    rtk = rtk_status(root)
+    if args.json:
+        print(json.dumps({"rtk": rtk}, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"m8shift-context.py v{VERSION}")
+        print_rtk_status(rtk)
+    return 0
+
+
 def cmd_doctor(args):
     root = root_from(args)
     findings = []
@@ -1361,12 +1411,7 @@ def cmd_doctor(args):
     else:
         if not findings:
             print("✓ m8shift-context doctor: no findings")
-        print(
-            "rtk: "
-            f"present={str(rtk.get('present')).lower()} "
-            f"pinned={str(rtk.get('pinned')).lower()} "
-            f"telemetry={rtk.get('telemetry', {}).get('state', 'unknown')}"
-        )
+        print_rtk_status(rtk)
         for row in findings:
             print(f"{row['severity']}: {row['check']}: {row['message']}")
     return 1 if any(row["severity"] == "error" for row in findings) else 0
@@ -1406,6 +1451,10 @@ def main(argv=None):
     sm.add_argument("--last", action="store_true")
     sm.add_argument("--json", action="store_true")
     sm.set_defaults(func=cmd_metrics)
+
+    ss = sub.add_parser("status", help="show context companion status, including RTK adapter state")
+    ss.add_argument("--json", action="store_true")
+    ss.set_defaults(func=cmd_status)
 
     sb = sub.add_parser("benchmark", help="benchmark raw context versus native pack fixtures")
     sb.add_argument("--profile", choices=PROFILE_NAMES, default="reviewer")
