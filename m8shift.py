@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.30.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.31.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -125,6 +125,24 @@ GITIGNORE_ENTRIES = (
     ".m8shift/",
     "*.m8shift.bak",
 )
+DECISION_TARGETS = ("forge", "github", "both", "git", "md")
+
+
+def project_root():
+    return os.path.dirname(os.path.abspath(COWORK))
+
+
+def decisions_dir():
+    return os.path.join(project_root(), "docs", "decisions")
+
+
+def decisions_single():
+    return os.path.join(project_root(), "DECISIONS.md")
+
+
+def decisions_config():
+    return os.path.join(project_root(), ".m8shift", "decisions.json")
+
 
 # Canonical names auto-loaded by the host tools. Existing variants are renamed to
 # these names during `init`, including via a two-step rename on case-insensitive
@@ -397,6 +415,7 @@ same metadata and serializes unavailable values as `null`.
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
 ./m8shift.py session {list,show,decisions,report} …  # read-only session views + optional Markdown report
+./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
 ./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
@@ -2453,6 +2472,263 @@ def render_session_report(session, turns, include_body=False):
     return "\n".join(lines)
 
 
+def slugify_title(value):
+    text = (value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text[:80].strip("-") or "decision"
+
+
+def next_decision_number():
+    os.makedirs(decisions_dir(), exist_ok=True)
+    highest = 0
+    for name in os.listdir(decisions_dir()):
+        m = re.match(r"^(\d{4})-[A-Za-z0-9_.-]+\.md$", name)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return highest + 1
+
+
+def git_remote_urls():
+    try:
+        result = subprocess.run(
+            ["git", "remote", "-v"],
+            cwd=project_root(),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    urls = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] not in urls:
+            urls.append(parts[1])
+    return urls
+
+
+def infer_decision_target():
+    urls = git_remote_urls()
+    if not urls:
+        return "md", "default"
+    has_github = any("github.com" in url.lower() for url in urls)
+    has_forge = any(
+        ("github.com" not in url.lower())
+        and (
+            any(token in url.lower() for token in ("forge", "gitea", "gitlab", "gogs"))
+            or bool(re.search(r":\d+/", url))
+            or url.lower().startswith(("http://", "https://"))
+        )
+        for url in urls
+    )
+    if has_github and has_forge:
+        return "both", "inferred"
+    if has_forge:
+        return "forge", "inferred"
+    if has_github:
+        return "github", "inferred"
+    return "git", "inferred"
+
+
+def read_json_diagnostic(path, default):
+    if not os.path.exists(path):
+        return default, ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh), ""
+    except (OSError, json.JSONDecodeError) as e:
+        return default, str(e)
+
+
+def configured_decision_target():
+    data, err = read_json_diagnostic(decisions_config(), {})
+    if err or not isinstance(data, dict):
+        return "", "config_error" if err else ""
+    target = str(data.get("target", "")).strip()
+    return (target, "config") if target in DECISION_TARGETS else ("", "")
+
+
+def resolve_decision_target(explicit=""):
+    if explicit:
+        return explicit, "override"
+    configured, source = configured_decision_target()
+    if configured:
+        return configured, source
+    return infer_decision_target()
+
+
+def turn_stances(turns):
+    out = []
+    for t in turns:
+        stance = t["fields"].get("stance", "").strip()
+        if not stance:
+            continue
+        out.append({
+            "turn": t["n"],
+            "agent": t["fields"].get("from", t["agent"]),
+            "stance": stance,
+        })
+    return out
+
+
+def render_decision_record(session, turns, *, title="", status="proposed", target="md", single=False):
+    sid = session.get("session_id", "-")
+    title = title.strip() or "TODO: state the decision"
+    decisions = structured_session_decisions(turns)
+    stances = turn_stances(turns)
+    trace_turns = ", ".join(f"#{t['n']}" for t in turns) or "none"
+    lines = [
+        f"# {title}",
+        "",
+        f"- Status: {status}",
+        f"- Traceability target: {target}",
+        f"- Source journal: M8SHIFT session `{sid}`",
+        f"- Source turns: {trace_turns}",
+        "",
+        "## Decision",
+        "",
+        f"{title}",
+        "",
+        "## Context",
+        "",
+        "Derived from the M8Shift turn journal. The journal remains the source of truth;",
+        "this file is a curated decision trace.",
+        "",
+        "## Options",
+        "",
+        "- TODO: list the options considered.",
+        "",
+        "## Positions",
+        "",
+    ]
+    if stances:
+        for row in stances:
+            lines.append(f"- {row['agent']} (turn #{row['turn']}): {row['stance']}")
+    else:
+        lines.append("- TODO: no explicit `stance` fields recorded; complete manually from the quoted trace.")
+    lines += [
+        "",
+        "## Divergence",
+        "",
+        "TODO: summarize the substantive disagreement, if any.",
+        "",
+        "## Resolution",
+        "",
+    ]
+    if decisions:
+        for row in decisions:
+            reason = row.get("evidence") or row.get("waiver_reason") or row.get("requires") or "—"
+            lines.append(f"- Turn #{row['turn']} ({row['agent']}): `{row['decision']}` — {reason}")
+    else:
+        lines.append("TODO: record consensus, maintainer arbitration, or why one option prevailed.")
+    lines += [
+        "",
+        "## Trace",
+        "",
+        f"- Session: `{sid}`",
+        f"- Turns: {trace_turns}",
+        "",
+        "### Draft context from turns",
+        "",
+    ]
+    for t in turns[-6:]:
+        f = t["fields"]
+        lines.extend([
+            f"#### Turn #{t['n']} — {f.get('from', t['agent'])} → {f.get('to', '-')}",
+            "",
+            f"- ask: {md_bullet(f.get('ask', ''))}",
+            f"- done: {md_bullet(f.get('done', ''))}",
+        ])
+        if f.get("stance"):
+            lines.append(f"- stance: {f['stance']}")
+        if t.get("body"):
+            lines.extend(["", fenced_untrusted(t["body"]), ""])
+        else:
+            lines.append("")
+    if not turns:
+        lines.append("No turns recorded.")
+    if single:
+        lines.append("\n---")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_decision_record(record, *, title="", single=False):
+    if single:
+        header = "# Decisions\n\nAppend-only decision trace exported from M8Shift turns.\n\n"
+        current = read(decisions_single()) if os.path.exists(decisions_single()) else header
+        if current and not current.endswith("\n"):
+            current += "\n"
+        write(current + "\n" + record, decisions_single())
+        return decisions_single()
+    number = next_decision_number()
+    slug = slugify_title(title)
+    while True:
+        path = os.path.join(decisions_dir(), f"{number:04d}-{slug}.md")
+        if not os.path.exists(path):
+            break
+        number += 1
+    write(record, path)
+    return path
+
+
+def cmd_decisions(args):
+    """Decision traceability helpers. Advisory only; never mutates the LOCK."""
+    if args.verb == "target":
+        if args.set:
+            write(json.dumps({"target": args.set}, ensure_ascii=False, indent=2) + "\n",
+                  decisions_config())
+        target, target_source = resolve_decision_target("")
+        payload = {
+            "ok": True,
+            "target": target,
+            "target_source": target_source,
+            "configured": args.set or configured_decision_target()[0],
+            "config_path": os.path.relpath(decisions_config(), project_root()),
+            "runtime_version": VERSION,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return 0
+        print(f"decision target: {target} ({target_source})")
+        if args.set:
+            print(f"configured in {payload['config_path']}")
+        return 0
+    if args.verb != "scaffold":
+        sys.exit(f"unknown decisions command: {args.verb}")
+    text, lk, sessions, turns = session_context()
+    session = select_session(args.session, sessions, lk)
+    selected_turns = turns_for_session(session, turns)
+    target, target_source = resolve_decision_target(args.target)
+    title = args.title or "TODO: state the decision"
+    record = render_decision_record(
+        session, selected_turns,
+        title=title, status=args.status, target=target, single=args.single,
+    )
+    path = write_decision_record(record, title=title, single=args.single)
+    rel = os.path.relpath(path, project_root())
+    payload = {
+        "ok": True,
+        "path": rel,
+        "session_id": session.get("session_id", "-"),
+        "target": target,
+        "target_source": target_source,
+        "single": args.single,
+        "decisions": len(structured_session_decisions(selected_turns)),
+        "stances": len(turn_stances(selected_turns)),
+        "journal_source_of_truth": True,
+        "runtime_version": VERSION,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    print(f"✓ decision scaffold written: {rel}")
+    print(f"target: {target} ({target_source})")
+    print("source of truth: M8SHIFT turn journal")
+    return 0
+
+
 RESERVED_REPORT_OUTPUT_RELATIVE_PATHS = (
     "m8shift.py",
     "m8shift-runtime.py",
@@ -4144,7 +4420,8 @@ def collect_advisory_fields(args):
                        ("relation", args.relation), ("requires", args.requires),
                        ("expected_output", args.expected_output), ("evidence", args.evidence),
                        ("decision", args.decision), ("waiver_reason", args.waiver_reason),
-                       ("schema", args.schema), ("permissions", args.permissions)):
+                       ("schema", args.schema), ("permissions", args.permissions),
+                       ("stance", args.stance)):
         add(key, "--" + key.replace("_", "-"), value)
     for item in args.field:
         key, sep, value = item.partition("=")
@@ -4802,6 +5079,28 @@ def main():
     hs.add_argument("--json", action="store_true", help="machine-readable session history")
     hs.set_defaults(fn=cmd_history)
 
+    dec = sub.add_parser("decisions",
+                         help="advisory durable decision records derived from the turn journal")
+    dec.set_defaults(fn=cmd_decisions)
+    dec_sub = dec.add_subparsers(dest="verb", required=True)
+    dec_t = dec_sub.add_parser("target", help="show or configure the decision traceability target")
+    dec_t.add_argument("--set", choices=DECISION_TARGETS, default="",
+                       help="persist an explicit target override in .m8shift/decisions.json")
+    dec_t.add_argument("--json", action="store_true")
+    dec_t.set_defaults(fn=cmd_decisions)
+    dec_s = dec_sub.add_parser("scaffold",
+                               help="write a markdown decision record from session turns")
+    dec_s.add_argument("--session", default="current", help="session id or current")
+    dec_s.add_argument("--target", choices=DECISION_TARGETS, default="",
+                       help="traceability target override")
+    dec_s.add_argument("--single", action="store_true",
+                       help="append to DECISIONS.md instead of docs/decisions/NNNN-*.md")
+    dec_s.add_argument("--title", default="", help="decision title")
+    dec_s.add_argument("--status", choices=("proposed", "accepted", "superseded"),
+                       default="proposed")
+    dec_s.add_argument("--json", action="store_true")
+    dec_s.set_defaults(fn=cmd_decisions)
+
     se = sub.add_parser("session", help="read-only session inspection and Markdown reports")
     se.set_defaults(fn=cmd_session)
     se_sub = se.add_subparsers(dest="verb", required=True)
@@ -4878,6 +5177,8 @@ def main():
     a.add_argument("--waiver-reason", dest="waiver_reason", default="")
     a.add_argument("--schema", default="")
     a.add_argument("--permissions", default="")
+    a.add_argument("--stance", default="",
+                   help="explicit decision stance tag, e.g. FOR:option or AGAINST:option (advisory)")
     a.add_argument("--field", action="append", default=[], metavar="KEY=VALUE",
                    help="advisory turn field, repeatable (KEY snake_case or x_*)")
     a.set_defaults(fn=cmd_append)

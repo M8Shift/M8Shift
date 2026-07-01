@@ -1,6 +1,6 @@
 # RFC — Decision traceability (forge, git, or a markdown fallback)
 
-**Status:** design finalized (this RFC) · implementation tracked in #55 · **Builds on:** [022-rfc-session-reports.md](022-rfc-session-reports.md) (decision ledger derived from turns), [agents-guide.md](../agents-guide.md) §6 (forge tracking) and its §2 *surface-disagreement-explicitly* rule · **Source:** maintainer request — guarantee a durable record of *why* decisions were made, including contradictory ones, **whatever tooling the project has or lacks**.
+**Status:** implemented in v3.31.0 (#55) · **Builds on:** [022-rfc-session-reports.md](022-rfc-session-reports.md) (decision ledger derived from turns), [agents-guide.md](../agents-guide.md) §6 (forge tracking) and its §2 *surface-disagreement-explicitly* rule · **Source:** maintainer request — guarantee a durable record of *why* decisions were made, including contradictory ones, **whatever tooling the project has or lacks**.
 
 ## Question
 
@@ -95,15 +95,34 @@ duplicate manual work.
    — just a durable, structured record.
 4. **Tool-independent.** Stdlib-only; the markdown fallback needs nothing but a filesystem.
 
-## Command surface (proposed)
+## Command surface
 
 ```bash
 python3 m8shift.py session decisions current     # derive decisions from the turns (RFC 022)
+python3 m8shift.py decisions target --json       # show inferred/configured target
+python3 m8shift.py decisions target --set forge  # persist explicit target override
 python3 m8shift.py decisions scaffold --target md # write a decision entry from the template / turns
+python3 m8shift.py decisions scaffold --single   # append to DECISIONS.md instead of ADR-per-file
+python3 m8shift.py append codex --to claude \
+  --stance "FOR: markdown ADR fallback"          # explicit stance, advisory only
 ```
 
 The target (`forge` / `github` / `both` / `git` / `md`) is read from config established at
 setup; `md` is the default when nothing else is configured.
+
+Implementation notes:
+
+- `decisions scaffold` writes `docs/decisions/NNNN-*.md` by default and
+  `DECISIONS.md` with `--single`.
+- `decisions target --set <target>` writes `.m8shift/decisions.json`; `--target <target>`
+  remains an explicit per-command override.
+- Target inference uses git remotes: GitHub → `github`, self-hosted forge-like remotes →
+  `forge`, both → `both`, plain git remotes → `git`, no remotes → `md`.
+- Positions are taken only from explicit `--stance` turn fields. If no stance is recorded,
+  the scaffold leaves TODOs and quotes the relevant turn context; it never fabricates a
+  FOR/AGAINST attribution from prose.
+- The turn journal stays the source of truth. Decision records are curated exports and never
+  mutate `M8SHIFT.md` or the `LOCK`.
 
 ## Non-goals
 
@@ -115,13 +134,13 @@ setup; `md` is the default when nothing else is configured.
 
 ## Acceptance criteria
 
-- A project with no issue tracker ends a session with a structured, append-only markdown
+- ✅ A project with no issue tracker ends a session with a structured, append-only markdown
   decision record (positions, divergence, resolution) it did not have to hand-maintain.
-- A contested decision is recorded with named for / against positions and the resolution, on
+- ✅ A contested decision is recorded with named for / against positions and the resolution, on
   whichever target is configured.
-- The decision record is derivable from the turn journal (no duplicate manual logging).
-- Removing the decision log loses only the curated summary, never the turn journal.
-- Agents establish (ask / config) the target before producing decisions; absent any, they use
+- ✅ The decision record is derivable from the turn journal (no duplicate manual logging).
+- ✅ Removing the decision log loses only the curated summary, never the turn journal.
+- ✅ Agents establish (ask / config) the target before producing decisions; absent any, they use
   the markdown fallback rather than logging nowhere.
 
 ## Resolved questions
