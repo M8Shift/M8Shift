@@ -1,6 +1,6 @@
 # RFC 037 — Agent Context Compression Backends and Digest-Based Handoffs
 
-- Status: draft; Phase C local records + builtin/RTK backend dispatch shipped in v3.38.0
+- Status: draft; Phase C local records + builtin/RTK backend dispatch shipped in v3.38.0; Phase D optional Headroom adapter dispatch shipped in v3.39.0
 - Target stage: optional context companion (`m8shift-context.py`) — policy + file protocol
 - Builds on: [RFC 033 Context Economy](033-rfc-context-economy.md) (policy), [RFC 034 Companion Adapter Interface](034-rfc-companion-adapter-interface.md) (mechanism), [RFC 026 sidecar retention](026-rfc-sidecar-retention.md)
 - Related: [RFC 036 Token-window exhaustion](036-rfc-token-window-exhaustion.md), [RFC 040 AI session usage monitoring](040-rfc-ai-session-usage-monitoring.md)
@@ -129,7 +129,7 @@ Backend → RFC 034 mapping:
 |---------|----------------------|--------|
 | **builtin** | *native* (no adapter — in-process stdlib) | always available, the fallback |
 | **RTK** | `shell_output_filter` | already shipped (`rtk-shell-output`, RFC 034 / #64 / #76) — reused verbatim |
-| **Headroom (external, Apache-2.0)** | `context_transform` (promoted from RFC 034 §11 reserved) | optional, opt-in, identity-pinned like RTK |
+| **Headroom-compatible local command (external, Apache-2.0 ecosystem)** | `context_transform` (promoted from RFC 034 §11 reserved) | optional, opt-in, identity-pinned like RTK; adapter id `headroom_ext` shipped in v3.39.0 |
 
 Rules for every backend:
 
@@ -149,6 +149,20 @@ external tool.
 
 > Naming note: "Headroom" here is the external compression tool; it is unrelated to the internal
 > `m8shift-runtime.py headroom` token-window guard (RFC 036). Backend id: `headroom_ext`.
+
+The shipped `auto` dispatch map is explicit:
+
+| Content type | Auto backend when identity-pinned | Fallback |
+|--------------|-----------------------------------|----------|
+| `shell_output`, `test_output`, `logs`, `log`, `git_output` | `rtk-shell-output` | builtin digest |
+| `conversation`, `history`, `file`, `report`, `diff`, `large-context`, `large_context` | `headroom_ext` | builtin digest |
+| any other label | builtin digest | reference-only only on config/backend failure |
+
+`headroom_ext` is intentionally a **local adapter contract**, not a Headroom proxy/MCP launcher.
+The manifest invokes an adapter-compatible `headroom` command as an argv-only, stdin/stdout
+subprocess. If the operator's installed Headroom CLI does not expose that local one-shot contract,
+the manifest stays absent/unpinned or fails closed; M8Shift does not start a daemon, proxy, MCP
+server, socket listener, or network path to compensate.
 
 ## Records and digests (JSON/JSONL only)
 
@@ -333,8 +347,9 @@ python3 m8shift-context.py context stats --json
   shell/tool-output backend for the configured content types; preserve exit code + key
   diagnostics; fall back to builtin.
 - **Phase D — Headroom backend (optional).** Add a `context_transform` RFC 034 adapter manifest for
-  Headroom (`headroom_ext`), argv-only + identity-pinned; detect-and-use only when present and
-  pinned; never require installation; preserve raw refs independently.
+  Headroom-compatible local commands (`headroom_ext`), argv-only + identity-pinned; detect-and-use
+  only when present and pinned; never require installation; preserve raw refs independently.
+  **Shipped in v3.39.0.**
 - **Phase E — handoff integration.** Agents receive `context_digest` + `handoff_digest` + compact
   summaries + raw refs by default — not full logs/diffs/trees/outputs/transcripts.
 - **Phase F — reporting.** Add `context stats` (`m8shift.context.stats.v1`): records, estimated
