@@ -169,10 +169,15 @@ the two cover each other's blind spots.
 **Adoption:** M8Shift ships an optional RTK `shell_output_filter` adapter manifest and
 runner policy, but not the RTK binary. See [rtk-shell-output-policy.md](rtk-shell-output-policy.md).
 
-## Round 3 — Headroom (context compressor): parked, not run · 2026-06-30
+## Round 3 — Headroom (context compressor): adapter shipped, gain not claimed · 2026-07-01
 
-Both agents — Claude (analysis) and Codex (independent review) — agreed **not** to run Round 3
-on the current native pack. Reasoning:
+Both agents — Claude (analysis) and Codex (independent review) — previously agreed **not** to run
+Round 3 on the current native pack. That judgement still holds for the pack itself. In v3.39.0
+M8Shift added only the optional `headroom_ext` backend dispatch for **broad raw context records**
+(`conversation`, `history`, `file`, `report`, `diff`, `large-context`) when an operator installs
+and identity-pins an adapter-compatible local `headroom` command.
+
+Reasoning:
 
 - The native pack already distils real relay context to ~2 k tokens (1 727 proxy / 1 967 sonnet /
   2 537 opus) while preserving recent `ask`/`done`/`decision` **verbatim** + SHA-256 references, so
@@ -184,10 +189,23 @@ on the current native pack. Reasoning:
   any evidence of extra value. The big wins are already captured (native pack on the relay-context
   axis, RTK on the shell-output axis).
 
-**Parked behind a concrete use case.** Headroom may become worth testing later for: a profile that
-intentionally inlines large file excerpts; large supporting-sources sections; archive / RAG
-retrieval bundles; or reports exceeding the pack budget. **Hard constraint for any future Headroom
-integration:** compress only the *disposable / supporting* sections, **never** the
+**Measured footprint during v3.39.0 implementation.**
+
+| Item | Measurement | Method / caveat |
+|------|-------------|-----------------|
+| `headroom-ai==0.28.0` base package + resolved wheel dependencies | **37.04 MiB** downloaded wheels | `python3 -m pip download --only-binary=:all: headroom-ai==0.28.0` on the implementation Mac |
+| `headroom-ai[all]==0.28.0` / proxy / ONNX + model path | **not completed** | PyPI resolution timed out repeatedly during implementation; no size is claimed |
+| Compression gain | **not claimed** | No adapter-compatible local Headroom one-shot command was available and no real-tokenizer + equivalence run was completed |
+
+The upstream Headroom CLI is primarily documented around `wrap`, `proxy`, and `mcp` flows; the
+M8Shift backend deliberately does **not** start those modes. `headroom_ext` is therefore an
+optional RFC 034 adapter hook: it runs only when the operator provides and pins a local argv
+subprocess that reads redacted stdin and writes compact stdout.
+
+**Parked behind a concrete use case.** Headroom may become worth measuring for: large supporting
+source sections; archive / RAG retrieval bundles; reports exceeding the pack budget; or
+conversation/history/file records intentionally stored as raw compression records. **Hard
+constraint:** compress only the *disposable / supporting* sections, **never** the
 `ask`/`done`/`decision` verbatim blocks, and only with a strict preserve-block mechanism + source
 references.
 

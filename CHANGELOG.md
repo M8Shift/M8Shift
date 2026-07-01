@@ -1,5 +1,33 @@
 # Changelog
 
+## v3.39.0 — 2026-07-01
+
+Release scope:
+
+- #82 / RFC 037 Phase D — Added the optional `headroom_ext`
+  `context_transform` backend for broad context compression records.
+- `compress --backend auto` now uses an explicit content-type dispatch map:
+  shell/tool content types stay on `rtk-shell-output` when identity-pinned, while
+  broad content types (`conversation`, `history`, `file`, `report`, `diff`,
+  `large-context`) try `headroom_ext` when it is installed and identity-pinned.
+- `headroom_ext` is advisory, argv-only, one-shot, local-subprocess only. M8Shift
+  does not start Headroom proxy/MCP/server modes and does not require Headroom to
+  be installed.
+- Adapter execution now uses a shared safe dispatch helper so RTK and Headroom
+  mode/manifest/path identity failures degrade instead of crashing `auto`.
+
+Validation:
+
+- Added Headroom backend tests for pinned auto-selection, absent/unpinned
+  degradation, drifted-manifest no-crash behavior, and secret redaction before
+  backend input/output records.
+- Recorded the measured local base Headroom footprint available during
+  implementation: `headroom-ai==0.28.0` base wheels + dependencies = 37.04 MiB
+  on the implementation Mac. No Headroom compression gain is claimed without a
+  real-tokenizer + output-equivalence run.
+- Lockstep version surfaces bumped from `3.38.0` to `3.39.0` across distributed
+  scripts and tests.
+
 ## v3.38.0 — 2026-07-01
 
 Release scope:
