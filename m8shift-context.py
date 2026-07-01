@@ -20,13 +20,18 @@ import sys
 import threading
 import time
 
-VERSION = "3.36.0"
+VERSION = "3.37.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
 SCHEMA_PROFILE = "m8shift.context.profile.v1"
 SCHEMA_ADAPTER = "m8shift.adapter.v1"
 SCHEMA_ADAPTER_RESULT = "m8shift.adapter.result.v1"
+SCHEMA_COMPRESSED_CONTEXT_RECORD = "m8shift.compressed_context_record.v1"
+SCHEMA_CONTEXT_DIGEST = "m8shift.context_digest.v1"
+SCHEMA_HANDOFF_DIGEST = "m8shift.handoff_digest.v1"
+SCHEMA_RAW_OUTPUT_REFERENCE = "m8shift.raw_output_reference.v1"
+SCHEMA_COMPRESSION_CONFIG = "m8shift.context_compression.config.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TURN_RE = re.compile(
     r"<!-- M8SHIFT:TURN (?P<num>\d+) (?P<author>[a-z][a-z0-9_-]*) BEGIN -->"
@@ -36,9 +41,15 @@ TURN_RE = re.compile(
 )
 FIELD_RE = re.compile(r"^- (?P<key>[a-z_]+):\s*(?P<value>.*)$")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+COMPRESSION_RECORD_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 PROFILE_NAMES = ("implementer", "reviewer", "tester", "gatekeeper", "maintainer")
 GIT_TIMEOUT_SECONDS = 10
 MAX_HASH_BYTES = 512 * 1024 * 1024
+DEFAULT_RETRIEVAL_LINES = 80
+MAX_RETRIEVAL_LINES = 500
+MAX_GREP_PATTERN_CHARS = 128
+MAX_GREP_SCAN_BYTES = 1024 * 1024
+MAX_GREP_LINE_CHARS = 4096
 ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
@@ -87,6 +98,127 @@ DEFAULT_ADAPTERS = {
         },
     },
 }
+
+
+DEFAULT_COMPRESSION_CONFIG = {
+    "schema": SCHEMA_COMPRESSION_CONFIG,
+    "enabled": True,
+    "default_backend": "builtin",
+    "measurement": {
+        "estimate_basis": "proxy_bytes_div_4",
+        "measure_before_send": True,
+        "record_metrics": True,
+    },
+    "thresholds": {
+        "compress_above_tokens": 2000,
+        "reference_only_above_tokens": 20000,
+        "warn_above_tokens": 90000,
+        "hard_limit_tokens": 120000,
+    },
+    "policy": {
+        "preserve_raw": True,
+        "redact_before_store": True,
+        "include_raw_ref": True,
+        "include_token_estimates": True,
+        "never_compress": ["secrets", "credentials", "private_keys", "tokens"],
+    },
+    "retrieval": {
+        "default_lines": DEFAULT_RETRIEVAL_LINES,
+        "max_lines": MAX_RETRIEVAL_LINES,
+        "max_grep_pattern_chars": MAX_GREP_PATTERN_CHARS,
+        "max_grep_scan_bytes": MAX_GREP_SCAN_BYTES,
+        "max_grep_line_chars": MAX_GREP_LINE_CHARS,
+    },
+    "redaction": {
+        "pattern_set": "m8shift.secret_patterns.v2",
+    },
+}
+
+SECRET_PATTERNS = (
+    (
+        "private_key",
+        re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL),
+        "[REDACTED_PRIVATE_KEY]",
+    ),
+    (
+        "authorization_header",
+        re.compile(r"(?im)^(\s*Authorization\s*:\s*(?:Bearer|Basic)\s+)\S+"),
+        r"\1[REDACTED]",
+    ),
+    (
+        "bearer_token",
+        re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+        "Bearer [REDACTED]",
+    ),
+    (
+        "github_token",
+        re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+        "[REDACTED_GITHUB_TOKEN]",
+    ),
+    (
+        "slack_token",
+        re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+        "[REDACTED_SLACK_TOKEN]",
+    ),
+    (
+        "google_api_key",
+        re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+        "[REDACTED_GOOGLE_API_KEY]",
+    ),
+    (
+        "stripe_key",
+        re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}\b"),
+        "[REDACTED_STRIPE_KEY]",
+    ),
+    (
+        "openai_key",
+        re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+        "[REDACTED_API_KEY]",
+    ),
+    (
+        "anthropic_key",
+        re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"),
+        "[REDACTED_API_KEY]",
+    ),
+    (
+        "aws_access_key",
+        re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+        "[REDACTED_AWS_KEY]",
+    ),
+    (
+        "jwt",
+        re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        "[REDACTED_JWT]",
+    ),
+    (
+        "url_inline_credentials",
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+(@)"),
+        r"\1[REDACTED]\2",
+    ),
+    (
+        "assignment_secret_identifier",
+        re.compile(
+            r"(?i)\b([A-Za-z0-9_.-]*(?:secret|token|api[_-]?key|apikey|password|passwd|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)"
+            r"(\s*[:=]\s*)"
+            r"([\"']?)[^\s\"']+([\"']?)"
+        ),
+        r"\1\2\3[REDACTED]\4",
+    ),
+    (
+        "assignment_secret",
+        re.compile(
+            r"(?i)\b(api[_-]?key|token|password|passwd|secret|access[_-]?token|private[_-]?key)\b"
+            r"(\s*[:=]\s*)"
+            r"([\"']?)[^\s\"']+([\"']?)"
+        ),
+        r"\1\2\3[REDACTED]\4",
+    ),
+)
+
+ERROR_LINE_RE = re.compile(r"\b(error|exception|traceback|failed|failure|fatal|warning|assertionerror)\b", re.IGNORECASE)
+EXIT_CODE_RE = re.compile(r"\b(?:exit(?:ed)?(?:\s+code)?|returncode|return code|rc)\s*[:=]?\s*(-?\d+)\b", re.IGNORECASE)
+PATH_RE = re.compile(r"(?:(?:[A-Za-z]:)?[/\\][^\s:;]+|[A-Za-z0-9_.@%+=:-]+(?:/[A-Za-z0-9_.@%+=:-]+)+)")
+UNSAFE_GREP_RE = re.compile(r"(\([^)]*[+*?][^)]*\)[+*?{]|\[[^\]]*[+*?][^\]]*\][+*?{]|(?:\.\*){3,}|\{\d+(?:,\d*)?\})")
 
 
 DEFAULT_PROFILES = {
@@ -181,6 +313,26 @@ def adapters_dir(root):
     return os.path.join(context_dir(root), "adapters")
 
 
+def compression_dir(root):
+    return os.path.join(context_dir(root), "compression")
+
+
+def compression_records_dir(root):
+    return os.path.join(compression_dir(root), "records")
+
+
+def compression_raw_dir(root):
+    return os.path.join(compression_dir(root), "raw")
+
+
+def compression_compact_dir(root):
+    return os.path.join(compression_dir(root), "compact")
+
+
+def compression_config_path(root):
+    return os.path.join(root, ".m8shift", "context-compression.json")
+
+
 def metrics_path(root):
     return os.path.join(context_dir(root), "metrics.jsonl")
 
@@ -190,7 +342,17 @@ def benchmarks_path(root):
 
 
 def ensure_dirs(root):
-    for path in (context_dir(root), packs_dir(root), receipts_dir(root), profiles_dir(root), adapters_dir(root)):
+    for path in (
+        context_dir(root),
+        packs_dir(root),
+        receipts_dir(root),
+        profiles_dir(root),
+        adapters_dir(root),
+        compression_dir(root),
+        compression_records_dir(root),
+        compression_raw_dir(root),
+        compression_compact_dir(root),
+    ):
         os.makedirs(path, exist_ok=True)
 
 
@@ -331,6 +493,113 @@ def size_metrics(text):
         "estimated_proxy_tokens": len(data) // 4,
         "lines": len(text.splitlines()),
     }
+
+
+def merge_dict(base, override):
+    out = copy.deepcopy(base)
+    if not isinstance(override, dict):
+        return out
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merge_dict(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def default_compression_config():
+    return copy.deepcopy(DEFAULT_COMPRESSION_CONFIG)
+
+
+def load_compression_config(root):
+    path = compression_config_path(root)
+    data, err = read_json_diagnostic(path, None)
+    if err:
+        return default_compression_config(), [
+            finding("warning", "compression.config_unreadable", f"{rel(root, path)}: {err}; using redacted reference-only fail-safe")
+        ], True
+    if data is None:
+        return default_compression_config(), [
+            finding("warning", "compression.config_missing", f"{rel(root, path)} is missing; using redacted reference-only fail-safe")
+        ], True
+    if not isinstance(data, dict) or data.get("schema") != SCHEMA_COMPRESSION_CONFIG:
+        return default_compression_config(), [
+            finding("warning", "compression.config_schema", f"{rel(root, path)} has invalid schema; using redacted reference-only fail-safe")
+        ], True
+    return merge_dict(DEFAULT_COMPRESSION_CONFIG, data), [], False
+
+
+def compression_policy(config):
+    policy = config.get("policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def compression_retrieval(config):
+    retrieval = config.get("retrieval")
+    return retrieval if isinstance(retrieval, dict) else {}
+
+
+def bounded_int(value, default, minimum, maximum):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def retrieval_int(config, key, default, minimum, maximum):
+    return bounded_int(compression_retrieval(config).get(key, default), default, minimum, maximum)
+
+
+def redaction_enabled(config):
+    return bool(compression_policy(config).get("redact_before_store", True))
+
+
+def redact_text(text, config):
+    if not redaction_enabled(config):
+        redaction = config.get("redaction")
+        redaction = redaction if isinstance(redaction, dict) else {}
+        return text, {
+            "enabled": False,
+            "pattern_set": redaction.get("pattern_set", "disabled"),
+            "applied_count": 0,
+            "matches": {},
+        }
+    redacted = text
+    matches = {}
+    applied = 0
+    for name, pattern, repl in SECRET_PATTERNS:
+        redacted, count = pattern.subn(repl, redacted)
+        if count:
+            matches[name] = count
+            applied += count
+    return redacted, {
+        "enabled": True,
+        "pattern_set": "m8shift.secret_patterns.v2",
+        "applied_count": applied,
+        "matches": matches,
+    }
+
+
+def valid_record_id(record_id, label="record id"):
+    if not COMPRESSION_RECORD_ID_RE.fullmatch(record_id or ""):
+        die(f"unsafe {label}: {record_id!r}")
+    return record_id
+
+
+def record_json_path(root, record_id):
+    valid_record_id(record_id)
+    return safe_join(root, os.path.join(compression_records_dir(root), f"{record_id}.json"), "record path")
+
+
+def record_raw_path(root, record_id):
+    valid_record_id(record_id)
+    return safe_join(root, os.path.join(compression_raw_dir(root), f"{record_id}.raw.txt"), "raw reference path")
+
+
+def record_compact_path(root, record_id):
+    valid_record_id(record_id)
+    return safe_join(root, os.path.join(compression_compact_dir(root), f"{record_id}.compact.txt"), "compact reference path")
 
 
 def truncate_lines(text, limit):
@@ -646,12 +915,17 @@ def cmd_init(args):
             continue
         write_json(path, default_adapter_manifest(name))
         wrote.append(rel(root, path))
+    config_path = compression_config_path(root)
+    if args.force or not os.path.exists(config_path):
+        write_json(config_path, default_compression_config())
+        wrote.append(rel(root, config_path))
     readme = os.path.join(context_dir(root), "README.md")
     if args.force or not os.path.exists(readme):
         write_text(readme, (
             "# M8Shift context companion\n\n"
-            "Generated context packs, receipts, metrics, adapter manifests, and benchmarks live here.\n"
+            "Generated context packs, receipts, metrics, adapter manifests, compression records, and benchmarks live here.\n"
             "Packs are operational views only; verification uses original sources.\n"
+            "Compression records store redacted raw references and compact digests under `compression/`.\n"
             "When RTK is present and identity-pinned, packs may use the RTK shell-output adapter by default; use `pack --adapter native` to opt out.\n"
         ))
         wrote.append(rel(root, readme))
@@ -1229,6 +1503,405 @@ def filter_shell_output(root, args, adapter_status, text, mode):
     }
 
 
+def read_compression_input(root, args):
+    if args.stdin:
+        return sys.stdin.read()
+    if args.input:
+        return read_text(safe_join(root, args.input, "input path"))
+    die("compress requires --stdin or --input")
+
+
+def builtin_manifest():
+    return {
+        "schema": SCHEMA_ADAPTER,
+        "name": "builtin",
+        "type": "context_transform",
+        "version": VERSION,
+        "authority": "advisory",
+        "input_schema": "text/plain",
+        "output_schema": SCHEMA_COMPRESSED_CONTEXT_RECORD,
+        "mutates_core": False,
+        "mutates_repo": False,
+        "failure_policy": "fail_closed",
+    }
+
+
+def collapse_repeated_lines(lines):
+    out = []
+    groups = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        j = i + 1
+        while j < len(lines) and lines[j] == line:
+            j += 1
+        count = j - i
+        if count >= 3:
+            out.append(line)
+            marker = f"... [previous line repeated {count - 1} more times]"
+            out.append(marker)
+            groups.append({"line": line[:240], "count": count})
+        else:
+            out.extend(lines[i:j])
+        i = j
+    return out, groups
+
+
+def head_tail_lines(lines, total_limit):
+    if total_limit <= 0 or len(lines) <= total_limit:
+        return lines, 0
+    head = max(1, total_limit // 2)
+    tail = max(1, total_limit - head - 1)
+    omitted = len(lines) - head - tail
+    return lines[:head] + [f"... [{omitted} lines omitted; retrieve bounded raw reference for evidence]"] + lines[-tail:], omitted
+
+
+def unique_limited(values, limit):
+    out = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def extract_builtin_signals(text):
+    lines = text.splitlines()
+    error_lines = []
+    exit_codes = []
+    paths = []
+    for number, line in enumerate(lines, 1):
+        if ERROR_LINE_RE.search(line):
+            error_lines.append({"line": number, "text": line[:500]})
+        for match in EXIT_CODE_RE.finditer(line):
+            exit_codes.append(match.group(1))
+        for match in PATH_RE.finditer(line):
+            paths.append(match.group(0).rstrip(".,);]\"'"))
+    return {
+        "errors": error_lines[:30],
+        "exit_codes": unique_limited(exit_codes, 10),
+        "paths": unique_limited(paths, 30),
+    }
+
+
+def render_builtin_digest(record_id, text, content_type, config):
+    max_lines = retrieval_int(config, "max_lines", MAX_RETRIEVAL_LINES, 1, MAX_RETRIEVAL_LINES)
+    line_limit = retrieval_int(config, "default_lines", DEFAULT_RETRIEVAL_LINES, 1, max_lines)
+    lines = text.splitlines()
+    collapsed, repeated_groups = collapse_repeated_lines(lines)
+    excerpt_lines, omitted = head_tail_lines(collapsed, line_limit)
+    signals = extract_builtin_signals(text)
+    status = "failed" if signals["errors"] or any(code not in {"0", ""} for code in signals["exit_codes"]) else "unknown"
+    out = [
+        "# M8Shift builtin context digest",
+        "",
+        f"- record_id: `{record_id}`",
+        f"- content_type: `{content_type}`",
+        f"- status: `{status}`",
+        f"- source_lines: `{len(lines)}`",
+        f"- source_bytes: `{size_metrics(text)['bytes']}`",
+        f"- bounded_raw_retrieval: `true`",
+        "",
+    ]
+    if signals["exit_codes"]:
+        out.extend(["## Exit codes", ""])
+        out.extend(f"- `{code}`" for code in signals["exit_codes"])
+        out.append("")
+    if signals["errors"]:
+        out.extend(["## Error / warning lines", ""])
+        for row in signals["errors"]:
+            out.append(f"- L{row['line']}: {row['text']}")
+        out.append("")
+    if signals["paths"]:
+        out.extend(["## Paths detected", ""])
+        out.extend(f"- `{path}`" for path in signals["paths"])
+        out.append("")
+    if repeated_groups:
+        out.extend(["## Repeated-line collapses", ""])
+        for group in repeated_groups[:20]:
+            out.append(f"- `{group['count']}` × `{group['line']}`")
+        out.append("")
+    out.extend(["## Head/tail excerpt", "", "```text"])
+    out.extend(excerpt_lines)
+    out.append("```")
+    if omitted:
+        out.extend(["", f"> {omitted} collapsed lines omitted. Use bounded retrieval for raw evidence."])
+    return "\n".join(out).rstrip() + "\n", signals, repeated_groups, omitted
+
+
+def reference_only_text(record_id, raw_ref, reason):
+    return (
+        "# M8Shift reference-only context digest\n\n"
+        f"- record_id: `{record_id}`\n"
+        f"- raw_ref: `{raw_ref}`\n"
+        f"- reason: `{reason or 'fail-closed reference-only'}`\n"
+        "- inline_raw: `false`\n"
+        "- bounded_raw_retrieval: `true`\n\n"
+        "> Compression failed closed. Retrieve bounded redacted raw evidence explicitly.\n"
+    )
+
+
+def make_context_digest(record_id, content_type, raw_ref, compact_ref, signals, fallback_used, reason):
+    errors = signals.get("errors", []) if isinstance(signals, dict) else []
+    exit_codes = signals.get("exit_codes", []) if isinstance(signals, dict) else []
+    status = "reference_only" if fallback_used else ("failed" if errors or any(code not in {"0", ""} for code in exit_codes) else "unknown")
+    return {
+        "schema": SCHEMA_CONTEXT_DIGEST,
+        "record_id": record_id,
+        "content_type": content_type,
+        "status": status,
+        "summary": reason if fallback_used else "Builtin digest generated from redacted raw content.",
+        "errors": errors[:10],
+        "exit_codes": exit_codes,
+        "paths": (signals.get("paths", []) if isinstance(signals, dict) else [])[:20],
+        "raw_ref": raw_ref,
+        "compact_ref": compact_ref,
+        "bounded_retrieval_required": True,
+        "not_evidence": True,
+    }
+
+
+def make_handoff_digest(record_id, agent, content_type, raw_ref, compact_ref, fallback_used, reason):
+    return {
+        "schema": SCHEMA_HANDOFF_DIGEST,
+        "record_id": record_id,
+        "agent": agent or "",
+        "content_type": content_type,
+        "summary": reason if fallback_used else "Use the compact digest for orientation and the bounded raw reference for verification.",
+        "evidence": [
+            {"kind": "raw_output_reference", "record_id": record_id, "path": raw_ref, "bounded": True},
+            {"kind": "compact_digest", "record_id": record_id, "path": compact_ref, "bounded": True},
+        ],
+        "next_actions": [],
+        "not_evidence": True,
+    }
+
+
+def compression_record_id(args):
+    if args.id:
+        return valid_record_id(args.id)
+    stamp = iso().replace("-", "").replace(":", "")
+    suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", (args.type or "context").strip("-"))[:40] or "context"
+    return valid_record_id(f"ccr-{stamp}-{suffix}")
+
+
+def compact_backend(root, args, redacted, config, config_fail_safe):
+    if config_fail_safe:
+        return None, "missing or malformed compression config", {}
+    if not ADAPTER_NAME_RE.fullmatch(args.backend or ""):
+        return None, f"unsafe backend id {args.backend!r}", {}
+    if args.backend != "builtin":
+        return None, f"unsupported or unavailable backend {args.backend!r}", {}
+    filtered, signals, repeated_groups, omitted_lines = render_builtin_digest(args.id, redacted, args.type, config)
+    return filtered, "", (signals, repeated_groups, omitted_lines)
+
+
+def cmd_compress(args):
+    root = root_from(args)
+    ensure_dirs(root)
+    args.id = compression_record_id(args)
+    config, config_findings, config_fail_safe = load_compression_config(root)
+    raw = read_compression_input(root, args)
+    try:
+        redacted, redaction = redact_text(raw, config)
+    except Exception as e:  # defensive fail-closed boundary; redaction should not raise.
+        config_findings.append(finding("error", "compression.redaction_failed", f"redaction failed: {e}"))
+        redacted = ""
+        redaction = {"enabled": True, "pattern_set": "m8shift.secret_patterns.v1", "applied_count": 0, "matches": {}, "failed": True}
+        config_fail_safe = True
+    raw_path = record_raw_path(root, args.id)
+    compact_path = record_compact_path(root, args.id)
+    record_path = record_json_path(root, args.id)
+    write_text(raw_path, redacted)
+    raw_ref = rel(root, raw_path)
+    compact_ref = rel(root, compact_path)
+
+    compact_result = compact_backend(root, args, redacted, config, config_fail_safe)
+    filtered, backend_error, extras = compact_result
+    fallback_used = filtered is None
+    signals = {}
+    repeated_groups = []
+    omitted_lines = 0
+    if fallback_used:
+        filtered = reference_only_text(args.id, raw_ref, backend_error)
+    else:
+        signals, repeated_groups, omitted_lines = extras
+    write_text(compact_path, filtered)
+
+    manifest = builtin_manifest()
+    result = adapter_result(
+        manifest,
+        mode=args.type,
+        original=raw,
+        filtered=filtered,
+        fallback_used=fallback_used,
+        error=backend_error or "",
+        stderr="",
+    )
+    before = size_metrics(raw)
+    after = size_metrics(filtered)
+    ratio = 0 if before["bytes"] == 0 else round(after["bytes"] / before["bytes"], 6)
+    raw_reference = {
+        "schema": SCHEMA_RAW_OUTPUT_REFERENCE,
+        "record_id": args.id,
+        "path": raw_ref,
+        "sha256": sha256_text(redacted),
+        "metrics": size_metrics(redacted),
+        "redacted": redaction_enabled(config),
+        "redaction": redaction,
+        "bounded_retrieval_required": True,
+    }
+    context_digest = make_context_digest(args.id, args.type, raw_ref, compact_ref, signals, fallback_used, backend_error)
+    handoff_digest = make_handoff_digest(args.id, args.agent, args.type, raw_ref, compact_ref, fallback_used, backend_error)
+    record = {
+        "schema": SCHEMA_COMPRESSED_CONTEXT_RECORD,
+        "id": args.id,
+        "created_at": iso(),
+        "agent": args.agent or "",
+        "content_type": args.type,
+        "backend": args.backend,
+        "adapter_result": result,
+        "context_digest": context_digest,
+        "handoff_digest": handoff_digest,
+        "raw_output_reference": raw_reference,
+        "estimated_proxy_tokens_before": before["estimated_proxy_tokens"],
+        "estimated_proxy_tokens_after": after["estimated_proxy_tokens"],
+        "compression_ratio": ratio,
+        "estimate_basis": "proxy_bytes_div_4",
+        "reversible": True,
+        "fallback_used": fallback_used,
+        "status": "reference_only" if fallback_used else "ok",
+        "storage": {
+            "record_ref": rel(root, record_path),
+            "raw_ref": raw_ref,
+            "compact_ref": compact_ref,
+        },
+        "config": {
+            "path": rel(root, compression_config_path(root)),
+            "valid": not config_fail_safe,
+        },
+        "redaction": redaction,
+        "builtin": {
+            "signals": signals,
+            "repeated_groups": repeated_groups[:20],
+            "omitted_excerpt_lines": omitted_lines,
+        },
+        "findings": config_findings,
+        "warning": "Compressed context is operational orientation, not evidence; verify against bounded raw references.",
+    }
+    write_json(record_path, record)
+    if args.json:
+        print(json.dumps(record, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"✓ wrote {rel(root, record_path)}")
+        if fallback_used:
+            print(f"  reference-only: {backend_error}")
+    return 0
+
+
+def parse_line_selector(selector, config):
+    max_lines = retrieval_int(config, "max_lines", MAX_RETRIEVAL_LINES, 1, MAX_RETRIEVAL_LINES)
+    default_lines = retrieval_int(config, "default_lines", DEFAULT_RETRIEVAL_LINES, 1, max_lines)
+    if not selector:
+        return 1, min(default_lines, max_lines)
+    if ":" in selector:
+        start_s, end_s = selector.split(":", 1)
+        if not start_s.isdigit() or not end_s.isdigit():
+            die("lines selector must be N or START:END")
+        start = max(1, int(start_s))
+        end = max(start, int(end_s))
+        if end - start + 1 > max_lines:
+            end = start + max_lines - 1
+        return start, end
+    if not selector.isdigit():
+        die("lines selector must be N or START:END")
+    count = max(1, min(int(selector), max_lines))
+    return 1, count
+
+
+def validate_grep_pattern(pattern, config):
+    max_chars = retrieval_int(config, "max_grep_pattern_chars", MAX_GREP_PATTERN_CHARS, 1, MAX_GREP_PATTERN_CHARS)
+    if len(pattern) > max_chars:
+        die(f"unsafe grep pattern: too long ({len(pattern)} > {max_chars})")
+    if "\x00" in pattern:
+        die("unsafe grep pattern: NUL byte")
+    if UNSAFE_GREP_RE.search(pattern):
+        die("unsafe grep pattern: nested or repeated wildcard quantifier")
+    try:
+        return re.compile(pattern)
+    except re.error as e:
+        die(f"unsafe grep pattern: {e}")
+
+
+def bounded_text_window(text, start, end):
+    lines = text.splitlines()
+    total = len(lines)
+    selected = lines[start - 1:end]
+    truncated = start > 1 or end < total
+    return "\n".join(selected), truncated, total
+
+
+def bounded_grep(text, pattern, config, limit):
+    max_bytes = retrieval_int(config, "max_grep_scan_bytes", MAX_GREP_SCAN_BYTES, 1, MAX_GREP_SCAN_BYTES)
+    max_line_chars = retrieval_int(config, "max_grep_line_chars", MAX_GREP_LINE_CHARS, 1, MAX_GREP_LINE_CHARS)
+    chunk = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="replace")
+    regex = validate_grep_pattern(pattern, config)
+    matches = []
+    for number, line in enumerate(chunk.splitlines(), 1):
+        bounded_line = line[:max_line_chars]
+        if regex.search(bounded_line):
+            matches.append({"line": number, "text": bounded_line})
+            if len(matches) >= limit:
+                break
+    scanned_truncated = len(text.encode("utf-8")) > max_bytes
+    return matches, scanned_truncated
+
+
+def cmd_retrieve(args):
+    root = root_from(args)
+    record_id = valid_record_id(args.id)
+    config, config_findings, _ = load_compression_config(root)
+    record_path = record_json_path(root, record_id)
+    record = read_json(record_path, None)
+    if not isinstance(record, dict) or record.get("schema") != SCHEMA_COMPRESSED_CONTEXT_RECORD:
+        die(f"record not found or invalid: {record_id}")
+    source = "compact" if args.compact else "raw"
+    path = record_compact_path(root, record_id) if args.compact else record_raw_path(root, record_id)
+    text = read_text(path)
+    start, end = parse_line_selector(args.lines, config)
+    max_count = end - start + 1
+    if args.grep:
+        matches, scan_truncated = bounded_grep(text, args.grep, config, max_count)
+        content = "\n".join(f"{row['line']}:{row['text']}" for row in matches)
+        truncated = scan_truncated or len(matches) >= max_count
+        lines = {"selector": args.lines or str(max_count), "returned": len(matches), "grep": args.grep}
+    else:
+        content, truncated, total = bounded_text_window(text, start, end)
+        lines = {"start": start, "end": end, "total": total}
+    payload = {
+        "schema": "m8shift.context.retrieve.v1",
+        "record_id": record_id,
+        "source": source,
+        "path": rel(root, path),
+        "bounded": True,
+        "lines": lines,
+        "truncated": truncated,
+        "content": content,
+        "findings": config_findings,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(content)
+        if truncated:
+            print("[m8shift-context: output truncated; use an explicit bounded --lines range]", file=sys.stderr)
+    return 0
+
+
 def rtk_telemetry_disable():
     resolved = shutil_which("rtk")
     if not resolved:
@@ -1449,6 +2122,10 @@ def cmd_status(args):
 def cmd_doctor(args):
     root = root_from(args)
     findings = []
+    _, compression_findings, compression_fail_safe = load_compression_config(root)
+    findings.extend(compression_findings)
+    if compression_fail_safe:
+        findings.append(finding("warning", "compression.fail_safe", "context compression will redact and fall back to reference-only until config is valid"))
     for name in PROFILE_NAMES:
         path = os.path.join(profiles_dir(root), f"{name}.json")
         data = read_json(path, None)
@@ -1527,6 +2204,25 @@ def main(argv=None):
     sm.add_argument("--last", action="store_true")
     sm.add_argument("--json", action="store_true")
     sm.set_defaults(func=cmd_metrics)
+
+    sc = sub.add_parser("compress", help="write a redacted compressed-context record from raw input")
+    sc.add_argument("--id", help="record id (safe id only)")
+    sc.add_argument("--agent", default="")
+    sc.add_argument("--type", default="context", help="content type label, e.g. test_output or shell_output")
+    sc.add_argument("--backend", default="builtin", help="compression backend id (default: builtin)")
+    csrc = sc.add_mutually_exclusive_group(required=True)
+    csrc.add_argument("--stdin", action="store_true", help="read raw content from stdin")
+    csrc.add_argument("--input", help="read raw content from a project-relative file")
+    sc.add_argument("--json", action="store_true")
+    sc.set_defaults(func=cmd_compress)
+
+    sret = sub.add_parser("retrieve", help="retrieve bounded raw or compact content by record id")
+    sret.add_argument("id", help="compressed context record id")
+    sret.add_argument("--compact", action="store_true", help="retrieve compact digest instead of redacted raw reference")
+    sret.add_argument("--lines", help="bounded line selector: N or START:END (default 80)")
+    sret.add_argument("--grep", help="bounded native stdlib re scan")
+    sret.add_argument("--json", action="store_true")
+    sret.set_defaults(func=cmd_retrieve)
 
     ss = sub.add_parser("status", help="show context companion status, including RTK adapter state")
     ss.add_argument("--json", action="store_true")
