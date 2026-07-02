@@ -39,7 +39,7 @@ the determinant that actually decides which wins. A true hybrid routes on that d
 |-----------|----------|-----|
 | **Headroom installed + identity-pinned** | **Headroom** | precision-first priority: Headroom measured highest precision + full preservation, 0 hallucinations |
 | **Headroom absent / unpinned / errored / config problem** | **builtin + retrieval** (fail-closed) | comparable, reliable, **no data loss** (raw retrievable); retrieval is mandatory (digest-alone is near-useless) |
-| Optional refinement: an **efficiency-critical** batch that is retrieve-capable + few-facts | builtin *(opt-in)* even with Headroom pinned | save ~5× tokens where the precision headroom is not needed |
+| **Short** context (below `compress_above_tokens`) — even with Headroom pinned | **builtin** | Headroom's precision/preservation edge is negligible on short input; keep the ~5× token saving |
 
 Note: content-type (shell/tool vs broad) still selects the RTK vs native *family* as in RFC 037;
 this rule governs the builtin-vs-Headroom choice *within* the broad family, under the precision-first
@@ -56,6 +56,10 @@ common case), never inferred silently:
   regime.
 - `--whole-content` (default off) — the consumer needs most of the content at once (not a few
   facts) ⇒ Headroom regime.
+- **context size** — short contexts (below the RFC 037 `compress_above_tokens` threshold) barely
+  benefit from either backend and carry no real precision risk; route them to **builtin** (efficiency),
+  reserving **Headroom** for **large** contexts where its preservation/precision edge actually matters.
+  (Operator framing: short → internal for efficiency; long → Headroom to preserve.)
 - Callers that know their consumer set these (e.g. a one-shot handoff to an external agent →
   `--access-mode inline`; a local relay handoff → `retrieve`). Absent hints ⇒ `retrieve` +
   few-facts ⇒ builtin. **The common M8Shift path stays builtin with zero configuration.**
