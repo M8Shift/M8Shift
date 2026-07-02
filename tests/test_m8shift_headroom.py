@@ -18,10 +18,14 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
 
     def _fake_headroom(self, body):
         pkg = os.path.join(self.tmp, "headroom")
+        transforms = os.path.join(pkg, "transforms")
         os.makedirs(pkg, exist_ok=True)
+        os.makedirs(transforms, exist_ok=True)
         with open(os.path.join(pkg, "__init__.py"), "w", encoding="utf-8") as fh:
             fh.write("__version__ = '0.28.0-test'\n")
-        with open(os.path.join(pkg, "compress.py"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(transforms, "__init__.py"), "w", encoding="utf-8") as fh:
+            fh.write("")
+        with open(os.path.join(transforms, "kompress_compressor.py"), "w", encoding="utf-8") as fh:
             fh.write(textwrap.dedent(body))
         env = dict(os.environ)
         env["PYTHONPATH"] = self.tmp + os.pathsep + env.get("PYTHONPATH", "")
@@ -47,38 +51,80 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
             import os
             import socket
 
-            def compress(messages):
-                assert os.environ["HEADROOM_OFFLINE"] == "1"
-                assert os.environ["HF_HUB_OFFLINE"] == "1"
-                assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
-                assert all(row["role"] != "user" for row in messages)
-                try:
-                    socket.create_connection(("example.com", 443), timeout=0.01)
-                except Exception as exc:
-                    assert "network disabled" in str(exc)
-                else:
-                    raise AssertionError("network was not blocked")
-                return "offline-ok"
+            class KompressConfig:
+                pass
+
+            class Result:
+                compressed = "offline-ok"
+                original_tokens = 100
+                compressed_tokens = 20
+
+            class KompressCompressor:
+                def __init__(self, config):
+                    assert isinstance(config, KompressConfig)
+
+                def compress(self, text, target_ratio, allow_download):
+                    assert os.environ["HEADROOM_OFFLINE"] == "1"
+                    assert os.environ["HF_HUB_OFFLINE"] == "1"
+                    assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+                    assert target_ratio == 0.4
+                    assert allow_download is False
+                    assert isinstance(text, str)
+                    assert '"role": "user"' not in text
+                    assert "decision: keep offline wrapper" in text
+                    assert "m8shift_headroom_mode=report" in text
+                    try:
+                        socket.create_connection(("example.com", 443), timeout=0.01)
+                    except Exception as exc:
+                        assert "network disabled" in str(exc)
+                    else:
+                        raise AssertionError("network was not blocked")
+                    return Result()
+
+            def ensure_background_download(model_id):
+                raise AssertionError("runtime wrapper must not download")
             """
         )
         result = self._run("decision: keep offline wrapper\n", env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "offline-ok\n")
 
-    def test_missing_headroom_fails_closed_without_echoing_stdin(self):
-        secret = "token=VERY_SECRET_VALUE_SHOULD_NOT_LEAK"
-        env = dict(os.environ)
-        env.pop("PYTHONPATH", None)
+    def test_kompress_import_error_fails_closed_without_echoing_stdin(self):
+        env = self._fake_headroom(
+            """
+            class KompressConfig:
+                pass
+
+            class KompressCompressor:
+                def __init__(self, config):
+                    raise ImportError("Kompress requires onnxruntime or torch")
+
+            def ensure_background_download(model_id):
+                pass
+            """
+        )
+        secret = "token=SECRET123456789"
         result = self._run(secret, env)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertNotIn(secret, result.stderr)
+        self.assertIn("Kompress compression failed", result.stderr)
 
     def test_unchanged_result_fails_closed_by_length_fallback(self):
         env = self._fake_headroom(
             """
-            def compress(messages):
-                return messages[-1]["content"].split("\\n\\n", 1)[-1]
+            class KompressConfig:
+                pass
+
+            class KompressCompressor:
+                def __init__(self, config):
+                    pass
+
+                def compress(self, text, target_ratio, allow_download):
+                    return text
+
+            def ensure_background_download(model_id):
+                pass
             """
         )
         result = self._run("same text\n", env)
@@ -86,38 +132,53 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("did not reduce compact length", result.stderr)
 
-    def test_compress_result_messages_and_token_reduction_are_supported(self):
+    def test_kompress_result_compressed_and_token_reduction_are_supported(self):
         env = self._fake_headroom(
             """
-            class CompressResult:
-                def __init__(self):
-                    self.messages = [
-                        {"role": "system", "content": "ignore"},
-                        {"role": "assistant", "content": "compact decision trace"},
-                    ]
-                    self.tokens_before = 100
-                    self.tokens_after = 20
-                    self.compression_ratio = 0.2
-                    self.transforms_applied = ["kompress"]
+            class KompressConfig:
+                pass
 
-            def compress(messages):
-                return CompressResult()
+            class CompressResult:
+                compressed = "compact decision trace"
+                original_tokens = 100
+                compressed_tokens = 20
+                compression_ratio = 0.2
+
+            class KompressCompressor:
+                def __init__(self, config):
+                    pass
+
+                def compress(self, text, target_ratio, allow_download):
+                    return CompressResult()
+
+            def ensure_background_download(model_id):
+                pass
             """
         )
         result = self._run("x " * 200, env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "compact decision trace\n")
 
-    def test_compress_result_without_token_reduction_fails_closed(self):
+    def test_kompress_result_without_token_reduction_fails_closed(self):
         env = self._fake_headroom(
             """
-            class CompressResult:
-                messages = [{"role": "assistant", "content": "compact but not cheaper"}]
-                tokens_before = 100
-                tokens_after = 100
+            class KompressConfig:
+                pass
 
-            def compress(messages):
-                return CompressResult()
+            class CompressResult:
+                compressed = "compact but not cheaper"
+                original_tokens = 100
+                compressed_tokens = 100
+
+            class KompressCompressor:
+                def __init__(self, config):
+                    pass
+
+                def compress(self, text, target_ratio, allow_download):
+                    return CompressResult()
+
+            def ensure_background_download(model_id):
+                pass
             """
         )
         result = self._run("x " * 200, env)
@@ -128,16 +189,80 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
     def test_conservative_redaction_before_headroom(self):
         env = self._fake_headroom(
             """
-            def compress(messages):
-                content = messages[-1]["content"]
-                assert "SECRET123456789" not in content
-                assert "[REDACTED]" in content
-                return "redacted-ok"
+            class KompressConfig:
+                pass
+
+            class Result:
+                compressed = "redacted-ok"
+                original_tokens = 100
+                compressed_tokens = 20
+
+            class KompressCompressor:
+                def __init__(self, config):
+                    pass
+
+                def compress(self, text, target_ratio, allow_download):
+                    assert "SECRET123456789" not in text
+                    assert "[REDACTED]" in text
+                    return Result()
+
+            def ensure_background_download(model_id):
+                pass
             """
         )
         result = self._run("api_key=SECRET123456789\n", env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "redacted-ok\n")
+
+    def test_preload_helper_contract_is_mockable_for_installer(self):
+        env = self._fake_headroom(
+            """
+            seen = []
+
+            class KompressConfig:
+                pass
+
+            class Result:
+                compressed = "compact"
+                original_tokens = 10
+                compressed_tokens = 5
+
+            class KompressCompressor:
+                def __init__(self, config):
+                    pass
+
+                def compress(self, text, target_ratio, allow_download):
+                    return Result()
+
+            def ensure_background_download(model_id):
+                assert model_id == "chopratejas/kompress-v2-base"
+                seen.append(model_id)
+            """
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from headroom.transforms.kompress_compressor import ensure_background_download; "
+                    "ensure_background_download(model_id='chopratejas/kompress-v2-base')"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_headroom_fails_closed_without_echoing_stdin(self):
+        secret = "token=VERY_SECRET_VALUE_SHOULD_NOT_LEAK"
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        result = self._run(secret, env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn(secret, result.stderr)
+
 
 
 if __name__ == "__main__":
