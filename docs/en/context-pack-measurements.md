@@ -267,3 +267,46 @@ output-equivalence check (verbatim preserved, dropped content flagged and refere
 Runtime records carry only the advisory `estimated_proxy_tokens_*` (bytes/4) for policy decisions —
 never presented as a measured gain. The Headroom constraint above (never compress the verbatim
 `ask`/`done`/`decision` blocks) is normative for the RFC 037 `context_transform` backend.
+
+## Round 3 — Headroom vs builtin, large-context (100k) FAIR pilot · 2026-07-02 (#84)
+
+The first Headroom comparison ("8× worse") was struck as unfair (raw-blob input → `noop`; lossy
+digest vs near-lossless compressor on token count alone). This round is a budget-scoped (~$1.35
+Anthropic) **fair** re-run on the **large-context (100k) regime**, with the free rigor fixes applied.
+
+**Setup.** One fixture: 41 RFCs concatenated + scrubbed = **99,017 o200k tokens** (sha `faab2f7c31e8`).
+**11 pre-registered exact-match questions** (sha `ac8cd548`), position-verified: 3 head / **3 mid
+(builtin's drop-zone)** / 3 tail / 2 **unanswerable** probes. Scored **programmatically (exact
+substring match) — no LLM judge**, which removes judge bias and cost at once. Answering model:
+`claude-opus-4-8`, one batched call per form, 1 run. Headroom produced by Codex in a repo-external
+venv, run **offline/cache-only** (`preload(allow_download=False)`, onnx), fed as **41 RAG chunks**
+(not a raw blob) — no-op check `false` (it genuinely compressed).
+
+| Form | o200k tokens | accuracy (of 9) | head/mid/tail | hallucinations | unanswerable abstain |
+|------|-------------:|:---------------:|:-------------:|:--------------:|:--------------------:|
+| builtin **digest-only** | 2,112 (2.1%) | **1/9** | 0/3 · 0/3 · 1/3 | 0 | 2/2 |
+| builtin **+ retrieval** | 8,472 (8.6%) | **5/9** | 2/3 · 1/3 · 2/3 | 0 | 2/2 |
+| **Headroom** (aggressive, keeps 45.5%) | 45,085 | **6/9** | 2/3 · 1/3 · 3/3 | 0 | 2/2 |
+
+**Directional findings.**
+- builtin+retrieval and Headroom are **comparable on accuracy** (5/9 vs 6/9); Headroom edged it on
+  the tail (3/3). But builtin+retrieval reaches it at **~1/5 the tokens** (8.5k vs 45k) —
+  ~1,700 tokens/correct vs ~7,500.
+- The **digest alone is near-useless for QA (1/9)**: it safely abstains but cannot answer — the
+  **retrieve is essential** (empirically validates the M8Shift model: tiny digest + retrievable raw,
+  not digest alone).
+- **Both safe: 0 hallucinations**, both correctly abstained on the 2 unanswerable probes.
+
+**Verdict (honest).** The builtin-default decision holds — *not* because Headroom is "worse" (it is a
+legitimate near-lossless option that even edged accuracy here), but because for M8Shift's
+retrieve-capable model, **digest+retrieval gets comparable answers at a fifth of the tokens**;
+Headroom's marginal extra preservation costs ~5× the tokens. Consistent with keeping builtin the
+`auto` default and Headroom opt-in (v3.40.0).
+
+**Limits (this is a pilot, not a significance-grade verdict).** N=9 answerable, **1 run, 1 genre
+(docs/RAG), 1 size (100k)**. The builtin+retrieval retrieval was **idealized** (slices supplied for
+the queried facts) → its 5/9 is likely *understated*, so real agentic retrieval would probably
+*widen* the efficiency gap in builtin's favor. Exact-match was strict (e.g. `tiered` ≠
+`capability-tiered` counted as a miss for **both** forms). The full rigorous version (3 genres × 3
+sizes, N≥50, ≥5 runs + bootstrap CIs + paired significance, config frontiers, blind cross-model
+judge, both framings incl. Headroom-with-retrieval) is deferred behind budget (#84).
