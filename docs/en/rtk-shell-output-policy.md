@@ -54,9 +54,11 @@ that fallback is pinned to the selected `--rtk-version` tag.
 Project-local binaries are never trusted just because they exist. `adapters init`
 prefers a normal `PATH` executable for pin establishment. A `.m8shift/bin/rtk`
 candidate is accepted only when its installer provenance file matches the
-candidate's real path and SHA-256. Routine telemetry helpers execute RTK only via
-a freshly verified manifest `trusted_executable`; absent, unpinned, drifted, or
-symlinked local binaries are skipped instead of run.
+candidate's real path and SHA-256. Setup telemetry helpers execute
+`rtk telemetry disable` only via a freshly verified manifest `trusted_executable`;
+absent, unpinned, drifted, or symlinked local binaries are skipped instead of
+run. Public `status`/`doctor` output deliberately does **not** log RTK telemetry
+stdout/stderr; it reports telemetry as `not-reported`.
 
 If RTK is installed or upgraded after manifest generation, regenerate the manifest
 from a trusted shell:

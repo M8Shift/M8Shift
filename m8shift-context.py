@@ -1019,14 +1019,12 @@ def cmd_init(args):
         ))
         wrote.append(rel(root, readme))
     warnings = project_local_pin_warnings(root)
-    telemetry = rtk_telemetry_disable(root)
+    rtk_telemetry_disable(root)
     print(f"✓ context companion initialized ({len(wrote)} files written)")
     for path in wrote:
         print(f"  {path}")
     for row in warnings:
         print(f"warning: {row['message']}", file=sys.stderr)
-    if telemetry.get("present"):
-        print(f"✓ rtk telemetry disable attempted (disabled={str(telemetry.get('disabled')).lower()})")
     return 0
 
 
@@ -2408,7 +2406,7 @@ def rtk_status(root):
         "present": bool(resolved),
         "pinned": False,
         "path": diagnostic_path(root, resolved) if resolved else "",
-        "telemetry": rtk_telemetry_status(root),
+        "telemetry": {"state": "not-reported"},
         "network": "M8Shift uses RTK only as a local argv subprocess and disables telemetry on context setup.",
         "last_pack": last_pack,
     }
@@ -2440,17 +2438,15 @@ def cmd_adapters_init(args):
         write_json(path, default_adapter_manifest(name, allow_project_local=True))
         wrote.append(rel(root, path))
     warnings = project_local_pin_warnings(root)
-    telemetry = rtk_telemetry_disable(root)
+    rtk_telemetry_disable(root)
     if args.json:
-        print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS), "rtk_telemetry": telemetry, "warnings": warnings}, ensure_ascii=False, sort_keys=True))
+        print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS), "warnings": warnings}, ensure_ascii=False, sort_keys=True))
     else:
         print(f"✓ adapter manifests ready ({len(wrote)} file(s) written)")
         for path in wrote:
             print(f"  {path}")
         for row in warnings:
             print(f"warning: {row['message']}", file=sys.stderr)
-        if telemetry.get("present"):
-            print(f"✓ rtk telemetry disable attempted (disabled={str(telemetry.get('disabled')).lower()})")
     return 0
 
 

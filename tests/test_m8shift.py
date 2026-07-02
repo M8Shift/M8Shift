@@ -5210,7 +5210,7 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         d = self._project()
         _rtk, marker = self._write_fake_rtk(d)
         payload = self._adapters_init(d)
-        self.assertFalse(payload["rtk_telemetry"]["present"])
+        self.assertNotIn("rtk_telemetry", payload)
         self.assertFalse(os.path.exists(marker), "unpinned project-local rtk must not be executed")
         self.assertNotIn("trusted_executable", self._rtk_manifest(d))
 
@@ -5219,7 +5219,7 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         rtk, marker = self._write_fake_rtk(d)
         self._write_provenance(d, rtk)
         payload = self._adapters_init(d)
-        self.assertTrue(payload["rtk_telemetry"]["present"])
+        self.assertNotIn("rtk_telemetry", payload)
         self.assertTrue(os.path.exists(marker))
         self.assertTrue(any(row["check"] == "adapter.project_local_pin" for row in payload["warnings"]))
         adapter = self._rtk_manifest(d)
@@ -5231,7 +5231,7 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         rtk, marker = self._write_fake_rtk(d, filename="rtk.exe")
         self._write_provenance(d, rtk)
         payload = self._adapters_init(d)
-        self.assertFalse(payload["rtk_telemetry"]["present"])
+        self.assertNotIn("rtk_telemetry", payload)
         self.assertFalse(os.path.exists(marker))
         self.assertNotIn("trusted_executable", self._rtk_manifest(d))
 
@@ -5246,7 +5246,7 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         rtk, marker = self._write_fake_rtk(d, bindir=os.path.join(d, ".m8shift", "bin"))
         self._write_provenance(d, rtk)
         payload = self._adapters_init(d)
-        self.assertFalse(payload["rtk_telemetry"]["present"])
+        self.assertNotIn("rtk_telemetry", payload)
         self.assertFalse(os.path.exists(marker))
         self.assertNotIn("trusted_executable", self._rtk_manifest(d))
 

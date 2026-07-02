@@ -155,7 +155,7 @@ class TestContextInitDoctor(ContextBase):
         payload = json.loads(dr.stdout)
         self.assertTrue(payload["rtk"]["present"])
         self.assertTrue(payload["rtk"]["pinned"])
-        self.assertEqual(payload["rtk"]["telemetry"]["state"], "disabled")
+        self.assertEqual(payload["rtk"]["telemetry"]["state"], "not-reported")
 
     def test_status_and_doctor_show_rtk_state_and_last_pack_ratio(self):
         off = self.ctx("status")
