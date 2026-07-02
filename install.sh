@@ -29,6 +29,8 @@ RTK_VERSION="${M8SHIFT_INSTALL_RTK_VERSION:-v0.43.0}"
 RTK_BASE_URL="${M8SHIFT_INSTALL_RTK_BASE_URL:-}"
 RTK_SOURCE_BUILD=0
 HEADROOM_PACKAGE="headroom-ai==0.28.0"
+HEADROOM_RUNTIME_PACKAGE="onnxruntime==1.27.0"
+HEADROOM_KOMPRESS_MODEL="chopratejas/kompress-v2-base"
 VERIFY_EXPLICIT=""   # --verify sets 1, --no-verify sets 0; otherwise env/default decide
 VERIFY_DOWNLOADS=1   # resolved after arg parsing (verification is ON by default)
 CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
@@ -83,8 +85,8 @@ M8Shift downloads the matching RTK release asset, verifies it against the
 same release tag's checksums.txt (GitHub/TLS trust model), installs it under
 .m8shift/bin, records local provenance, and identity-pins the adapter manifest.
 Cargo/Rust source builds are disabled unless --allow-source-build is explicit.
-Headroom is experimental, pinned to headroom-ai==0.28.0, downloads the Kompress
-model at install time, and remains explicit opt-in.
+Headroom is experimental, pinned to headroom-ai==0.28.0 + onnxruntime==1.27.0,
+downloads the Kompress model at install time, and remains explicit opt-in.
 EOF
 }
 
@@ -222,7 +224,7 @@ Prerequisites:
   required: Python 3.8+, git, and one downloader (curl, wget, or Python urllib).
   required for verification: sha256sum, shasum, or Python hashlib.
   optional RTK (--with-rtk): tar for macOS/Linux .tar.gz assets; unzip or Python zipfile for Git Bash/Windows .zip assets; Cargo/Rust only with --allow-source-build.
-  optional Headroom (--with-headroom): Python venv + pip; pinned headroom-ai==0.28.0, install-time Kompress model download/cache; macOS requires an arm64-native Python because no x86_64 wheel is available.
+  optional Headroom (--with-headroom): Python venv + pip; pinned headroom-ai==0.28.0 + onnxruntime==1.27.0, install-time Kompress model download/cache; macOS requires an arm64-native Python because no x86_64 wheel is available.
 EOF
 }
 
@@ -387,7 +389,8 @@ Dry run plan:
   RTK source build fallback: $RTK_SOURCE_BUILD
   Headroom: $HEADROOM_CHOICE (experimental)
   Headroom package: $HEADROOM_PACKAGE
-  Headroom model: Kompress, downloaded/cached at install time; runtime stays offline
+  Headroom runtime: $HEADROOM_RUNTIME_PACKAGE
+  Headroom model: $HEADROOM_KOMPRESS_MODEL, downloaded/cached at install time; runtime stays offline
 
 No files were downloaded or written.
 EOF
@@ -730,31 +733,23 @@ require_headroom_python_arch() {
 
 headroom_preload_model() {
   local hp="$1"
-  HEADROOM_OFFLINE=0 HF_HUB_DISABLE_TELEMETRY=1 "$hp" - <<'PY'
-import importlib
+  HEADROOM_OFFLINE=0 HF_HUB_DISABLE_TELEMETRY=1 "$hp" - "$HEADROOM_KOMPRESS_MODEL" <<'PY'
 import sys
 
-candidates = [
-    ("headroom.transforms.kompress", "KompressCompressor"),
-    ("headroom.compress.kompress", "KompressCompressor"),
-    ("headroom.kompress", "KompressCompressor"),
-]
-last = None
-for module_name, class_name in candidates:
-    try:
-        module = importlib.import_module(module_name)
-        cls = getattr(module, class_name)
-        compressor = cls()
-        preload = getattr(compressor, "preload", None)
-        if not callable(preload):
-            raise RuntimeError(f"{module_name}.{class_name}.preload is not callable")
-        preload(allow_download=True)
-        print(f"preloaded {module_name}.{class_name}")
-        sys.exit(0)
-    except Exception as exc:
-        last = f"{module_name}.{class_name}: {type(exc).__name__}: {exc}"
-print(last or "KompressCompressor not found", file=sys.stderr)
-sys.exit(1)
+model_id = sys.argv[1]
+try:
+    from headroom.transforms.kompress_compressor import ensure_background_download
+except Exception as exc:
+    print(f"headroom.transforms.kompress_compressor.ensure_background_download unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    ensure_background_download(model_id=model_id)
+except Exception as exc:
+    print(f"Kompress model download/cache failed for {model_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"preloaded Kompress model {model_id}")
 PY
 }
 
@@ -781,7 +776,8 @@ write_headroom_provenance() {
   local out_path="$2"
   local sha
   sha="$(file_sha256 "$launcher")"
-  "$PYTHON_BIN" - "$launcher" "$sha" "$HEADROOM_PACKAGE" "$out_path" <<'PY'
+  M8SHIFT_HEADROOM_RUNTIME_PACKAGE="$HEADROOM_RUNTIME_PACKAGE" M8SHIFT_HEADROOM_MODEL="$HEADROOM_KOMPRESS_MODEL" \
+    "$PYTHON_BIN" - "$launcher" "$sha" "$HEADROOM_PACKAGE" "$out_path" <<'PY'
 import json
 import os
 import sys
@@ -793,7 +789,8 @@ payload = {
     "path": os.path.realpath(path),
     "sha256": sha,
     "package": package,
-    "model": "Kompress",
+    "runtime_package": os.environ.get("M8SHIFT_HEADROOM_RUNTIME_PACKAGE", ""),
+    "model": os.environ.get("M8SHIFT_HEADROOM_MODEL", "Kompress"),
     "model_cache": "downloaded at install time; runtime wrapper runs offline/cache-only",
     "source": "headroom-ai pinned pip package plus M8Shift wrapper launcher",
     "trust_model": "pip package pin over configured pip index plus local launcher SHA-256 identity",
@@ -806,7 +803,7 @@ PY
 
 install_headroom() {
   printf '→ optional Headroom install is EXPERIMENTAL and fail-closed\n'
-  printf '  package: %s\n' "$HEADROOM_PACKAGE"
+  printf '  package: %s + %s\n' "$HEADROOM_PACKAGE" "$HEADROOM_RUNTIME_PACKAGE"
   require_headroom_python_arch
   local venv
   venv="$(headroom_venv_dir)"
@@ -816,10 +813,10 @@ install_headroom() {
   hp="$(headroom_python)"
   [ -n "$hp" ] || headroom_fail "Headroom venv was created but no Python executable was found"
   "$hp" -m pip install --upgrade pip >/dev/null 2>&1 || headroom_fail "could not upgrade pip in Headroom venv"
-  "$hp" -m pip install "$HEADROOM_PACKAGE" || headroom_fail "could not install pinned $HEADROOM_PACKAGE"
-  printf '✓ %s installed in %s\n' "$HEADROOM_PACKAGE" "$venv"
+  "$hp" -m pip install "$HEADROOM_PACKAGE" "$HEADROOM_RUNTIME_PACKAGE" || headroom_fail "could not install pinned $HEADROOM_PACKAGE + $HEADROOM_RUNTIME_PACKAGE"
+  printf '✓ %s + %s installed in %s\n' "$HEADROOM_PACKAGE" "$HEADROOM_RUNTIME_PACKAGE" "$venv"
   printf '→ downloading/caching Kompress model for offline runtime\n'
-  headroom_preload_model "$hp" || headroom_fail "could not preload Kompress model; Headroom runtime would not be offline-ready"
+  headroom_preload_model "$hp" || headroom_fail "could not preload Kompress model $HEADROOM_KOMPRESS_MODEL; Headroom runtime would not be offline-ready"
   local hbin
   hbin="$(headroom_bin_dir)"
   [ -n "$hbin" ] || headroom_fail "Headroom venv bin directory not found"

@@ -5088,7 +5088,16 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         self.assertIn("RTK: yes", result.stdout)
         self.assertIn("Headroom: yes", result.stdout)
         self.assertIn("headroom-ai==0.28.0", result.stdout)
-        self.assertIn("Kompress", result.stdout)
+        self.assertIn("onnxruntime==1.27.0", result.stdout)
+        self.assertIn("chopratejas/kompress-v2-base", result.stdout)
+
+    def test_with_headroom_installer_uses_verified_kompress_preload_contract(self):
+        with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn("headroom.transforms.kompress_compressor", body)
+        self.assertIn("ensure_background_download(model_id=model_id)", body)
+        self.assertIn("onnxruntime==1.27.0", body)
+        self.assertIn("chopratejas/kompress-v2-base", body)
 
     def test_with_headroom_rejects_macos_x86_64_python_clearly(self):
         target = tempfile.mkdtemp(prefix="m8shift-headroom-x86-")
