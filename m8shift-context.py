@@ -1360,9 +1360,18 @@ def project_local_pin_warnings(root):
             warnings.append(finding(
                 "warning",
                 "adapter.project_local_pin",
-                f"{name}: trusted executable is project-local ({path}); this is accepted only for installer-provenanced tools",
+                f"{name}: trusted executable is project-local; this is accepted only for installer-provenanced tools",
             ))
     return warnings
+
+
+def diagnostic_path(root, path):
+    if not path:
+        return ""
+    real = os.path.realpath(path)
+    if is_path_under(real, root):
+        return rel(root, real)
+    return os.path.basename(real)
 
 
 def adapter_findings(manifest, check_executable=True):
@@ -1465,13 +1474,13 @@ def adapter_identity_findings(manifest, program, resolved):
         return [finding("error", "adapter.trusted_executable", f"{name}: trusted executable sha256 is invalid")]
     real = os.path.realpath(resolved)
     if real != expected_path:
-        return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} resolved to {real}, expected {expected_path}")]
+        return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} resolved to a different path than the expected trusted identity")]
     try:
         actual_sha = sha256_file(real)
     except (OSError, ValueError) as e:
-        return [finding("error", "adapter.program_identity_mismatch", f"{name}: cannot hash executable {program!r}: {e}")]
+        return [finding("error", "adapter.program_identity_mismatch", f"{name}: cannot hash executable {program!r}: {type(e).__name__}")]
     if actual_sha != expected_sha:
-        return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} sha256 {actual_sha} does not match trusted sha256 {expected_sha}")]
+        return [finding("error", "adapter.program_identity_mismatch", f"{name}: executable {program!r} sha256 does not match trusted sha256")]
     return []
 
 
@@ -2332,7 +2341,7 @@ def trusted_adapter_executable(root, adapter_name, program):
     try:
         actual_sha = sha256_file(real)
     except (OSError, ValueError) as e:
-        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: cannot hash trusted executable: {e}; telemetry command skipped")]
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: cannot hash trusted executable ({type(e).__name__}); telemetry command skipped")]
     if actual_sha != expected_sha:
         return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: trusted executable hash drift; telemetry command skipped")]
     return real, findings
@@ -2341,7 +2350,7 @@ def trusted_adapter_executable(root, adapter_name, program):
 def rtk_telemetry_disable(root):
     resolved, findings = trusted_adapter_executable(root, "rtk-shell-output", "rtk")
     if not resolved:
-        return {"present": False, "disabled": False, "detail": "rtk not identity-pinned; telemetry command skipped", "findings": findings}
+        return {"present": False, "disabled": False, "detail": "rtk not identity-pinned; telemetry command skipped"}
     try:
         proc = subprocess.run(
             [resolved, "telemetry", "disable"],
@@ -2351,21 +2360,20 @@ def rtk_telemetry_disable(root):
             env={"PATH": os.environ.get("PATH", os.defpath)},
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        return {"present": True, "disabled": False, "path": os.path.realpath(resolved), "detail": str(e)}
+        return {"present": True, "disabled": False, "path": diagnostic_path(root, resolved), "detail": type(e).__name__}
     return {
         "present": True,
         "disabled": proc.returncode == 0,
-        "path": os.path.realpath(resolved),
+        "path": diagnostic_path(root, resolved),
         "returncode": proc.returncode,
         "detail": (proc.stdout or proc.stderr).strip(),
-        "findings": findings,
     }
 
 
 def rtk_telemetry_status(root):
     resolved, findings = trusted_adapter_executable(root, "rtk-shell-output", "rtk")
     if not resolved:
-        return {"present": False, "state": "absent", "detail": "rtk not identity-pinned; telemetry command skipped", "findings": findings}
+        return {"present": False, "state": "absent", "detail": "rtk not identity-pinned; telemetry command skipped"}
     try:
         proc = subprocess.run(
             [resolved, "telemetry", "status"],
@@ -2375,7 +2383,7 @@ def rtk_telemetry_status(root):
             env={"PATH": os.environ.get("PATH", os.defpath)},
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        return {"present": True, "state": "unknown", "path": os.path.realpath(resolved), "detail": str(e)}
+        return {"present": True, "state": "unknown", "path": diagnostic_path(root, resolved), "detail": type(e).__name__}
     detail = (proc.stdout or proc.stderr).strip()
     lowered = detail.lower()
     if "disabled" in lowered or "off" in lowered:
@@ -2387,10 +2395,9 @@ def rtk_telemetry_status(root):
     return {
         "present": True,
         "state": state,
-        "path": os.path.realpath(resolved),
+        "path": diagnostic_path(root, resolved),
         "returncode": proc.returncode,
         "detail": detail,
-        "findings": findings,
     }
 
 
@@ -2402,7 +2409,7 @@ def rtk_status(root):
     status = {
         "present": bool(resolved),
         "pinned": False,
-        "path": os.path.realpath(resolved) if resolved else "",
+        "path": diagnostic_path(root, resolved) if resolved else "",
         "telemetry": rtk_telemetry_status(root),
         "network": "M8Shift uses RTK only as a local argv subprocess and disables telemetry on context setup.",
         "last_pack": last_pack,
