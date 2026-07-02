@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.40.0 — 2026-07-02
+
+Release scope:
+
+- #82 / RFC 037 follow-up — Headroom remains an optional operator experiment:
+  `compress --backend auto` now keeps broad context types on the builtin digest
+  unless `.m8shift/context-compression.json` explicitly sets
+  `backends.headroom_ext.auto_enabled: true`.
+- Explicit `--backend headroom_ext` is still honored for pinned adapter
+  experiments and keeps the existing fail-closed/reference-only behavior.
+- Future official Headroom wrappers must force offline/cache-only execution
+  (`HEADROOM_OFFLINE=1`, `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`) and
+  refuse to run unless the model is already cached.
+
+Validation:
+
+- Added tests for pinned Headroom + auto broad content with and without explicit
+  config opt-in, explicit Headroom backend selection, absent/unpinned Headroom
+  degradation, and drifted Headroom manifests.
+- Recorded the follow-up library-mode measurement: `headroom-ai==0.28.0`
+  can run in-process with a cached ONNX model, but the exploratory comparison
+  is not like-for-like: builtin is a lossy digest plus mandatory raw retrieval,
+  while Headroom is closer to a near-lossless conversation compressor. The
+  default remains builtin because that matches M8Shift's handoff model.
+- Lockstep version surfaces bumped from `3.39.0` to `3.40.0` across distributed
+  scripts and tests.
+
 ## v3.39.0 — 2026-07-01
 
 Release scope:
