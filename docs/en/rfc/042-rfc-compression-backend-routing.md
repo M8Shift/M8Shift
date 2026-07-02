@@ -13,11 +13,14 @@ can retrieve the raw, and the query shape — not by content-type**. builtin (a 
 retrieval) and Headroom (near-lossless, keeps ~45%) are not competitors; they are optimal in
 *different* regimes. This RFC defines the routing signal and decision rule to select between them
 automatically. **M8Shift's operator priority is explicit: preservation + precision rank above token
-efficiency** (losing information loses the meaning of the work). Under that priority, **when Headroom
-is installed and identity-pinned it is the *preferred* broad-context backend** (Round 3 measured it
-highest on precision, with full preservation and zero hallucinations); **builtin+retrieval is the
-fallback** when Headroom is absent/unpinned — comparable, reliable, and losing no data (the raw stays
-retrievable). This flips the earlier efficiency-first default.
+efficiency** (losing information loses the meaning of the work). Under that priority, **Headroom is
+the *preferred* backend in the regimes where it measurably wins** — **large** contexts that are
+inline / no-retrieval / whole-content / many-rapid-facts — when it is installed and identity-pinned
+(Round 3 measured it highest on single-pass precision, full inline preservation, zero hallucinations).
+**builtin+retrieval stays preferred for retrieve-capable few-fact work** (it tied findability 9/9 at
+~1/5 the tokens with no probed-fact loss — the right default there, not a fallback) and is the
+fail-closed fallback when Headroom is absent/unpinned. This *refines* — it does **not** globally flip
+— the earlier efficiency-first default.
 
 ## Motivation
 
@@ -37,9 +40,10 @@ the determinant that actually decides which wins. A true hybrid routes on that d
 
 | Condition | Route to | Why |
 |-----------|----------|-----|
-| **Headroom installed + identity-pinned** | **Headroom** | precision-first priority: Headroom measured highest precision + full preservation, 0 hallucinations |
-| **Headroom absent / unpinned / errored / config problem** | **builtin + retrieval** (fail-closed) | comparable, reliable, **no data loss** (raw retrievable); retrieval is mandatory (digest-alone is near-useless) |
-| **Short** context (below `compress_above_tokens`) — even with Headroom pinned | **builtin** | Headroom's precision/preservation edge is negligible on short input; keep the ~5× token saving |
+| **Large** ctx **AND** (`inline`/no-retrieval **OR** `--whole-content` **OR** many-rapid-facts) **AND** Headroom installed + identity-pinned | **Headroom** | the *measured* Headroom-winning regime: highest single-pass precision + full inline preservation, 0 hallucinations, retrieval can't cheaply cover it |
+| **Retrieve-capable + few-fact** query (any length, **even long**) | **builtin + retrieval** | tied findability 9/9 at ~1/5 tokens, no probed-fact loss — the *right default* here, **not** a fallback; retrieval mandatory (digest-alone near-useless) |
+| **Short** context (below `compress_above_tokens`) | **builtin** | Headroom's precision edge is negligible on short input; keep the ~5× token saving |
+| **Headroom absent / unpinned / errored / config problem, or unknown signal** | **builtin + retrieval** (fail-closed) | comparable, reliable, **no data loss** (raw retrievable); default until the Phase C/D gate opens |
 
 Note: content-type (shell/tool vs broad) still selects the RTK vs native *family* as in RFC 037;
 this rule governs the builtin-vs-Headroom choice *within* the broad family, under the precision-first
@@ -56,10 +60,14 @@ common case), never inferred silently:
   regime.
 - `--whole-content` (default off) — the consumer needs most of the content at once (not a few
   facts) ⇒ Headroom regime.
-- **context size** — short contexts (below the RFC 037 `compress_above_tokens` threshold) barely
-  benefit from either backend and carry no real precision risk; route them to **builtin** (efficiency),
-  reserving **Headroom** for **large** contexts where its preservation/precision edge actually matters.
-  (Operator framing: short → internal for efficiency; long → Headroom to preserve.)
+- **context size** — length is a **risk *amplifier*, not a standalone determinant**. Short contexts
+  (below the RFC 037 `compress_above_tokens` threshold) carry no real precision risk → **builtin**
+  (efficiency). Large contexts *raise the stakes* of the access-mode / query-shape choice above, but
+  do **not** by themselves route to Headroom: the Round 3 case is long (100k) and **still** favored
+  builtin+retrieval for retrieve-capable few-fact queries. So **long + inline/whole-content/many-fact →
+  Headroom; long + retrieve + few-fact → still builtin+retrieval**. (The operator framing "short →
+  internal, long → Headroom" holds only once retrieval is unavailable or the task needs broad inline
+  recall.)
 - Callers that know their consumer set these (e.g. a one-shot handoff to an external agent →
   `--access-mode inline`; a local relay handoff → `retrieve`). Absent hints ⇒ `retrieve` +
   few-facts ⇒ builtin. **The common M8Shift path stays builtin with zero configuration.**
@@ -78,7 +86,8 @@ the shipped default is a version-gated change (Phase D).
 
 stdlib-only · advisory · no network/daemon (Headroom runs only via the RFC 034 argv-only,
 identity-pinned, output-capped runner) · **fail-closed to builtin** on any unknown signal, absent /
-unpinned / errored Headroom, or config problem. Redaction-before-store and "compression never
+unpinned / errored Headroom, or config problem. The online `pip install` for #84 is **measurement-harness
+setup only**, never shipped runtime behavior — the runtime path stays offline/cache-only. Redaction-before-store and "compression never
 starves verification" (RFC 033 §9) are unchanged: the retrieve path is the safety net, and the
 router never sends a form that drops content a consumer cannot recover.
 
