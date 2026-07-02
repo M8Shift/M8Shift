@@ -197,7 +197,7 @@ flowchart TB
     class RT,CX,WT,I18,HR companion
 
     RTK["⚡ RTK — optional external filter<br/>argv-only · telemetry off · SHA-256 pinned<br/>default-if-pinned shell-output compression"]
-    HD["🧠 Headroom-compatible command — optional external transform<br/>argv-only · one-shot · SHA-256 pinned<br/>explicit broad-context compression"]
+    HD["🧠 Headroom-compatible command — optional external transform<br/>argv-only · one-shot · SHA-256 pinned<br/>explicit / manual opt-in broad-context compression"]
     class RTK,HD external
 
     subgraph TRACE["📋 Traceability"]
@@ -225,8 +225,9 @@ retention) without ever holding the pen. **`m8shift-context.py`** compresses the
 into referenced packs and compression records. When [RTK](rfc/034-rfc-companion-adapter-interface.md)
 is present and identity-pinned, it runs it as an argv-only, telemetry-off shell-output filter; when
 an adapter-compatible Headroom command is present, identity-pinned, and explicitly selected with
-`--backend headroom_ext`, it may run `headroom_ext` as an argv-only broad-context transform; RFC 042
-signals are recorded but do not auto-route to Headroom until the measured gate opens.
+`--backend headroom_ext` or manually enabled through `backends.headroom_ext.auto_enabled`, it may run
+`headroom_ext` as an argv-only broad-context transform; RFC 042 access-mode signals are recorded but
+do not drive routing until the measured gate opens.
 **`m8shift-worktree.py`**
 is the only sanctioned parallel-write path (degree-2), serialising merges through the canonical
 `LOCK`. **`headless_runner.py`** executes one hardened, immutable run plan and verifies the `LOCK`

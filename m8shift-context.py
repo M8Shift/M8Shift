@@ -425,6 +425,16 @@ def write_text(path, text):
     os.replace(tmp, path)
 
 
+def write_pending_text(path, text):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    pending = f"{path}.pending.{os.getpid()}"
+    tmp = f"{pending}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, pending)
+    return pending
+
+
 def write_json(path, data):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
@@ -1005,7 +1015,7 @@ def cmd_init(args):
             "Packs are operational views only; verification uses original sources.\n"
             "Compression records store redacted raw references and compact digests under `compression/`.\n"
             "When RTK is present and identity-pinned, packs may use the RTK shell-output adapter by default; use `pack --adapter native` to opt out.\n"
-            "Headroom `headroom_ext` is an operator experiment: use explicit `compress --backend headroom_ext`; `--access-mode` / `--whole-content` are recorded as advisory routing signals but do not auto-route to Headroom until the evidence gate opens.\n"
+            "Headroom `headroom_ext` is an operator experiment: use explicit `compress --backend headroom_ext`, or `compress --backend auto` for broad records only when `.m8shift/context-compression.json` sets `backends.headroom_ext.auto_enabled` to true. `--access-mode` / `--whole-content` are recorded as advisory routing signals but do not drive routing until the evidence gate opens.\n"
         ))
         wrote.append(rel(root, readme))
     telemetry = rtk_telemetry_disable()
@@ -1940,7 +1950,7 @@ def compression_headroom_result(root, args, redacted, config, explicit=False):
 
 
 def compact_backend(root, args, redacted, config, config_fail_safe):
-    routing_signals = compression_routing_signals(args)
+    compression_routing_signals(args)  # RFC 042 Phase B: normalize/read only; no signal-driven routing before Phase D.
     if config_fail_safe:
         return compression_backend_result(filtered=None, error="missing or malformed compression config", backend=args.backend)
     if not ADAPTER_NAME_RE.fullmatch(args.backend or ""):
@@ -1955,14 +1965,12 @@ def compact_backend(root, args, redacted, config, config_fail_safe):
         backend = COMPRESSION_AUTO_BACKEND_BY_CONTENT_TYPE.get(args.type)
         if backend == "rtk-shell-output":
             return compression_rtk_result(root, args, redacted, config, explicit=False)
-        if args.type in COMPRESSION_HEADROOM_CONTENT_TYPES and (
-            routing_signals["access_mode"] == "inline" or routing_signals["whole_content"]
-        ):
-            # RFC 042 Phase B only plumbs these advisory signals. Until the
-            # Phase D evidence gate opens, broad-context auto routing remains
-            # fail-closed to builtin. Explicit --backend headroom_ext is still
-            # honored above.
-            return builtin_backend_result(args, redacted, config)
+        # RFC 042 Phase B does not route on access-mode or whole-content until
+        # the Phase D evidence gate opens. The legacy v3.40.0 manual opt-in
+        # path remains effective and explicit --backend headroom_ext is honored
+        # above.
+        if args.type in COMPRESSION_HEADROOM_CONTENT_TYPES and compression_backend_auto_enabled(config, "headroom_ext"):
+            return compression_headroom_result(root, args, redacted, config, explicit=False)
         return builtin_backend_result(args, redacted, config)
     return compression_backend_result(filtered=None, error=f"unsupported or unavailable backend {args.backend!r}", backend=args.backend)
 
@@ -1986,7 +1994,8 @@ def cmd_compress(args):
     raw_path = record_raw_path(root, args.id)
     compact_path = record_compact_path(root, args.id)
     record_path = record_json_path(root, args.id)
-    write_text(raw_path, redacted)
+    raw_pending = write_pending_text(raw_path, redacted)
+    compact_pending = None
     raw_ref = rel(root, raw_path)
     compact_ref = rel(root, compact_path)
 
@@ -2004,7 +2013,7 @@ def cmd_compress(args):
         filtered = reference_only_text(args.id, raw_ref, backend_error)
     else:
         signals, repeated_groups, omitted_lines = extras
-    write_text(compact_path, filtered)
+    compact_pending = write_pending_text(compact_path, filtered)
 
     result = adapter_result(
         manifest,
@@ -2070,6 +2079,10 @@ def cmd_compress(args):
         "findings": config_findings + backend_findings,
         "warning": "Compressed context is operational orientation, not evidence; verify against bounded raw references.",
     }
+    os.replace(raw_pending, raw_path)
+    raw_pending = None
+    os.replace(compact_pending, compact_path)
+    compact_pending = None
     write_json(record_path, record)
     if args.json:
         print(json.dumps(record, ensure_ascii=False, sort_keys=True))
@@ -2138,6 +2151,30 @@ def bounded_grep(text, pattern, config, limit):
     return matches, scanned_truncated
 
 
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def expected_retrieve_sha256(record, source):
+    if source == "raw":
+        raw_ref = record.get("raw_output_reference")
+        if isinstance(raw_ref, dict):
+            return raw_ref.get("sha256") or ""
+        return ""
+    adapter = record.get("adapter_result")
+    if isinstance(adapter, dict):
+        return adapter.get("filtered_sha256") or ""
+    return ""
+
+
+def verify_retrieve_sha256(record_id, source, text, expected):
+    label = "raw_output_reference.sha256" if source == "raw" else "adapter_result.filtered_sha256"
+    if not isinstance(expected, str) or not SHA256_RE.fullmatch(expected):
+        die(f"record {record_id} missing valid {label}; refusing to serve {source}")
+    actual = sha256_text(text)
+    if actual != expected:
+        die(f"record {record_id} {source} hash mismatch; refusing to serve evidence")
+
+
 def cmd_retrieve(args):
     root = root_from(args)
     record_id = valid_record_id(args.id)
@@ -2149,6 +2186,7 @@ def cmd_retrieve(args):
     source = "compact" if args.compact else "raw"
     path = record_compact_path(root, record_id) if args.compact else record_raw_path(root, record_id)
     text = read_text(path)
+    verify_retrieve_sha256(record_id, source, text, expected_retrieve_sha256(record, source))
     start, end = parse_line_selector(args.lines, config)
     max_count = end - start + 1
     if args.grep:
