@@ -75,12 +75,15 @@ common case), never inferred silently:
 ## Evidence gate (do not route on a hypothesis)
 
 The precision-first preference rests on **directional** evidence (Round 3: N=9, 1 run, 1 genre, 1
-size — a +1-2 precision margin). It is a **fail-safe priority choice**: builtin+retrieval loses no
-data, so preferring Headroom-when-pinned cannot lose information versus the fallback. Two guards:
+size — a +1-2 precision margin). It is a **fail-safe priority choice**: in the retrieve-capable
+benchmark, builtin+retrieval lost **no probed facts** while raw references stayed
+retained/authorized/retrievable — so preferring **Headroom in its gated regimes** is a *conditional
+priority choice*, **not a general no-loss proof**, and it does not lose recoverable information versus
+the retrieve-capable fallback. Two guards:
 (a) Headroom is used only when **identity-pinned** (RFC 034) and offline-safe; (b) the full rigorous
 benchmark (#84 — incl. no-retrieval / whole-content regimes) **firms or revises** the margin, and the
-policy is reversible if fuller measurement contradicts it. Enabling Headroom-preferred-when-pinned as
-the shipped default is a version-gated change (Phase D).
+policy is reversible if fuller measurement contradicts it. Enabling Headroom-preferred-in-its-gated-regimes
+as the shipped default is a version-gated change (Phase D).
 
 ## Charter
 
