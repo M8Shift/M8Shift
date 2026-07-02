@@ -173,9 +173,11 @@ runner policy, but not the RTK binary. See [rtk-shell-output-policy.md](rtk-shel
 
 Both agents — Claude (analysis) and Codex (independent review) — previously agreed **not** to run
 Round 3 on the current native pack. That judgement still holds for the pack itself. In v3.39.0
-M8Shift added only the optional `headroom_ext` backend dispatch for **broad raw context records**
-(`conversation`, `history`, `file`, `report`, `diff`, `large-context`) when an operator installs
-and identity-pins an adapter-compatible local `headroom` command.
+M8Shift added the optional `headroom_ext` backend hook for **broad raw context records**
+(`conversation`, `history`, `file`, `report`, `diff`, `large-context`). Since v3.40.0, `auto`
+keeps those broad records on the builtin digest unless an operator explicitly sets
+`backends.headroom_ext.auto_enabled: true` and identity-pins an adapter-compatible local
+`headroom` command.
 
 Reasoning:
 

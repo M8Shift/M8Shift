@@ -1,6 +1,6 @@
 # RFC 037 — Agent Context Compression Backends and Digest-Based Handoffs
 
-- Status: draft; Phase C local records + builtin/RTK backend dispatch shipped in v3.38.0; Phase D optional Headroom adapter dispatch shipped in v3.39.0
+- Status: draft; Phase C local records + builtin/RTK backend dispatch shipped in v3.38.0; Phase D optional Headroom adapter dispatch shipped in v3.39.0; Headroom auto opt-in gate shipped in v3.40.0
 - Target stage: optional context companion (`m8shift-context.py`) — policy + file protocol
 - Builds on: [RFC 033 Context Economy](033-rfc-context-economy.md) (policy), [RFC 034 Companion Adapter Interface](034-rfc-companion-adapter-interface.md) (mechanism), [RFC 026 sidecar retention](026-rfc-sidecar-retention.md)
 - Related: [RFC 036 Token-window exhaustion](036-rfc-token-window-exhaustion.md), [RFC 040 AI session usage monitoring](040-rfc-ai-session-usage-monitoring.md)
@@ -143,19 +143,19 @@ Rules for every backend:
 - **retrieval is local filesystem reads** of the `raw_ref`/`compact_ref` written under `.m8shift/`.
   There is no external retrieval service.
 
-Default backend priority: **builtin → RTK (for shell/tool content types) → Headroom (broad
-context, if pinned) → reference-only**. The default `default_backend` is **`builtin`**, not an
-external tool.
+Default backend priority: **builtin → RTK (for shell/tool content types) → Headroom only when
+explicitly selected or config-opted-in → reference-only**. The default `default_backend` is
+**`builtin`**, not an external tool.
 
 > Naming note: "Headroom" here is the external compression tool; it is unrelated to the internal
 > `m8shift-runtime.py headroom` token-window guard (RFC 036). Backend id: `headroom_ext`.
 
 The shipped `auto` dispatch map is explicit:
 
-| Content type | Auto backend when identity-pinned | Fallback |
-|--------------|-----------------------------------|----------|
+| Content type | Auto backend | Fallback |
+|--------------|--------------|----------|
 | `shell_output`, `test_output`, `logs`, `log`, `git_output` | `rtk-shell-output` | builtin digest |
-| `conversation`, `history`, `file`, `report`, `diff`, `large-context`, `large_context` | `headroom_ext` | builtin digest |
+| `conversation`, `history`, `file`, `report`, `diff`, `large-context`, `large_context` | builtin digest unless `backends.headroom_ext.auto_enabled: true`; then `headroom_ext` if identity-pinned | builtin digest |
 | any other label | builtin digest | reference-only only on config/backend failure |
 
 `headroom_ext` is intentionally a **local adapter contract**, not a Headroom proxy/MCP launcher.
@@ -260,8 +260,11 @@ Normative — none of these may be violated:
 
 ## Configuration — `.m8shift/context-compression.json`
 
-Policy-only knobs. **Backend enablement, identity (path + sha256), and modes are owned by the
-RFC 034 adapter manifests** under `.m8shift/context/adapters/`, not duplicated here.
+Policy knobs. **Backend identity (path + sha256), commands, and modes are owned by the
+RFC 034 adapter manifests** under `.m8shift/context/adapters/`, not duplicated here. The one
+exception is `backends.headroom_ext.auto_enabled`, which is an explicit product opt-in for
+automatic broad-context Headroom experiments; explicit `--backend headroom_ext` does not require
+that opt-in.
 
 ```json
 {
@@ -277,7 +280,9 @@ RFC 034 adapter manifests** under `.m8shift/context/adapters/`, not duplicated h
     "include_token_estimates": true,
     "never_compress": ["secrets", "credentials", "private_keys", "tokens"]
   },
-  "backends": { "rtk": { "scope": ["shell_output", "test_output", "logs", "git_output"] } }
+  "backends": {
+    "headroom_ext": { "auto_enabled": false }
+  }
 }
 ```
 
@@ -373,8 +378,8 @@ RFC 037's first implementation is accepted when M8Shift can:
 3. Generate/update a `context_digest` for a task and a `handoff_digest` between agents.
 4. Retrieve raw content by validated record-id with **mandatory bounded** selectors.
 5. Use the builtin fallback with no external dependency.
-6. Optionally detect and use RTK (`shell_output_filter`) and Headroom (`context_transform`) **as
-   RFC 034 identity-pinned adapters**, fail-closed when absent/unpinned.
+6. Optionally detect and use RTK (`shell_output_filter`) and explicit/config-opted-in Headroom
+   (`context_transform`) **as RFC 034 identity-pinned adapters**, fail-closed when absent/unpinned.
 7. Report estimated raw/sent/avoided tokens, labelled as estimates.
 8. Keep compression policy under M8Shift control, degrade **fail-closed to reference-only**, and
    never remove context that verification needs.

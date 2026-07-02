@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.39.0"
+VERSION = "3.40.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -62,7 +62,6 @@ COMPRESSION_HEADROOM_CONTENT_TYPES = {
 }
 COMPRESSION_AUTO_BACKEND_BY_CONTENT_TYPE = {
     **{name: "rtk-shell-output" for name in COMPRESSION_RTK_CONTENT_TYPES},
-    **{name: "headroom_ext" for name in COMPRESSION_HEADROOM_CONTENT_TYPES},
 }
 ADAPTER_TYPES = {"shell_output_filter", "context_transform", "reporter", "doctor_check"}
 ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift_command"}
@@ -177,6 +176,11 @@ DEFAULT_COMPRESSION_CONFIG = {
     },
     "redaction": {
         "pattern_set": "m8shift.secret_patterns.v2",
+    },
+    "backends": {
+        "headroom_ext": {
+            "auto_enabled": False,
+        },
     },
 }
 
@@ -585,6 +589,20 @@ def compression_retrieval(config):
     return retrieval if isinstance(retrieval, dict) else {}
 
 
+def compression_backends(config):
+    backends = config.get("backends")
+    return backends if isinstance(backends, dict) else {}
+
+
+def compression_backend_config(config, backend):
+    backend_config = compression_backends(config).get(backend)
+    return backend_config if isinstance(backend_config, dict) else {}
+
+
+def compression_backend_auto_enabled(config, backend):
+    return bool(compression_backend_config(config, backend).get("auto_enabled", False))
+
+
 def bounded_int(value, default, minimum, maximum):
     try:
         value = int(value)
@@ -973,7 +991,7 @@ def cmd_init(args):
             "Packs are operational views only; verification uses original sources.\n"
             "Compression records store redacted raw references and compact digests under `compression/`.\n"
             "When RTK is present and identity-pinned, packs may use the RTK shell-output adapter by default; use `pack --adapter native` to opt out.\n"
-            "When an adapter-compatible Headroom command is present and identity-pinned, `compress --backend auto` may use `headroom_ext` for broad context records.\n"
+            "Headroom `headroom_ext` is an operator experiment: explicit `--backend headroom_ext`, or `compress --backend auto` only when `.m8shift/context-compression.json` sets `backends.headroom_ext.auto_enabled` to true.\n"
         ))
         wrote.append(rel(root, readme))
     telemetry = rtk_telemetry_disable()
@@ -1922,7 +1940,10 @@ def compact_backend(root, args, redacted, config, config_fail_safe):
         backend = COMPRESSION_AUTO_BACKEND_BY_CONTENT_TYPE.get(args.type)
         if backend == "rtk-shell-output":
             return compression_rtk_result(root, args, redacted, config, explicit=False)
-        if backend == "headroom_ext":
+        if (
+            args.type in COMPRESSION_HEADROOM_CONTENT_TYPES
+            and compression_backend_auto_enabled(config, "headroom_ext")
+        ):
             return compression_headroom_result(root, args, redacted, config, explicit=False)
         return builtin_backend_result(args, redacted, config)
     return compression_backend_result(filtered=None, error=f"unsupported or unavailable backend {args.backend!r}", backend=args.backend)
