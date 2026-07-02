@@ -216,17 +216,22 @@ of leaving `headroom_ext` as a contract-only adapter. The feasibility result is 
   download on first use. A M8Shift-compatible wrapper would therefore need to force offline/cache-only
   execution (`HEADROOM_OFFLINE=1`, `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`) and refuse to run
   unless the ONNX model is already installed.
-- **The real-token comparison did not justify promotion:** on the synthetic broad-context cases
-  below, Headroom's compact output was much larger than the builtin digest when counted with
-  `tiktoken` `o200k_base`. These are not final product benchmarks, but they are enough to block
-  a default wrapper promotion.
+- **The default decision is model-driven, not a Headroom rejection:** M8Shift's builtin compressor
+  is an aggressive, lossy **digest** paired with mandatory bounded raw retrieval. That is the
+  intended handoff model: send a small operational orientation, then retrieve evidence on demand.
+  Headroom's library path is closer to a near-lossless conversation compressor and solves a
+  different problem. A raw compact-token comparison between the two rewards builtin for dropping
+  information that remains available through `retrieve`, so it is not a like-for-like quality
+  benchmark.
 
-| Case | Raw `o200k_base` tokens | Builtin compact | Headroom compact | Verdict |
-|------|-------------------------:|----------------:|-----------------:|---------|
-| `conversation` | 19,800 | 1,829 | 14,651 | builtin much smaller |
-| `file` | 15,200 | 474 | 15,200 | Headroom no-op; builtin smaller |
-| `diff` | 14,599 | 1,081 | 14,599 | Headroom no-op; builtin smaller |
-| `report` | 17,500 | 748 | 12,237 | builtin much smaller |
+Exploratory measurements:
+
+| Case | Raw `o200k_base` tokens | Builtin compact | Headroom compact | Protocol note |
+|------|-------------------------:|----------------:|-----------------:|---------------|
+| `conversation` | 19,800 | 1,829 | 14,651 | Indicative only: builtin is a lossy digest + raw ref; Headroom keeps much more text. |
+| `report` | 17,500 | 748 | 12,237 | Indicative only: same lossy-digest vs near-lossless-compressor caveat. |
+| `file` | 15,200 | 474 | 15,200 | Struck from verdict: this raw blob is outside the conversation-message workload Headroom's one-function API targets. |
+| `diff` | 14,599 | 1,081 | 14,599 | Struck from verdict: this raw blob is outside the conversation-message workload Headroom's one-function API targets. |
 
 Test conditions:
 
@@ -235,13 +240,15 @@ Test conditions:
 - `KompressCompressor().preload(allow_download=False)` succeeded before the measured calls;
 - Headroom transforms observed: `router:text:0.70`, `router:kompress:0.73`, or `router:noop`;
 - token counts: `tiktoken.get_encoding("o200k_base")`;
+- no output-equivalence evaluation was completed;
 - Claude/Anthropic `count_tokens` was not measured in this pass, so no Claude-token gain is claimed.
 
-**Decision:** do not ship or promote an official Headroom wrapper until a representative workload
-shows a meaningful real-token gain over the builtin digest **and** passes the equivalence check.
-The existing `headroom_ext` adapter hook remains available for operator experiments, but M8Shift
-should not treat a local Headroom command as the preferred broad-context backend merely because it
-is installed.
+**Decision:** keep builtin as the automatic broad-context default because it matches M8Shift's
+handoff contract: tiny digest + always-retrievable redacted raw evidence. Do not promote an
+official Headroom wrapper until a representative conversation/report workload shows a meaningful
+real-token gain **within its own quality target** and passes the equivalence check. The existing
+`headroom_ext` adapter hook remains available for operator experiments, but M8Shift should not
+treat a local Headroom command as the preferred broad-context backend merely because it is installed.
 
 **Parked behind a concrete use case.** Headroom may become worth measuring for: large supporting
 source sections; archive / RAG retrieval bundles; reports exceeding the pack budget; or

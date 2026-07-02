@@ -20,9 +20,10 @@ Validation:
   config opt-in, explicit Headroom backend selection, absent/unpinned Headroom
   degradation, and drifted Headroom manifests.
 - Recorded the follow-up library-mode measurement: `headroom-ai==0.28.0`
-  can run in-process with a cached ONNX model, but its measured `o200k_base`
-  compact output was much larger than the builtin digest on the synthetic broad
-  contexts tested, so it is not promoted as a default broad compressor.
+  can run in-process with a cached ONNX model, but the exploratory comparison
+  is not like-for-like: builtin is a lossy digest plus mandatory raw retrieval,
+  while Headroom is closer to a near-lossless conversation compressor. The
+  default remains builtin because that matches M8Shift's handoff model.
 - Lockstep version surfaces bumped from `3.39.0` to `3.40.0` across distributed
   scripts and tests.
 
