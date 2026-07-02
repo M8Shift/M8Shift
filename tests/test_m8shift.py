@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.41.0"
+VERSION = "3.41.1"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -5152,6 +5152,71 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         with open(rtk, "rb") as fh:
             self.assertEqual(payload["trusted_executable"]["sha256"], hashlib.sha256(fh.read()).hexdigest())
 
+    def test_no_rtk_does_not_execute_project_local_rtk(self):
+        target = tempfile.mkdtemp(prefix="m8shift-rtk-planted-target-")
+        self.addCleanup(shutil.rmtree, target, True)
+        bindir = os.path.join(target, ".m8shift", "bin")
+        os.makedirs(bindir, exist_ok=True)
+        marker = os.path.join(target, "planted-rtk-executed.txt")
+        rtk = os.path.join(bindir, "rtk")
+        with open(rtk, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {marker!r}\n")
+        os.chmod(rtk, 0o755)
+
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--no-verify", "--no-worktree", "--no-init", "--no-rtk"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(os.path.exists(marker), "project-local RTK must not run without explicit RTK opt-in")
+
+    def _fake_uname_and_cargo_env(self, marker):
+        bindir = tempfile.mkdtemp(prefix="m8shift-fake-cargo-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        uname = os.path.join(bindir, "uname")
+        with open(uname, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\ncase \"$1\" in -m) echo riscv64 ;; *) echo Plan9 ;; esac\n")
+        cargo = os.path.join(bindir, "cargo")
+        with open(cargo, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {marker!r}\n")
+        os.chmod(uname, 0o755)
+        os.chmod(cargo, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        return env
+
+    def test_rtk_cargo_fallback_requires_explicit_flag(self):
+        target = tempfile.mkdtemp(prefix="m8shift-cargo-no-flag-")
+        self.addCleanup(shutil.rmtree, target, True)
+        marker = os.path.join(target, "cargo-called.txt")
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--no-verify", "--no-worktree", "--no-init", "--with-rtk"],
+            capture_output=True, text=True, env=self._fake_uname_and_cargo_env(marker),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(os.path.exists(marker), "cargo fallback must not run without --allow-source-build")
+
+    def test_rtk_cargo_fallback_is_tag_pinned_when_explicitly_allowed(self):
+        target = tempfile.mkdtemp(prefix="m8shift-cargo-allowed-")
+        self.addCleanup(shutil.rmtree, target, True)
+        marker = os.path.join(target, "cargo-called.txt")
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--no-verify", "--no-worktree", "--no-init", "--with-rtk", "--allow-source-build"],
+            capture_output=True, text=True, env=self._fake_uname_and_cargo_env(marker),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        with open(marker, encoding="utf-8") as fh:
+            calls = fh.read()
+        self.assertIn("install --git https://github.com/rtk-ai/rtk --tag v0.43.0 --locked rtk", calls)
+
 
 class TestContextLocalAdapterResolution(unittest.TestCase):
     def _project(self):
@@ -5193,9 +5258,9 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(provenance, fh)
 
-    def _adapters_init(self, d):
+    def _adapters_init(self, d, *extra):
         result = subprocess.run(
-            [sys.executable, "m8shift-context.py", "adapters", "init", "--force", "--json"],
+            [sys.executable, "m8shift-context.py", "adapters", "init", "--force", "--json", *extra],
             cwd=d, capture_output=True, text=True, env=self._env_without_global_rtk(),
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -5214,11 +5279,20 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         self.assertFalse(os.path.exists(marker), "unpinned project-local rtk must not be executed")
         self.assertNotIn("trusted_executable", self._rtk_manifest(d))
 
-    def test_project_local_rtk_with_installer_provenance_can_be_pinned_with_warning(self):
+    def test_project_local_rtk_with_installer_provenance_still_needs_explicit_opt_in(self):
         d = self._project()
         rtk, marker = self._write_fake_rtk(d)
         self._write_provenance(d, rtk)
         payload = self._adapters_init(d)
+        self.assertNotIn("rtk_telemetry", payload)
+        self.assertFalse(os.path.exists(marker))
+        self.assertNotIn("trusted_executable", self._rtk_manifest(d))
+
+    def test_project_local_rtk_with_installer_provenance_and_opt_in_can_be_pinned_with_warning(self):
+        d = self._project()
+        rtk, marker = self._write_fake_rtk(d)
+        self._write_provenance(d, rtk)
+        payload = self._adapters_init(d, "--allow-project-local-adapters")
         self.assertNotIn("rtk_telemetry", payload)
         self.assertTrue(os.path.exists(marker))
         self.assertTrue(any(row["check"] == "adapter.project_local_pin" for row in payload["warnings"]))

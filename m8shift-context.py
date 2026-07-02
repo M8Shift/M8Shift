@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.41.0"
+VERSION = "3.41.1"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -1001,7 +1001,7 @@ def cmd_init(args):
         path = os.path.join(adapters_dir(root), f"{name}.json")
         if os.path.exists(path) and not args.force:
             continue
-        write_json(path, default_adapter_manifest(name, allow_project_local=True))
+        write_json(path, default_adapter_manifest(name, allow_project_local=args.allow_project_local_adapters))
         wrote.append(rel(root, path))
     config_path = compression_config_path(root)
     if args.force or not os.path.exists(config_path):
@@ -1015,6 +1015,7 @@ def cmd_init(args):
             "Packs are operational views only; verification uses original sources.\n"
             "Compression records store redacted raw references and compact digests under `compression/`.\n"
             "When RTK is present and identity-pinned, packs may use the RTK shell-output adapter by default; use `pack --adapter native` to opt out.\n"
+            "Project-local adapter binaries under `.m8shift/bin` are ignored unless init is run with `--allow-project-local-adapters` after operator review.\n"
             "Headroom `headroom_ext` is an operator experiment: use explicit `compress --backend headroom_ext`, or `compress --backend auto` for broad records only when `.m8shift/context-compression.json` sets `backends.headroom_ext.auto_enabled` to true. `--access-mode` / `--whole-content` are recorded as advisory routing signals but do not drive routing until the evidence gate opens.\n"
         ))
         wrote.append(rel(root, readme))
@@ -1442,10 +1443,13 @@ def shutil_which(executable, include_local_bin=True):
     if os.name == "nt" and not executable.lower().endswith(".exe"):
         names.append(executable + ".exe")
     folders = [folder for folder in os.environ.get("PATH", os.defpath).split(os.pathsep) if folder]
+    local_bin_real = os.path.realpath(local_adapter_bin_dir())
     for folder in folders:
         for name in names:
             path = os.path.join(folder, name)
             if os.path.isfile(path) and os.access(path, os.X_OK):
+                if not include_local_bin and is_path_under(os.path.realpath(path), local_bin_real):
+                    continue
                 return path
     if include_local_bin:
         return safe_project_local_candidate(executable)
@@ -2435,7 +2439,7 @@ def cmd_adapters_init(args):
         path = adapter_path(root, name)
         if os.path.exists(path) and not args.force:
             continue
-        write_json(path, default_adapter_manifest(name, allow_project_local=True))
+        write_json(path, default_adapter_manifest(name, allow_project_local=args.allow_project_local_adapters))
         wrote.append(rel(root, path))
     warnings = project_local_pin_warnings(root)
     rtk_telemetry_disable(root)
@@ -2620,6 +2624,11 @@ def main(argv=None):
 
     si = sub.add_parser("init", help="create native context companion profile scaffold")
     si.add_argument("--force", action="store_true")
+    si.add_argument(
+        "--allow-project-local-adapters",
+        action="store_true",
+        help="allow installer-provenanced executables under .m8shift/bin to be identity-pinned",
+    )
     si.set_defaults(func=cmd_init)
 
     sp = sub.add_parser("pack", help="build a referenced native context pack")
@@ -2686,6 +2695,11 @@ def main(argv=None):
     sa_sub = sa.add_subparsers(dest="verb", required=True)
     sai = sa_sub.add_parser("init", help="write shipped adapter manifests")
     sai.add_argument("--force", action="store_true")
+    sai.add_argument(
+        "--allow-project-local-adapters",
+        action="store_true",
+        help="allow installer-provenanced executables under .m8shift/bin to be identity-pinned",
+    )
     sai.add_argument("--json", action="store_true")
     sai.set_defaults(func=cmd_adapters_init)
     sal = sa_sub.add_parser("list", help="list known adapter manifests")

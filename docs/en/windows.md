@@ -68,7 +68,9 @@ python m8shift.py status
   The installer downloads the Windows `.zip` asset, verifies it against RTK's
   `checksums.txt` from the same GitHub release tag, installs `rtk.exe` under
   `.m8shift/bin`, records provenance, disables telemetry, and writes the pinned
-  adapter manifest. Cargo/Rust source-build fallback is disabled unless
+  adapter manifest through the explicit project-local adapter opt-in. A
+  pre-existing project-local `rtk.exe` is ignored unless that opt-in is active and
+  provenance matches. Cargo/Rust source-build fallback is disabled unless
   `--allow-source-build` is explicit.
 
 ## Option C — Native PowerShell / cmd

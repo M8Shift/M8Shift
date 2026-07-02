@@ -54,7 +54,8 @@ Options:
   --no-runtime        Do not download m8shift-runtime.py.
   --no-context        Do not download m8shift-context.py.
   --with-rtk          With consent already given, install optional RTK portably if absent.
-  --no-rtk            Do not prompt for or install RTK; if present, telemetry is still disabled.
+  --no-rtk            Do not prompt for or install RTK; if present on normal PATH,
+                      telemetry is still disabled.
   --rtk-version VER   RTK release tag for portable install (default: v0.43.0).
   --allow-source-build
                       Allow RTK Cargo/Rust source build fallback when no
@@ -75,7 +76,7 @@ The installer is local-only: no sudo, no PATH mutation, no background service.
 Verification is enabled by default; --no-verify disables it.
 Security note: verification checks integrity against the selected ref's manifest;
 for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
-RTK is optional. When installed or already present, this installer runs
+RTK is optional. When installed or already present on normal PATH, this installer runs
 `rtk telemetry disable` to keep telemetry off by default. With --with-rtk,
 M8Shift downloads the matching RTK release asset, verifies it against the
 same release tag's checksums.txt (GitHub/TLS trust model), installs it under
@@ -131,6 +132,20 @@ with open(sys.argv[1], "rb") as f:
 print(h.hexdigest())
 PY
   fi
+}
+
+path_under() {
+  "$PYTHON_BIN" - "$1" "$2" <<'PY'
+import os
+import sys
+
+path, parent = map(os.path.realpath, sys.argv[1:3])
+try:
+    ok = os.path.commonpath([path, parent]) == parent
+except ValueError:
+    ok = False
+sys.exit(0 if ok else 1)
+PY
 }
 
 expected_sha_for() {
@@ -410,13 +425,19 @@ rtk_local_command() {
 }
 
 rtk_command() {
+  local allow_project_local="${1:-0}"
   local existing
   existing="$(command -v rtk 2>/dev/null || true)"
   if [ -n "$existing" ]; then
+    if [ "$allow_project_local" != "1" ] && path_under "$existing" "$(rtk_local_bin_dir)"; then
+      return 1
+    fi
     printf '%s\n' "$existing"
     return 0
   fi
-  rtk_local_command
+  if [ "$allow_project_local" = "1" ]; then
+    rtk_local_command
+  fi
 }
 
 rtk_host_asset() {
@@ -454,13 +475,18 @@ pin_context_adapters() {
   [ "$WITH_CONTEXT" -eq 1 ] || return 0
   [ -f "$TARGET_DIR/m8shift-context.py" ] || return 0
   local extra_path="${1:-}"
+  local allow_project_local="${2:-0}"
   local local_bin
   local_bin="$(rtk_local_bin_dir)"
   local path_prefix="$local_bin"
   if [ -n "$extra_path" ]; then
     path_prefix="$extra_path:$path_prefix"
   fi
-  if (cd "$TARGET_DIR" && PATH="$path_prefix:$PATH" "$PYTHON_BIN" ./m8shift-context.py adapters init --force >/dev/null 2>&1); then
+  local args="adapters init --force"
+  if [ "$allow_project_local" = "1" ]; then
+    args="$args --allow-project-local-adapters"
+  fi
+  if (cd "$TARGET_DIR" && PATH="$path_prefix:$PATH" "$PYTHON_BIN" ./m8shift-context.py $args >/dev/null 2>&1); then
     printf '✓ context adapter manifests identity-pinned\n'
   else
     printf 'warning: could not identity-pin context adapters; run `%s m8shift-context.py adapters init --force` manually after reviewing PATH\n' "$PYTHON_BIN" >&2
@@ -468,8 +494,9 @@ pin_context_adapters() {
 }
 
 rtk_disable_telemetry() {
+  local allow_project_local="${1:-0}"
   local cmd
-  cmd="$(rtk_command || true)"
+  cmd="$(rtk_command "$allow_project_local" || true)"
   if [ -n "$cmd" ]; then
     if "$cmd" telemetry disable >/dev/null 2>&1; then
       printf '✓ rtk telemetry disabled\n'
@@ -581,8 +608,8 @@ install_rtk_prebuilt() {
   write_rtk_provenance "$asset" "$actual"
   rm -f "$checksums_tmp" "$archive_tmp"
   printf '✓ RTK installed in %s\n' "$(rtk_local_bin_dir)"
-  rtk_disable_telemetry
-  pin_context_adapters
+  rtk_disable_telemetry 1
+  pin_context_adapters "" 1
 }
 
 install_rtk_cargo_fallback() {

@@ -123,11 +123,13 @@ curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
 the asset against `checksums.txt` from the same RTK GitHub release tag
 (GitHub/TLS trust model), installs the binary under `.m8shift/bin`, records local
 provenance, disables RTK telemetry, and identity-pins the RFC 034 adapter
-manifest. If no prebuilt asset matches the host, Cargo/Rust source builds are
-available only with the additional explicit `--allow-source-build` flag and are
-pinned to the selected `--rtk-version` tag. The default `ask` mode only prompts in
-an interactive terminal; non-interactive installs skip RTK unless `--with-rtk` is
-explicit.
+manifest through the explicit project-local adapter opt-in. A binary merely
+placed under `.m8shift/bin` is ignored unless that opt-in is active and installer
+provenance matches its path and SHA-256. If no prebuilt asset matches the host,
+Cargo/Rust source builds are available only with the additional explicit
+`--allow-source-build` flag and are pinned to the selected `--rtk-version` tag.
+The default `ask` mode only prompts in an interactive terminal; non-interactive
+installs skip RTK unless `--with-rtk` is explicit.
 
 Experimental Headroom-compatible context compression stays opt-in:
 

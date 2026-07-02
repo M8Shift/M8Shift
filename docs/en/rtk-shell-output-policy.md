@@ -31,11 +31,22 @@ python3 m8shift-context.py adapters init
 ```
 
 `adapters init` records the trusted `rtk` executable identity when `rtk` is
-available on `PATH` or in the project-local `.m8shift/bin` install location:
-resolved absolute path plus binary SHA-256. At runtime, M8Shift re-resolves
-`rtk` and rejects execution unless both the path and hash match the recorded
-identity. This deliberately rejects same-name wrappers, renamed copies,
-symlink/path hijacks, and relay binaries disguised as `rtk`.
+available on normal `PATH`: resolved absolute path plus binary SHA-256. At
+runtime, M8Shift re-resolves `rtk` and rejects execution unless both the path and
+hash match the recorded identity. This deliberately rejects same-name wrappers,
+renamed copies, symlink/path hijacks, and relay binaries disguised as `rtk`.
+
+Project-local `.m8shift/bin/rtk` is a separate trust path. It is accepted only
+when `adapters init` is run with an explicit review flag:
+
+```bash
+python3 m8shift-context.py adapters init --force --allow-project-local-adapters
+```
+
+That opt-in is still insufficient by itself: the installer provenance file must
+also match the candidate's real path and SHA-256. The Bash installer passes this
+flag automatically only after `--with-rtk` downloaded a release asset and verified
+it against the same release checksums.
 
 The Bash installer can perform the optional setup portably:
 
@@ -53,8 +64,8 @@ that fallback is pinned to the selected `--rtk-version` tag.
 
 Project-local binaries are never trusted just because they exist. `adapters init`
 prefers a normal `PATH` executable for pin establishment. A `.m8shift/bin/rtk`
-candidate is accepted only when its installer provenance file matches the
-candidate's real path and SHA-256. Setup telemetry helpers execute
+candidate is accepted only after explicit opt-in and matching installer
+provenance. Setup telemetry helpers execute
 `rtk telemetry disable` only via a freshly verified manifest `trusted_executable`;
 absent, unpinned, drifted, or symlinked local binaries are skipped instead of
 run. Public `status`/`doctor` output deliberately does **not** log RTK telemetry
