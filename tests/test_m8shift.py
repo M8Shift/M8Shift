@@ -5022,7 +5022,7 @@ class TestInstallerVerifyDefault(unittest.TestCase):
     def setUp(self):
         self.src = tempfile.mkdtemp(prefix="m8shift-isrc-")
         self.addCleanup(shutil.rmtree, self.src, True)
-        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py", "checksums.sha256"):
+        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py", "m8shift-headroom.py", "checksums.sha256"):
             shutil.copy(os.path.join(REPO, f), self.src)
         with open(os.path.join(self.src, "m8shift.py"), "a") as fh:
             fh.write("\n# tampered\n")              # hash no longer matches the manifest
@@ -5087,7 +5087,28 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         self.assertIn("Git Bash/Windows", result.stdout)
         self.assertIn("RTK: yes", result.stdout)
         self.assertIn("Headroom: yes", result.stdout)
-        self.assertIn("Rust/Cargo", result.stdout)
+        self.assertIn("headroom-ai==0.28.0", result.stdout)
+        self.assertIn("Kompress", result.stdout)
+
+    def test_with_headroom_rejects_macos_x86_64_python_clearly(self):
+        target = tempfile.mkdtemp(prefix="m8shift-headroom-x86-")
+        self.addCleanup(shutil.rmtree, target, True)
+        bindir = tempfile.mkdtemp(prefix="m8shift-fake-uname-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        uname = os.path.join(bindir, "uname")
+        with open(uname, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\ncase \"$1\" in -s) echo Darwin ;; -m) echo x86_64 ;; *) echo Darwin ;; esac\n")
+        os.chmod(uname, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--no-verify", "--no-worktree", "--no-runtime", "--no-context", "--no-init", "--with-headroom"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires an arm64-native Python on macOS", result.stderr)
 
     def test_manual_pin_is_self_sufficient_without_manifest(self):
         # A mirror with NO checksums.sha256: a correct --sha256 pin still verifies (manifest
