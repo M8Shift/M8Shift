@@ -1,8 +1,9 @@
 # RTK shell-output policy
 
 M8Shift treats RTK as an optional shell-output filter adapter. RTK is not bundled,
-not auto-installed, and never becomes evidence by itself. The operator installs
-`rtk` separately when they want this optimization.
+not auto-installed, and never becomes evidence by itself. The operator either
+installs `rtk` separately or gives explicit installer consent with `--with-rtk`
+when they want this optimization.
 
 Use RTK for noisy command output where the measured compact view preserves the
 decision signal:
@@ -30,10 +31,34 @@ python3 m8shift-context.py adapters init
 ```
 
 `adapters init` records the trusted `rtk` executable identity when `rtk` is
-available on `PATH`: resolved absolute path plus binary SHA-256. At runtime,
-M8Shift re-resolves `rtk` and rejects execution unless both the path and hash
-match the recorded identity. This deliberately rejects same-name wrappers,
-renamed copies, symlink/path hijacks, and relay binaries disguised as `rtk`.
+available on `PATH` or in the project-local `.m8shift/bin` install location:
+resolved absolute path plus binary SHA-256. At runtime, M8Shift re-resolves
+`rtk` and rejects execution unless both the path and hash match the recorded
+identity. This deliberately rejects same-name wrappers, renamed copies,
+symlink/path hijacks, and relay binaries disguised as `rtk`.
+
+The Bash installer can perform the optional setup portably:
+
+```bash
+bash install.sh --with-rtk
+```
+
+It downloads the OS-specific RTK release asset for macOS, Linux, or Git
+Bash/Windows, verifies it against RTK's `checksums.txt` from the same GitHub
+release tag (the installer trust model is GitHub + TLS for that tag), installs it
+under `.m8shift/bin`, records installer provenance, disables telemetry, and
+writes the pinned adapter manifest. If a matching prebuilt asset is unavailable,
+Cargo/Rust source builds are disabled unless `--allow-source-build` is explicit;
+that fallback is pinned to the selected `--rtk-version` tag.
+
+Project-local binaries are never trusted just because they exist. `adapters init`
+prefers a normal `PATH` executable for pin establishment. A `.m8shift/bin/rtk`
+candidate is accepted only when its installer provenance file matches the
+candidate's real path and SHA-256. Setup telemetry helpers execute
+`rtk telemetry disable` only via a freshly verified manifest `trusted_executable`;
+absent, unpinned, drifted, or symlinked local binaries are skipped instead of
+run. Public `status`/`doctor` output deliberately does **not** log RTK telemetry
+stdout/stderr; it reports telemetry as `not-reported`.
 
 If RTK is installed or upgraded after manifest generation, regenerate the manifest
 from a trusted shell:
