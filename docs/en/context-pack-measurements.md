@@ -303,6 +303,28 @@ retrieve-capable model, **digest+retrieval gets comparable answers at a fifth of
 Headroom's marginal extra preservation costs ~5× the tokens. Consistent with keeping builtin the
 `auto` default and Headroom opt-in (v3.40.0).
 
+**Why builtin is more token-efficient here — the mechanism (this is *not* "builtin is a better
+compressor").** The two tools solve different problems:
+- **Headroom is a near-lossless *compressor*** — "same content, fewer tokens." It must carry the
+  answer to *any* possible question inside its output (it cannot know what will be asked), so it
+  pays tokens for the whole document (kept 45%).
+- **builtin is a tiny lossy *digest* (~2%) + a *retrieval back-end*** — it discards ~98%, keeps a
+  small "map," and fetches raw slices **only for what is actually queried**.
+
+Analogy: Headroom photocopies a 100-page book at 45% size (you carry all 45 pages, always); builtin
+keeps a 2-page index and leaves the book on the shelf, fetching only the 1–2 pages you open. For a
+workload where each query touches only a **few facts**, index-and-fetch is far cheaper — you do not
+pay to carry the ~96% nobody asked about. **The advantage is architectural (a retrieval back-end +
+the task shape), not a smarter compression algorithm.** Headroom is a well-optimized tool doing its
+own job correctly.
+
+**When Headroom would win instead:** (a) **no retrieval** available → builtin's digest alone is
+near-useless (measured: 1/9), Headroom's near-lossless 45% wins outright; (b) a task needing **most
+of the content at once** (not a few facts) → the digest pays for many fetches; (c) **many rapid
+facts** → each retrieval is a round-trip Headroom avoids. So the finding is workload-specific:
+M8Shift's handoffs are retrieve-capable and few-facts-per-query, which is where digest+retrieval
+wins; it is not a general claim that builtin out-compresses Headroom.
+
 **Limits (this is a pilot, not a significance-grade verdict).** N=9 answerable, **1 run, 1 genre
 (docs/RAG), 1 size (100k)**. The builtin+retrieval retrieval was **idealized** (slices supplied for
 the queried facts) → its 5/9 is likely *understated*, so real agentic retrieval would probably
