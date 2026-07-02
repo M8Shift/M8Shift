@@ -349,13 +349,20 @@ Same fixture, questions, forms, and exact-match scoring; only the answering mode
 | `claude-haiku-4-5` | builtin digest-only | 2,112 | 0/9 | 0·0·0 | 0 | 2/2 | — |
 | `claude-haiku-4-5` | builtin + retrieval | 8,472 | 3/9 | 1·1·1 | 0 | 2/2 | ~2,800 |
 | `claude-haiku-4-5` | Headroom (aggressive, 45.5%) | 45,085 | **4/9** | 1·1·2 | 0 | 2/2 | ~11,300 |
-| `gpt-5-codex` | (all three) | (same) | *pending — Codex env* | | | | |
+| `gpt-5` (gpt-5-2025-08-07) | builtin digest-only | 2,112 | 0/9 | 0·0·0 | 0 | 2/2 | — |
+| `gpt-5` (gpt-5-2025-08-07) | builtin + retrieval | 8,472 | 5/9 | 3·1·1 | 0 | 2/2 | ~1,700 |
+| `gpt-5` (gpt-5-2025-08-07) | Headroom (aggressive, 45.5%) | 45,085 | **7/9** | 3·1·3 | 0 | 2/2 | ~6,400 |
 
 Cross-model reads: (a) digest-alone is useless for QA on **every** model; (b) builtin+retrieval is
 the efficiency winner across the board; (c) **Headroom scores highest accuracy on every model**
 (+1 answer over builtin+retrieval) — it is the strongest *near-lossless preservation* candidate —
-but at ~5× the tokens; (d) the **cheaper model (haiku) benefits relatively more** from Headroom
-(+33% vs opus +20%) — the one clear "Headroom helps" signal, relevant to cheap-model delegation.
+but at ~5× the tokens; (d) **Headroom's accuracy edge over builtin+retrieval varies by model**: opus/sonnet +1 (5→6),
+haiku +1 (3→4), and **`gpt-5` +2 (5→7)** — a strong long-context model extracts the *most* from
+Headroom's fuller preservation, so Headroom's value scales with long-context recall. It still costs
+~5× the tokens of builtin+retrieval, and reliability is tied at **0 hallucinations for every
+model+form**. (NB: the deployed Codex agent `gpt-5-codex` is not API-exposed; this row uses `gpt-5`
+= `gpt-5-2025-08-07`, the closest API model, as a long-context *read* — distinct from the
+`gpt-5-codex` tool-assisted row below.)
 
 ### Accuracy vs reliability — read the table correctly
 
