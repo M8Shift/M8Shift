@@ -70,6 +70,93 @@ flowchart LR
     D --> M
 ```
 
+### 3.2 Operational communication views
+
+The diagrams below are normative enough to validate implementation boundaries: the core remains a
+passive local-file mutex, while companions stay advisory and communicate through files, argv,
+JSON/stdin-stdout, and exit codes only. Colours follow the M8Shift brand palette.
+
+#### Module-communication schema
+
+```mermaid
+flowchart LR
+    classDef actor fill:#FF7A18,stroke:#AD2F0A,color:#11183A;
+    classDef core fill:#5D26F2,stroke:#2D09A4,color:#FFF8F0;
+    classDef companion fill:#22C55E,stroke:#14432f,color:#07110b;
+    classDef record fill:#F252BF,stroke:#8B47F9,color:#11183A;
+    classDef external fill:#FD9F2C,stroke:#AD2F0A,color:#11183A;
+
+    A["agents / maintainer UI"]:::actor
+    C["m8shift.py core<br/>mutex + journal"]:::core
+    R["M8SHIFT.md + LOCK<br/>relay file"]:::record
+    L[".m8shift.lock<br/>O_EXCL guard"]:::record
+    B["memory/tasks/sessions<br/>MD + JSONL boards"]:::record
+    RT["m8shift-runtime.py<br/>advisory runtime"]:::companion
+    RS[".m8shift/runtime/*<br/>presence/progress/notify"]:::record
+    CX["m8shift-context.py<br/>pack/compress/retrieve"]:::companion
+    CS[".m8shift/context/*<br/>packs/adapters/compression"]:::record
+    WT["m8shift-worktree.py<br/>degree-2 companion"]:::companion
+    E2E["m8shift-e2e.py<br/>hermetic runner"]:::companion
+    EXT["local external commands<br/>git · RTK · headroom_ext · hooks"]:::external
+
+    A -->|"shell argv: claim/next/append/status"| C
+    C -->|"atomic file R/W: state + turn append"| R
+    C -->|"O_EXCL create/remove: mutex"| L
+    C -->|"MD/JSONL append/read: boards"| B
+    RT -->|"subprocess argv: core status/pause + JSON stdout"| C
+    RT -->|"JSON/JSONL file R/W: runtime sidecars"| RS
+    RT -->|"one-shot argv + exit code: notify hooks"| EXT
+    CX -->|"bounded file read: relay/context inputs"| R
+    CX -->|"JSON/text file R/W: packs + records"| CS
+    CX -->|"argv + stdin/stdout + exit code: RFC 034 adapters"| EXT
+    WT -->|"import core helpers: serialized integration flip"| C
+    WT -->|"git argv + exit code: worktree/merge"| EXT
+    E2E -->|"subprocess argv + exit code: copied core cases"| C
+```
+
+#### Inter-application agent flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as maintainer / UI
+    participant A as active agent A
+    participant B as active agent B
+    participant C as m8shift.py + M8SHIFT.md
+    participant Board as memory/tasks/sessions
+    participant Ctx as m8shift-context.py
+    participant WT as m8shift-worktree.py
+    participant Rt as m8shift-runtime.py
+    participant Hook as local hooks
+
+    rect rgb(247,245,255)
+        U->>A: UI prompt / user scope
+        A->>C: shell argv `claim A` → file LOCK `WORKING_A`
+        A->>Board: shell argv board command → MD/JSONL append
+        A->>C: shell argv `append --to B` → turn append + `AWAITING_B`
+        B->>C: shell argv `next B` → claim + handoff read
+    end
+
+    rect rgb(255,248,240)
+        B->>Ctx: shell argv `compress --stdin` → stdin text
+        Ctx-->>B: JSON stdout record id + exit code
+        B->>C: shell argv `append --body record-id` → turn append
+        A->>Ctx: shell argv `retrieve record --json` → bounded JSON stdout
+    end
+
+    rect rgb(240,253,244)
+        A->>WT: shell argv `claim feature --base main` → worktree request
+        WT-->>A: git worktree path + exit code
+        WT->>C: imported core helpers → serialized integration handoff
+    end
+
+    rect rgb(239,246,255)
+        Rt->>C: subprocess argv `status --json` → JSON stdout
+        Rt->>Hook: one-shot argv/stdout/file/bell → notification result
+        Hook-->>Rt: exit code / warning, relay unchanged
+    end
+```
+
 ## 4. Functional requirements
 
 | ID | Requirement | Verified by |

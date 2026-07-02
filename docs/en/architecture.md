@@ -218,6 +218,135 @@ flowchart TB
     HOOK -. "stamps commits" .-> TRACE
 ```
 
+### 1.6.2 Module-communication schema — channels and boundaries
+
+This view makes the communication channels explicit. All arrows are local: there is no hosted
+control plane, no network dependency, and no daemon in the core path. Colours use the canonical
+[brand palette](brand/color-palette.md): orange for human/agent entry points, purple for the passive
+core, green for advisory companions, amber for local external adapters, pink for durable records.
+
+```mermaid
+flowchart LR
+    classDef actor fill:#FF7A18,stroke:#AD2F0A,color:#11183A;
+    classDef core fill:#5D26F2,stroke:#2D09A4,color:#FFF8F0;
+    classDef companion fill:#22C55E,stroke:#14432f,color:#07110b;
+    classDef record fill:#F252BF,stroke:#8B47F9,color:#11183A;
+    classDef external fill:#FD9F2C,stroke:#AD2F0A,color:#11183A;
+    classDef boundary fill:#F7F5FF,stroke:#7B8196,color:#2B3045,stroke-dasharray: 6 4;
+
+    Human["👤 maintainer / interactive UI"]
+    Agents["🤖 roster agents<br/>Claude · Codex · Gemini · Vibe · future CLI"]
+    class Human,Agents actor
+
+    subgraph LOCAL["local-only boundary<br/>no network · no daemon · repository filesystem"]
+        CORE["🔒 m8shift.py core CLI<br/>state machine · mutex · turns"]
+        RELAY["📘 M8SHIFT.md + LOCK<br/>single pen + turn journal"]
+        LOCKFILE["🔐 .m8shift.lock<br/>O_EXCL inter-process lock"]
+        BOARDS["📋 M8SHIFT.memory.md<br/>M8SHIFT.tasks.md<br/>M8SHIFT.sessions.jsonl"]
+        RUNTIME["🧩 m8shift-runtime.py<br/>presence · progress · notify · route"]
+        RUNTIME_STORE["🗂 .m8shift/runtime/*<br/>JSONL / JSON sidecars"]
+        CONTEXT["🧩 m8shift-context.py<br/>pack · compress · retrieve"]
+        CONTEXT_STORE["🗂 .m8shift/context/*<br/>packs · adapters · compression records"]
+        WORKTREE["🧩 m8shift-worktree.py<br/>degree-2 isolated worktrees"]
+        E2E["🧪 m8shift-e2e.py<br/>hermetic scenario runner"]
+        I18N["🌐 m8shift-i18n.py<br/>localized script builder"]
+        GEN["📚 scripts/gen_docs.py<br/>docs sync helper"]
+        GIT["⚙️ git<br/>worktree · merge · status"]
+        HOOKS["🔔 local hooks / OS notify<br/>stdout · file · bell · argv hook"]
+        ADAPTERS["⚡ RFC 034 adapters<br/>RTK · headroom_ext"]
+    end
+    style LOCAL fill:#F7F5FF,stroke:#7B8196,color:#2B3045,stroke-dasharray: 6 4
+    class CORE core
+    class RELAY,LOCKFILE,BOARDS,RUNTIME_STORE,CONTEXT_STORE record
+    class RUNTIME,CONTEXT,WORKTREE,E2E,I18N,GEN companion
+    class GIT,HOOKS,ADAPTERS external
+
+    Human -->|"shell argv: init/status/next/pause/resume"| CORE
+    Agents -->|"shell argv: claim/work/append/wait"| CORE
+    CORE -->|"atomic file R/W: LOCK + turn append"| RELAY
+    CORE -->|"O_EXCL create/remove: mutex guard"| LOCKFILE
+    CORE -->|"MD/JSONL append: memory/tasks/sessions"| BOARDS
+    RUNTIME -->|"subprocess argv: m8shift.py status --json / pause"| CORE
+    RUNTIME -->|"JSON/JSONL file R/W: presence/progress/inbox/runs"| RUNTIME_STORE
+    RUNTIME -->|"one-shot argv + exit code: notify hook / OS preset"| HOOKS
+    CONTEXT -->|"bounded file read: relay/context inputs"| RELAY
+    CONTEXT -->|"JSON/text file R/W: packs, records, raw/compact refs"| CONTEXT_STORE
+    CONTEXT -->|"argv + stdin/stdout + exit code: RFC 034 runner"| ADAPTERS
+    WORKTREE -->|"import core helpers + LOCK flip/finalize"| CORE
+    WORKTREE -->|"git argv + exit code: worktree add/merge/remove"| GIT
+    E2E -->|"subprocess argv + exit code: copied m8shift.py cases"| CORE
+    I18N -->|"file read/write: language packs -> localized script"| CORE
+    GEN -->|"file read/write: docs indexes from repo metadata"| BOARDS
+```
+
+### 1.6.3 Inter-application agent flow — major scenarios
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Human as maintainer / UI
+    participant Codex as Codex lane
+    participant Claude as Claude lane
+    participant Core as m8shift.py + M8SHIFT.md
+    participant Boards as memory/tasks/sessions
+    participant Runtime as m8shift-runtime.py
+    participant Context as m8shift-context.py
+    participant Worktree as m8shift-worktree.py
+    participant Git as git worktrees
+    participant Hooks as local notify hooks
+
+    rect rgb(247,245,255)
+        Note over Codex,Claude: Pen lifecycle: claim → work → append
+        Human->>Codex: UI prompt / operator scope
+        Codex->>Core: shell argv `claim codex` → file LOCK `WORKING_CODEX`
+        Codex->>Core: repository work happens while the pen is held
+        Codex->>Boards: shell argv `task/memory/session` → MD/JSONL append
+        Codex->>Core: shell argv `append codex --to claude` → turn append + LOCK `AWAITING_CLAUDE`
+        Claude->>Core: shell argv `claim claude` / `next claude` → LOCK `WORKING_CLAUDE`
+        Claude->>Core: shell argv `append claude --to codex` → turn append + LOCK `AWAITING_CODEX`
+    end
+
+    rect rgb(255,248,240)
+        Note over Claude,Context: Context handoff: compress → record id → bounded retrieve
+        Claude->>Context: shell argv `compress --stdin --access-mode ...` → stdin text
+        Context->>Context: JSON/text files `.m8shift/context/compression/*` → raw/compact/record
+        Claude->>Core: shell argv `append ... --body record-id` → file turn append
+        Codex->>Context: shell argv `retrieve RECORD --json` → bounded JSON stdout
+        Context-->>Codex: JSON stdout + exit code, hash-verified before content is served
+    end
+
+    rect rgb(240,253,244)
+        Note over Codex,Worktree: Degree-2 work: isolated worktrees, serialized integration pen
+        Codex->>Worktree: shell argv `claim feature codex --base main` → request isolated tree
+        Worktree->>Git: git argv `worktree add` → feature worktree
+        Codex->>Worktree: shell argv `done feature codex` → worktree ledger append
+        Worktree->>Git: git argv `merge --no-ff --no-commit` → integration tree
+        Worktree->>Core: imported core helpers → LOCK flip + turn append for serialized handoff
+    end
+
+    rect rgb(239,246,255)
+        Note over Runtime,Hooks: Advisory runtime: observe, notify, never own the pen
+        Runtime->>Core: subprocess argv `m8shift.py status --json` → JSON stdout
+        Runtime->>Runtime: JSON/JSONL sidecars `.m8shift/runtime/*` → presence/progress/runs
+        Runtime->>Hooks: one-shot argv/stdout/file/bell → local notification result
+        Hooks-->>Runtime: exit code / warning, relay state unchanged
+    end
+```
+
+**Arrow verification against code paths.**
+
+| Diagram arrow | Code path checked |
+|---------------|-------------------|
+| agents/human → `m8shift.py` via shell argv | `m8shift.py` argparse command handlers (`cmd_claim`, `cmd_append`, `cmd_wait`, `cmd_next`, `cmd_pause`, `cmd_resume`) |
+| `m8shift.py` → `M8SHIFT.md` / `.m8shift.lock` | core lock mutation path uses the repository state file plus `.m8shift.lock` `O_EXCL` guard before atomic state writes |
+| `m8shift.py` → memory/tasks/sessions | core side-ledger commands append Markdown/JSONL rows; they do not grant companion write authority over the pen |
+| `m8shift-runtime.py` → core | `load_core()` imports `m8shift.py`; `run_core_json()` invokes `[python, CORE_PATH, ...]` and parses JSON stdout |
+| `m8shift-runtime.py` → runtime sidecars/hooks | runtime constants under `.m8shift/runtime/*`; notification tiers write prompt/event/log files or run one-shot argv hooks |
+| `m8shift-context.py` → adapters | `safe_run_adapter_process()` wraps the RFC 034 argv-only adapter runner with bounded stdout/stderr and exit-code handling |
+| `m8shift-context.py` → compression store | `cmd_compress()` writes raw/compact/record files under `.m8shift/context/compression`; `cmd_retrieve()` returns bounded JSON/text after hash checks |
+| `m8shift-worktree.py` → core/git | `load_core()` imports core helpers; `git()` calls `git -C ...`; `cmd_integrate()` merges in an integration worktree then finalizes through the core lock |
+| `m8shift-e2e.py` → copied core | `run_case()` copies `m8shift.py` into a temp directory and drives it through subprocess argv/exit codes |
+
 **What each module serves.** The **core** is the mutex + immutable journal + the self-installing
 stanza; it is the only writer of relay state. **`m8shift-runtime.py`** turns that state into
 observability + advisory operations (presence, progress, notifications, usage cooldowns, bounded
