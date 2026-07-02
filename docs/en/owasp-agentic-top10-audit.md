@@ -56,9 +56,9 @@ defends.
 
 | Dimension | M8Shift's choice | Verified |
 |-----------|------------------|----------|
-| **Network** | None. No `socket`/`http`/`urllib`/`requests` import. | ✅ `grep` imports → 0 |
-| **Execution** | No `eval`/`exec`/`os.system`/`shell=True`. Subprocess = `git` in argv only. | ✅ `m8shift.py:1185,1194` |
-| **Dependencies** | stdlib only (`argparse, json, os, re, subprocess, tempfile, …`). No `requirements.txt`. | ✅ |
+| **Network** | **Core:** none — no `socket`/`http`/`urllib`/`requests` import. **Optional installer** `--with-rtk`/`--with-headroom` performs **install-time** network (release-asset / `pip` download); runtime stays offline. | ✅ core `grep` imports → 0 · installer network is opt-in, install-time |
+| **Execution** | No `eval`/`exec`/`os.system`/`shell=True`. Subprocess = `git` **plus allowlisted, realpath+sha256-pinned adapters (`rtk`/`headroom`)**, argv-only, no shell (v3.40+). | ✅ `m8shift.py:1185,1194`; adapters RFC 034 pinned |
+| **Dependencies** | **Core:** stdlib only (`argparse, json, os, re, subprocess, …`), no `requirements.txt`. **Optional adapters** (RTK binary via release asset; Headroom `pip` venv) are installed opt-in and sha256/pin-gated — a real but opt-in supply-chain input (ASI04). | ✅ core stdlib; adapters opt-in |
 | **Identity** | **Declarative, cooperative**: one agent = one name (`claude`, `codex`) read from the roster. No auth, no signature. | ✅ `AGENTS=("claude","codex")` |
 | **Confidentiality** | Local filesystem (lock `0o600`). `M8SHIFT.md` = readable plaintext. No encryption. | ✅ `m8shift.py:828` |
 | **Integrity** | Mutex + atomic write + immutable append-only turns + marker neutralization + schema validation. | ✅ (detailed §3–§7) |
