@@ -12,8 +12,12 @@ Pick the compression backend by the **actual determinant of which one wins — w
 can retrieve the raw, and the query shape — not by content-type**. builtin (a ~2% digest + bounded
 retrieval) and Headroom (near-lossless, keeps ~45%) are not competitors; they are optimal in
 *different* regimes. This RFC defines the routing signal and decision rule to select between them
-automatically, and **gates the "auto-route to Headroom" branch behind measured evidence** (the
-Round 3 pilot only measured the regime where builtin wins).
+automatically. **M8Shift's operator priority is explicit: preservation + precision rank above token
+efficiency** (losing information loses the meaning of the work). Under that priority, **when Headroom
+is installed and identity-pinned it is the *preferred* broad-context backend** (Round 3 measured it
+highest on precision, with full preservation and zero hallucinations); **builtin+retrieval is the
+fallback** when Headroom is absent/unpinned — comparable, reliable, and losing no data (the raw stays
+retrievable). This flips the earlier efficiency-first default.
 
 ## Motivation
 
@@ -31,16 +35,16 @@ the determinant that actually decides which wins. A true hybrid routes on that d
 
 ## The determinant and decision rule
 
-| Signal | Route to | Why |
-|--------|----------|-----|
-| Consumer **can retrieve** raw **and** queries touch **a few facts** | **builtin (digest + retrieval)** | tiny digest + fetch-on-demand → far fewer tokens at tied completeness |
-| **No retrieval** (one-shot handoff, external agent, raw not kept) | **Headroom** *(if enabled + pinned)* | digest-alone is near-useless; Headroom's near-lossless output preserves in-place |
-| Task needs **most of the content at once**, or **many rapid facts** | **Headroom** *(if enabled + pinned)* | avoids many retrieval round-trips |
-| Any signal unknown / Headroom absent / unpinned / errored | **builtin** (fail-closed) | never worse than today's default |
+| Condition | Route to | Why |
+|-----------|----------|-----|
+| **Headroom installed + identity-pinned** | **Headroom** | precision-first priority: Headroom measured highest precision + full preservation, 0 hallucinations |
+| **Headroom absent / unpinned / errored / config problem** | **builtin + retrieval** (fail-closed) | comparable, reliable, **no data loss** (raw retrievable); retrieval is mandatory (digest-alone is near-useless) |
+| Optional refinement: an **efficiency-critical** batch that is retrieve-capable + few-facts | builtin *(opt-in)* even with Headroom pinned | save ~5× tokens where the precision headroom is not needed |
 
 Note: content-type (shell/tool vs broad) still selects the RTK vs native *family* as in RFC 037;
-this RFC adds the builtin-vs-Headroom choice *within* the broad family, on the retrieval/query
-determinant.
+this rule governs the builtin-vs-Headroom choice *within* the broad family, under the precision-first
+priority.
+
 
 ## Routing signal
 
@@ -58,12 +62,13 @@ common case), never inferred silently:
 
 ## Evidence gate (do not route on a hypothesis)
 
-**Auto-routing to Headroom stays DISABLED until:** (a) the no-retrieval / whole-content regimes are
-**measured** (the full rigorous benchmark, #84) and confirm Headroom wins there under the DoD
-(real-tokenizer gain **and** equivalence), **and** (b) Headroom is identity-pinned (RFC 034). Until
-both hold, the router behaves exactly as v3.40.0: builtin default, Headroom only via explicit
-`--backend headroom_ext` or the manual `auto_enabled` opt-in. This RFC specifies the *mechanism*; it
-does not flip auto-Headroom on.
+The precision-first preference rests on **directional** evidence (Round 3: N=9, 1 run, 1 genre, 1
+size — a +1-2 precision margin). It is a **fail-safe priority choice**: builtin+retrieval loses no
+data, so preferring Headroom-when-pinned cannot lose information versus the fallback. Two guards:
+(a) Headroom is used only when **identity-pinned** (RFC 034) and offline-safe; (b) the full rigorous
+benchmark (#84 — incl. no-retrieval / whole-content regimes) **firms or revises** the margin, and the
+policy is reversible if fuller measurement contradicts it. Enabling Headroom-preferred-when-pinned as
+the shipped default is a version-gated change (Phase D).
 
 ## Charter
 
@@ -108,6 +113,11 @@ is packed) and compose.
 - Should `access-mode` be inferable from the consumer/handoff type (e.g. external one-shot →
   `inline`) or always explicit? (Default: explicit, with sensible per-command defaults.)
 - Is there a third regime (streaming / incremental) that neither backend serves well?
+- **Combined hybrid** (operator idea): rather than route one-or-the-other, *combine* them — e.g. ship
+  Headroom's near-lossless compact **plus** the retrievable raw reference (belt-and-suspenders), or
+  route per-chunk (Headroom for prose chunks, digest+retrieval for structured/log chunks) — to
+  maximize preservation without losing precision. Worth prototyping + measuring if it beats either
+  alone.
 - Should the router expose a `route recommend`-style advisory (RFC 039 verb) for compression, so an
   operator can see *why* a backend was chosen before it runs?
 

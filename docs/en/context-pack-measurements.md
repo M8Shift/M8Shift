@@ -401,5 +401,29 @@ not **whether a model recalls it from a single long-context pass**.
    held more than a single-pass read recovered.
 2. **For tool-assisted agents** (how M8Shift agents actually operate — they grep/read), **retrieval
    matches Headroom's completeness (9/9) at ~1/5 the tokens** — strengthening builtin+retrieval as
-   the default. A strictly comparable `gpt-5-codex` *long-context-read* row (OpenAI API, no tools)
-   is a follow-up (not run here; only the Anthropic key was available).
+   the default. A strictly comparable long-context read was **subsequently run** as the `gpt-5`
+   (`gpt-5-2025-08-07`) row in the Mode-A table above (the exact `gpt-5-codex` agent is not
+   API-exposed).
+
+### Decision under M8Shift's stated priority — preservation + precision **over** efficiency
+
+The operator's priority for M8Shift is explicit: **preservation and precision rank above token
+efficiency** — losing information means losing the meaning of the work. Under that priority the data
+resolves cleanly:
+
+- **Neither builtin+retrieval nor Headroom loses information.** builtin keeps the **full raw,
+  retrievably** (Mode B: 9/9 findable); Headroom keeps ~45% in-place. Only the *digest alone* drops
+  data. So the "never lose data" bar is met by **both** — the internal version does not lose meaning
+  when retrieval is on.
+- Where Headroom leads is **single-pass precision** (Mode A recall): 6-7/9 vs builtin+retrieval's
+  3-5/9, on every model, with **0 hallucinations everywhere**.
+
+**Policy:** because M8Shift prioritizes precision + preservation over efficiency, **when Headroom is
+installed and identity-pinned it is the preferred broad-context backend** (highest measured
+precision, full preservation); **builtin+retrieval is the fallback** when Headroom is absent/unpinned
+(comparable, reliable, still no data loss). This flips the earlier efficiency-first default and is
+captured in [RFC 042](rfc/042-rfc-compression-backend-routing.md).
+
+**Caveat (kept honest):** the +1-2 precision margin is **directional** (N=9, 1 run, 1 genre, 1 size);
+the full benchmark (#84) would firm it. The policy is a priority *choice* on directional evidence,
+fail-safe (builtin loses nothing), and reversible if fuller measurement contradicts it.
