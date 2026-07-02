@@ -3,7 +3,7 @@
 - **Date:** 2026-06-27
 - **Scope:** external security research (arXiv agentic-security defenses), MITRE ATLAS,
   and the IBM AI Risk Atlas, each judged against M8Shift's declared threat model
-  (`m8shift.py` v3.41.1 and its companions).
+  (`m8shift.py` v3.42.0 and its companions).
 - **Mode:** external-source review + verification. Every external citation was fetched
   (`arxiv.org/abs/<id>`, the ATLAS canonical YAML, the IBM Atlas Nexus mirror / AIUC-1
   crosswalk) and fact-checked against the source before being used here.
@@ -354,7 +354,7 @@ societal impact). Risks are also tagged by applicability: *traditional/broad*,
 | Misaligned actions (5) | Agentic / value-alignment | **INSPIRATION-ONLY** | M8Shift coordinates but doesn't judge agent intent; advisory companions explicitly never touch the pen/network. Conceptual lead only. |
 | Function calling hallucination (9) / Attack on AI agents' external resources (6) | Agentic / robustness-security | **NOT-APPLICABLE** | M8Shift calls no tools and makes no network/API calls (stdlib-local invariant). |
 | Reproducibility (14) | Agentic / robustness | **PARTIAL** | M8Shift itself is deterministic (local files, no network), so the relay is reproducible by construction; the *agents'* outputs aren't its concern. Lead: keep VERSION lockstep + run-plan immutability so a run can be replayed/audited. |
-| Incomplete AI agent evaluation (11) / Lack of testing diversity (86) | Agentic + Non-Technical / robustness | **APPLICABLE (to M8Shift's own dev)** | Applies to M8Shift-as-software, not as a model. Lead: the existing 384-test suite (as of v3.41.1 — regenerate on release; a test *count* is not evidence of coverage or diversity, so risk 86 is addressed by adversarial + invariant/property tests, not a headline number) plus adversarial dogfooding (Codex implements / Claude reviews) is the mitigation. |
+| Incomplete AI agent evaluation (11) / Lack of testing diversity (86) | Agentic + Non-Technical / robustness | **APPLICABLE (to M8Shift's own dev)** | Applies to M8Shift-as-software, not as a model. Lead: the existing 388-test suite (as of v3.42.0 — regenerate on release; a test *count* is not evidence of coverage or diversity, so risk 86 is addressed by adversarial + invariant/property tests, not a headline number) plus adversarial dogfooding (Codex implements / Claude reviews) is the mitigation. |
 | Discriminatory actions (17) / Introduce data bias (18) | Agentic / fairness | **NOT-APPLICABLE (model sense) / see §4.3** | M8Shift takes no actions toward people and writes no dataset. |
 | Impact on the environment (91) / Impact on Jobs (94) / Impact on human agency (95) | Non-Technical / societal-impact | **NOT-APPLICABLE** | A single-file local CLI mutex has no societal-scale footprint; no inference compute. |
 
@@ -463,7 +463,7 @@ M8Shift's design already engages:
   loop guards + TTL/force-bounce.
 - **Incomplete AI agent evaluation (11) / Lack of testing diversity (86) / Lack of system
   transparency (81)** → addressed for M8Shift-as-software by `docs/en/agents-guide.md`, LOCK
-  schema validation, the 384-test suite (count ≠ coverage), and adversarial dogfooding.
+  schema validation, the 388-test suite (count ≠ coverage), and adversarial dogfooding.
 - **Reproducibility (14)** → addressed by construction: no network, deterministic local
   files, VERSION lockstep, immutable run-plans.
 
@@ -533,7 +533,7 @@ enumerates 12 GenAI risk categories mapped back to those four functions.
 |---|---|---|---|
 | **GOVERN** | Policies, accountability, roles, documented processes | **APPLICABLE — largely satisfied** | The charter *is* a governance policy; degree-1 cooperative mutex = accountability/role structure; advisory-companion boundary = documented separation of duties. Lead: surface as an explicit charter/`GOVERNANCE.md` (roles, trust assumption, out-of-charter list). |
 | **MAP** | Frame context, intended use, actors, risks before building | **PARTIAL — partially satisfied** | No model context, but a stated threat model (trusted cooperative agents; explicitly *not* a boundary against malicious agents) + classified gaps (SEC-4/SEC-7, ASI03/ASI10) = the "frame context & known limits" outcome. Keep the threat-model + gaps register versioned with the code. |
-| **MEASURE** | Quantitative/qualitative *model* eval: metrics, bias, robustness, drift | **NOT-APPLICABLE (largely)** | No model ⇒ no accuracy/bias/robustness metrics. Inspiration-only carve-out: `doctor` diagnostics + the 384-test suite are *software-quality* measurement, not "AI measurement." Do **not** invent model metrics. |
+| **MEASURE** | Quantitative/qualitative *model* eval: metrics, bias, robustness, drift | **NOT-APPLICABLE (largely)** | No model ⇒ no accuracy/bias/robustness metrics. Inspiration-only carve-out: `doctor` diagnostics + the 388-test suite are *software-quality* measurement, not "AI measurement." Do **not** invent model metrics. |
 | **MANAGE** | Prioritize/treat risks, monitor, incident response, traceability, residual risk | **APPLICABLE — largely satisfied** | Append-only immutable ledger + atomic writes = traceability; force-ops audited in `sessions.jsonl` = incident record; LOCK validation + marker neutralization = risk treatment; `doctor` = monitoring. Lead: document SEC-7/SEC-4 as accepted/open residual risks tied to ledger evidence. |
 | *Char.:* **secure & resilient** | Withstand misuse, recover gracefully | **PARTIAL** | Resilience real (atomic writes, immutable ledger, LOCK validation, force-op audit, `doctor`); security bounded by charter (declarative identity, no crypto auth). Lead: close SEC-7 / SEC-4 (resilience hardening, not a threat-model change). |
 | *Char.:* **accountable & transparent** | Who did what, when; traceable | **APPLICABLE — satisfied** | Core strength: append-only ledger (transparency), `sessions.jsonl` force-op audit (accountability), declarative identity attributes every entry. Lead: `doctor`/`history` render a human-readable provenance view. |
@@ -619,7 +619,7 @@ separate environment. Its cross-cutting controls are **cloisonnement** (R12/R28)
 | **R12** **Cloisonner chaque phase dans un environnement dédié** | Isolate each lifecycle phase | **APPLICABLE — strong map, partially satisfied** | **Best transfer.** Maps to **degree-2 worktree isolation** (`m8shift-worktree.py`: claim/integrate/drop, merge `--no-ff --no-commit` + `integrating:` sentinel) and **per-session sandboxes**. Lead: document worktrees explicitly as M8Shift's cloisonnement; keep handoff non-stranding so isolation can't deadlock. |
 | **R19 / R20** Protéger en intégrité les données / fichiers du système d'IA | Integrity verification (signature/hash) | **NOT-APPLICABLE (model)** but **principle satisfied** | The model/training objects are N/A, but the **vérification d'intégrité** principle is realised by M8Shift's **immutable append-only ledger + atomic writes + LOCK schema validation + marker neutralization + `doctor`** over its own data. |
 | **R23** Audits de sécurité avant déploiement | Audit before deploy | **APPLICABLE — already practised** | Mirrors M8Shift's adversarial-review dogfooding (Codex implements / Claude reviews adversarially before APPROVE). |
-| **R24** Tests fonctionnels avant déploiement | Functional tests | **APPLICABLE — already satisfied** | **384 tests** (v3.41.1, regenerate on release), VERSION lockstep across 7 scripts. |
+| **R24** Tests fonctionnels avant déploiement | Functional tests | **APPLICABLE — already satisfied** | **388 tests** (v3.42.0, regenerate on release), VERSION lockstep across 7 scripts. |
 | **R28** **Cloisonner dans des zones logiques dédiées** ("limiter les risques de latéralisation") | Isolate in dedicated logical zones | **APPLICABLE — strong map** | Reinforces R12: worktree / per-session isolation limits "latéralisation." Same lead as R12. |
 | **R29** Journaliser l'ensemble des traitements | Comprehensive logging | **APPLICABLE — already satisfied** | Session history (`history` + ledger jsonl), force-ops audited in `sessions.jsonl`, immutable turn ledger. |
 | **R35** **Revue régulière de la configuration des droits** | Periodic access-rights review | **PARTIAL** | Touches the declarative-identity design-owned gap (ASI03/ASI10): M8Shift can't enforce access rights cryptographically. Lead: surface lane-ownership / identity declarations via `doctor`/`status` for periodic operator review. |
@@ -667,7 +667,7 @@ cross-referencing the audit's SEC findings and its P1/P2/P3 plan.
 |---|---|---|---|
 | **Verify-before-commit** ([VIGIL 2601.05755](https://arxiv.org/abs/2601.05755)) | integration sentinel + atomic write + LOCK validation; audit P1 | **APPLICABLE** | Formalize the half-present two-phase pen handoff (stage → validate → atomic append); stdlib-only. |
 | **Runtime-trace program analysis** ([AgentArmor 2508.01249](https://arxiv.org/abs/2508.01249)) | the append-only ledger (ASI08/ASI09) | **APPLICABLE** | The ledger *is* the trace; add `doctor --analyze` static invariant checks (one writer, monotonic turns, marker-clean). |
-| **Four formal security properties** ([2603.19469](https://arxiv.org/abs/2603.19469)) | roster + turn schema + lane scope; 384-test suite | **APPLICABLE** | Encode task/action alignment, source-authorization, data-isolation as asserted unit-test invariants. |
+| **Four formal security properties** ([2603.19469](https://arxiv.org/abs/2603.19469)) | roster + turn schema + lane scope; 388-test suite | **APPLICABLE** | Encode task/action alignment, source-authorization, data-isolation as asserted unit-test invariants. |
 | **Schema-validated cross-lane handoff** ([AgentSys 2602.07398](https://arxiv.org/abs/2602.07398)) | LOCK/turn schema validation (ASI06) | **APPLICABLE** | Require strict schema validation on every handoff payload before it enters M8SHIFT.md. |
 | **Structural goal-drift detection** ([2505.02709](https://arxiv.org/abs/2505.02709)) | declared-task field vs original objective (ASI01/ASI10) | **APPLICABLE (PARTIAL)** | Text-diff the lane's stated goal across the immutable ledger; warn in `doctor` — no ML. |
 | **Rogue-signal / sentinel monitoring** ([2502.05986](https://arxiv.org/abs/2502.05986), [2509.14956](https://arxiv.org/abs/2509.14956)) | advisory companion (ASI06/ASI10) | **APPLICABLE (PARTIAL)** | Read-only companion flags re-claim-after-done, no-progress, contradictions; never auto-revokes. |
@@ -716,4 +716,4 @@ are the same two the OWASP audit already names (**SEC-4**, **SEC-7**, both P1) p
 [security-audit.md](./security-audit.md) (SEC-1→SEC-11) · MITRE ATLAS
 <https://atlas.mitre.org> (canonical YAML) · IBM AI Risk Atlas (Atlas Nexus / AIUC-1
 crosswalk / arXiv [2503.05780](https://arxiv.org/abs/2503.05780)) · 19 verified arXiv
-defense papers. Verified code `m8shift.py` v3.41.1.*
+defense papers. Verified code `m8shift.py` v3.42.0.*
