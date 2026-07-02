@@ -5154,29 +5154,101 @@ class TestInstallerVerifyDefault(unittest.TestCase):
 
 
 class TestContextLocalAdapterResolution(unittest.TestCase):
-    def test_adapters_init_resolves_project_local_m8shift_bin_rtk(self):
+    def _project(self):
         d = tempfile.mkdtemp(prefix="m8shift-local-adapter-")
         self.addCleanup(shutil.rmtree, d, True)
         shutil.copy(os.path.join(REPO, "m8shift-context.py"), os.path.join(d, "m8shift-context.py"))
-        bindir = os.path.join(d, ".m8shift", "bin")
-        os.makedirs(bindir, exist_ok=True)
-        rtk = os.path.join(bindir, "rtk")
-        with open(rtk, "w", encoding="utf-8") as fh:
-            fh.write("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
-        os.chmod(rtk, 0o755)
+        return d
+
+    def _env_without_global_rtk(self):
         env = dict(os.environ)
         env["PATH"] = os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        return env
+
+    def _write_fake_rtk(self, d, *, filename="rtk", bindir=None):
+        if bindir is None:
+            bindir = os.path.join(d, ".m8shift", "bin")
+        os.makedirs(bindir, exist_ok=True)
+        marker = os.path.join(d, "rtk-executed.txt")
+        rtk = os.path.join(bindir, filename)
+        with open(rtk, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {marker!r}\n")
+        os.chmod(rtk, 0o755)
+        return rtk, marker
+
+    def _write_provenance(self, d, rtk):
+        with open(rtk, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        provenance = {
+            "schema": "m8shift.installer.tool_provenance.v1",
+            "program": "rtk",
+            "path": os.path.realpath(rtk),
+            "sha256": digest,
+            "asset": "fixture",
+            "asset_sha256": "0" * 64,
+            "version": "v0.0.0-test",
+            "source": "test fixture",
+        }
+        path = os.path.join(d, ".m8shift", "bin", "rtk.provenance.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(provenance, fh)
+
+    def _adapters_init(self, d):
         result = subprocess.run(
             [sys.executable, "m8shift-context.py", "adapters", "init", "--force", "--json"],
-            cwd=d, capture_output=True, text=True, env=env,
+            cwd=d, capture_output=True, text=True, env=self._env_without_global_rtk(),
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        payload = json.loads(result.stdout)
-        self.assertTrue(payload["rtk_telemetry"]["present"])
+        return json.loads(result.stdout)
+
+    def _rtk_manifest(self, d):
         manifest = os.path.join(d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
         with open(manifest, encoding="utf-8") as fh:
-            adapter = json.load(fh)
+            return json.load(fh)
+
+    def test_planted_project_local_rtk_is_not_executed_or_pinned_without_provenance(self):
+        d = self._project()
+        _rtk, marker = self._write_fake_rtk(d)
+        payload = self._adapters_init(d)
+        self.assertFalse(payload["rtk_telemetry"]["present"])
+        self.assertFalse(os.path.exists(marker), "unpinned project-local rtk must not be executed")
+        self.assertNotIn("trusted_executable", self._rtk_manifest(d))
+
+    def test_project_local_rtk_with_installer_provenance_can_be_pinned_with_warning(self):
+        d = self._project()
+        rtk, marker = self._write_fake_rtk(d)
+        self._write_provenance(d, rtk)
+        payload = self._adapters_init(d)
+        self.assertTrue(payload["rtk_telemetry"]["present"])
+        self.assertTrue(os.path.exists(marker))
+        self.assertTrue(any(row["check"] == "adapter.project_local_pin" for row in payload["warnings"]))
+        adapter = self._rtk_manifest(d)
         self.assertEqual(adapter["trusted_executable"]["path"], os.path.realpath(rtk))
+
+    @unittest.skipIf(os.name == "nt", ".exe fallback is expected on native Windows")
+    def test_project_local_exe_fallback_is_off_on_non_windows(self):
+        d = self._project()
+        rtk, marker = self._write_fake_rtk(d, filename="rtk.exe")
+        self._write_provenance(d, rtk)
+        payload = self._adapters_init(d)
+        self.assertFalse(payload["rtk_telemetry"]["present"])
+        self.assertFalse(os.path.exists(marker))
+        self.assertNotIn("trusted_executable", self._rtk_manifest(d))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_symlinked_project_local_bin_is_rejected(self):
+        d = self._project()
+        shutil.rmtree(os.path.join(d, ".m8shift"), True)
+        os.makedirs(os.path.join(d, ".m8shift"), exist_ok=True)
+        outside = tempfile.mkdtemp(prefix="m8shift-local-bin-outside-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        os.symlink(outside, os.path.join(d, ".m8shift", "bin"))
+        rtk, marker = self._write_fake_rtk(d, bindir=os.path.join(d, ".m8shift", "bin"))
+        self._write_provenance(d, rtk)
+        payload = self._adapters_init(d)
+        self.assertFalse(payload["rtk_telemetry"]["present"])
+        self.assertFalse(os.path.exists(marker))
+        self.assertNotIn("trusted_executable", self._rtk_manifest(d))
 
 
 class TestChecksumsManifest(unittest.TestCase):

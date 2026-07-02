@@ -27,6 +27,7 @@ HEADROOM_CHOICE="${M8SHIFT_INSTALL_HEADROOM:-no}"  # yes|no (experimental, expli
 DRY_RUN=0
 RTK_VERSION="${M8SHIFT_INSTALL_RTK_VERSION:-v0.43.0}"
 RTK_BASE_URL="${M8SHIFT_INSTALL_RTK_BASE_URL:-}"
+RTK_SOURCE_BUILD=0
 VERIFY_EXPLICIT=""   # --verify sets 1, --no-verify sets 0; otherwise env/default decide
 VERIFY_DOWNLOADS=1   # resolved after arg parsing (verification is ON by default)
 CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
@@ -55,6 +56,9 @@ Options:
   --with-rtk          With consent already given, install optional RTK portably if absent.
   --no-rtk            Do not prompt for or install RTK; if present, telemetry is still disabled.
   --rtk-version VER   RTK release tag for portable install (default: v0.43.0).
+  --allow-source-build
+                      Allow RTK Cargo/Rust source build fallback when no
+                      same-tag-checksummed prebuilt release asset matches this host.
   --with-headroom     EXPERIMENTAL: install optional headroom-ai into a local venv.
   --no-headroom       Do not install optional headroom-ai (default).
   --dry-run           Print the install plan and prerequisites; do not download or write files.
@@ -73,9 +77,11 @@ Security note: verification checks integrity against the selected ref's manifest
 for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
 RTK is optional. When installed or already present, this installer runs
 `rtk telemetry disable` to keep telemetry off by default. With --with-rtk,
-M8Shift downloads the matching RTK release asset, verifies it against
-checksums.txt, installs it under .m8shift/bin, and identity-pins the adapter
-manifest. Headroom is experimental and remains explicit opt-in.
+M8Shift downloads the matching RTK release asset, verifies it against the
+same release tag's checksums.txt (GitHub/TLS trust model), installs it under
+.m8shift/bin, records local provenance, and identity-pins the adapter manifest.
+Cargo/Rust source builds are disabled unless --allow-source-build is explicit.
+Headroom is experimental, unpinned pip install, and remains explicit opt-in.
 EOF
 }
 
@@ -198,8 +204,8 @@ print_prerequisites() {
 Prerequisites:
   required: Python 3.8+, git, and one downloader (curl, wget, or Python urllib).
   required for verification: sha256sum, shasum, or Python hashlib.
-  optional RTK (--with-rtk): tar for macOS/Linux .tar.gz assets; unzip or Python zipfile for Git Bash/Windows .zip assets; cargo/Rust only as fallback.
-  optional Headroom (--with-headroom): Python venv + pip; Rust/Cargo may be needed when headroom-ai builds cryptography from source.
+  optional RTK (--with-rtk): tar for macOS/Linux .tar.gz assets; unzip or Python zipfile for Git Bash/Windows .zip assets; Cargo/Rust only with --allow-source-build.
+  optional Headroom (--with-headroom): Python venv + pip; headroom-ai is an unpinned best-effort install and Rust/Cargo may be needed when cryptography builds from source.
 EOF
 }
 
@@ -257,6 +263,10 @@ while [ "$#" -gt 0 ]; do
       need_value "$1" "${2:-}"
       RTK_VERSION="$2"
       shift 2
+      ;;
+    --allow-source-build)
+      RTK_SOURCE_BUILD=1
+      shift
       ;;
     --with-headroom)
       HEADROOM_CHOICE=yes
@@ -357,6 +367,7 @@ Dry run plan:
   download worktree/runtime/context: $WITH_WORKTREE/$WITH_RUNTIME/$WITH_CONTEXT
   run init: $RUN_INIT
   RTK: $RTK_CHOICE (release $RTK_VERSION, $RTK_BASE_URL)
+  RTK source build fallback: $RTK_SOURCE_BUILD
   Headroom: $HEADROOM_CHOICE (experimental)
 
 No files were downloaded or written.
@@ -508,6 +519,37 @@ PY
   rm -rf "$tmp_dir"
 }
 
+write_rtk_provenance() {
+  local asset="$1"
+  local asset_sha="$2"
+  local cmd
+  cmd="$(rtk_local_command || true)"
+  [ -n "$cmd" ] || die "RTK installed but local command was not found"
+  local bin_sha
+  bin_sha="$(file_sha256 "$cmd")"
+  "$PYTHON_BIN" - "$cmd" "$bin_sha" "$asset" "$asset_sha" "$RTK_VERSION" "$(rtk_local_bin_dir)/rtk.provenance.json" <<'PY'
+import json
+import os
+import sys
+
+path, sha, asset, asset_sha, version, out_path = sys.argv[1:]
+payload = {
+    "schema": "m8shift.installer.tool_provenance.v1",
+    "program": "rtk",
+    "path": os.path.realpath(path),
+    "sha256": sha,
+    "asset": asset,
+    "asset_sha256": asset_sha,
+    "version": version,
+    "source": "rtk-ai/rtk GitHub release asset",
+    "trust_model": "release asset verified against checksums.txt from the same GitHub release tag over TLS",
+}
+with open(out_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+}
+
 install_rtk_prebuilt() {
   local existing
   existing="$(rtk_command || true)"
@@ -536,6 +578,7 @@ install_rtk_prebuilt() {
   fi
   printf '✓ verified %s\n' "$asset"
   rtk_extract_archive "$asset" "$archive_tmp" "$(rtk_local_bin_dir)"
+  write_rtk_provenance "$asset" "$actual"
   rm -f "$checksums_tmp" "$archive_tmp"
   printf '✓ RTK installed in %s\n' "$(rtk_local_bin_dir)"
   rtk_disable_telemetry
@@ -543,16 +586,22 @@ install_rtk_prebuilt() {
 }
 
 install_rtk_cargo_fallback() {
+  [ "$RTK_SOURCE_BUILD" -eq 1 ] || return 1
   command -v cargo >/dev/null 2>&1 || return 1
-  printf '→ attempting optional RTK cargo fallback\n'
-  cargo install --git https://github.com/rtk-ai/rtk --locked rtk
+  printf '→ attempting optional RTK cargo fallback from tag %s\n' "$RTK_VERSION"
+  cargo install --git https://github.com/rtk-ai/rtk --tag "$RTK_VERSION" --locked rtk
 }
 
 install_rtk_portable() {
   if install_rtk_prebuilt; then
     return 0
   fi
-  printf 'warning: no RTK prebuilt asset matched this OS/architecture; trying cargo fallback if available\n' >&2
+  printf 'warning: no RTK prebuilt asset matched this OS/architecture\n' >&2
+  if [ "$RTK_SOURCE_BUILD" -ne 1 ]; then
+    printf 'warning: RTK source-build fallback is disabled; rerun with --allow-source-build after reviewing the Cargo/Rust trust model\n' >&2
+    return 1
+  fi
+  printf 'warning: trying Cargo/Rust source-build fallback from reviewed tag %s\n' "$RTK_VERSION" >&2
   if install_rtk_cargo_fallback; then
     rtk_disable_telemetry
     pin_context_adapters
@@ -577,14 +626,14 @@ offer_rtk() {
         rtk_disable_telemetry
         pin_context_adapters
       elif [ -t 0 ]; then
-        printf 'Install optional RTK for token-saving shell output filtering from verified release assets? [y/N] '
+        printf 'Install optional RTK for token-saving shell output filtering from release assets verified against same-tag checksums? [y/N] '
         IFS= read -r answer || answer=""
         case "$answer" in
           y|Y|yes|YES) install_rtk_portable || die "optional RTK install failed; install RTK manually or rerun with --no-rtk" ;;
           *) printf '→ skipping optional RTK install\n' ;;
         esac
       else
-        printf '→ optional RTK not installed; rerun with --with-rtk to install verified release assets\n'
+        printf '→ optional RTK not installed; rerun with --with-rtk to install same-tag-checksummed release assets\n'
       fi
       ;;
     *)

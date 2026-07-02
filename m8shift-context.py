@@ -1001,7 +1001,7 @@ def cmd_init(args):
         path = os.path.join(adapters_dir(root), f"{name}.json")
         if os.path.exists(path) and not args.force:
             continue
-        write_json(path, default_adapter_manifest(name))
+        write_json(path, default_adapter_manifest(name, allow_project_local=True))
         wrote.append(rel(root, path))
     config_path = compression_config_path(root)
     if args.force or not os.path.exists(config_path):
@@ -1018,10 +1018,13 @@ def cmd_init(args):
             "Headroom `headroom_ext` is an operator experiment: use explicit `compress --backend headroom_ext`, or `compress --backend auto` for broad records only when `.m8shift/context-compression.json` sets `backends.headroom_ext.auto_enabled` to true. `--access-mode` / `--whole-content` are recorded as advisory routing signals but do not drive routing until the evidence gate opens.\n"
         ))
         wrote.append(rel(root, readme))
-    telemetry = rtk_telemetry_disable()
+    warnings = project_local_pin_warnings(root)
+    telemetry = rtk_telemetry_disable(root)
     print(f"✓ context companion initialized ({len(wrote)} files written)")
     for path in wrote:
         print(f"  {path}")
+    for row in warnings:
+        print(f"warning: {row['message']}", file=sys.stderr)
     if telemetry.get("present"):
         print(f"✓ rtk telemetry disable attempted (disabled={str(telemetry.get('disabled')).lower()})")
     return 0
@@ -1254,8 +1257,71 @@ def load_adapter_for_auto(root, name):
     return data, []
 
 
-def adapter_identity_for_program(program):
-    resolved = shutil_which(program)
+def is_path_under(path, parent):
+    try:
+        return os.path.commonpath([os.path.realpath(path), os.path.realpath(parent)]) == os.path.realpath(parent)
+    except (OSError, ValueError):
+        return False
+
+
+def local_adapter_bin_dir():
+    return os.path.join(HERE, ".m8shift", "bin")
+
+
+def local_adapter_provenance_path(program):
+    return os.path.join(local_adapter_bin_dir(), f"{program}.provenance.json")
+
+
+def safe_project_local_candidate(program):
+    local_bin = local_adapter_bin_dir()
+    local_bin_real = os.path.realpath(local_bin)
+    here_real = os.path.realpath(HERE)
+    if os.path.islink(local_bin) or not is_path_under(local_bin_real, here_real):
+        return None
+    names = [program]
+    if os.name == "nt" and not program.lower().endswith(".exe"):
+        names.append(program + ".exe")
+    for name in names:
+        candidate = os.path.join(local_bin, name)
+        if os.path.islink(candidate):
+            continue
+        real = os.path.realpath(candidate)
+        if not is_path_under(real, local_bin_real):
+            continue
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def load_project_local_provenance(program, candidate):
+    path = local_adapter_provenance_path(program)
+    data = read_json(path, None)
+    if not isinstance(data, dict):
+        return None
+    if data.get("schema") != "m8shift.installer.tool_provenance.v1":
+        return None
+    if data.get("program") != program:
+        return None
+    if os.path.realpath(data.get("path", "")) != os.path.realpath(candidate):
+        return None
+    expected = data.get("sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return None
+    try:
+        actual = sha256_file(os.path.realpath(candidate))
+    except (OSError, ValueError):
+        return None
+    if actual != expected:
+        return None
+    return data
+
+
+def adapter_identity_for_program(program, allow_project_local=False):
+    resolved = shutil_which(program, include_local_bin=False)
+    if not resolved and allow_project_local:
+        candidate = safe_project_local_candidate(program)
+        if candidate and load_project_local_provenance(program, candidate):
+            resolved = candidate
     if not resolved:
         return None
     real = os.path.realpath(resolved)
@@ -1270,14 +1336,33 @@ def adapter_identity_for_program(program):
     }
 
 
-def default_adapter_manifest(name):
+def default_adapter_manifest(name, allow_project_local=False):
     manifest = copy.deepcopy(DEFAULT_ADAPTERS[name])
     command = manifest.get("command")
     if isinstance(command, list) and command:
-        identity = adapter_identity_for_program(command[0])
+        identity = adapter_identity_for_program(command[0], allow_project_local=allow_project_local)
         if identity:
             manifest["trusted_executable"] = identity
     return manifest
+
+
+def project_local_pin_warnings(root):
+    warnings = []
+    for name in sorted(DEFAULT_ADAPTERS):
+        manifest = read_json(adapter_path(root, name), None)
+        if not isinstance(manifest, dict):
+            continue
+        trusted = manifest.get("trusted_executable")
+        if not isinstance(trusted, dict):
+            continue
+        path = trusted.get("path")
+        if isinstance(path, str) and os.path.isabs(path) and is_path_under(path, root):
+            warnings.append(finding(
+                "warning",
+                "adapter.project_local_pin",
+                f"{name}: trusted executable is project-local ({path}); this is accepted only for installer-provenanced tools",
+            ))
+    return warnings
 
 
 def adapter_findings(manifest, check_executable=True):
@@ -1345,19 +1430,18 @@ def adapter_findings(manifest, check_executable=True):
     return findings
 
 
-def shutil_which(executable):
+def shutil_which(executable, include_local_bin=True):
     names = [executable]
-    if not executable.lower().endswith(".exe"):
+    if os.name == "nt" and not executable.lower().endswith(".exe"):
         names.append(executable + ".exe")
     folders = [folder for folder in os.environ.get("PATH", os.defpath).split(os.pathsep) if folder]
-    local_bin = os.path.join(HERE, ".m8shift", "bin")
-    if local_bin not in folders:
-        folders.append(local_bin)
     for folder in folders:
         for name in names:
             path = os.path.join(folder, name)
             if os.path.isfile(path) and os.access(path, os.X_OK):
                 return path
+    if include_local_bin:
+        return safe_project_local_candidate(executable)
     return None
 
 
@@ -2225,10 +2309,39 @@ def cmd_retrieve(args):
     return 0
 
 
-def rtk_telemetry_disable():
-    resolved = shutil_which("rtk")
+def trusted_adapter_executable(root, adapter_name, program):
+    manifest, findings = load_adapter_diagnostic(root, adapter_name)
+    if not isinstance(manifest, dict):
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: manifest unavailable; telemetry command skipped")]
+    trusted = manifest.get("trusted_executable")
+    if not isinstance(trusted, dict):
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: missing trusted executable; telemetry command skipped")]
+    if trusted.get("program") != program:
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: trusted executable program mismatch; telemetry command skipped")]
+    path = trusted.get("path")
+    expected_sha = trusted.get("sha256")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: trusted executable path invalid; telemetry command skipped")]
+    if not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: trusted executable sha256 invalid; telemetry command skipped")]
+    real = os.path.realpath(path)
+    if adapter_resolves_to_denied_program(real):
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: trusted executable resolves to a denied program; telemetry command skipped")]
+    if not os.path.isfile(real) or not os.access(real, os.X_OK):
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: trusted executable missing or not executable; telemetry command skipped")]
+    try:
+        actual_sha = sha256_file(real)
+    except (OSError, ValueError) as e:
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: cannot hash trusted executable: {e}; telemetry command skipped")]
+    if actual_sha != expected_sha:
+        return None, findings + [finding("warning", "adapter.telemetry_unpinned", f"{adapter_name}: trusted executable hash drift; telemetry command skipped")]
+    return real, findings
+
+
+def rtk_telemetry_disable(root):
+    resolved, findings = trusted_adapter_executable(root, "rtk-shell-output", "rtk")
     if not resolved:
-        return {"present": False, "disabled": False, "detail": "rtk not found"}
+        return {"present": False, "disabled": False, "detail": "rtk not identity-pinned; telemetry command skipped", "findings": findings}
     try:
         proc = subprocess.run(
             [resolved, "telemetry", "disable"],
@@ -2245,13 +2358,14 @@ def rtk_telemetry_disable():
         "path": os.path.realpath(resolved),
         "returncode": proc.returncode,
         "detail": (proc.stdout or proc.stderr).strip(),
+        "findings": findings,
     }
 
 
-def rtk_telemetry_status():
-    resolved = shutil_which("rtk")
+def rtk_telemetry_status(root):
+    resolved, findings = trusted_adapter_executable(root, "rtk-shell-output", "rtk")
     if not resolved:
-        return {"present": False, "state": "absent", "detail": "rtk not found"}
+        return {"present": False, "state": "absent", "detail": "rtk not identity-pinned; telemetry command skipped", "findings": findings}
     try:
         proc = subprocess.run(
             [resolved, "telemetry", "status"],
@@ -2276,6 +2390,7 @@ def rtk_telemetry_status():
         "path": os.path.realpath(resolved),
         "returncode": proc.returncode,
         "detail": detail,
+        "findings": findings,
     }
 
 
@@ -2288,7 +2403,7 @@ def rtk_status(root):
         "present": bool(resolved),
         "pinned": False,
         "path": os.path.realpath(resolved) if resolved else "",
-        "telemetry": rtk_telemetry_status(),
+        "telemetry": rtk_telemetry_status(root),
         "network": "M8Shift uses RTK only as a local argv subprocess and disables telemetry on context setup.",
         "last_pack": last_pack,
     }
@@ -2317,15 +2432,18 @@ def cmd_adapters_init(args):
         path = adapter_path(root, name)
         if os.path.exists(path) and not args.force:
             continue
-        write_json(path, default_adapter_manifest(name))
+        write_json(path, default_adapter_manifest(name, allow_project_local=True))
         wrote.append(rel(root, path))
-    telemetry = rtk_telemetry_disable()
+    warnings = project_local_pin_warnings(root)
+    telemetry = rtk_telemetry_disable(root)
     if args.json:
-        print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS), "rtk_telemetry": telemetry}, ensure_ascii=False, sort_keys=True))
+        print(json.dumps({"written": wrote, "adapters": sorted(DEFAULT_ADAPTERS), "rtk_telemetry": telemetry, "warnings": warnings}, ensure_ascii=False, sort_keys=True))
     else:
         print(f"✓ adapter manifests ready ({len(wrote)} file(s) written)")
         for path in wrote:
             print(f"  {path}")
+        for row in warnings:
+            print(f"warning: {row['message']}", file=sys.stderr)
         if telemetry.get("present"):
             print(f"✓ rtk telemetry disable attempted (disabled={str(telemetry.get('disabled')).lower()})")
     return 0

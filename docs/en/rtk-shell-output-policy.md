@@ -44,10 +44,19 @@ bash install.sh --with-rtk
 ```
 
 It downloads the OS-specific RTK release asset for macOS, Linux, or Git
-Bash/Windows, verifies it against RTK's `checksums.txt`, installs it under
-`.m8shift/bin`, disables telemetry, and writes the pinned adapter manifest.
-If a matching prebuilt asset is unavailable, Cargo/Rust may be used as a
-fallback when present.
+Bash/Windows, verifies it against RTK's `checksums.txt` from the same GitHub
+release tag (the installer trust model is GitHub + TLS for that tag), installs it
+under `.m8shift/bin`, records installer provenance, disables telemetry, and
+writes the pinned adapter manifest. If a matching prebuilt asset is unavailable,
+Cargo/Rust source builds are disabled unless `--allow-source-build` is explicit;
+that fallback is pinned to the selected `--rtk-version` tag.
+
+Project-local binaries are never trusted just because they exist. `adapters init`
+prefers a normal `PATH` executable for pin establishment. A `.m8shift/bin/rtk`
+candidate is accepted only when its installer provenance file matches the
+candidate's real path and SHA-256. Routine telemetry helpers execute RTK only via
+a freshly verified manifest `trusted_executable`; absent, unpinned, drifted, or
+symlinked local binaries are skipped instead of run.
 
 If RTK is installed or upgraded after manifest generation, regenerate the manifest
 from a trusted shell:

@@ -14,12 +14,15 @@ native PowerShell/cmd.
   `urllib`, plus `sha256sum`, `shasum`, or Python `hashlib`.
 - *(Optional)* **Git for Windows** — only needed for anchor case-renaming via
   `git mv`. Without it, M8Shift still works (it skips the Git step).
-- *(Optional)* **RTK** — Git Bash can install a verified Windows release asset with
-  `--with-rtk`; the binary is stored in `.m8shift/bin`, telemetry is disabled, and
-  the adapter manifest is identity-pinned.
+- *(Optional)* **RTK** — Git Bash can install a Windows release asset with
+  `--with-rtk`; the asset is verified against RTK's `checksums.txt` from the same
+  GitHub release tag, the binary is stored in `.m8shift/bin`, telemetry is
+  disabled, installer provenance is recorded, and the adapter manifest is
+  identity-pinned.
 - *(Experimental)* **Headroom** — `--with-headroom` attempts `pip install
-  headroom-ai` in `.m8shift/venvs/headroom`; source builds may require Rust/Cargo
-  and failures do not block the base install.
+  headroom-ai` in `.m8shift/venvs/headroom`; this pip install is unpinned,
+  source builds may require Rust/Cargo, and failures do not block the base
+  install.
 
 ## Option A — WSL (recommended: closest to Linux/macOS)
 
@@ -63,8 +66,10 @@ python m8shift.py status
   ```
 
   The installer downloads the Windows `.zip` asset, verifies it against RTK's
-  `checksums.txt`, installs `rtk.exe` under `.m8shift/bin`, disables telemetry,
-  and writes the pinned adapter manifest.
+  `checksums.txt` from the same GitHub release tag, installs `rtk.exe` under
+  `.m8shift/bin`, records provenance, disables telemetry, and writes the pinned
+  adapter manifest. Cargo/Rust source-build fallback is disabled unless
+  `--allow-source-build` is explicit.
 
 ## Option C — Native PowerShell / cmd
 

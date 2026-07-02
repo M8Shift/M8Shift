@@ -119,12 +119,15 @@ curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
   bash -s -- --agents claude,codex --with-rtk
 ```
 
-`--with-rtk` uses verified release assets for macOS, Linux, and Git Bash/Windows,
-installs the binary under `.m8shift/bin`, disables RTK telemetry, and
-identity-pins the RFC 034 adapter manifest. If no prebuilt asset matches the
-host, the installer may use Cargo/Rust as a fallback. The default `ask` mode only
-prompts in an interactive terminal; non-interactive installs skip RTK unless
-`--with-rtk` is explicit.
+`--with-rtk` uses release assets for macOS, Linux, and Git Bash/Windows, verifies
+the asset against `checksums.txt` from the same RTK GitHub release tag
+(GitHub/TLS trust model), installs the binary under `.m8shift/bin`, records local
+provenance, disables RTK telemetry, and identity-pins the RFC 034 adapter
+manifest. If no prebuilt asset matches the host, Cargo/Rust source builds are
+available only with the additional explicit `--allow-source-build` flag and are
+pinned to the selected `--rtk-version` tag. The default `ask` mode only prompts in
+an interactive terminal; non-interactive installs skip RTK unless `--with-rtk` is
+explicit.
 
 Experimental Headroom-compatible context compression stays opt-in:
 
@@ -133,10 +136,11 @@ curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
   bash -s -- --agents claude,codex --with-headroom
 ```
 
-`--with-headroom` creates `.m8shift/venvs/headroom` and attempts
-`pip install headroom-ai`. Some platforms receive source distributions and may
-need Rust/Cargo for `cryptography`; failures are reported clearly and never block
-the base M8Shift install. Headroom remains behind the RFC 042 measurement gate.
+`--with-headroom` creates `.m8shift/venvs/headroom` and attempts an unpinned,
+best-effort `pip install headroom-ai`. Some platforms receive source
+distributions and may need Rust/Cargo for `cryptography`; failures are reported
+clearly and never block the base M8Shift install. Headroom remains behind the RFC
+042 measurement gate.
 
 For CI or review, inspect the install plan without writing files:
 
