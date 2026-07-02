@@ -373,3 +373,26 @@ correctly abstained on what it lacked and never lied. On the **reliability** axi
 the best *accuracy/preservation* candidate and is fully reliable; builtin+retrieval is the best
 *efficiency* candidate for M8Shift's retrieve-capable workload** — which is why builtin stays the
 default and Headroom stays a reliable opt-in, not a rejected one.
+
+### gpt-5-codex — a *different axis*: tool-assisted answer-presence (not long-context recall)
+
+The `gpt-5-codex` cross-vendor row is **not comparable** to the Claude rows above and is kept
+separate: Codex answered by **searching inside the form files** (its native agent/tool mode), not by
+a pure long-context read. So it measures **whether each gold is present & findable in the form**,
+not **whether a model recalls it from a single long-context pass**.
+
+| Form | gpt-5-codex (tool-assisted) | Head | Mid | Tail | Halluc | Abstain |
+|------|:---------------------------:|:----:|:---:|:----:|:------:|:-------:|
+| builtin digest | 2/9 | 1/3 | 0/3 | 1/3 | 0 | 2/2 |
+| builtin + retrieval | **9/9** | 3/3 | 3/3 | 3/3 | 0 | 2/2 |
+| Headroom (aggressive) | **9/9** | 3/3 | 3/3 | 3/3 | 0 | 2/2 |
+
+**Two findings this exposes:**
+1. **Preservation (findability):** builtin+retrieval and Headroom **both contain all 9 golds (9/9)** —
+   tied on completeness — while the digest truly drops 7. So the accuracy gap in the Claude
+   long-context table (5-6/9) is a **recall limitation, not a preservation limitation**: the forms
+   held more than a single-pass read recovered.
+2. **For tool-assisted agents** (how M8Shift agents actually operate — they grep/read), **retrieval
+   matches Headroom's completeness (9/9) at ~1/5 the tokens** — strengthening builtin+retrieval as
+   the default. A strictly comparable `gpt-5-codex` *long-context-read* row (OpenAI API, no tools)
+   is a follow-up (not run here; only the Anthropic key was available).
