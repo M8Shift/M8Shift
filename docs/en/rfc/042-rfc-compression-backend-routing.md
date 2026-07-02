@@ -43,7 +43,7 @@ the determinant that actually decides which wins. A true hybrid routes on that d
 | **Large** ctx **AND** (`inline`/no-retrieval **OR** `--whole-content` **OR** many-rapid-facts) **AND** Headroom installed + identity-pinned | **Headroom** | the *measured* Headroom-winning regime: highest single-pass precision + full inline preservation, 0 hallucinations, retrieval can't cheaply cover it |
 | **Retrieve-capable + few-fact** query (any length, **even long**) | **builtin + retrieval** | tied findability 9/9 at ~1/5 tokens, no probed-fact loss — the *right default* here, **not** a fallback; retrieval mandatory (digest-alone near-useless) |
 | **Short** context (below `compress_above_tokens`) | **builtin** | Headroom's precision edge is negligible on short input; keep the ~5× token saving |
-| **Headroom absent / unpinned / errored / config problem, or unknown signal** | **builtin + retrieval** (fail-closed) | comparable, reliable, **no data loss** (raw retrievable); default until the Phase C/D gate opens |
+| **Headroom absent / unpinned / errored / config problem, or unknown signal** | **builtin + retrieval** (fail-closed) | comparable, reliable, **no probed-fact loss while raw references remain retained/authorized/retrievable**; default until the Phase C/D gate opens |
 
 Note: content-type (shell/tool vs broad) still selects the RTK vs native *family* as in RFC 037;
 this rule governs the builtin-vs-Headroom choice *within* the broad family, under the precision-first
