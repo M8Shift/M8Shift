@@ -65,7 +65,7 @@ class ContextBase(unittest.TestCase):
         bindir = tempfile.mkdtemp(prefix="m8ctx-system-headroom-")
         self.addCleanup(shutil.rmtree, bindir, True)
         os.makedirs(bindir, exist_ok=True)
-        path = os.path.join(bindir, "headroom")
+        path = os.path.join(bindir, "m8shift-headroom")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("#!/usr/bin/env python3\n" + body)
         os.chmod(path, 0o755)
@@ -90,7 +90,7 @@ class ContextBase(unittest.TestCase):
         with open(real, "rb") as fh:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 h.update(chunk)
-        return {"program": "headroom", "path": real, "sha256": h.hexdigest()}
+        return {"program": "m8shift-headroom", "path": real, "sha256": h.hexdigest()}
 
     def symlinked_rtk_to_core_env(self):
         bindir = os.path.join(self.d, "bin")

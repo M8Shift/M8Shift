@@ -5290,6 +5290,33 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(provenance, fh)
 
+    def _write_fake_headroom_launcher(self, d):
+        bindir = os.path.join(d, ".m8shift", "venvs", "headroom", "bin")
+        os.makedirs(bindir, exist_ok=True)
+        marker = os.path.join(d, "headroom-executed.txt")
+        launcher = os.path.join(bindir, "m8shift-headroom")
+        with open(launcher, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {marker!r}\n")
+        os.chmod(launcher, 0o755)
+        return launcher, marker
+
+    def _write_headroom_provenance(self, d, launcher):
+        with open(launcher, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        provenance = {
+            "schema": "m8shift.installer.tool_provenance.v1",
+            "program": "m8shift-headroom",
+            "path": os.path.realpath(launcher),
+            "sha256": digest,
+            "package": "headroom-ai==0.28.0",
+            "runtime_packages": "onnxruntime==1.27.0 transformers==5.12.1",
+            "model": "chopratejas/kompress-v2-base",
+            "source": "test fixture",
+        }
+        path = os.path.join(d, ".m8shift", "venvs", "headroom", "bin", "m8shift-headroom.provenance.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(provenance, fh)
+
     def _adapters_init(self, d, *extra, env=None):
         if env is None:
             env = self._env_without_global_rtk()
@@ -5309,6 +5336,9 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         manifest = os.path.join(d, ".m8shift", "context", "adapters", f"{name}.json")
         with open(manifest, encoding="utf-8") as fh:
             return json.load(fh)
+
+    def _headroom_manifest(self, d):
+        return self._manifest(d, "headroom_ext")
 
     def _case_variant_local_bin(self, d):
         lower = os.path.join(d, ".m8shift", "bin")
@@ -5360,14 +5390,32 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
 
     def test_case_variant_project_local_headroom_path_is_not_pinned_without_opt_in(self):
         d = self._project()
-        _headroom, marker = self._write_fake_rtk(d, filename="headroom")
-        variant_bin = self._case_variant_local_bin(d)
+        _launcher, marker = self._write_fake_headroom_launcher(d)
+        variant_bin = os.path.join(d, ".m8shift", "VENVS", "headroom", "bin")
+        if not os.path.isfile(os.path.join(variant_bin, "m8shift-headroom")):
+            self.skipTest("case-sensitive filesystem: no case-variant headroom venv collision to defend against")
         env = self._env_without_global_rtk()
         env["PATH"] = variant_bin + os.pathsep + env["PATH"]
         self._adapters_init(d, env=env)
-        adapter = self._manifest(d, "headroom_ext")
         self.assertFalse(os.path.exists(marker))
-        self.assertNotIn("trusted_executable", adapter)
+        self.assertNotIn("trusted_executable", self._headroom_manifest(d))
+
+    def test_project_local_headroom_venv_launcher_requires_explicit_opt_in_and_provenance(self):
+        d = self._project()
+        launcher, marker = self._write_fake_headroom_launcher(d)
+        self._write_headroom_provenance(d, launcher)
+
+        without_opt_in = self._adapters_init(d)
+        self.assertFalse(os.path.exists(marker))
+        self.assertNotIn("trusted_executable", self._headroom_manifest(d))
+
+        with_opt_in = self._adapters_init(d, "--allow-project-local-adapters")
+        self.assertTrue(any(row["check"] == "adapter.project_local_pin" for row in with_opt_in["warnings"]))
+        self.assertFalse(os.path.exists(marker), "pinning must hash the launcher without executing it")
+        adapter = self._headroom_manifest(d)
+        self.assertEqual(adapter["command"], ["m8shift-headroom", "m8shift-transform", "$M8SHIFT_ADAPTER_MODE"])
+        self.assertEqual(adapter["trusted_executable"]["program"], "m8shift-headroom")
+        self.assertEqual(adapter["trusted_executable"]["path"], os.path.realpath(launcher))
 
     @unittest.skipIf(os.name == "nt", ".exe fallback is expected on native Windows")
     def test_project_local_exe_fallback_is_off_on_non_windows(self):
@@ -5408,8 +5456,7 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         # A case-variant of the project-local bin dir on PATH (e.g. .m8shift/BIN) points at
         # the SAME physical dir on a case-insensitive filesystem. It must NOT let a
         # project-local rtk be pinned or executed without --allow-project-local-adapters:
-        # the physical-identity exclusion + the under-project-root defense-in-depth guard
-        # both reject it. (No-op on case-sensitive filesystems, where the variant is a
+        # the physical-identity exclusion rejects it. (No-op on case-sensitive filesystems, where the variant is a
         # different, non-existent path.)
         d = self._project()
         rtk, marker = self._write_fake_rtk(d)  # .m8shift/bin/rtk (no provenance)

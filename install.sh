@@ -823,9 +823,11 @@ install_headroom() {
   [ -n "$hbin" ] || headroom_fail "Headroom venv bin directory not found"
   local launcher="$hbin/m8shift-headroom"
   write_headroom_launcher "$hp" "$launcher"
-  write_headroom_provenance "$launcher" "$hbin/headroom.provenance.json"
+  write_headroom_provenance "$launcher" "$hbin/m8shift-headroom.provenance.json"
+  cp "$hbin/m8shift-headroom.provenance.json" "$hbin/headroom.provenance.json"
   printf '✓ m8shift-headroom launcher installed in %s\n' "$launcher"
-  printf '✓ Headroom provenance written to %s\n' "$hbin/headroom.provenance.json"
+  printf '✓ Headroom provenance written to %s\n' "$hbin/m8shift-headroom.provenance.json"
+  pin_context_adapters "$hbin" 1
 }
 
 offer_headroom() {
