@@ -2509,13 +2509,29 @@ def git_remote_urls():
     return urls
 
 
+def _remote_host(url):
+    """Best-effort host from a git remote URL: scp-like `git@host:`, `scheme://[user@]host`, else ""."""
+    u = (url or "").strip()
+    m = re.match(r"^[A-Za-z0-9_.+-]+@([^:/]+):", u)
+    if m:
+        return m.group(1).lower()
+    m = re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*://(?:[^@/]+@)?([^:/]+)", u)
+    if m:
+        return m.group(1).lower()
+    return ""
+
+
+def _is_github_host(host):
+    return host == "github.com" or host.endswith(".github.com")
+
+
 def infer_decision_target():
     urls = git_remote_urls()
     if not urls:
         return "md", "default"
-    has_github = any("github.com" in url.lower() for url in urls)
+    has_github = any(_is_github_host(_remote_host(url)) for url in urls)
     has_forge = any(
-        ("github.com" not in url.lower())
+        (not _is_github_host(_remote_host(url)))
         and (
             any(token in url.lower() for token in ("forge", "gitea", "gitlab", "gogs"))
             or bool(re.search(r":\d+/", url))
