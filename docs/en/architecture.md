@@ -262,7 +262,7 @@ flowchart LR
     class GIT,HOOKS,ADAPTERS external
 
     Human -->|"shell argv: init/status/next/pause/resume"| CORE
-    Agents -->|"shell argv: claim/work/append/wait"| CORE
+    Agents -->|"shell argv: claim/next/append/wait"| CORE
     CORE -->|"atomic file R/W: LOCK + turn append"| RELAY
     CORE -->|"O_EXCL create/remove: mutex guard"| LOCKFILE
     CORE -->|"MD/JSONL append: memory/tasks/sessions"| BOARDS
@@ -276,7 +276,7 @@ flowchart LR
     WORKTREE -->|"git argv + exit code: worktree add/merge/remove"| GIT
     E2E -->|"subprocess argv + exit code: copied m8shift.py cases"| CORE
     I18N -->|"file read/write: language packs -> localized script"| CORE
-    GEN -->|"file read/write: docs indexes from repo metadata"| BOARDS
+    GEN -->|"python import: core helpers · writes docs/en/protocol*.md only"| CORE
 ```
 
 ### 1.6.3 Inter-application agent flow — major scenarios
@@ -300,7 +300,7 @@ sequenceDiagram
         Human->>Codex: UI prompt / operator scope
         Codex->>Core: shell argv `claim codex` → file LOCK `WORKING_CODEX`
         Codex->>Core: repository work happens while the pen is held
-        Codex->>Boards: shell argv `task/memory/session` → MD/JSONL append
+        Codex->>Boards: shell argv `task`/`remember` → MD board append (sessions.jsonl = core side effect)
         Codex->>Core: shell argv `append codex --to claude` → turn append + LOCK `AWAITING_CLAUDE`
         Claude->>Core: shell argv `claim claude` / `next claude` → LOCK `WORKING_CLAUDE`
         Claude->>Core: shell argv `append claude --to codex` → turn append + LOCK `AWAITING_CODEX`
