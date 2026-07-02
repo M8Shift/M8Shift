@@ -435,4 +435,5 @@ auto-routing stays behind the **Phase C/D evidence gate**.
 
 **Caveat (kept honest):** the +1-2 precision margin is **directional** (N=9, 1 run, 1 genre, 1 size);
 the full benchmark (#84) would firm it. The policy is a priority *choice* on directional evidence,
-fail-safe (builtin loses nothing), and reversible if fuller measurement contradicts it.
+fail-safe **in retrieve-capable mode** (builtin retains the raw by reference while it stays
+retained/authorized/retrievable), and reversible if fuller measurement contradicts it.
