@@ -60,6 +60,7 @@ COMPRESSION_HEADROOM_CONTENT_TYPES = {
     "large-context",
     "large_context",
 }
+COMPRESSION_ACCESS_MODES = {"retrieve", "inline"}
 COMPRESSION_AUTO_BACKEND_BY_CONTENT_TYPE = {
     **{name: "rtk-shell-output" for name in COMPRESSION_RTK_CONTENT_TYPES},
 }
@@ -603,6 +604,19 @@ def compression_backend_auto_enabled(config, backend):
     return bool(compression_backend_config(config, backend).get("auto_enabled", False))
 
 
+def normalize_compression_access_mode(value):
+    if value in COMPRESSION_ACCESS_MODES:
+        return value
+    return "retrieve"
+
+
+def compression_routing_signals(args):
+    return {
+        "access_mode": normalize_compression_access_mode(getattr(args, "access_mode", "retrieve")),
+        "whole_content": bool(getattr(args, "whole_content", False)),
+    }
+
+
 def bounded_int(value, default, minimum, maximum):
     try:
         value = int(value)
@@ -991,7 +1005,7 @@ def cmd_init(args):
             "Packs are operational views only; verification uses original sources.\n"
             "Compression records store redacted raw references and compact digests under `compression/`.\n"
             "When RTK is present and identity-pinned, packs may use the RTK shell-output adapter by default; use `pack --adapter native` to opt out.\n"
-            "Headroom `headroom_ext` is an operator experiment: explicit `--backend headroom_ext`, or `compress --backend auto` only when `.m8shift/context-compression.json` sets `backends.headroom_ext.auto_enabled` to true.\n"
+            "Headroom `headroom_ext` is an operator experiment: use explicit `compress --backend headroom_ext`; `--access-mode` / `--whole-content` are recorded as advisory routing signals but do not auto-route to Headroom until the evidence gate opens.\n"
         ))
         wrote.append(rel(root, readme))
     telemetry = rtk_telemetry_disable()
@@ -1926,6 +1940,7 @@ def compression_headroom_result(root, args, redacted, config, explicit=False):
 
 
 def compact_backend(root, args, redacted, config, config_fail_safe):
+    routing_signals = compression_routing_signals(args)
     if config_fail_safe:
         return compression_backend_result(filtered=None, error="missing or malformed compression config", backend=args.backend)
     if not ADAPTER_NAME_RE.fullmatch(args.backend or ""):
@@ -1940,11 +1955,14 @@ def compact_backend(root, args, redacted, config, config_fail_safe):
         backend = COMPRESSION_AUTO_BACKEND_BY_CONTENT_TYPE.get(args.type)
         if backend == "rtk-shell-output":
             return compression_rtk_result(root, args, redacted, config, explicit=False)
-        if (
-            args.type in COMPRESSION_HEADROOM_CONTENT_TYPES
-            and compression_backend_auto_enabled(config, "headroom_ext")
+        if args.type in COMPRESSION_HEADROOM_CONTENT_TYPES and (
+            routing_signals["access_mode"] == "inline" or routing_signals["whole_content"]
         ):
-            return compression_headroom_result(root, args, redacted, config, explicit=False)
+            # RFC 042 Phase B only plumbs these advisory signals. Until the
+            # Phase D evidence gate opens, broad-context auto routing remains
+            # fail-closed to builtin. Explicit --backend headroom_ext is still
+            # honored above.
+            return builtin_backend_result(args, redacted, config)
         return builtin_backend_result(args, redacted, config)
     return compression_backend_result(filtered=None, error=f"unsupported or unavailable backend {args.backend!r}", backend=args.backend)
 
@@ -1953,6 +1971,9 @@ def cmd_compress(args):
     root = root_from(args)
     ensure_dirs(root)
     args.id = compression_record_id(args)
+    routing_signals = compression_routing_signals(args)
+    args.access_mode = routing_signals["access_mode"]
+    args.whole_content = routing_signals["whole_content"]
     config, config_findings, config_fail_safe = load_compression_config(root)
     raw = read_compression_input(root, args)
     try:
@@ -2015,6 +2036,8 @@ def cmd_compress(args):
         "created_at": iso(),
         "agent": args.agent or "",
         "content_type": args.type,
+        "access_mode": args.access_mode,
+        "whole_content": args.whole_content,
         "backend": backend_result["backend"],
         "requested_backend": args.backend,
         "backend_version": manifest.get("version", ""),
@@ -2464,6 +2487,10 @@ def main(argv=None):
     sc.add_argument("--agent", default="")
     sc.add_argument("--type", default="context", help="content type label, e.g. test_output or shell_output")
     sc.add_argument("--backend", default="auto", help="compression backend id (default: auto)")
+    sc.add_argument("--access-mode", choices=sorted(COMPRESSION_ACCESS_MODES), default="retrieve",
+                    help="advisory consumer access mode for compression routing signals")
+    sc.add_argument("--whole-content", action="store_true",
+                    help="signal that the consumer needs most of the compressed content at once")
     csrc = sc.add_mutually_exclusive_group(required=True)
     csrc.add_argument("--stdin", action="store_true", help="read raw content from stdin")
     csrc.add_argument("--input", help="read raw content from a project-relative file")

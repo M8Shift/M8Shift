@@ -1,6 +1,6 @@
 # RFC 037 — Agent Context Compression Backends and Digest-Based Handoffs
 
-- Status: draft; Phase C local records + builtin/RTK backend dispatch shipped in v3.38.0; Phase D optional Headroom adapter dispatch shipped in v3.39.0; Headroom auto opt-in gate shipped in v3.40.0
+- Status: draft; Phase C local records + builtin/RTK backend dispatch shipped in v3.38.0; Phase D optional Headroom adapter dispatch shipped in v3.39.0; RFC 042 Phase B keeps broad `auto` routing on builtin while recording future Headroom routing signals
 - Target stage: optional context companion (`m8shift-context.py`) — policy + file protocol
 - Builds on: [RFC 033 Context Economy](033-rfc-context-economy.md) (policy), [RFC 034 Companion Adapter Interface](034-rfc-companion-adapter-interface.md) (mechanism), [RFC 026 sidecar retention](026-rfc-sidecar-retention.md)
 - Related: [RFC 036 Token-window exhaustion](036-rfc-token-window-exhaustion.md), [RFC 040 AI session usage monitoring](040-rfc-ai-session-usage-monitoring.md)
@@ -155,7 +155,7 @@ The shipped `auto` dispatch map is explicit:
 | Content type | Auto backend | Fallback |
 |--------------|--------------|----------|
 | `shell_output`, `test_output`, `logs`, `log`, `git_output` | `rtk-shell-output` | builtin digest |
-| `conversation`, `history`, `file`, `report`, `diff`, `large-context`, `large_context` | builtin digest unless `backends.headroom_ext.auto_enabled: true`; then `headroom_ext` if identity-pinned | builtin digest |
+| `conversation`, `history`, `file`, `report`, `diff`, `large-context`, `large_context` | builtin digest in `auto`; explicit `--backend headroom_ext` only until the RFC 042 evidence gate opens | builtin digest |
 | any other label | builtin digest | reference-only only on config/backend failure |
 
 `headroom_ext` is intentionally a **local adapter contract**, not a Headroom proxy/MCP launcher.
@@ -262,9 +262,9 @@ Normative — none of these may be violated:
 
 Policy knobs. **Backend identity (path + sha256), commands, and modes are owned by the
 RFC 034 adapter manifests** under `.m8shift/context/adapters/`, not duplicated here. The one
-exception is `backends.headroom_ext.auto_enabled`, which is an explicit product opt-in for
-automatic broad-context Headroom experiments; explicit `--backend headroom_ext` does not require
-that opt-in.
+legacy reserved field is `backends.headroom_ext.auto_enabled`; RFC 042 Phase B records routing
+signals but does not auto-route broad context to Headroom before the measured gate opens. Explicit
+`--backend headroom_ext` does not require that reserved flag.
 
 ```json
 {

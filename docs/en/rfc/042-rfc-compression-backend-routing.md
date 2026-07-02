@@ -32,9 +32,11 @@ Round 3 measured, at 100k on M8Shift-style content:
 - Headroom's *winning* regimes (no retrieval; whole-content; many rapid facts) were **reasoned from
   the mechanism, not measured**.
 
-Today's dispatch (RFC 037 / v3.40.0) routes broad content to builtin by default, or to Headroom only
-via a manual `backends.headroom_ext.auto_enabled` flag — a per-content-type + manual choice, **not**
-the determinant that actually decides which wins. A true hybrid routes on that determinant.
+The previous dispatch (RFC 037 / v3.40.0) routed broad content to builtin by default, or to
+Headroom through a manual `backends.headroom_ext.auto_enabled` flag — a per-content-type + manual
+choice, **not** the determinant that actually decides which wins. RFC 042 Phase B supersedes that
+automatic broad Headroom route by recording the determinant signals while keeping `auto` fail-closed
+to builtin until the measured gate opens. A true hybrid routes on that determinant.
 
 ## The determinant and decision rule
 

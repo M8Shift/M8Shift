@@ -174,10 +174,10 @@ runner policy, but not the RTK binary. See [rtk-shell-output-policy.md](rtk-shel
 Both agents — Claude (analysis) and Codex (independent review) — previously agreed **not** to run
 Round 3 on the current native pack. That judgement still holds for the pack itself. In v3.39.0
 M8Shift added the optional `headroom_ext` backend hook for **broad raw context records**
-(`conversation`, `history`, `file`, `report`, `diff`, `large-context`). Since v3.40.0, `auto`
-keeps those broad records on the builtin digest unless an operator explicitly sets
-`backends.headroom_ext.auto_enabled: true` and identity-pins an adapter-compatible local
-`headroom` command.
+(`conversation`, `history`, `file`, `report`, `diff`, `large-context`). RFC 042 Phase B keeps
+`auto` on builtin for those broad records, while recording `--access-mode` and `--whole-content`
+signals for the later measured gate. Operators can still select `headroom_ext` explicitly with
+`--backend headroom_ext` when an adapter-compatible local `headroom` command is identity-pinned.
 
 Reasoning:
 
@@ -301,7 +301,7 @@ venv, run **offline/cache-only** (`preload(allow_download=False)`, onnx), fed as
 legitimate near-lossless option that even edged accuracy here), but because for M8Shift's
 retrieve-capable model, **digest+retrieval gets comparable answers at a fifth of the tokens**;
 Headroom's marginal extra preservation costs ~5× the tokens. Consistent with keeping builtin the
-`auto` default and Headroom opt-in (v3.40.0).
+`auto` default until the RFC 042 evidence gate opens, while retaining explicit Headroom experiments.
 
 **Why builtin is more token-efficient here — the mechanism (this is *not* "builtin is a better
 compressor").** The two tools solve different problems:
