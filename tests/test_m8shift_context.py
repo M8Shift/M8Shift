@@ -392,6 +392,18 @@ class TestContextBenchmark(ContextBase):
 
 
 class TestContextCompression(ContextBase):
+    def test_compression_routing_signal_defaults_and_internal_fail_safe(self):
+        ctx = load_context_module()
+        self.assertEqual(ctx.normalize_compression_access_mode("garbage"), "retrieve")
+
+        class EmptyArgs:
+            pass
+
+        self.assertEqual(ctx.compression_routing_signals(EmptyArgs()), {
+            "access_mode": "retrieve",
+            "whole_content": False,
+        })
+
     def test_compress_writes_redacted_record_and_bounded_retrieve(self):
         self.assertEqual(self.ctx("init").returncode, 0)
         slack_token = "xoxb-" + "1234567890-" + "abcdefghijklmnop"
@@ -464,6 +476,41 @@ class TestContextCompression(ContextBase):
         retrieved_payload = json.loads(retrieved.stdout)
         self.assertTrue(retrieved_payload["bounded"])
         self.assertLessEqual(len(retrieved_payload["content"].splitlines()), 3)
+
+    def test_retrieve_accepts_legacy_record_without_routing_signal_fields(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        record_id = "legacy-record"
+        base = os.path.join(self.d, ".m8shift", "context", "compression")
+        record_dir = os.path.join(base, "records")
+        raw_dir = os.path.join(base, "raw")
+        compact_dir = os.path.join(base, "compact")
+        for path in (record_dir, raw_dir, compact_dir):
+            os.makedirs(path, exist_ok=True)
+        with open(os.path.join(raw_dir, f"{record_id}.raw.txt"), "w", encoding="utf-8") as fh:
+            fh.write("legacy raw line 1\nlegacy raw line 2\n")
+        with open(os.path.join(compact_dir, f"{record_id}.compact.txt"), "w", encoding="utf-8") as fh:
+            fh.write("legacy compact line\n")
+        legacy_record = {
+            "schema": "m8shift.compressed_context_record.v1",
+            "id": record_id,
+            "content_type": "report",
+            "backend": "builtin",
+            "requested_backend": "auto",
+        }
+        with open(os.path.join(record_dir, f"{record_id}.json"), "w", encoding="utf-8") as fh:
+            json.dump(legacy_record, fh)
+
+        raw = self.ctx("retrieve", record_id, "--lines", "2", "--json")
+        self.assertEqual(raw.returncode, 0, raw.stderr + raw.stdout)
+        raw_payload = json.loads(raw.stdout)
+        self.assertEqual(raw_payload["source"], "raw")
+        self.assertIn("legacy raw line 2", raw_payload["content"])
+
+        compact = self.ctx("retrieve", record_id, "--compact", "--lines", "1", "--json")
+        self.assertEqual(compact.returncode, 0, compact.stderr + compact.stdout)
+        compact_payload = json.loads(compact.stdout)
+        self.assertEqual(compact_payload["source"], "compact")
+        self.assertIn("legacy compact line", compact_payload["content"])
 
     def test_compress_rejects_traversal_record_id(self):
         self.assertEqual(self.ctx("init").returncode, 0)
@@ -654,7 +701,7 @@ class TestContextCompression(ContextBase):
         self.assertIn("adapter mode 'test' is not declared", payload["adapter_result"]["error"])
         self.assertNotIn("super-secret", json.dumps(payload))
 
-    def test_auto_headroom_backend_stays_builtin_until_phase_d_gate(self):
+    def test_auto_headroom_backend_requires_explicit_config_opt_in(self):
         marker = os.path.join(self.d, "headroom-compress.txt")
         env = self.fake_headroom_env(
             "import sys\n"
@@ -689,13 +736,16 @@ class TestContextCompression(ContextBase):
         self.assertEqual(opt_in_auto.returncode, 0, opt_in_auto.stderr)
         payload = json.loads(opt_in_auto.stdout)
         self.assertEqual(payload["requested_backend"], "auto")
-        self.assertEqual(payload["backend"], "builtin")
-        self.assertEqual(payload["adapter_result"]["adapter"], "builtin")
+        self.assertEqual(payload["backend"], "headroom_ext")
+        self.assertEqual(payload["adapter_result"]["adapter"], "headroom_ext")
+        self.assertEqual(payload["adapter_result"]["mode"], "report")
+        self.assertIn("HEADROOM_COMPACT mode=m8shift-transform report", payload["adapter_result"]["filtered_text"])
         self.assertIn("exit code 1", payload["adapter_result"]["filtered_text"])
         self.assertEqual(payload["access_mode"], "retrieve")
         self.assertFalse(payload["whole_content"])
         self.assertNotIn("super-secret", json.dumps(payload))
-        self.assertFalse(os.path.exists(marker))
+        with open(marker, encoding="utf-8") as fh:
+            self.assertIn("m8shift-transform report", fh.read())
 
     def test_inline_and_whole_content_signals_do_not_auto_route_headroom_yet(self):
         marker = os.path.join(self.d, "headroom-signal.txt")
@@ -705,10 +755,6 @@ class TestContextCompression(ContextBase):
             "sys.stdout.write('HEADROOM_SIGNAL\\n')\n"
         )
         self.assertEqual(self.ctx("init", env=env).returncode, 0)
-        self.write_json(".m8shift/context-compression.json", {
-            "schema": "m8shift.context_compression.config.v1",
-            "backends": {"headroom_ext": {"auto_enabled": True}},
-        })
 
         inline = self.ctx(
             "compress", "--id", "headroom-inline-auto", "--type", "report", "--access-mode", "inline", "--stdin", "--json",
@@ -799,7 +845,7 @@ class TestContextCompression(ContextBase):
         payload = json.loads(auto_opt_in.stdout)
         self.assertEqual(payload["requested_backend"], "auto")
         self.assertEqual(payload["backend"], "builtin")
-        self.assertNotIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
+        self.assertIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
         self.assertNotIn("super-secret", json.dumps(payload))
 
         explicit = self.ctx(
@@ -843,7 +889,7 @@ class TestContextCompression(ContextBase):
         self.assertEqual(payload["requested_backend"], "auto")
         self.assertEqual(payload["backend"], "builtin")
         self.assertFalse(payload["fallback_used"])
-        self.assertNotIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
+        self.assertIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
         self.assertNotIn("super-secret", json.dumps(payload))
 
         explicit = self.ctx(

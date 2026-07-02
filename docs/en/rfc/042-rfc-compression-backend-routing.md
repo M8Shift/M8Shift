@@ -94,7 +94,9 @@ identity-pinned, output-capped runner) · **fail-closed to builtin** on any unkn
 unpinned / errored Headroom, or config problem. The online `pip install` for #84 is **measurement-harness
 setup only**, never shipped runtime behavior — the runtime path stays offline/cache-only. Redaction-before-store and "compression never
 starves verification" (RFC 033 §9) are unchanged: the retrieve path is the safety net, and the
-router never sends a form that drops content a consumer cannot recover.
+router never sends a form that drops content a consumer cannot recover. An unknown `--access-mode`
+value is rejected at the CLI before any write; unknown INTERNAL values normalize fail-safe to
+`retrieve` -> builtin.
 
 ## Relationship to RFC 039
 
@@ -121,8 +123,9 @@ is packed) and compose.
 
 1. The decision rule + the `access-mode`/`whole-content` signals are specified and recorded on the
    record.
-2. Default and unknown-signal behavior is **builtin** (fail-closed), byte-identical to v3.40.0 until
-   the gate opens.
+2. Default and unknown-signal behavior keeps the routing outcome (selected backend) identical to
+   v3.40.0 for default and unknown signals; the record schema gains the two advisory fields per
+   criterion 1.
 3. Auto-route-to-Headroom is explicitly **gated behind measured evidence (#84) + identity-pinning**.
 4. Explicit `--backend headroom_ext` remains available as an operator experiment.
 
