@@ -327,8 +327,10 @@ wins; it is not a general claim that builtin out-compresses Headroom.
 
 **Limits (this is a pilot, not a significance-grade verdict).** N=9 answerable, **1 run, 1 genre
 (docs/RAG), 1 size (100k)**. The builtin+retrieval retrieval was **idealized** (slices supplied for
-the queried facts) → its 5/9 is likely *understated*, so real agentic retrieval would probably
-*widen* the efficiency gap in builtin's favor. Exact-match was strict (e.g. `tiered` ≠
+the queried facts): this is **not a production retrieval measurement**. It may *understate* the
+model's use of available facts (fixed windows, strict exact-match), but it also *overstates*
+retrieval efficiency by excluding real query/retry/tool overhead — so the bias direction is
+**ambiguous**, not simply favorable to builtin. Exact-match was strict (e.g. `tiered` ≠
 `capability-tiered` counted as a miss for **both** forms). The full rigorous version (3 genres × 3
 sizes, N≥50, ≥5 runs + bootstrap CIs + paired significance, config frontiers, blind cross-model
 judge, both framings incl. Headroom-with-retrieval) is deferred behind budget (#84).
@@ -411,18 +413,25 @@ The operator's priority for M8Shift is explicit: **preservation and precision ra
 efficiency** — losing information means losing the meaning of the work. Under that priority the data
 resolves cleanly:
 
-- **Neither builtin+retrieval nor Headroom loses information.** builtin keeps the **full raw,
-  retrievably** (Mode B: 9/9 findable); Headroom keeps ~45% in-place. Only the *digest alone* drops
-  data. So the "never lose data" bar is met by **both** — the internal version does not lose meaning
-  when retrieval is on.
+- **Neither form lost a *probed fact* in this benchmark, under the tested access mode.** builtin
+  preserves the source **by reference** (Mode B: 9/9 findable) — but *only while the raw stays
+  retained, authorized, and retrievable by the consumer*; Headroom preserves **more facts inline**
+  (~45% compact), not the full raw either. Only the *digest alone* drops data. This is a
+  **benchmark-scoped** no-loss result (probed facts + retrieval on), **not** a general no-loss proof
+  for either backend.
 - Where Headroom leads is **single-pass precision** (Mode A recall): 6-7/9 vs builtin+retrieval's
   3-5/9, on every model, with **0 hallucinations everywhere**.
 
-**Policy:** because M8Shift prioritizes precision + preservation over efficiency, **when Headroom is
-installed and identity-pinned it is the preferred broad-context backend** (highest measured
-precision, full preservation); **builtin+retrieval is the fallback** when Headroom is absent/unpinned
-(comparable, reliable, still no data loss). This flips the earlier efficiency-first default and is
-captured in [RFC 042](rfc/042-rfc-compression-backend-routing.md).
+**Policy (conditional, not global):** because M8Shift prioritizes precision + preservation over
+efficiency, **Headroom becomes the preferred backend in the regimes where it measurably wins** —
+**large** contexts that are **inline / no-retrieval / whole-content / many-rapid-facts**, when it is
+installed and identity-pinned (highest measured single-pass precision, full inline preservation).
+**builtin + retrieval remains preferred for retrieve-capable few-fact work** — there it matched
+findability 9/9 at ~1/5 the tokens with no probed-fact loss, so it is the *right default* for that
+regime, **not a mere fallback**. builtin is also the **fail-closed fallback** whenever Headroom is
+absent / unpinned / errored, and for short contexts. This **refines** (it does not globally flip) the
+earlier default and is captured in [RFC 042](rfc/042-rfc-compression-backend-routing.md); the flip to
+auto-routing stays behind the **Phase C/D evidence gate**.
 
 **Caveat (kept honest):** the +1-2 precision margin is **directional** (N=9, 1 run, 1 genre, 1 size);
 the full benchmark (#84) would firm it. The policy is a priority *choice* on directional evidence,
