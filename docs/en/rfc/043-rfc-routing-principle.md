@@ -45,7 +45,7 @@ disqualifies alone).
 |--------|------|---------|----------------|
 | `feasibility / context-class` | **hard gate** | Can the candidate physically do the job — fit the input, be present, be pinned? | A candidate that cannot fit the input, or an absent / unpinned / identity-mismatched backend, is disqualified **regardless of cost**. |
 | `capability-requirement` | **hard gate** | Does the candidate clear the task's capability floor + required capabilities? | Floor is **inviolable**; cost is never a reason to drop below it. |
-| `access-mode` (`retrieve` vs `inline`) | **hard gate** | Can the eventual consumer fetch the raw by reference, or must it be inline? | `retrieve` keeps the low-cost default (no probed-fact loss where the raw stays retrievable — RFC 042) eligible; `inline` (no retrieval) opens the higher-fidelity regime. |
+| `access-mode` (`retrieve` vs `inline`) | **hard gate — *context/compression routers only*** | Can the eventual consumer fetch the raw by reference, or must it be inline? *(Not universal: it does not apply to model routing or delegation, where nothing is being compressed/delivered as a form.)* | `retrieve` keeps the low-cost default (no probed-fact loss where the raw stays retrievable — RFC 042) eligible; `inline` (no retrieval) opens the higher-fidelity regime. |
 | `task-type` / `content-type` | soft fitness | What *kind* of work / content this is. | Selects a *family* or a starting fit — **never the sole determinant**; the real determinant (below) decides within the family. |
 | `size` | soft fitness | Estimated tokens (proxy: bytes/4, advisory). | **A risk *amplifier*, not a standalone determinant.** Large *raises the stakes* of the access-mode / query-shape choice; it does **not** by itself select a backend. "Long → the expensive branch" is a misframing (RFC 042): long + retrieve + few-fact still routes to the cheap default. |
 | `cost-band` / `latency` | soft fitness (tie-break) | Ordinal operator bands (`$<$$<$$$<$$$$`), never currency. | Breaks ties **among already-feasible, fit candidates only**. |
@@ -77,16 +77,22 @@ produces the drift this RFC exists to stop.
    is `downgradable:false` and stays at its pinned tier; and **routing never emits a form
    that starves verification** — the retrievable raw must stay retained, authorized, and
    recoverable (RFC 033 §9). Economy never wins over correctness here.
-5. **EVIDENCE GATE (non-default branch only).** An instance's branch that departs from its
-   safe default ships **only** behind that instance's own measured evidence — real-token gain **and** output-
-   equivalence, per the RFC 034 §8 benchmark — and behind a **version gate**. Until that
-   evidence firms, the non-default branch is design-only / operator-experiment; a
-   directional pilot is not proof and does not open the gate.
-6. **FAIL-CLOSED DEFAULT.** On any unknown, absent, errored, or unpinned signal — or an
-   empty eligible set — degrade to the **safe default whose raw stays retrievable** (no
-   probed-fact loss while retrieval is intact — RFC 033 §9): the pen-holder's own model,
-   or builtin+retrieval, never a guessed cheap candidate and never the un-redacted raw
-   blob. The default is the floor of correctness, not a convenience.
+5. **INSTANCE EVIDENCE / PROMOTION GATE (non-default branch only).** An instance's branch that
+   departs from its safe default ships **only** behind that instance's **own** evidence — and the
+   *kind* of evidence is **instance-owned, not universal**: for compression/adapters (037/042) a
+   **measured** gate (real-token gain **and** output-equivalence, per the RFC 034 §8 benchmark); for
+   model routing (039) operator-asserted capability ordinals + staleness + a **verify-before-integrate
+   output** gate (no real-token concept); for delegation (032) **verify-before-integrate** against
+   ground truth (no measured branch gate at all). In every case it is **version-gated**, and a
+   directional pilot is not proof — it does not open the gate.
+6. **FAIL-CLOSED DEFAULT.** On any unknown, absent, errored, or unpinned signal — or an empty
+   eligible set — degrade to **the instance's own safe default**, never a guessed cheap candidate.
+   That default is instance-specific, **not** a universal "raw stays retrievable": for
+   compression/context (037/042) builtin+retrieval or reference-only *while the raw stays
+   retained/authorized/retrievable* (no probed-fact loss while retrieval is intact — RFC 033 §9), and
+   never the un-redacted raw blob; for model routing (039) the pen-holder's own model / manual /
+   launch nothing; for delegation (032) integrate **no** unverified output. The default is the floor
+   of correctness, not a convenience.
 
 ## Instance mapping
 
@@ -98,30 +104,32 @@ copied here (so this table cannot fall out of sync when an instance changes its 
 
 | RFC (instance) | Feasibility gate | Fitness determinant | Cost tie-break | Evidence gate | Fail-closed default |
 |----------------|------------------|---------------------|----------------|---------------|---------------------|
-| **037** compression family | backend identity-pin present/matched; oversized-input refuse threshold; never-compress content classes (RFC 037 §config) | content-type selects family (shell/tool vs broad); extended-context backend only if pinned | deterministic per type; size ladder trades richness for reference-only (RFC 037) | real-tokenizer gain + output-equivalence; extended-context auto only behind its enable flag + pin (RFC 037) | reference-only output (path + digest, zero inline); default backend + redact-before-store forced (RFC 037 §config) |
+| **037** compression family | backend identity-pin present/matched; oversized-input refuse threshold; never-compress content classes (RFC 037 §config) | content-type selects family (shell/tool vs broad); extended-context backend only if pinned | deterministic per type; size ladder trades richness for reference-only (RFC 037) | measured (real-tokenizer gain + output-equivalence) **for any claimed gain / promotion / defaulting**; explicit/configured experiments still allowed behind pin + fail-closed (RFC 037) | reference-only output (path + digest, zero inline); default backend + redact-before-store forced (RFC 037 §config) |
 | **039** model / task-type | tier floor **AND** required capabilities **AND** required context-class (RFC 039) | capability-first (floor is the only eligibility axis) | cheapest cost-band among eligible, then latency | **output gate** — operator-asserted ordinals + staleness on *selection*; the empirical gate is verify-before-integrate on *output* | pen-holder's own model by strict precedence; launch nothing; floor never relaxed |
 | **042** builtin vs Headroom | Headroom installed + pinned + offline-safe; short ctx → builtin (RFC 042) | retrieval capability + query shape (the *determinant*, not content-type) | token efficiency, **subordinate** to preservation+precision | **measured** — auto-route-to-Headroom gated behind its operator gate + pin + version gate (RFC 042 Phase D) | builtin + retrieval (comparable, no probed-fact loss while the raw stays retrievable) |
-| **032** tier delegation | architectural: no sub-agent touches LOCK/M8SHIFT.md; worktree-only parallel writes; `downgradable:false` not silently weakened (RFC 032) | tier matched to task difficulty (light vs heavy), operator/orchestrator-chosen | advisory budget (WARN default; opt-in fail-closed, RFC 040 snapshots) | **output gate** — mandatory verify-before-integrate against ground truth (tests/build/byte diffs), ledger-recorded | unverified output never integrated; delegation absence never loses mutex/log |
+| **032** delegation charter *(+ 039 operationalization)* | architectural charter: no sub-agent touches LOCK/M8SHIFT.md; worktree-only parallel writes; verify-before-integrate; provenance (RFC 032). Tier/cost/`downgradable:false` mechanics are **039's operationalization of 032**, not 032 itself | tier matched to task difficulty, operator/orchestrator-chosen *(via 039)* | advisory budget *(via 039/040: WARN default; opt-in fail-closed, RFC 040 snapshots)* | **output gate** — mandatory verify-before-integrate against ground truth (tests/build/byte diffs), ledger-recorded; **no measured branch gate** | integrate no unverified output; delegation absence never loses mutex/log |
 
 Two honest asymmetries the table preserves rather than papering over. First, the *evidence*
-axis is not uniform: RFC 042 and RFC 037 carry a **measured** gate (real-token gain +
-output-equivalence) on the **non-default branch itself**, whereas RFC 039 and RFC 032 gate
-on **output** — via verify-before-integrate against ground truth — not on the selection.
-(RFC 032 in particular has *no* measured/benchmark gate at all; its only gate is the
-output check before integration, structurally the same shape as RFC 039's.) Second,
-RFC 039's model-eligibility rests on **operator-asserted** ordinals rather than a measured
-selection gate. The principle accommodates both: the evidence gate applies wherever a
-non-default branch exists, and where a *measured* branch gate is not yet available the
-branch relies on the output gate and stays design-only / advisory until measurement firms.
+axis is not uniform: RFC 042 carries a **measured** gate (real-token gain + output-equivalence) on
+the non-default branch itself, and RFC 037 carries a measured gate **for any claimed gain /
+promotion / defaulting** — while explicit, configured experiments stay allowed behind pin +
+fail-closed. RFC 039 and RFC 032 instead gate on **output** — via verify-before-integrate against
+ground truth — not on the selection. (RFC 032 in particular has *no* measured/benchmark gate at all;
+its only gate is the output check before integration, structurally the same shape as RFC 039's.)
+Second, RFC 039's model-eligibility rests on **operator-asserted** ordinals rather than a measured
+selection gate. The principle accommodates all of these: the evidence/promotion gate applies wherever
+a non-default branch exists, and its *kind* is owned by the instance — where a *measured* branch gate
+is not available the branch relies on the output gate and stays design-only / advisory until it firms.
 
 ## Reuse of shared substrate
 
-A router that follows this principle **reuses**, and must not re-derive:
+A router that follows this principle **SHOULD reuse** (rather than re-derive) — as design guidance, not a mandate; the instance RFCs remain authoritative:
 
 - **RFC 034** — the argv-only, identity-pinned, env-allowlisted, output-capped,
   timeout-bounded `run_adapter_process()` runner as the *only* way to launch a chosen
-  backend/model CLI, plus its `--require-real-tokens` benchmark as the stage-5 promotion
-  gate. No new subprocess path.
+  backend/model CLI, plus its `--require-real-tokens` benchmark as the stage-5 promotion gate
+  **for compression/adapter branches** (the measured-evidence path; model/delegation branches use
+  their own output gate instead). No new subprocess path.
 - **RFC 033** — the "cheapest still capable-enough" objective (stages 2–3) and the §9
   verification floor (stage 4). No new budget model.
 - **RFC 014** — the provider/capability manifest as the candidate registry + feasibility
@@ -170,12 +178,13 @@ not a new constraint imposed on them.
 ## Acceptance criteria
 
 1. The signal vocabulary and six-stage pipeline are specified once, with `size` and
-   `content-type` explicitly classed as soft (amplifier / family) and feasibility +
-   capability + access-mode as hard gates.
+   `content-type` explicitly classed as soft (amplifier / family), feasibility + capability as
+   **universal** hard gates, and `access-mode` as a hard gate **scoped to context/compression routers**.
 2. The instance-mapping table shows all four routers (037/039/042/032) as instances by
    **signal role + pointer to the owning RFC**, with no literal threshold/config/flag
-   copied, and states the honest evidence-gate asymmetry correctly (037/042 measured
-   branch gate; 039/032 output gate; 032 carries no measured gate).
+   copied, and states the honest evidence-gate asymmetry correctly (042 measured branch gate;
+   037 measured gate for claims/promotion/defaulting; 039/032 output gate; 032 carries no
+   measured gate).
 3. The RFC introduces no behavior, no script, no schema; deleting it changes nothing that
    ships (design-only, reversible).
 4. It makes no measured claim of its own and points every empirical claim back to the
@@ -189,7 +198,9 @@ not a new constraint imposed on them.
 - Should M8Shift ship a shared `route recommend`-style advisory **library** (read-only,
   stdlib) that all routers call, so the six stages exist in one place in code and not just
   in prose — or does a shared library risk becoming the "second routing authority" the
-  charter forbids?
+  charter forbids? **If ever built it must be explain-only / read-only: no `claim`/`append`/LOCK
+  mutation, no subprocess launch, no hidden auto-selection — it emits *rationale, not authority*,
+  and the instance RFCs remain authoritative.**
 - Per-router **adoption order**: do we retrofit the existing four to cite this principle
   opt-in (039 first, since it is the reference philosophy), or leave them untouched and
   only bind future routers to it?
@@ -198,3 +209,7 @@ not a new constraint imposed on them.
   re-declaring its own?
 - Should the evidence gate (stage 5) define a **canonical minimum** (N, regimes, real-token
   + output-equivalence) that any non-default branch must clear, or stay per-instance?
+- **[drift guard]** Should each signal in the normalized vocabulary declare **which router families
+  it applies to**, so compression-only signals (`access-mode`, raw-retrieval) are not accidentally
+  treated as universal model/delegation signals? *(This is the exact drift RFC 043's own first draft
+  fell into — the review caught compression assumptions leaking into the universal pipeline.)*
