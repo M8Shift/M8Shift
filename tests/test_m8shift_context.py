@@ -49,7 +49,8 @@ class ContextBase(unittest.TestCase):
         return path
 
     def fake_rtk_env(self, body):
-        bindir = os.path.join(self.d, "bin")
+        bindir = tempfile.mkdtemp(prefix="m8ctx-system-rkt-")
+        self.addCleanup(shutil.rmtree, bindir, True)
         os.makedirs(bindir, exist_ok=True)
         path = os.path.join(bindir, "rtk")
         with open(path, "w", encoding="utf-8") as fh:
@@ -61,7 +62,8 @@ class ContextBase(unittest.TestCase):
         return env
 
     def fake_headroom_env(self, body):
-        bindir = os.path.join(self.d, "bin")
+        bindir = tempfile.mkdtemp(prefix="m8ctx-system-headroom-")
+        self.addCleanup(shutil.rmtree, bindir, True)
         os.makedirs(bindir, exist_ok=True)
         path = os.path.join(bindir, "headroom")
         with open(path, "w", encoding="utf-8") as fh:
