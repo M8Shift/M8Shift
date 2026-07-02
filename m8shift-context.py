@@ -2350,7 +2350,7 @@ def trusted_adapter_executable(root, adapter_name, program):
 def rtk_telemetry_disable(root):
     resolved, findings = trusted_adapter_executable(root, "rtk-shell-output", "rtk")
     if not resolved:
-        return {"present": False, "disabled": False, "detail": "rtk not identity-pinned; telemetry command skipped"}
+        return {"present": False, "disabled": False}
     try:
         proc = subprocess.run(
             [resolved, "telemetry", "disable"],
@@ -2360,20 +2360,19 @@ def rtk_telemetry_disable(root):
             env={"PATH": os.environ.get("PATH", os.defpath)},
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        return {"present": True, "disabled": False, "path": diagnostic_path(root, resolved), "detail": type(e).__name__}
+        return {"present": True, "disabled": False, "path": diagnostic_path(root, resolved), "returncode": None}
     return {
         "present": True,
         "disabled": proc.returncode == 0,
         "path": diagnostic_path(root, resolved),
         "returncode": proc.returncode,
-        "detail": (proc.stdout or proc.stderr).strip(),
     }
 
 
 def rtk_telemetry_status(root):
     resolved, findings = trusted_adapter_executable(root, "rtk-shell-output", "rtk")
     if not resolved:
-        return {"present": False, "state": "absent", "detail": "rtk not identity-pinned; telemetry command skipped"}
+        return {"present": False, "state": "absent"}
     try:
         proc = subprocess.run(
             [resolved, "telemetry", "status"],
@@ -2383,7 +2382,7 @@ def rtk_telemetry_status(root):
             env={"PATH": os.environ.get("PATH", os.defpath)},
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        return {"present": True, "state": "unknown", "path": diagnostic_path(root, resolved), "detail": type(e).__name__}
+        return {"present": True, "state": "unknown", "path": diagnostic_path(root, resolved), "returncode": None}
     detail = (proc.stdout or proc.stderr).strip()
     lowered = detail.lower()
     if "disabled" in lowered or "off" in lowered:
@@ -2397,7 +2396,6 @@ def rtk_telemetry_status(root):
         "state": state,
         "path": diagnostic_path(root, resolved),
         "returncode": proc.returncode,
-        "detail": detail,
     }
 
 
