@@ -476,6 +476,10 @@ class TestContextCompression(ContextBase):
         retrieved_payload = json.loads(retrieved.stdout)
         self.assertTrue(retrieved_payload["bounded"])
         self.assertLessEqual(len(retrieved_payload["content"].splitlines()), 3)
+        pending = []
+        for dirpath, _, filenames in os.walk(os.path.join(self.d, ".m8shift", "context", "compression")):
+            pending.extend(name for name in filenames if ".pending." in name)
+        self.assertEqual(pending, [])
 
     def test_retrieve_accepts_legacy_record_without_routing_signal_fields(self):
         self.assertEqual(self.ctx("init").returncode, 0)
@@ -486,16 +490,28 @@ class TestContextCompression(ContextBase):
         compact_dir = os.path.join(base, "compact")
         for path in (record_dir, raw_dir, compact_dir):
             os.makedirs(path, exist_ok=True)
+        raw_text = "legacy raw line 1\nlegacy raw line 2\n"
+        compact_text = "legacy compact line\n"
         with open(os.path.join(raw_dir, f"{record_id}.raw.txt"), "w", encoding="utf-8") as fh:
-            fh.write("legacy raw line 1\nlegacy raw line 2\n")
+            fh.write(raw_text)
         with open(os.path.join(compact_dir, f"{record_id}.compact.txt"), "w", encoding="utf-8") as fh:
-            fh.write("legacy compact line\n")
+            fh.write(compact_text)
         legacy_record = {
             "schema": "m8shift.compressed_context_record.v1",
             "id": record_id,
             "content_type": "report",
             "backend": "builtin",
             "requested_backend": "auto",
+            "raw_output_reference": {
+                "schema": "m8shift.raw_output_reference.v1",
+                "record_id": record_id,
+                "path": f".m8shift/context/compression/raw/{record_id}.raw.txt",
+                "sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            },
+            "adapter_result": {
+                "schema": "m8shift.adapter.result.v1",
+                "filtered_sha256": hashlib.sha256(compact_text.encode("utf-8")).hexdigest(),
+            },
         }
         with open(os.path.join(record_dir, f"{record_id}.json"), "w", encoding="utf-8") as fh:
             json.dump(legacy_record, fh)
@@ -511,6 +527,38 @@ class TestContextCompression(ContextBase):
         compact_payload = json.loads(compact.stdout)
         self.assertEqual(compact_payload["source"], "compact")
         self.assertIn("legacy compact line", compact_payload["content"])
+
+    def test_retrieve_refuses_raw_hash_mismatch(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        compressed = self.ctx(
+            "compress", "--id", "tamper-raw", "--stdin", "--json",
+            stdin="original raw\n",
+        )
+        self.assertEqual(compressed.returncode, 0, compressed.stderr + compressed.stdout)
+        raw_path = os.path.join(self.d, ".m8shift", "context", "compression", "raw", "tamper-raw.raw.txt")
+        with open(raw_path, "w", encoding="utf-8") as fh:
+            fh.write("tampered raw\n")
+
+        retrieved = self.ctx("retrieve", "tamper-raw", "--json")
+        self.assertNotEqual(retrieved.returncode, 0)
+        self.assertIn("raw hash mismatch", retrieved.stderr)
+        self.assertNotIn("tampered raw", retrieved.stdout)
+
+    def test_retrieve_refuses_compact_hash_mismatch(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        compressed = self.ctx(
+            "compress", "--id", "tamper-compact", "--stdin", "--json",
+            stdin="original compact source\n",
+        )
+        self.assertEqual(compressed.returncode, 0, compressed.stderr + compressed.stdout)
+        compact_path = os.path.join(self.d, ".m8shift", "context", "compression", "compact", "tamper-compact.compact.txt")
+        with open(compact_path, "w", encoding="utf-8") as fh:
+            fh.write("tampered compact\n")
+
+        retrieved = self.ctx("retrieve", "tamper-compact", "--compact", "--json")
+        self.assertNotEqual(retrieved.returncode, 0)
+        self.assertIn("compact hash mismatch", retrieved.stderr)
+        self.assertNotIn("tampered compact", retrieved.stdout)
 
     def test_compress_rejects_traversal_record_id(self):
         self.assertEqual(self.ctx("init").returncode, 0)
