@@ -5258,10 +5258,12 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(provenance, fh)
 
-    def _adapters_init(self, d, *extra):
+    def _adapters_init(self, d, *extra, env=None):
+        if env is None:
+            env = self._env_without_global_rtk()
         result = subprocess.run(
             [sys.executable, "m8shift-context.py", "adapters", "init", "--force", "--json", *extra],
-            cwd=d, capture_output=True, text=True, env=self._env_without_global_rtk(),
+            cwd=d, capture_output=True, text=True, env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return json.loads(result.stdout)
@@ -5270,6 +5272,20 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         manifest = os.path.join(d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
         with open(manifest, encoding="utf-8") as fh:
             return json.load(fh)
+
+    def _manifest(self, d, name):
+        manifest = os.path.join(d, ".m8shift", "context", "adapters", f"{name}.json")
+        with open(manifest, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _case_variant_local_bin(self, d):
+        lower = os.path.join(d, ".m8shift", "bin")
+        variant = os.path.join(d, ".m8shift", "BIN")
+        if not os.path.isdir(lower) or not os.path.isdir(variant):
+            self.skipTest("filesystem is case-sensitive")
+        if not os.path.samefile(lower, variant):
+            self.skipTest("filesystem does not resolve case-variant paths to the same directory")
+        return variant
 
     def test_planted_project_local_rtk_is_not_executed_or_pinned_without_provenance(self):
         d = self._project()
@@ -5299,6 +5315,28 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         adapter = self._rtk_manifest(d)
         self.assertEqual(adapter["trusted_executable"]["path"], os.path.realpath(rtk))
 
+    def test_case_variant_project_local_rtk_path_is_not_pinned_without_opt_in(self):
+        d = self._project()
+        _rtk, marker = self._write_fake_rtk(d)
+        variant_bin = self._case_variant_local_bin(d)
+        env = self._env_without_global_rtk()
+        env["PATH"] = variant_bin + os.pathsep + env["PATH"]
+        payload = self._adapters_init(d, env=env)
+        self.assertNotIn("rtk_telemetry", payload)
+        self.assertFalse(os.path.exists(marker))
+        self.assertNotIn("trusted_executable", self._rtk_manifest(d))
+
+    def test_case_variant_project_local_headroom_path_is_not_pinned_without_opt_in(self):
+        d = self._project()
+        _headroom, marker = self._write_fake_rtk(d, filename="headroom")
+        variant_bin = self._case_variant_local_bin(d)
+        env = self._env_without_global_rtk()
+        env["PATH"] = variant_bin + os.pathsep + env["PATH"]
+        self._adapters_init(d, env=env)
+        adapter = self._manifest(d, "headroom_ext")
+        self.assertFalse(os.path.exists(marker))
+        self.assertNotIn("trusted_executable", adapter)
+
     @unittest.skipIf(os.name == "nt", ".exe fallback is expected on native Windows")
     def test_project_local_exe_fallback_is_off_on_non_windows(self):
         d = self._project()
@@ -5323,6 +5361,48 @@ class TestContextLocalAdapterResolution(unittest.TestCase):
         self.assertNotIn("rtk_telemetry", payload)
         self.assertFalse(os.path.exists(marker))
         self.assertNotIn("trusted_executable", self._rtk_manifest(d))
+
+    def _init_with_path_prefix(self, d, prefix, *extra):
+        env = self._env_without_global_rtk()
+        env["PATH"] = prefix + os.pathsep + env["PATH"]
+        result = subprocess.run(
+            [sys.executable, "m8shift-context.py", "adapters", "init", "--force", "--json", *extra],
+            cwd=d, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return json.loads(result.stdout)
+
+    def test_case_variant_local_bin_on_path_does_not_bypass_opt_in(self):
+        # A case-variant of the project-local bin dir on PATH (e.g. .m8shift/BIN) points at
+        # the SAME physical dir on a case-insensitive filesystem. It must NOT let a
+        # project-local rtk be pinned or executed without --allow-project-local-adapters:
+        # the physical-identity exclusion + the under-project-root defense-in-depth guard
+        # both reject it. (No-op on case-sensitive filesystems, where the variant is a
+        # different, non-existent path.)
+        d = self._project()
+        rtk, marker = self._write_fake_rtk(d)  # .m8shift/bin/rtk (no provenance)
+        variant = os.path.join(d, ".m8shift", "BIN")
+        if not os.path.isfile(os.path.join(variant, "rtk")):
+            self.skipTest("case-sensitive filesystem: no case-variant collision to defend against")
+        payload = self._init_with_path_prefix(d, variant)
+        self.assertNotIn("rtk_telemetry", payload)
+        self.assertFalse(os.path.exists(marker), "case-variant PATH must not execute project-local rtk without opt-in")
+        self.assertNotIn("trusted_executable", self._rtk_manifest(d))
+
+    def test_case_variant_local_bin_on_path_still_honors_opt_in_pin(self):
+        # The fix must not over-correct: with a case-variant on PATH AND the explicit
+        # opt-in AND valid provenance, the canonical project-local rtk is still pinned
+        # (resolved through the provenance path, not as a bogus "system" identity).
+        d = self._project()
+        rtk, marker = self._write_fake_rtk(d)
+        self._write_provenance(d, rtk)
+        variant = os.path.join(d, ".m8shift", "BIN")
+        if not os.path.isfile(os.path.join(variant, "rtk")):
+            self.skipTest("case-sensitive filesystem: no case-variant collision to defend against")
+        payload = self._init_with_path_prefix(d, variant, "--allow-project-local-adapters")
+        self.assertTrue(any(row["check"] == "adapter.project_local_pin" for row in payload["warnings"]))
+        adapter = self._rtk_manifest(d)
+        self.assertEqual(adapter["trusted_executable"]["path"], os.path.realpath(rtk))
 
 
 class TestChecksumsManifest(unittest.TestCase):

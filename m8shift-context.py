@@ -1256,9 +1256,45 @@ def load_adapter_for_auto(root, name):
     return data, []
 
 
+def _is_within_dir_physical(path_real, parent_real):
+    """True if path_real is parent_real or physically inside it, compared by
+    (st_dev, st_ino) identity so the result is correct on case-insensitive
+    filesystems and across symlinks. Requires the paths to exist; returns False
+    otherwise (callers fall back to the lexical checks in is_path_under)."""
+    try:
+        target = os.stat(parent_real)
+    except OSError:
+        return False
+    target_id = (target.st_dev, target.st_ino)
+    current = path_real
+    while True:
+        try:
+            st = os.stat(current)
+            if (st.st_dev, st.st_ino) == target_id:
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def is_path_under(path, parent):
     try:
-        return os.path.commonpath([os.path.realpath(path), os.path.realpath(parent)]) == os.path.realpath(parent)
+        rp = os.path.realpath(path)
+        rpar = os.path.realpath(parent)
+        if os.path.commonpath([rp, rpar]) == rpar:
+            return True
+        # Case-insensitive filesystems (macOS, Windows) preserve the caller's
+        # spelling through realpath, so a case-variant of the same physical
+        # directory escapes the exact string comparison above. normcase folds
+        # case lexically where the platform does (Windows); the physical-identity
+        # ancestor walk covers filesystems that do not fold case in paths (macOS).
+        np, npar = os.path.normcase(rp), os.path.normcase(rpar)
+        if os.path.commonpath([np, npar]) == npar:
+            return True
+        return _is_within_dir_physical(rp, rpar)
     except (OSError, ValueError):
         return False
 
