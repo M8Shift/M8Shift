@@ -154,6 +154,11 @@ def call_headroom(compress: Callable[..., Any], messages: list[dict[str, str]], 
 def text_from_result(result: Any) -> str:
     if isinstance(result, str):
         return result
+    messages = getattr(result, "messages", None)
+    if isinstance(messages, list):
+        parts = compact_parts_from_messages(messages)
+        if parts:
+            return "\n".join(parts)
     if isinstance(result, dict):
         for key in ("content", "text", "compressed", "summary", "output"):
             value = result.get(key)
@@ -161,25 +166,54 @@ def text_from_result(result: Any) -> str:
                 return value
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
     if isinstance(result, list):
-        parts: list[str] = []
-        for item in result:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("content"), str):
-                parts.append(item["content"])
+        parts = compact_parts_from_messages(result)
         if parts:
             return "\n".join(parts)
     raise HeadroomUnavailable(f"unsupported headroom result type {type(result).__name__}")
 
 
-def validate_compact(compact: str, redacted: str) -> str:
+def compact_parts_from_messages(messages: list[Any]) -> list[str]:
+    parts: list[str] = []
+    for item in messages:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if isinstance(item, dict):
+            role = item.get("role")
+            content = item.get("content")
+        else:
+            role = getattr(item, "role", None)
+            content = getattr(item, "content", None)
+        if role == "system":
+            continue
+        if isinstance(content, str) and content.strip():
+            parts.append(content)
+    return parts
+
+
+def result_token_counts(result: Any) -> tuple[int | None, int | None]:
+    before = getattr(result, "tokens_before", None)
+    after = getattr(result, "tokens_after", None)
+    if isinstance(result, dict):
+        before = result.get("tokens_before", before)
+        after = result.get("tokens_after", after)
+    if isinstance(before, int) and isinstance(after, int):
+        return before, after
+    return None, None
+
+
+def validate_compact(compact: str, redacted: str, result: Any) -> str:
     compact = compact.strip()
     if not compact:
         raise HeadroomUnavailable("empty compact output")
     if len(compact) > MAX_STDOUT_CHARS:
         compact = compact[:MAX_STDOUT_CHARS] + "\n[m8shift-headroom: output truncated]"
-    if compact.strip() == redacted.strip():
-        raise HeadroomUnavailable("headroom returned unchanged input")
+    before, after = result_token_counts(result)
+    if before is not None and after is not None:
+        if before <= 0 or after >= before:
+            raise HeadroomUnavailable("headroom did not reduce token count")
+    elif len(compact) >= int(len(redacted) * 0.9):
+        raise HeadroomUnavailable("headroom did not reduce compact length")
     return compact + "\n"
 
 
@@ -192,7 +226,7 @@ def run_transform(mode: str) -> int:
     with sockets_blocked():
         compress = import_headroom_compress()
         result = call_headroom(compress, messages, mode)
-    compact = validate_compact(text_from_result(result), redacted)
+    compact = validate_compact(text_from_result(result), redacted, result)
     sys.stdout.write(compact)
     return 0
 

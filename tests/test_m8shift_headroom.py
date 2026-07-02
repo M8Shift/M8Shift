@@ -58,12 +58,12 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
                     assert "network disabled" in str(exc)
                 else:
                     raise AssertionError("network was not blocked")
-                return "COMPACT: " + messages[-1]["content"].splitlines()[-1]
+                return "offline-ok"
             """
         )
         result = self._run("decision: keep offline wrapper\n", env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("COMPACT: decision: keep offline wrapper", result.stdout)
+        self.assertEqual(result.stdout, "offline-ok\n")
 
     def test_missing_headroom_fails_closed_without_echoing_stdin(self):
         secret = "token=VERY_SECRET_VALUE_SHOULD_NOT_LEAK"
@@ -74,7 +74,7 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertNotIn(secret, result.stderr)
 
-    def test_unchanged_result_fails_closed(self):
+    def test_unchanged_result_fails_closed_by_length_fallback(self):
         env = self._fake_headroom(
             """
             def compress(messages):
@@ -84,7 +84,46 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
         result = self._run("same text\n", env)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
-        self.assertIn("unchanged input", result.stderr)
+        self.assertIn("did not reduce compact length", result.stderr)
+
+    def test_compress_result_messages_and_token_reduction_are_supported(self):
+        env = self._fake_headroom(
+            """
+            class CompressResult:
+                def __init__(self):
+                    self.messages = [
+                        {"role": "system", "content": "ignore"},
+                        {"role": "assistant", "content": "compact decision trace"},
+                    ]
+                    self.tokens_before = 100
+                    self.tokens_after = 20
+                    self.compression_ratio = 0.2
+                    self.transforms_applied = ["kompress"]
+
+            def compress(messages):
+                return CompressResult()
+            """
+        )
+        result = self._run("x " * 200, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "compact decision trace\n")
+
+    def test_compress_result_without_token_reduction_fails_closed(self):
+        env = self._fake_headroom(
+            """
+            class CompressResult:
+                messages = [{"role": "assistant", "content": "compact but not cheaper"}]
+                tokens_before = 100
+                tokens_after = 100
+
+            def compress(messages):
+                return CompressResult()
+            """
+        )
+        result = self._run("x " * 200, env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("did not reduce token count", result.stderr)
 
     def test_conservative_redaction_before_headroom(self):
         env = self._fake_headroom(
