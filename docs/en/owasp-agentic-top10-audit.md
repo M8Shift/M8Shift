@@ -28,7 +28,7 @@ only, with no network, no daemon, and no API key**.
 
 Direct consequence: M8Shift **eliminates** by construction the most frequently cited
 attack surfaces of the OWASP Agentic Top 10 (no network → no MITM/downgrade/routing
-spoofing; no dependencies → near-zero supply chain; no `eval`/`shell` → no tool RCE), but
+spoofing; the **core** has no dependencies → near-zero supply chain and no `eval`/`shell` → no tool RCE — though the **optional v3.40+ installer/adapters add an opt-in, sha256-pinned supply-chain surface**; see ASI04/ASI05), but
 **delegates to trust** the properties that OWASP recommends making cryptographic (agent
 identity, message signing).
 
@@ -135,7 +135,8 @@ contradict the "no key, no daemon" philosophy. → See §5 "What to deliberately
 *your* agentic supply chain.
 
 **✅ Covered (a major strength of the project)**
-- **Zero third-party dependencies:** stdlib only, **no `requirements.txt`/`pyproject.toml`** → **dependency attack surface ≈ nil** (no PyPI/npm typosquatting, no poisoned package, no dynamic loading of a remote tool).
+- **Zero third-party dependencies (core relay):** the relay scripts are stdlib only, **no `requirements.txt`/`pyproject.toml`** → the *core*'s dependency surface is near-nil (no PyPI/npm typosquatting or poisoned package in the relay itself).
+- **⚠️ Optional installer/adapter supply chain (v3.40+, post-audit — was NOT in scope at v3.26.0):** the shipped *system* is no longer zero-surface. `install.sh --with-rtk` downloads a prebuilt RTK release asset (verified against the release tag's `checksums.txt` over TLS — same-origin **TOFU**, not an independent signature) and, with `--allow-source-build`, can `cargo` build from a **tag-pinned** source; `--with-headroom` pip-installs `headroom-ai` (**unpinned**, best-effort) into `.m8shift/venvs/headroom`. At runtime the RFC 042 compression path invokes those allowlisted binaries (`rtk`/`headroom`) via the RFC 034 **identity-pinned (realpath+sha256), argv-only, output-capped** runner. So ASI04 is 🟢 for the **core** but the **installed adapters carry a real (opt-in, sha256-pinned, no-shell) supply-chain surface** — tracked in #94 (project-local opt-in), #95 (Headroom venv), #97 (this re-scope).
 - **Portable single file:** `m8shift.py` is a copyable executable, Python 3.6+.
 - **Self-protection of scripts:** `checksums.sha256` + denylist prevent the tool from overwriting its own scripts via `session report` (`m8shift.py:2085-2101`).
 
@@ -155,6 +156,7 @@ exactly the choice made.
 **✅ Covered**
 - **No `eval`/`exec`/`os.system`/`shell=True`** (`grep` → 0).
 - **Subprocess = `git` in strict argv:** `["git","-C",HERE,"ls-files",...]` and `["git","-C",HERE,"mv","-f","--",...]` (`m8shift.py:1185, 1194`) → no shell injection.
+- **Adapters = allowlisted, identity-pinned argv subprocess (v3.40+, post-audit):** since RFC 042, `m8shift-context.py` also runs `rtk`/`headroom` (allowlist `ALLOWED_ADAPTER_PROGRAMS`) via **argv-only** `subprocess.run` through the RFC 034 runner — **realpath+sha256 pin**, env-allowlisted, output-capped, **no shell / no `eval`**. So subprocess is no longer *only* `git`; it is `git` + pinned adapters. A renamed/planted/wrapped binary fails the pin (fail-closed), and a project-local `.m8shift/bin` binary needs explicit `--allow-project-local-adapters` (#94). The residual is the adapter *supply chain* (ASI04), not shell RCE.
 - **Ref validation before subprocess (worktree):** `safe_branch_name()` rejects leading `-`, whitespace, control characters and runs `git check-ref-format`; `safe_id()` rejects `/`, `..`, whitespace (`m8shift-worktree.py:72-80, 91-94`).
 
 **🟢 SEC-4 (i18n builder) — fixed**
