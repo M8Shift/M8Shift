@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.41.0 — 2026-07-02
+
+Release scope:
+
+- RFC 042 Phase B — `m8shift-context.py compress` now accepts
+  `--access-mode retrieve|inline` and `--whole-content`, records both advisory
+  routing signals on compressed-context records, and keeps signal-driven
+  Headroom routing gated behind future measurement.
+- The v3.40.0 manual Headroom opt-in remains intact:
+  `backends.headroom_ext.auto_enabled: true` still routes broad `--backend auto`
+  records to pinned `headroom_ext`; explicit `--backend headroom_ext` remains
+  available.
+- #91 — `retrieve` now verifies raw and compact content hashes before serving
+  evidence, and `compress` writes raw/compact artifacts through pending files
+  before publishing the record last.
+- #90 — architecture/specification docs now include color Mermaid views for
+  module communication and inter-application agent flow.
+
+Validation:
+
+- Added tests for default/inline/whole-content signal plumbing, explicit and
+  manual-opt-in Headroom behavior, internal fail-safe normalization, legacy
+  record compatibility, tampered raw/compact retrieval rejection, and pending
+  artifact cleanup.
+- Lockstep version surfaces bumped from `3.40.0` to `3.41.0` across distributed
+  scripts and tests.
+
 ## v3.40.0 — 2026-07-02
 
 Release scope:
