@@ -39,8 +39,8 @@ identity, message signing).
 | **ASI01** | Goal Hijack | Substrate (carries NL `ask`/`body`) | 🟡 Partial | Reinforce (boundary documented, not filtered) |
 | **ASI02** | Tool Misuse | The tool itself (`--force`, append) | 🟢 Good | Minor hardening |
 | **ASI03** | Identity & Privilege Abuse | Substrate (identity = pen) | 🟠 Out of scope by design | Document / future option |
-| **ASI04** | Supply Chain | The tool (its own deps) | 🟢 Excellent | Sign releases |
-| **ASI05** | RCE | The tool (git subprocess, i18n) | 🟢 Good | SEC-4 fixed + tested |
+| **ASI04** | Supply Chain | Core deps + **opt-in installer/adapters (v3.40+)** | 🟢 core / 🟡 adapters* | Sign releases; *RTK/Headroom supply-chain surface — see ASI04 body |
+| **ASI05** | RCE | git subprocess, i18n, **pinned adapters (v3.40+)** | 🟢 Good* | SEC-4 fixed + tested; *adapters argv-only + realpath+sha256-pinned, no shell |
 | **ASI06** | Memory & Context Poisoning | Substrate (shared memory) | 🟢 Strong integrity / 🟡 content | Optional improvements |
 | **ASI07** | Insecure Inter-Agent Comm. | **This is exactly M8Shift** | 🟢 Local integrity / 🟠 no crypto | Network surface = N/A |
 | **ASI08** | Cascading Failures | Substrate (serialization) | 🟢 Anti-cascade by design | Optional cap |
@@ -60,7 +60,7 @@ defends.
 | **Execution** | No `eval`/`exec`/`os.system`/`shell=True`. Subprocess = `git` **plus allowlisted, realpath+sha256-pinned adapters (`rtk`/`headroom`)**, argv-only, no shell (v3.40+). | ✅ `m8shift.py:1185,1194`; adapters RFC 034 pinned |
 | **Dependencies** | **Core:** stdlib only (`argparse, json, os, re, subprocess, …`), no `requirements.txt`. **Optional adapters** (RTK binary via release asset; Headroom `pip` venv) are installed opt-in and sha256/pin-gated — a real but opt-in supply-chain input (ASI04). | ✅ core stdlib; adapters opt-in |
 | **Identity** | **Declarative, cooperative**: one agent = one name (`claude`, `codex`) read from the roster. No auth, no signature. | ✅ `AGENTS=("claude","codex")` |
-| **Confidentiality** | Local filesystem (lock `0o600`). `M8SHIFT.md` = readable plaintext. No encryption. | ✅ `m8shift.py:828` |
+| **Confidentiality** | Local filesystem (lock `0o600`). `M8SHIFT.md` = readable plaintext, no encryption. **Compression artifacts** (`.m8shift/context/compression/`, v3.40+) are best-effort regex-redacted before store (can miss novel secret shapes). | ✅ `m8shift.py:828`; redaction in `m8shift-context.py` |
 | **Integrity** | Mutex + atomic write + immutable append-only turns + marker neutralization + schema validation. | ✅ (detailed §3–§7) |
 | **Assumed environment** | **Honest cooperative team** (agents the operator launches/controls). | ✅ declared in `docs/en/security-audit.md` |
 
@@ -180,6 +180,7 @@ directly applicable.
 
 **🟡 Gap vs OWASP ASI06 recommendations**
 - No **signed provenance**, no per-entry **trust score**, no **decay/expiry** of unverified entries, no **content scan** on memory writes (ASI06 §2,5,7,9). But: these are recommendations for **multi-tenant RAG/vector stores**; M8Shift is a single-context text journal. "Bootstrap poisoning" (auto re-ingestion of outputs) **does not exist**: M8Shift ingests nothing automatically — it is the agents who read.
+- **⚠️ Compression store at rest (v3.40+, RFC 037/042):** `compress` persists raw + compact artifacts under `.m8shift/context/compression/`; secrets are stripped by **best-effort regex redaction before store** (`SECRET_PATTERNS`), which is pattern-based and can miss a novel secret shape. New *confidentiality-at-rest* surface — mitigated (redaction-before-store, fail-closed to reference-only) but not a guarantee. See §2 Confidentiality and #97.
 
 **Recommendation:** **Optional improvements.** Integrity (impossible to forge/rewrite) is
 **solid**. On the content side: optional — an extended `doctor` could flag memory notes

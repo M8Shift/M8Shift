@@ -91,7 +91,7 @@ taxonomy (ASI01 prompt/instruction injection; ASI02 tool/plugin exploitation; AS
 memory/knowledge poisoning; ASI04 goal/task drift; ASI05 rogue/compromised-agent behavior;
 ASI06 inter-agent message integrity & trust; ASI07 identity/authorization mismatch &
 privilege escalation; ASI08 supply-chain / MCP-A2A; ASI09 information-flow / data
-isolation; ASI10 auditability/monitoring). The M8Shift charter recap is applied per row:
+isolation; ASI10 auditability/monitoring). **⚠️ Numbering note:** this generic taxonomy is *this document's own* and does **not** match the canonical **OWASP Agentic Top-10** grid used in [owasp-agentic-top10-audit.md](owasp-agentic-top10-audit.md) (there ASI04=Supply Chain, ASI05=RCE, ASI08=Cascading Failures). Do not cross-map the two docs by ASI number — use the threat names. The M8Shift charter recap is applied per row:
 stdlib-only local CLI, no ML, no network, cooperative trusted agents, declarative identity,
 degree-1 mutex, immutable ledger.
 
