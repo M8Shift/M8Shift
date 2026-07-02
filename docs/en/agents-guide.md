@@ -361,6 +361,38 @@ development. When a version is **stabilized** (tests green, merged to `main`, ta
 - Treat any skew between the relay engine and the shipped version as a documented
   exception to resolve at the next stable point.
 
+### Stale locks, force-claim, and worktree isolation
+
+A holder running a long operation (a full test suite, a large build) can let its pen
+TTL lapse **without being dead**. The relay then reports the lock as stale and
+`claim --force` becomes available — but *stale pen* and *holder gone* are different
+states, and conflating them causes collisions.
+
+- **A stale lock lets you reclaim the pen (the write token) — nothing more.** It is not
+  proof the peer has stopped, and not license to redo the peer's in-flight work. A worker
+  mid-long-op legitimately has **no commits yet**: an empty branch and a clean worktree do
+  **not** mean "stalled."
+- **Before force-claiming to take over a task**, scan for the peer's work-in-progress —
+  `git worktree list` and the peer's branches — and prefer to **ping and wait** over
+  redoing it. Reclaiming the pen is a coordination act, not a takeover of the peer's task.
+- **One worktree, one owner.** Never edit, run suites against, or commit inside a worktree
+  another agent created. If you do take over, work in your **own fresh isolated worktree**
+  (`git worktree add --detach <path> <ref>` for read-only validation). Two agents writing
+  the same tree blends their edits and makes test runs read files mid-edit.
+- **Never validate against a contested tree.** Copy the commit into an isolated detached
+  worktree and run the suite there, so results are not muddied by the other agent.
+- **Do not let a release or scratch worktree squat a branch the peer needs.** A second
+  checkout of `main` blocks the peer's worktree tooling from checking it out; remove such
+  worktrees when idle.
+- **Keep your own pen fresh during long work** so it never goes stale mid-op and invites a
+  force-claim in the first place — this is the holder's half of the contract.
+
+> [!WARNING]
+> The durable fix is structural: liveness must be decoupled from pen-TTL (a presence
+> heartbeat the holder updates during long ops, checked by `claim --force`) so "stale
+> pen" reliably means "holder gone." Until that lands, the discipline above is mandatory.
+> Tracked in the relay-robustness backlog.
+
 ## 8. Stopping condition
 
 An agent keeps working/listening until the relay is `DONE` or the maintainer gives an

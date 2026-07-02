@@ -1,5 +1,51 @@
 # Changelog
 
+## v3.42.0 — 2026-07-03
+
+Security-hardening and portable-installer release. No new runtime features; this
+consolidates the supply-chain, telemetry, boundary, and documentation work that
+landed after `v3.41.0`. The optional Headroom/Kompress feature is intentionally
+NOT in this release — it ships separately in `v3.43.0`.
+
+Release scope:
+
+- #82 / RFC 037 — portable multi-OS installer (`install.sh`) with opt-in RTK and
+  Headroom options, plus adapter identity hardening (realpath + SHA-256 provenance
+  pinning for project-local adapter executables).
+- #94 — project-local adapters require an explicit
+  `adapters init --allow-project-local-adapters` opt-in before any project-local
+  executable is pinned or run; without it, resolution stays PATH-only and
+  fail-closed. This opt-in is the documented trust boundary — provenance is
+  drift-detection, not signature-by-authority.
+- #4 / PR #5 — closed a case-insensitive-filesystem gap in that boundary:
+  `is_path_under()` now falls back to `os.path.normcase` and a physical
+  `(st_dev, st_ino)` ancestor walk when the lexical comparison is insufficient, so
+  a case-variant of the project-local adapter bin dir on `PATH` (e.g. `.m8shift/BIN`
+  vs `.m8shift/bin`) can no longer be discovered as a "system" executable and pinned
+  without opt-in. Case-sensitive filesystems are unaffected. Regression tests added
+  for rtk and headroom adapter names (skipped on case-sensitive filesystems).
+- CodeQL HIGH (`py/incomplete-url-substring-sanitization`) — the commit provenance
+  trailer parses the git remote host (`_remote_host` / `_is_github_host`) instead of
+  a `"github.com" in url` substring match.
+- RTK telemetry hardening — telemetry output is no longer emitted, sensitive RTK
+  diagnostics are redacted, and RTK must be identity-pinned before any telemetry
+  command is attempted.
+- #97 — security documentation corrected for the post-#82 surface (test count,
+  version scope, supply-chain/RCE claims scoped core-vs-adapters, threat-model
+  invariants, OWASP Agentic Top-10 mapping, RFC 036 positioning).
+- Agents guide — added a "Stale locks, force-claim, and worktree isolation" section
+  (§7): a stale pen reclaims only the write token, never proof the peer is gone;
+  one worktree, one owner; validate in an isolated detached worktree; keep the pen
+  fresh during long work. Structural fix (liveness decoupled from pen-TTL) tracked
+  in the relay-robustness backlog (#6).
+- RFC 042 Phase C — whole-content measurement round recorded (documentation).
+
+Validation:
+
+- Full suite green on `main` (388 tests). No behavior change to the relay core.
+- Lockstep version surfaces bumped from `3.41.1` (unreleased CodeQL patch) to
+  `3.42.0` across distributed scripts, tests, examples, and docs.
+
 ## v3.41.0 — 2026-07-02
 
 Release scope:

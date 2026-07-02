@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import m8shift  # noqa: E402
 
-VERSION = "3.41.1"
+VERSION = "3.42.0"
 
 
 def render_doc(rel, body):

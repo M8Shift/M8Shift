@@ -1,7 +1,7 @@
 # Security audit — M8Shift against the OWASP Top 10 for Agentic Applications 2026
 
 - **Date:** 2026-06-27
-- **Scope:** the **M8Shift** project (`m8shift.py` v3.41.1) and its companions, mapped
+- **Scope:** the **M8Shift** project (`m8shift.py` v3.42.0) and its companions, mapped
   threat-by-threat onto the OWASP Agentic Top 10 (ASI01 → ASI10).
 - **Mode:** read-only source review. Every statement about the code was verified against
   the source (`file:line` citations).
@@ -344,4 +344,4 @@ access-controlled server) — explicitly **not to be done** inside M8Shift (§5)
 *Cross-references: OWASP Top 10 for Agentic Applications 2026 (OWASP GenAI Security Project
 — Agentic Security Initiative), <https://genai.owasp.org> (threat grid) ·
 [security-audit.md](./security-audit.md) (internal audit SEC-1→SEC-11) · verified code
-`m8shift.py` v3.41.1.*
+`m8shift.py` v3.42.0.*
