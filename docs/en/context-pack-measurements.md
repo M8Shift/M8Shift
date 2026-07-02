@@ -439,3 +439,48 @@ auto-routing stays behind the **Phase C/D evidence gate**.
 the full benchmark (#84) would firm it. The policy is a priority *choice* on directional evidence,
 fail-safe **in retrieve-capable mode** (builtin retains the raw by reference while it stays
 retained/authorized/retrievable), and reversible if fuller measurement contradicts it.
+
+### Round 4 — RFC 042 Phase C: the whole-content regime, measured (2026-07-02)
+
+**Goal.** Phase C of RFC 042 gates Phase D (auto-route-to-Headroom) on measuring the regimes the
+pilot only *reasoned* about. Round 3 already measured the **no-retrieval point-fact** regime
+(digest-alone 0-1/9 vs Headroom 6-7/9). This round measures the last unmeasured regime:
+**whole-content** — a task needing broad coverage of the document at once.
+
+**Method (pre-registered, judge-free).** Same 100k fixture (41 RFC docs, sha `faab2f7c31e8`).
+Two tasks authored with **programmatic answer keys derived from the raw before any API call**:
+WC1 = enumerate every document with a short topic (coverage scored by per-title distinctive-keyword
+match, 41 titles); WC2 = exact count (=41) + exact set of header RFC numbers (034-041). Three forms:
+builtin **digest-alone** (the fail-closed no-retrieval form, ~3.4k tokens), **Headroom compact**
+(71.5k tokens Anthropic tokenizer — 46% of raw), **raw** ceiling (154.9k). Two models
+(`claude-opus-4-8`, `claude-sonnet-5`), single run, no LLM judge. Retrieval is out of scope by
+construction: covering 41 documents by bounded retrieval ≈ re-fetching the whole raw plus digest
+overhead — arithmetic, not measurement.
+
+| Form | opus 4.8: coverage / count / set | sonnet 5: coverage / count / set | input tokens |
+|---|---|---|---|
+| digest-alone | 7/41 · ✗ · ✗ | 8/41 · ✗ · ✗ | 3,399 |
+| **Headroom** | **40/41 · ✓ · ✓** | **40/41 · ✓ · ✓** | 71,468 (46%) |
+| raw (ceiling) | 41/41 · ✓ · ✓ | 31/41* · ✓ · ✓ | 154,898 |
+
+\* sonnet raw first run was output-truncated (thinking consumed the 2.5k budget); re-run at 8k
+output gave 41/41 — reported: 41/41. Method note: sonnet-5 thinks by default; whole-content tasks
+need output budget ≥8k.
+
+**Honesty checks.** No fabrication: digest answers listed only what the digest contains (6-7 lines).
+The single Headroom miss (RFC 041) is identical on both models; its keywords ARE present in the
+compact — a tail-rendering weakness of the compact, not a proven drop. `temperature` is deprecated
+on these models (first run 400'd, unbilled).
+
+**Result.** In the whole-content regime, **Headroom ≈ raw ceiling at 46% of the tokens**
+(40/41 coverage + both exact tasks on both models), while **digest-alone collapses** (7-8/41,
+both exact tasks failed). Replicated across two models. Combined with Round 3 (no-retrieval
+point-facts), **both Headroom-favored regimes now have direct measurement**.
+
+**Phase C verdict → Phase D gate.** CONFIRMS RFC 042's conditional routing: for
+**large + inline/no-retrieval/whole-content** content with Headroom identity-pinned, Headroom is
+the right backend; builtin+retrieval remains the right default for retrieve-capable few-fact work
+(Round 3). The Phase D flip (auto-route in those regimes only, version-gated) is now
+**evidence-backed within this fixture's scope** — caveats: 1 fixture/genre, 1 run, N=2 tasks;
+the full benchmark (#84) remains the definitive bar. Cost: ~$2.27 of the $5 operator envelope
+(opus $1.19; sonnet ×2 runs $1.08 at intro pricing).
