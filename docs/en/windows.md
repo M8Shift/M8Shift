@@ -9,9 +9,17 @@ native PowerShell/cmd.
 - **Python 3.8+** — install from [python.org](https://www.python.org/downloads/)
   (tick *"Add python.exe to PATH"*), or `winget install Python.Python.3.12`, or the
   Microsoft Store. Verify: `python --version` (or `py --version`).
-- **No dependencies** — M8Shift is stdlib-only, so there is nothing else to install.
+- **No Python package dependencies** — M8Shift itself is stdlib-only.
+- **Downloader + checksum tool** for the Bash installer — `curl`/`wget` or Python
+  `urllib`, plus `sha256sum`, `shasum`, or Python `hashlib`.
 - *(Optional)* **Git for Windows** — only needed for anchor case-renaming via
   `git mv`. Without it, M8Shift still works (it skips the Git step).
+- *(Optional)* **RTK** — Git Bash can install a verified Windows release asset with
+  `--with-rtk`; the binary is stored in `.m8shift/bin`, telemetry is disabled, and
+  the adapter manifest is identity-pinned.
+- *(Experimental)* **Headroom** — `--with-headroom` attempts `pip install
+  headroom-ai` in `.m8shift/venvs/headroom`; source builds may require Rust/Cargo
+  and failures do not block the base install.
 
 ## Option A — WSL (recommended: closest to Linux/macOS)
 
@@ -28,7 +36,7 @@ python3 m8shift.py status
 ```
 
 The installer downloads `m8shift.py` plus the optional `m8shift-worktree.py`
-toolbox and `m8shift-runtime.py` companion, verifies them against
+toolbox, `m8shift-runtime.py`, and `m8shift-context.py`, verifies them against
 `checksums.sha256`, then runs `init`.
 
 WSL gives a true POSIX filesystem (real `O_EXCL`, `chmod`, atomic `rename`), so
@@ -47,6 +55,16 @@ python m8shift.py status
 - Call the script as `python m8shift.py <cmd>` — Git Bash may not honor the
   `#!/usr/bin/env python3` shebang reliably.
 - `git mv` for anchor canonicalization works because git is present.
+- Optional RTK install is portable here too:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
+    bash -s -- --agents claude,codex --with-rtk
+  ```
+
+  The installer downloads the Windows `.zip` asset, verifies it against RTK's
+  `checksums.txt`, installs `rtk.exe` under `.m8shift/bin`, disables telemetry,
+  and writes the pinned adapter manifest.
 
 ## Option C — Native PowerShell / cmd
 
@@ -65,8 +83,8 @@ python m8shift.py status
 ```
 
 The PowerShell installer downloads `m8shift.py` plus the optional
-`m8shift-worktree.py` toolbox and `m8shift-runtime.py` companion, verifies them
-against `checksums.sha256` by default, then runs `init`.
+`m8shift-worktree.py` toolbox, `m8shift-runtime.py`, and `m8shift-context.py`,
+verifies them against `checksums.sha256` by default, then runs `init`.
 
 Manual fallback:
 

@@ -417,5 +417,6 @@ left on the table by raw commands).
 > *verifying*.
 
 RTK is optional and fully degrading: when it is absent, agents fall back to the raw commands and lose
-only the saving; M8Shift's core stays stdlib-only either way. Whether M8Shift installs/enables RTK by
-default (with telemetry off) is tracked separately as a product feature.
+only the saving; M8Shift's core stays stdlib-only either way. The Bash installer may install RTK only
+with explicit operator consent (`--with-rtk`), then telemetry is disabled and the adapter is
+identity-pinned. Headroom-compatible compression remains a separate explicit experiment.

@@ -1,8 +1,9 @@
 # RTK shell-output policy
 
 M8Shift treats RTK as an optional shell-output filter adapter. RTK is not bundled,
-not auto-installed, and never becomes evidence by itself. The operator installs
-`rtk` separately when they want this optimization.
+not auto-installed, and never becomes evidence by itself. The operator either
+installs `rtk` separately or gives explicit installer consent with `--with-rtk`
+when they want this optimization.
 
 Use RTK for noisy command output where the measured compact view preserves the
 decision signal:
@@ -30,10 +31,23 @@ python3 m8shift-context.py adapters init
 ```
 
 `adapters init` records the trusted `rtk` executable identity when `rtk` is
-available on `PATH`: resolved absolute path plus binary SHA-256. At runtime,
-M8Shift re-resolves `rtk` and rejects execution unless both the path and hash
-match the recorded identity. This deliberately rejects same-name wrappers,
-renamed copies, symlink/path hijacks, and relay binaries disguised as `rtk`.
+available on `PATH` or in the project-local `.m8shift/bin` install location:
+resolved absolute path plus binary SHA-256. At runtime, M8Shift re-resolves
+`rtk` and rejects execution unless both the path and hash match the recorded
+identity. This deliberately rejects same-name wrappers, renamed copies,
+symlink/path hijacks, and relay binaries disguised as `rtk`.
+
+The Bash installer can perform the optional setup portably:
+
+```bash
+bash install.sh --with-rtk
+```
+
+It downloads the OS-specific RTK release asset for macOS, Linux, or Git
+Bash/Windows, verifies it against RTK's `checksums.txt`, installs it under
+`.m8shift/bin`, disables telemetry, and writes the pinned adapter manifest.
+If a matching prebuilt asset is unavailable, Cargo/Rust may be used as a
+fallback when present.
 
 If RTK is installed or upgraded after manifest generation, regenerate the manifest
 from a trusted shell:

@@ -5064,6 +5064,31 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         self.assertNotEqual(self._rc(["--verify"], {"M8SHIFT_INSTALL_VERIFY": "0"}), 0)
         self.assertEqual(self._rc(["--no-verify"], {"M8SHIFT_INSTALL_VERIFY": "1"}), 0)
 
+    def test_bash_syntax_ok(self):
+        result = subprocess.run(
+            ["bash", "-n", os.path.join(REPO, "install.sh")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dry_run_lists_multios_prereqs_and_does_not_write(self):
+        parent = tempfile.mkdtemp(prefix="m8shift-dry-parent-")
+        self.addCleanup(shutil.rmtree, parent, True)
+        target = os.path.join(parent, "target")
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--with-rtk", "--with-headroom", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(os.path.exists(target))
+        self.assertIn("Dry run plan:", result.stdout)
+        self.assertIn("Git Bash/Windows", result.stdout)
+        self.assertIn("RTK: yes", result.stdout)
+        self.assertIn("Headroom: yes", result.stdout)
+        self.assertIn("Rust/Cargo", result.stdout)
+
     def test_manual_pin_is_self_sufficient_without_manifest(self):
         # A mirror with NO checksums.sha256: a correct --sha256 pin still verifies (manifest
         # skipped), a wrong one is rejected, and default verify fails for lack of a manifest.
@@ -5101,6 +5126,57 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         with open(marker, encoding="utf-8") as fh:
             self.assertIn("telemetry disable", fh.read())
+
+    def test_with_rtk_identity_pins_existing_rtk(self):
+        bindir = tempfile.mkdtemp(prefix="m8shift-rtk-pin-bin-")
+        target = tempfile.mkdtemp(prefix="m8shift-rtk-pin-target-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        self.addCleanup(shutil.rmtree, target, True)
+        rtk = os.path.join(bindir, "rtk")
+        with open(rtk, "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        os.chmod(rtk, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--no-verify", "--no-worktree", "--no-init", "--with-rtk"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        manifest = os.path.join(target, ".m8shift", "context", "adapters", "rtk-shell-output.json")
+        with open(manifest, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        self.assertEqual(payload["trusted_executable"]["path"], os.path.realpath(rtk))
+        with open(rtk, "rb") as fh:
+            self.assertEqual(payload["trusted_executable"]["sha256"], hashlib.sha256(fh.read()).hexdigest())
+
+
+class TestContextLocalAdapterResolution(unittest.TestCase):
+    def test_adapters_init_resolves_project_local_m8shift_bin_rtk(self):
+        d = tempfile.mkdtemp(prefix="m8shift-local-adapter-")
+        self.addCleanup(shutil.rmtree, d, True)
+        shutil.copy(os.path.join(REPO, "m8shift-context.py"), os.path.join(d, "m8shift-context.py"))
+        bindir = os.path.join(d, ".m8shift", "bin")
+        os.makedirs(bindir, exist_ok=True)
+        rtk = os.path.join(bindir, "rtk")
+        with open(rtk, "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        os.chmod(rtk, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        result = subprocess.run(
+            [sys.executable, "m8shift-context.py", "adapters", "init", "--force", "--json"],
+            cwd=d, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["rtk_telemetry"]["present"])
+        manifest = os.path.join(d, ".m8shift", "context", "adapters", "rtk-shell-output.json")
+        with open(manifest, encoding="utf-8") as fh:
+            adapter = json.load(fh)
+        self.assertEqual(adapter["trusted_executable"]["path"], os.path.realpath(rtk))
 
 
 class TestChecksumsManifest(unittest.TestCase):

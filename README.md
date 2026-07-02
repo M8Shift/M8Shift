@@ -84,11 +84,14 @@ Native Windows PowerShell:
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex
 ```
 
-These installers download `m8shift.py` plus `m8shift-worktree.py` and
-`m8shift-runtime.py` into the current directory, verify the files against
-`checksums.sha256`, then run
-`m8shift.py init --agents claude,codex` through the detected Python 3.8+ interpreter. No `sudo`, no global PATH change,
-no background service.
+Prerequisites: **Python 3.8+**, **git**, and one downloader (`curl`, `wget`, or Python
+`urllib`). Verification uses `sha256sum`, `shasum`, or Python `hashlib`.
+
+These installers download `m8shift.py` plus `m8shift-worktree.py`,
+`m8shift-runtime.py`, and `m8shift-context.py` into the current directory, verify
+the files against `checksums.sha256`, then run `m8shift.py init --agents
+claude,codex` through the detected Python 3.8+ interpreter. No `sudo`, no global
+PATH change, no background service.
 
 For a pinned release, fetch the installer from the tag and use the same ref for the
 downloaded files:
@@ -108,6 +111,38 @@ irm https://raw.githubusercontent.com/M8Shift/M8Shift/vX.Y.Z/install.ps1 | iex
 > against the `checksums.sha256` manifest from the selected ref. That catches
 > corruption or mismatch. For out-of-band trust against a compromised origin, pin
 > reviewed digests with `--sha256 FILE:HEX` or use a signed release tag.
+
+Optional RTK shell-output filtering is available during Bash install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
+  bash -s -- --agents claude,codex --with-rtk
+```
+
+`--with-rtk` uses verified release assets for macOS, Linux, and Git Bash/Windows,
+installs the binary under `.m8shift/bin`, disables RTK telemetry, and
+identity-pins the RFC 034 adapter manifest. If no prebuilt asset matches the
+host, the installer may use Cargo/Rust as a fallback. The default `ask` mode only
+prompts in an interactive terminal; non-interactive installs skip RTK unless
+`--with-rtk` is explicit.
+
+Experimental Headroom-compatible context compression stays opt-in:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
+  bash -s -- --agents claude,codex --with-headroom
+```
+
+`--with-headroom` creates `.m8shift/venvs/headroom` and attempts
+`pip install headroom-ai`. Some platforms receive source distributions and may
+need Rust/Cargo for `cryptography`; failures are reported clearly and never block
+the base M8Shift install. Headroom remains behind the RFC 042 measurement gate.
+
+For CI or review, inspect the install plan without writing files:
+
+```bash
+bash install.sh --dry-run --with-rtk --with-headroom
+```
 
 Manual install:
 

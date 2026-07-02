@@ -1346,10 +1346,18 @@ def adapter_findings(manifest, check_executable=True):
 
 
 def shutil_which(executable):
-    for folder in os.environ.get("PATH", os.defpath).split(os.pathsep):
-        path = os.path.join(folder, executable)
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
+    names = [executable]
+    if not executable.lower().endswith(".exe"):
+        names.append(executable + ".exe")
+    folders = [folder for folder in os.environ.get("PATH", os.defpath).split(os.pathsep) if folder]
+    local_bin = os.path.join(HERE, ".m8shift", "bin")
+    if local_bin not in folders:
+        folders.append(local_bin)
+    for folder in folders:
+        for name in names:
+            path = os.path.join(folder, name)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
     return None
 
 
