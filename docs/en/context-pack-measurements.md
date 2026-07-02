@@ -332,3 +332,44 @@ the queried facts) → its 5/9 is likely *understated*, so real agentic retrieva
 `capability-tiered` counted as a miss for **both** forms). The full rigorous version (3 genres × 3
 sizes, N≥50, ≥5 runs + bootstrap CIs + paired significance, config frontiers, blind cross-model
 judge, both framings incl. Headroom-with-retrieval) is deferred behind budget (#84).
+
+### Per-model (per-AI) results
+
+Same fixture, questions, forms, and exact-match scoring; only the answering model changes
+(+~$0.27). Codex-side (`gpt-5-codex`) is pending its env.
+
+| AI model | Software / method | Ctx o200k | Accuracy (/9) | head·mid·tail | Halluc | Abstain | Tokens/correct |
+|----------|-------------------|----------:|:-------------:|:-------------:|:------:|:-------:|---------------:|
+| `claude-opus-4-8` | builtin digest-only | 2,112 | 1/9 | 0·0·1 | 0 | 2/2 | — |
+| `claude-opus-4-8` | builtin + retrieval | 8,472 | 5/9 | 2·1·2 | 0 | 2/2 | ~1,700 |
+| `claude-opus-4-8` | Headroom (aggressive, 45.5%) | 45,085 | **6/9** | 2·1·3 | 0 | 2/2 | ~7,500 |
+| `claude-sonnet-4-6` | builtin digest-only | 2,112 | 1/9 | 0·0·1 | 0 | 2/2 | — |
+| `claude-sonnet-4-6` | builtin + retrieval | 8,472 | 5/9 | 3·0·2 | 0 | 2/2 | ~1,700 |
+| `claude-sonnet-4-6` | Headroom (aggressive, 45.5%) | 45,085 | **6/9** | 2·1·3 | 0 | 2/2 | ~7,500 |
+| `claude-haiku-4-5` | builtin digest-only | 2,112 | 0/9 | 0·0·0 | 0 | 2/2 | — |
+| `claude-haiku-4-5` | builtin + retrieval | 8,472 | 3/9 | 1·1·1 | 0 | 2/2 | ~2,800 |
+| `claude-haiku-4-5` | Headroom (aggressive, 45.5%) | 45,085 | **4/9** | 1·1·2 | 0 | 2/2 | ~11,300 |
+| `gpt-5-codex` | (all three) | (same) | *pending — Codex env* | | | | |
+
+Cross-model reads: (a) digest-alone is useless for QA on **every** model; (b) builtin+retrieval is
+the efficiency winner across the board; (c) **Headroom scores highest accuracy on every model**
+(+1 answer over builtin+retrieval) — it is the strongest *near-lossless preservation* candidate —
+but at ~5× the tokens; (d) the **cheaper model (haiku) benefits relatively more** from Headroom
+(+33% vs opus +20%) — the one clear "Headroom helps" signal, relevant to cheap-model delegation.
+
+### Accuracy vs reliability — read the table correctly
+
+These are **two different axes**; do not conflate them:
+
+| Column | Measures | Result |
+|--------|----------|--------|
+| **Accuracy** (X/9) | **completeness** — how many answerable questions the form preserved enough to answer correctly | varied (0–6) |
+| **Hallucinations** | **reliability / safety** — did the model fabricate an answer it did not have? | **0 for every model and form** |
+| **Abstention** (of 2) | did it correctly say "NOT PRESENT" on unanswerable probes? | **2/2 everywhere** |
+
+So a low-accuracy form (e.g. builtin digest-only, 1/9) is **incomplete, not unreliable**: it
+correctly abstained on what it lacked and never lied. On the **reliability** axis all forms tied at
+**perfect**; they differed only in **completeness** (accuracy) and **token cost**. Net: **Headroom is
+the best *accuracy/preservation* candidate and is fully reliable; builtin+retrieval is the best
+*efficiency* candidate for M8Shift's retrieve-capable workload** — which is why builtin stays the
+default and Headroom stays a reliable opt-in, not a rejected one.
