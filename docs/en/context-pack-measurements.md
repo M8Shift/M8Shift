@@ -173,9 +173,11 @@ runner policy, but not the RTK binary. See [rtk-shell-output-policy.md](rtk-shel
 
 Both agents — Claude (analysis) and Codex (independent review) — previously agreed **not** to run
 Round 3 on the current native pack. That judgement still holds for the pack itself. In v3.39.0
-M8Shift added only the optional `headroom_ext` backend dispatch for **broad raw context records**
-(`conversation`, `history`, `file`, `report`, `diff`, `large-context`) when an operator installs
-and identity-pins an adapter-compatible local `headroom` command.
+M8Shift added the optional `headroom_ext` backend hook for **broad raw context records**
+(`conversation`, `history`, `file`, `report`, `diff`, `large-context`). Since v3.40.0, `auto`
+keeps those broad records on the builtin digest unless an operator explicitly sets
+`backends.headroom_ext.auto_enabled: true` and identity-pins an adapter-compatible local
+`headroom` command.
 
 Reasoning:
 
@@ -201,6 +203,52 @@ The upstream Headroom CLI is primarily documented around `wrap`, `proxy`, and `m
 M8Shift backend deliberately does **not** start those modes. `headroom_ext` is therefore an
 optional RFC 034 adapter hook: it runs only when the operator provides and pins a local argv
 subprocess that reads redacted stdin and writes compact stdout.
+
+### Follow-up feasibility pass — library mode evaluated, wrapper not promoted · 2026-07-02
+
+After v3.39.0, the operators asked whether M8Shift should ship a local Headroom wrapper instead
+of leaving `headroom_ext` as a contract-only adapter. The feasibility result is split:
+
+- **Library mode exists:** `headroom-ai==0.28.0` exposes `headroom.compress.compress(messages, ...)`,
+  used by Headroom's own MCP/shared-context code path. It can run in-process and does not require
+  the `headroom proxy` or MCP server.
+- **Cold-cache risk exists:** the default Kompress path may start a background HuggingFace model
+  download on first use. A M8Shift-compatible wrapper would therefore need to force offline/cache-only
+  execution (`HEADROOM_OFFLINE=1`, `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`) and refuse to run
+  unless the ONNX model is already installed.
+- **The default decision is model-driven, not a Headroom rejection:** M8Shift's builtin compressor
+  is an aggressive, lossy **digest** paired with mandatory bounded raw retrieval. That is the
+  intended handoff model: send a small operational orientation, then retrieve evidence on demand.
+  Headroom's library path is closer to a near-lossless conversation compressor and solves a
+  different problem. A raw compact-token comparison between the two rewards builtin for dropping
+  information that remains available through `retrieve`, so it is not a like-for-like quality
+  benchmark.
+
+Exploratory measurements:
+
+| Case | Raw `o200k_base` tokens | Builtin compact | Headroom compact | Protocol note |
+|------|-------------------------:|----------------:|-----------------:|---------------|
+| `conversation` | 19,800 | 1,829 | 14,651 | Indicative only: builtin is a lossy digest + raw ref; Headroom keeps much more text. |
+| `report` | 17,500 | 748 | 12,237 | Indicative only: same lossy-digest vs near-lossless-compressor caveat. |
+| `file` | 15,200 | 474 | 15,200 | Struck from verdict: this raw blob is outside the conversation-message workload Headroom's one-function API targets. |
+| `diff` | 14,599 | 1,081 | 14,599 | Struck from verdict: this raw blob is outside the conversation-message workload Headroom's one-function API targets. |
+
+Test conditions:
+
+- `headroom-ai==0.28.0` with the proxy/ONNX dependencies in a temporary virtualenv;
+- Kompress ONNX model preloaded once, then compression run with offline/cache-only environment;
+- `KompressCompressor().preload(allow_download=False)` succeeded before the measured calls;
+- Headroom transforms observed: `router:text:0.70`, `router:kompress:0.73`, or `router:noop`;
+- token counts: `tiktoken.get_encoding("o200k_base")`;
+- no output-equivalence evaluation was completed;
+- Claude/Anthropic `count_tokens` was not measured in this pass, so no Claude-token gain is claimed.
+
+**Decision:** keep builtin as the automatic broad-context default because it matches M8Shift's
+handoff contract: tiny digest + always-retrievable redacted raw evidence. Do not promote an
+official Headroom wrapper until a representative conversation/report workload shows a meaningful
+real-token gain **within its own quality target** and passes the equivalence check. The existing
+`headroom_ext` adapter hook remains available for operator experiments, but M8Shift should not
+treat a local Headroom command as the preferred broad-context backend merely because it is installed.
 
 **Parked behind a concrete use case.** Headroom may become worth measuring for: large supporting
 source sections; archive / RAG retrieval bundles; reports exceeding the pack budget; or

@@ -647,7 +647,7 @@ class TestContextCompression(ContextBase):
         self.assertIn("adapter mode 'test' is not declared", payload["adapter_result"]["error"])
         self.assertNotIn("super-secret", json.dumps(payload))
 
-    def test_auto_headroom_backend_uses_pinned_adapter_for_broad_type(self):
+    def test_auto_headroom_backend_requires_explicit_config_opt_in(self):
         marker = os.path.join(self.d, "headroom-compress.txt")
         env = self.fake_headroom_env(
             "import sys\n"
@@ -657,13 +657,30 @@ class TestContextCompression(ContextBase):
             "sys.stdout.write(data.replace('VERBOSE filler\\n', ''))\n"
         )
         self.assertEqual(self.ctx("init", env=env).returncode, 0)
-        result = self.ctx(
-            "compress", "--id", "headroom1", "--type", "report", "--stdin", "--json",
+        default_auto = self.ctx(
+            "compress", "--id", "headroom-default-auto", "--type", "report", "--stdin", "--json",
             stdin="password=super-secret\nVERBOSE filler\nERROR failed\nexit code 1\n",
             env=env,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
+        self.assertEqual(default_auto.returncode, 0, default_auto.stderr)
+        payload = json.loads(default_auto.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "builtin")
+        self.assertEqual(payload["adapter_result"]["adapter"], "builtin")
+        self.assertFalse(os.path.exists(marker))
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+        self.write_json(".m8shift/context-compression.json", {
+            "schema": "m8shift.context_compression.config.v1",
+            "backends": {"headroom_ext": {"auto_enabled": True}},
+        })
+        opt_in_auto = self.ctx(
+            "compress", "--id", "headroom-opt-in-auto", "--type", "report", "--stdin", "--json",
+            stdin="password=super-secret\nVERBOSE filler\nERROR failed\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(opt_in_auto.returncode, 0, opt_in_auto.stderr)
+        payload = json.loads(opt_in_auto.stdout)
         self.assertEqual(payload["requested_backend"], "auto")
         self.assertEqual(payload["backend"], "headroom_ext")
         self.assertEqual(payload["adapter_result"]["adapter"], "headroom_ext")
@@ -674,6 +691,27 @@ class TestContextCompression(ContextBase):
         with open(marker, encoding="utf-8") as fh:
             self.assertIn("m8shift-transform report", fh.read())
 
+    def test_explicit_headroom_backend_honors_pinned_adapter_without_auto_opt_in(self):
+        env = self.fake_headroom_env(
+            "import sys\n"
+            "data = sys.stdin.read()\n"
+            "sys.stdout.write('EXPLICIT_HEADROOM mode=' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "sys.stdout.write(data.replace('VERBOSE filler\\n', ''))\n"
+        )
+        self.assertEqual(self.ctx("init", env=env).returncode, 0)
+        result = self.ctx(
+            "compress", "--id", "headroom-explicit", "--type", "report", "--backend", "headroom_ext", "--stdin", "--json",
+            stdin="password=super-secret\nVERBOSE filler\nERROR failed\nexit code 1\n",
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["requested_backend"], "headroom_ext")
+        self.assertEqual(payload["backend"], "headroom_ext")
+        self.assertEqual(payload["adapter_result"]["adapter"], "headroom_ext")
+        self.assertIn("EXPLICIT_HEADROOM mode=m8shift-transform report", payload["adapter_result"]["filtered_text"])
+        self.assertNotIn("super-secret", json.dumps(payload))
+
     def test_headroom_unpinned_or_absent_degrades_by_backend_mode(self):
         self.assertEqual(self.ctx("init").returncode, 0)
         auto = self.ctx(
@@ -682,6 +720,21 @@ class TestContextCompression(ContextBase):
         )
         self.assertEqual(auto.returncode, 0, auto.stderr + auto.stdout)
         payload = json.loads(auto.stdout)
+        self.assertEqual(payload["requested_backend"], "auto")
+        self.assertEqual(payload["backend"], "builtin")
+        self.assertNotIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
+        self.assertNotIn("super-secret", json.dumps(payload))
+
+        self.write_json(".m8shift/context-compression.json", {
+            "schema": "m8shift.context_compression.config.v1",
+            "backends": {"headroom_ext": {"auto_enabled": True}},
+        })
+        auto_opt_in = self.ctx(
+            "compress", "--id", "headroom-absent-auto-opt-in", "--type", "report", "--stdin", "--json",
+            stdin="password=super-secret\nERROR original\nexit code 1\n",
+        )
+        self.assertEqual(auto_opt_in.returncode, 0, auto_opt_in.stderr + auto_opt_in.stdout)
+        payload = json.loads(auto_opt_in.stdout)
         self.assertEqual(payload["requested_backend"], "auto")
         self.assertEqual(payload["backend"], "builtin")
         self.assertIn("compression.headroom_fallback", {row["check"] for row in payload["findings"]})
@@ -712,6 +765,10 @@ class TestContextCompression(ContextBase):
         del manifest["modes"]["report"]
         with open(adapter, "w", encoding="utf-8") as fh:
             json.dump(manifest, fh)
+        self.write_json(".m8shift/context-compression.json", {
+            "schema": "m8shift.context_compression.config.v1",
+            "backends": {"headroom_ext": {"auto_enabled": True}},
+        })
 
         auto = self.ctx(
             "compress", "--id", "headroom-drift-auto", "--type", "report", "--stdin", "--json",
