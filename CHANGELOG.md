@@ -1,5 +1,21 @@
 # Changelog
 
+## v3.45.0 — 2026-07-03
+
+RFC 046 (part 1) — execution modes and project identity.
+
+- `status` and `watch` now surface the **project name and cwd** in their header (human,
+  `--json`, and the watch banner), so multiple open terminals stay distinguishable.
+- agents-guide gains the **interactive vs headless** distinction and the mandatory
+  **status-guard** rule: never announce the baton (holder/state/AWAITING_*/WORKING_*) from
+  memory — always re-read `M8SHIFT.md` or `status --for <agent>` immediately before
+  answering — plus the interactive-UI honesty message. This closes the stale-baton
+  desynchronization observed in a pure chat UI.
+- The RFC 046 runner-install (copy `examples/headless_runner.py` + `scripts/watch-status.sh`
+  on init) lands next.
+
+Lockstep bump to `3.45.0`. Full suite green.
+
 ## v3.44.0 — 2026-07-03
 
 Adoption and documentation release.

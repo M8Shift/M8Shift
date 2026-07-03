@@ -398,6 +398,29 @@ states, and conflating them causes collisions.
 > pen" reliably means "holder gone." Until that lands, the discipline above is mandatory.
 > Tracked in the relay-robustness backlog.
 
+### Interactive vs headless, and the status-guard (RFC 046)
+
+`wait` blocks a **shell process**, not the model. Whether that helps depends on the host
+harness, so name the mode you are in:
+
+- **headless** — a runner (e.g. `examples/headless_runner.py`) or a harness that
+  **re-invokes the agent when `wait` completes** keeps a real loop alive; `wait` is meaningful.
+- **interactive** — a plain chat UI does **not** re-wake the agent after a final response;
+  `wait` is only a protocol intention, and the agent resumes on the next human turn.
+
+Two rules follow, and they are mandatory:
+
+- **Status-guard — never announce the baton from memory.** Before any response that mentions
+  `holder`, `state`, `AWAITING_*`, `WORKING_*`, or "the pen is on X", re-read `M8SHIFT.md` or run
+  `./m8shift.py status --for <agent>` *immediately first*. A checkpoint from earlier in the turn
+  is stale by the time you answer.
+- **Interactive honesty.** When the relay is not `DONE` and no headless runner is active, say so
+  plainly: *"I do not stay in autonomous listening in this interface; at the next resume I will
+  re-read `status` before acting."* Do not imply you are continuously waiting when you are not.
+
+`status` and `watch` surface the **project name and cwd** in their header so several open
+terminals stay distinguishable.
+
 ## 8. Stopping condition
 
 An agent keeps working/listening until the relay is `DONE` or the maintainer gives an

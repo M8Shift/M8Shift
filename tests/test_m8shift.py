@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.44.0"
+VERSION = "3.45.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -5779,6 +5779,44 @@ class TestRFC045ModuleReference(unittest.TestCase):
         pat = re.compile(r"rtk[^.\n]{0,40}\d{2}\s*%[^.\n]{0,20}compress", re.IGNORECASE)
         for page in self.MODULES:
             self.assertIsNone(pat.search(self._read(page)), page + " overclaims RTK compression")
+
+
+
+# ─────────────────────── RFC 046 — project identity in status/watch ─────────
+
+class TestRFC046ProjectIdentity(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8shift-pid-")
+        shutil.copy(SCRIPT, os.path.join(self.d, "m8shift.py"))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run(self, *a):
+        return subprocess.run([sys.executable, "m8shift.py", *a], cwd=self.d,
+                              capture_output=True, text=True)
+
+    def _name(self):
+        return os.path.basename(os.path.realpath(self.d))
+
+    def test_status_shows_project_and_cwd(self):
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        r = self._run("status")
+        self.assertIn("project", r.stdout)
+        self.assertIn(self._name(), r.stdout)
+        self.assertIn("cwd", r.stdout)
+
+    def test_status_json_has_project_cwd_root(self):
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        d = json.loads(self._run("status", "--json").stdout)
+        self.assertEqual(d["project"], self._name())
+        self.assertTrue(d["cwd"])
+        self.assertTrue(d["root"])
+
+    def test_watch_header_shows_project(self):
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        r = self._run("watch", "--once")
+        self.assertIn(self._name(), r.stdout)
 
 
 if __name__ == "__main__":

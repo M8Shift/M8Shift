@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.44.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.45.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -144,6 +144,12 @@ _SCRIPT_VERSION_RE = re.compile(r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
 
 def project_root():
     return os.path.dirname(os.path.abspath(COWORK))
+
+
+def project_display_name():
+    """RFC 046: human-facing project label for status/watch headers (relay-root folder name),
+    so multiple terminals/tabs are distinguishable at a glance."""
+    return os.path.basename(project_root().rstrip(os.sep)) or "project"
 
 
 def decisions_dir():
@@ -990,7 +996,7 @@ MESSAGES = {
         "wait_not_yet": "… not your turn: {st} (holder={holder}).",
         "wait_poll": "… {st} (holder={holder}), re-checking in {interval}s",
         "watch_start": "watching M8Shift every {interval}s (Ctrl-C to stop).",
-        "watch_header": "── watch {ts} ─────────────────────────",
+        "watch_header": "── watch {ts} · {project} · {cwd} ──────────",
         "watch_stop": "watch stopped.",
         "bad_interval": "--interval must be an integer >= 1.",
         "claim_active": "refused: {holder}'s lock is still valid (expires {expires}). --force only reclaims a stale lock (protocol §5).",
@@ -4294,6 +4300,9 @@ def cmd_may_i_write(args):
 def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False):
     session_info = session_info or current_session_info(lk)
     print(f"m8shift.py v{VERSION}")
+    print(f"project  {project_display_name()}")
+    if not brief:
+        print(f"cwd      {project_root()}")
     if brief:
         for k in ("holder", "state", "agents", "turn", "since", "expires"):
             _print_lock_line(k, lk)
@@ -4359,6 +4368,9 @@ def cmd_status(args):
         out["stale"] = stale
         out["last_turn"] = last
         out["m8shift_version"] = VERSION     # the RUNNING script's version (dogfooding skew check)
+        out["project"] = project_display_name()
+        out["cwd"] = os.getcwd()
+        out["root"] = project_root()
         out["session_started_at"] = (
             None if session_info["started_at"] == "-" else session_info["started_at"]
         )
@@ -4395,7 +4407,7 @@ def cmd_watch(args):
             if should_print:
                 if args.clear:
                     print("\033[2J\033[H", end="")
-                print(tr("watch_header", ts=display_time(iso(now()))))
+                print(tr("watch_header", ts=display_time(iso(now())), project=project_display_name(), cwd=project_root()))
                 _print_status_block(lk, stale, last, current_session_info(lk, parse_turns(text)),
                                     args.for_agent)
                 print("", flush=True)
