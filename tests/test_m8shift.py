@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.44.0"
+VERSION = "3.45.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -5779,6 +5779,83 @@ class TestRFC045ModuleReference(unittest.TestCase):
         pat = re.compile(r"rtk[^.\n]{0,40}\d{2}\s*%[^.\n]{0,20}compress", re.IGNORECASE)
         for page in self.MODULES:
             self.assertIsNone(pat.search(self._read(page)), page + " overclaims RTK compression")
+
+
+
+# ─────────────────────── RFC 046 — project identity in status/watch ─────────
+
+class TestRFC046ProjectIdentity(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8shift-pid-")
+        shutil.copy(SCRIPT, os.path.join(self.d, "m8shift.py"))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run(self, *a):
+        return subprocess.run([sys.executable, "m8shift.py", *a], cwd=self.d,
+                              capture_output=True, text=True)
+
+    def _name(self):
+        return os.path.basename(os.path.realpath(self.d))
+
+    def test_status_shows_project_and_cwd(self):
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        r = self._run("status")
+        self.assertIn("project", r.stdout)
+        self.assertIn(self._name(), r.stdout)
+        self.assertIn("cwd", r.stdout)
+        self.assertIn("root", r.stdout)
+
+    def test_status_json_has_project_cwd_root(self):
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        d = json.loads(self._run("status", "--json").stdout)
+        self.assertEqual(d["project"], self._name())
+        self.assertTrue(d["cwd"])
+        self.assertTrue(d["root"])
+
+    def test_watch_header_shows_project(self):
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        r = self._run("watch", "--once")
+        self.assertIn(self._name(), r.stdout)
+
+    def test_cwd_is_getcwd_root_is_project_root_from_subdir(self):
+        # Finding 1 (Codex): human `cwd` must be the real working dir, `root` the relay root;
+        # they diverge when the tool is invoked from a subdirectory of the project.
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        sub = os.path.join(self.d, "sub", "deep")
+        os.makedirs(sub)
+        script = os.path.join(self.d, "m8shift.py")
+        dj = json.loads(subprocess.run(
+            [sys.executable, script, "status", "--json"], cwd=sub,
+            capture_output=True, text=True).stdout)
+        self.assertEqual(os.path.realpath(dj["cwd"]), os.path.realpath(sub))
+        self.assertEqual(os.path.realpath(dj["root"]), os.path.realpath(self.d))
+        self.assertNotEqual(os.path.realpath(dj["cwd"]), os.path.realpath(dj["root"]))
+        # Human block must agree with the JSON: the cwd line carries the subdir name.
+        r = subprocess.run([sys.executable, script, "status"], cwd=sub,
+                           capture_output=True, text=True)
+        self.assertIn("deep", r.stdout)
+
+    def test_init_name_overrides_folder_basename(self):
+        # Finding 2 (Codex): `init --name` must surface as the project label, not the folder.
+        self._run("init", "--agents", "claude,codex", "--no-gitignore",
+                  "--name", "Named Project")
+        r = self._run("status")
+        self.assertIn("Named Project", r.stdout)
+        d = json.loads(self._run("status", "--json").stdout)
+        self.assertEqual(d["project"], "Named Project")
+
+    def test_status_guard_in_generated_protocol(self):
+        # Finding 3 (Codex): the status-guard rule must live in the generated core, not only
+        # in the (optional) agents-guide that agents may never load.
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        blob = ""
+        for fn in os.listdir(self.d):
+            if fn.endswith(".md"):
+                with open(os.path.join(self.d, fn), encoding="utf-8") as f:
+                    blob += f.read()
+        self.assertIn("Status-guard", blob)
 
 
 if __name__ == "__main__":
