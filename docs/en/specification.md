@@ -1,7 +1,7 @@
 # Specification — M8Shift
 
 > [!NOTE]
-> **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-06-25
+> **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-07-03 (v3.43.0)
 
 ---
 
@@ -542,6 +542,7 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [020-rfc-headless-runner-hardening.md](rfc/020-rfc-headless-runner-hardening.md) / [028-rfc-headless-command-templates.md](rfc/028-rfc-headless-command-templates.md) | **Headless runner hardening** | `examples/headless_runner.py --dry-run --turn-timeout --kill-grace --cwd --env-allowlist --expected-transition`, argument validation, immutable run plans, and `run.timeout` / `run.ended` events. | Bounds stuck provider processes while preserving post-run validation, no force-steal rule, explicit env allowlist, and success only on exit `0` + expected transition + unstolen lock + ledger events. |
 | [016-rfc-cooperative-turn-request.md](rfc/016-rfc-cooperative-turn-request.md) | **Cooperative turn request** | `request-turn`, `yield-turn`, `decline-turn`, `steer-turn --force`, append-only `M8SHIFT.requests.md`, and read-only doctor findings for malformed or out-of-sequence request ledgers. | Requests never make `claim` succeed; only explicit yield/force-steer changes routing, and `steer-turn` refuses fresh `WORKING_*`. |
 | [021-rfc-pause-resume.md](rfc/021-rfc-pause-resume.md) | **Pause / resume** | `PAUSED`, `pause <holder> --reason`, `resume <agent> --reason`, `next --resume --reason`, and livelock doctor warnings. | Open session with no active task has no holder; no automatic claim until explicit user-scope resume. |
+| [034-rfc-companion-adapter-interface.md](rfc/034-rfc-companion-adapter-interface.md) / [037-rfc-agent-context-compression-backends.md](rfc/037-rfc-agent-context-compression-backends.md) / [042-rfc-compression-backend-routing.md](rfc/042-rfc-compression-backend-routing.md) | **Context pack & compression companion** | `m8shift-context.py adapters/pack/compress/retrieve`; builtin digest + identity-pinned RTK (`rtk-shell-output`, a lossy semantic *filter*) + optional Headroom/Kompress (`--backend headroom_ext`, installed pinned via `install.sh --with-headroom`, gated by `--allow-project-local-adapters`, ~45–55% on prose, errors on shell); `--backend auto` stays on the builtin digest until the Phase D evidence gate. | Advisory, redaction-before-adapter, degrades to builtin/reference-only, never feeds the mutex/routing. |
 | [040-rfc-ai-session-usage-monitoring.md](rfc/040-rfc-ai-session-usage-monitoring.md) | **Usage cooldown core** | `cooldown --until ISO --reason TEXT [--for agent] [--source SOURCE] [--wait-interval N] [--replace]`, `PAUSED`, and `M8SHIFT.sessions.jsonl` `pause` events with `kind=usage_cooldown`. | Core-only Phase B: no provider adapter, network, subprocess, or automatic resume in `m8shift.py`; runtime/provider phases remain companion work. |
 
 ### 12.2 Stage 4 contract surface
