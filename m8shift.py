@@ -1892,13 +1892,16 @@ def cmd_init(args):
         for _e in _companion_errors:
             print("  • " + _e)
         sys.exit("companion install refused; no changes made")
-    _companion_lines, _companion_apply_errors = apply_companions(_companion_plan)
-    if _companion_apply_errors:
-        for _l in _companion_lines:
-            print("  • " + _l)
-        sys.exit("companion install failed; relay not initialized")
 
     with file_lock() as guard:
+        # RFC 044: apply the validated companion plan UNDER the lock (serialized), before any
+        # relay-state write, so concurrent inits cannot race on the companion files / kit.json
+        # and an apply-time failure exits non-zero with no half-initialized relay.
+        _companion_lines, _companion_apply_errors = apply_companions(_companion_plan)
+        if _companion_apply_errors:
+            for _l in _companion_lines:
+                print("  • " + _l)
+            sys.exit("companion install failed; relay not initialized")
         # Determine the ACTIVE roster UNDER the lock, so two concurrent inits cannot
         # compute different rosters before serializing. ALL declared names are active
         # members; the first two only seed the __A__/__B__ stanza placeholders.
