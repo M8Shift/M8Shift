@@ -11,6 +11,28 @@ checks. It grows as adapters (e.g. Headroom, RTK) are added and re-measured. See
 > that loses needed information is a failure, not a saving (RFC 034 §16, RFC 033 §9). Measure
 > with vs without, on small / medium / large contexts, for **both Claude and Codex**.
 
+## Cross-verified backend reality (Claude ↔ Codex, 2026-07-03)
+
+Both agents independently reproduced a measurement of every backend from the `v3.43.0`
+tag (deterministic inputs: `git log --stat -25`, `git grep -n "def " -- '*.py' | head -400`,
+`rfc 043` head-20000) and cross-checked the byte numbers. **What each backend actually does
+— do not overclaim beyond this:**
+
+| Backend | Honest, cross-verified figure | What it really is |
+|---|---|---|
+| **Headroom / Kompress** | **~45–55% on prose** (raw wrapper: Claude 51.0%, Codex 50.7% — concordant) | **Real semantic compression** (`KompressCompressor`, ONNX int8). **Prose only** — it **errors** on `shell_output` (no such mode) and falls back, so any Headroom "%" on shell content is a **fallback artifact, not compression**. |
+| **RTK** | **No standalone compression %** | A **mode-specific, lossy semantic *filter*** (`rtk err`/`test`/`git log`/`ls`/`git diff`), not a compressor. Its "reduction" is a **drop-rate**: on error-free `git log`, `rtk err` returns ~47 bytes (~100% dropped) because there were no errors to keep. Content- and mode-dependent; **a single "RTK %" is meaningless**. |
+| **builtin** | ~63–78% | A **lossy operational digest** (summary/excerpt), not lossless compression. |
+
+> [!WARNING]
+> The `compress --backend …` **stored compact** reduction (measured at 63–94% here) is **NOT
+> the backend's compression**. `render_external_backend_digest` applies a bounded head/tail
+> line excerpt (`head_tail_lines`) plus a digest header on top of *every* backend, so the
+> stored figure is dominated by M8Shift's own excerpting and **overstates the backend**. Never
+> quote the stored percentage as "the backend compresses X%". The only defensible standalone
+> **compression** claim is **Kompress ~45–55% on prose**; RTK and builtin are filtering /
+> digesting, not compression.
+
 ## Round 1 — native pack (Phase 1) · 2026-06-30
 
 ### Models and versions under test
@@ -198,7 +220,7 @@ Reasoning:
 |------|-------------|-----------------|
 | `headroom-ai==0.28.0` base package + resolved wheel dependencies | **37.04 MiB** downloaded wheels | `python3 -m pip download --only-binary=:all: headroom-ai==0.28.0` on the implementation Mac |
 | `headroom-ai[all]==0.28.0` / proxy / ONNX + model path | **not completed** | PyPI resolution timed out repeatedly during implementation; no size is claimed |
-| Compression gain | **~46–55%** (v3.43.0) | The v3.43.0 `m8shift-headroom` wrapper (`KompressCompressor`, ONNX int8, offline/cache-only) yields ~46–55% size reduction on RFC/prose content, measured end-to-end through `compress --backend headroom_ext`; still not evidence — verify against originals |
+| Compression gain | **~45–55%** (v3.43.0, cross-verified) | The v3.43.0 `m8shift-headroom` **raw wrapper** (`KompressCompressor`, ONNX int8, offline/cache-only) yields ~45–55% size reduction on RFC/prose content — measured directly on the wrapper (Claude 51.0%, Codex 50.7%), **not** the `compress` stored compact (which is a head/tail excerpt + digest, see the cross-verified section above). Prose only. Still not evidence — verify against originals |
 
 The upstream Headroom CLI is primarily documented around `wrap`, `proxy`, and `mcp` flows; the
 M8Shift backend deliberately does **not** start those modes. `headroom_ext` is therefore an
