@@ -5563,6 +5563,110 @@ class TestProtocolPackCommandCoverage(unittest.TestCase):
                                   f"{lang} pack does not document shipped CLI command {cmd!r}")
 
 
+
+# ─────────────────────────── RFC 044 — companion install ───────────────────
+
+class TestRFC044CompanionInstall(unittest.TestCase):
+    def setUp(self):
+        self.proj = tempfile.mkdtemp(prefix="m8shift-kit-")
+        shutil.copy(SCRIPT, os.path.join(self.proj, "m8shift.py"))
+
+    def tearDown(self):
+        shutil.rmtree(self.proj, ignore_errors=True)
+
+    def init(self, *extra):
+        return subprocess.run(
+            [sys.executable, "m8shift.py", "init", "--agents", "claude,codex", "--no-gitignore", *extra],
+            cwd=self.proj, capture_output=True, text=True,
+        )
+
+    def _present(self, fname):
+        return os.path.isfile(os.path.join(self.proj, fname))
+
+    def _kit(self):
+        with open(os.path.join(self.proj, ".m8shift", "kit.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    @staticmethod
+    def _reversioned(src_name, version, into_dir):
+        with open(os.path.join(REPO, src_name), encoding="utf-8") as fh:
+            body = fh.read()
+        body = re.sub(r'^VERSION = "\d+\.\d+\.\d+"', 'VERSION = "%s"' % version, body, count=1, flags=re.M)
+        with open(os.path.join(into_dir, src_name), "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def test_no_companions_installs_none(self):
+        r = self.init("--no-companions")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self._present("m8shift-runtime.py"))
+        self.assertFalse(os.path.exists(os.path.join(self.proj, ".m8shift", "kit.json")))
+
+    def test_companions_copies_only_selected_version_locked(self):
+        r = self.init("--companions", "runtime,context", "--companion-source", REPO)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self._present("m8shift-runtime.py"))
+        self.assertTrue(self._present("m8shift-context.py"))
+        self.assertFalse(self._present("m8shift-worktree.py"))
+        comps = self._kit()["companions"]
+        self.assertEqual(sorted(c["name"] for c in comps), ["context", "runtime"])
+        self.assertTrue(all(c["version"] == cowork.VERSION for c in comps))
+
+    def test_idempotent_and_merges_manifest(self):
+        self.init("--companions", "runtime,context", "--companion-source", REPO)
+        r = self.init("--companions", "runtime", "--companion-source", REPO)
+        self.assertIn("already up to date", r.stdout)
+        self.assertEqual(sorted(c["name"] for c in self._kit()["companions"]), ["context", "runtime"])
+
+    def test_version_skewed_source_refused(self):
+        rel = tempfile.mkdtemp(prefix="m8shift-rel-")
+        self.addCleanup(shutil.rmtree, rel, True)
+        self._reversioned("m8shift-worktree.py", "9.9.9", rel)
+        r = self.init("--companions", "worktree", "--companion-source", rel)
+        self.assertIn("refused", r.stdout)
+        self.assertFalse(self._present("m8shift-worktree.py"))
+
+    def test_edited_local_not_clobbered_without_force(self):
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        p = os.path.join(self.proj, "m8shift-runtime.py")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("\n# LOCAL EDIT MARKER\n")
+        r = self.init("--companions", "runtime", "--companion-source", REPO)
+        self.assertIn("refused without --force-companions", r.stdout)
+        with open(p, encoding="utf-8") as fh:
+            self.assertIn("# LOCAL EDIT MARKER", fh.read())
+        self.init("--companions", "runtime", "--companion-source", REPO, "--force-companions")
+        with open(p, encoding="utf-8") as fh:
+            self.assertNotIn("# LOCAL EDIT MARKER", fh.read())
+
+    def test_newer_local_not_downgraded_even_with_force(self):
+        p = os.path.join(self.proj, "m8shift-runtime.py")
+        self._reversioned("m8shift-runtime.py", "99.0.0", self.proj)
+        r = self.init("--companions", "runtime", "--companion-source", REPO, "--force-companions")
+        self.assertIn("newer", r.stdout)
+        with open(p, encoding="utf-8") as fh:
+            self.assertIn('VERSION = "99.0.0"', fh.read())
+
+    def test_kit_json_lives_under_ignored_m8shift_dir(self):
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        self.assertTrue(os.path.exists(os.path.join(self.proj, ".m8shift", "kit.json")))
+        self.assertIn(".m8shift/", cowork.GITIGNORE_ENTRIES)
+
+    def test_doctor_flags_version_skewed_companion(self):
+        self.init("--companions", "context", "--companion-source", REPO)
+        self._reversioned("m8shift-context.py", "3.40.0", self.proj)
+        r = subprocess.run([sys.executable, "m8shift.py", "doctor", "--json"],
+                           cwd=self.proj, capture_output=True, text=True)
+        data = json.loads(r.stdout)
+        findings = data if isinstance(data, list) else data.get("findings", [])
+        kit = [f for f in findings if "kit" in str(f.get("check", ""))]
+        self.assertTrue(any("version-skewed" in f.get("message", "") for f in kit), kit)
+
+    def test_unknown_companion_is_a_hard_error(self):
+        r = self.init("--companions", "nope", "--companion-source", REPO)
+        self.assertIn("unknown companion", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.proj, ".m8shift", "kit.json")))
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")
