@@ -1,7 +1,7 @@
 # Security audit — M8Shift against the OWASP Top 10 for Agentic Applications 2026
 
 - **Date:** 2026-06-27
-- **Scope:** the **M8Shift** project (`m8shift.py` v3.43.0) and its companions, mapped
+- **Scope:** the **M8Shift** project (`m8shift.py` v3.44.0) and its companions, mapped
   threat-by-threat onto the OWASP Agentic Top 10 (ASI01 → ASI10).
 - **Mode:** read-only source review. Every statement about the code was verified against
   the source (`file:line` citations).
@@ -136,7 +136,7 @@ contradict the "no key, no daemon" philosophy. → See §5 "What to deliberately
 
 **✅ Covered (a major strength of the project)**
 - **Zero third-party dependencies (core relay):** the relay scripts are stdlib only, **no `requirements.txt`/`pyproject.toml`** → the *core*'s dependency surface is near-nil (no PyPI/npm typosquatting or poisoned package in the relay itself).
-- **⚠️ Optional installer/adapter supply chain (v3.40+, post-audit — was NOT in scope at v3.26.0):** the shipped *system* is no longer zero-surface. `install.sh --with-rtk` downloads a prebuilt RTK release asset (verified against the release tag's `checksums.txt` over TLS — same-origin **TOFU**, not an independent signature) and, with `--allow-source-build`, can `cargo` build from a **tag-pinned** source; `--with-headroom` installs **pinned** `headroom-ai==0.28.0` + `onnxruntime==1.27.0` + `transformers==5.12.1` into `.m8shift/venvs/headroom` and identity-pins the `m8shift-headroom` launcher (v3.43.0). At runtime the RFC 042 compression path invokes those allowlisted binaries (`rtk`/`m8shift-headroom`) via the RFC 034 **identity-pinned (realpath+sha256), argv-only, output-capped** runner. So ASI04 is 🟢 for the **core** but the **installed adapters carry a real (opt-in, sha256-pinned, no-shell) supply-chain surface** — tracked in #94 (project-local opt-in), #95 (Headroom venv), #97 (this re-scope).
+- **⚠️ Optional installer/adapter supply chain (v3.40+, post-audit — was NOT in scope at v3.26.0):** the shipped *system* is no longer zero-surface. `install.sh --with-rtk` downloads a prebuilt RTK release asset (verified against the release tag's `checksums.txt` over TLS — same-origin **TOFU**, not an independent signature) and, with `--allow-source-build`, can `cargo` build from a **tag-pinned** source; `--with-headroom` installs **pinned** `headroom-ai==0.28.0` + `onnxruntime==1.27.0` + `transformers==5.12.1` into `.m8shift/venvs/headroom` and identity-pins the `m8shift-headroom` launcher (v3.44.0). At runtime the RFC 042 compression path invokes those allowlisted binaries (`rtk`/`m8shift-headroom`) via the RFC 034 **identity-pinned (realpath+sha256), argv-only, output-capped** runner. So ASI04 is 🟢 for the **core** but the **installed adapters carry a real (opt-in, sha256-pinned, no-shell) supply-chain surface** — tracked in #94 (project-local opt-in), #95 (Headroom venv), #97 (this re-scope).
 - **Portable single file:** `m8shift.py` is a copyable executable, Python 3.6+.
 - **Self-protection of scripts:** `checksums.sha256` + denylist prevent the tool from overwriting its own scripts via `session report` (`m8shift.py:2085-2101`).
 
@@ -344,4 +344,4 @@ access-controlled server) — explicitly **not to be done** inside M8Shift (§5)
 *Cross-references: OWASP Top 10 for Agentic Applications 2026 (OWASP GenAI Security Project
 — Agentic Security Initiative), <https://genai.owasp.org> (threat grid) ·
 [security-audit.md](./security-audit.md) (internal audit SEC-1→SEC-11) · verified code
-`m8shift.py` v3.43.0.*
+`m8shift.py` v3.44.0.*

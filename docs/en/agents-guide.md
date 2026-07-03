@@ -212,9 +212,14 @@ Every change follows the same branch-based flow.
    Mermaid architecture diagrams** (the module map — core + companions + what each serves) so a
    newcomer grasps the growing system visually;
    (b) **update the published site** ([m8shift.ai](https://m8shift.ai/)) with a **feature-focus** —
-   the release history plus the headline user-facing advances made transparent (e.g. token
-   compression with the measured RTK average %, parallelism, model/task routing, the economic usage
-   view) — with strong GitHub anchoring and consistent iconography.
+   the release history plus the headline user-facing advances made transparent (e.g. the token
+   economy with *honest* figures — Kompress ~45–55% on prose, RTK as a lossy semantic *filter* with
+   no standalone compression %, the `compress` stored view as an excerpt not compression —
+   parallelism, model/task routing, the economic usage view) — with strong GitHub anchoring and
+   consistent iconography;
+   (c) **verify the GitHub state after every push**: the CI / Actions / CodeQL checks pass, no
+   anomalous auto-created issue or PR was left behind, and (post-merge) no stale merged branch
+   remains. A push is not done until the checks that follow it are green and clean.
 9. **Delete the work branch on *both* remotes immediately after merge.** A merged branch is
    deleted the moment `main` contains it — never left to accumulate on either forge. Verify it
    is a true ancestor of `main` first (`git merge-base --is-ancestor <branch> main`), then

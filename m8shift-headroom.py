@@ -21,7 +21,7 @@ import sys
 from typing import Any, Iterable
 
 
-VERSION = "3.43.0"
+VERSION = "3.44.0"
 OFFLINE_ENV = {
     "HEADROOM_OFFLINE": "1",
     "HF_HUB_OFFLINE": "1",
