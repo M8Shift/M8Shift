@@ -3,7 +3,7 @@
 - **Date:** 2026-06-27
 - **Scope:** external security research (arXiv agentic-security defenses), MITRE ATLAS,
   and the IBM AI Risk Atlas, each judged against M8Shift's declared threat model
-  (`m8shift.py` v3.43.0 and its companions).
+  (`m8shift.py` v3.44.0 and its companions).
 - **Mode:** external-source review + verification. Every external citation was fetched
   (`arxiv.org/abs/<id>`, the ATLAS canonical YAML, the IBM Atlas Nexus mirror / AIUC-1
   crosswalk) and fact-checked against the source before being used here.
@@ -354,7 +354,7 @@ societal impact). Risks are also tagged by applicability: *traditional/broad*,
 | Misaligned actions (5) | Agentic / value-alignment | **INSPIRATION-ONLY** | M8Shift coordinates but doesn't judge agent intent; advisory companions explicitly never touch the pen/network. Conceptual lead only. |
 | Function calling hallucination (9) / Attack on AI agents' external resources (6) | Agentic / robustness-security | **NOT-APPLICABLE** | M8Shift calls no tools and makes no network/API calls (stdlib-local invariant). |
 | Reproducibility (14) | Agentic / robustness | **PARTIAL** | M8Shift itself is deterministic (local files, no network), so the relay is reproducible by construction; the *agents'* outputs aren't its concern. Lead: keep VERSION lockstep + run-plan immutability so a run can be replayed/audited. |
-| Incomplete AI agent evaluation (11) / Lack of testing diversity (86) | Agentic + Non-Technical / robustness | **APPLICABLE (to M8Shift's own dev)** | Applies to M8Shift-as-software, not as a model. Lead: the existing 400-test suite (as of v3.43.0 — regenerate on release; a test *count* is not evidence of coverage or diversity, so risk 86 is addressed by adversarial + invariant/property tests, not a headline number) plus adversarial dogfooding (Codex implements / Claude reviews) is the mitigation. |
+| Incomplete AI agent evaluation (11) / Lack of testing diversity (86) | Agentic + Non-Technical / robustness | **APPLICABLE (to M8Shift's own dev)** | Applies to M8Shift-as-software, not as a model. Lead: the existing 400-test suite (as of v3.44.0 — regenerate on release; a test *count* is not evidence of coverage or diversity, so risk 86 is addressed by adversarial + invariant/property tests, not a headline number) plus adversarial dogfooding (Codex implements / Claude reviews) is the mitigation. |
 | Discriminatory actions (17) / Introduce data bias (18) | Agentic / fairness | **NOT-APPLICABLE (model sense) / see §4.3** | M8Shift takes no actions toward people and writes no dataset. |
 | Impact on the environment (91) / Impact on Jobs (94) / Impact on human agency (95) | Non-Technical / societal-impact | **NOT-APPLICABLE** | A single-file local CLI mutex has no societal-scale footprint; no inference compute. |
 
@@ -619,7 +619,7 @@ separate environment. Its cross-cutting controls are **cloisonnement** (R12/R28)
 | **R12** **Cloisonner chaque phase dans un environnement dédié** | Isolate each lifecycle phase | **APPLICABLE — strong map, partially satisfied** | **Best transfer.** Maps to **degree-2 worktree isolation** (`m8shift-worktree.py`: claim/integrate/drop, merge `--no-ff --no-commit` + `integrating:` sentinel) and **per-session sandboxes**. Lead: document worktrees explicitly as M8Shift's cloisonnement; keep handoff non-stranding so isolation can't deadlock. |
 | **R19 / R20** Protéger en intégrité les données / fichiers du système d'IA | Integrity verification (signature/hash) | **NOT-APPLICABLE (model)** but **principle satisfied** | The model/training objects are N/A, but the **vérification d'intégrité** principle is realised by M8Shift's **immutable append-only ledger + atomic writes + LOCK schema validation + marker neutralization + `doctor`** over its own data. |
 | **R23** Audits de sécurité avant déploiement | Audit before deploy | **APPLICABLE — already practised** | Mirrors M8Shift's adversarial-review dogfooding (Codex implements / Claude reviews adversarially before APPROVE). |
-| **R24** Tests fonctionnels avant déploiement | Functional tests | **APPLICABLE — already satisfied** | **400 tests** (v3.43.0, regenerate on release), VERSION lockstep across 7 scripts. |
+| **R24** Tests fonctionnels avant déploiement | Functional tests | **APPLICABLE — already satisfied** | **400 tests** (v3.44.0, regenerate on release), VERSION lockstep across 7 scripts. |
 | **R28** **Cloisonner dans des zones logiques dédiées** ("limiter les risques de latéralisation") | Isolate in dedicated logical zones | **APPLICABLE — strong map** | Reinforces R12: worktree / per-session isolation limits "latéralisation." Same lead as R12. |
 | **R29** Journaliser l'ensemble des traitements | Comprehensive logging | **APPLICABLE — already satisfied** | Session history (`history` + ledger jsonl), force-ops audited in `sessions.jsonl`, immutable turn ledger. |
 | **R35** **Revue régulière de la configuration des droits** | Periodic access-rights review | **PARTIAL** | Touches the declarative-identity design-owned gap (ASI03/ASI10): M8Shift can't enforce access rights cryptographically. Lead: surface lane-ownership / identity declarations via `doctor`/`status` for periodic operator review. |
@@ -716,4 +716,4 @@ are the same two the OWASP audit already names (**SEC-4**, **SEC-7**, both P1) p
 [security-audit.md](./security-audit.md) (SEC-1→SEC-11) · MITRE ATLAS
 <https://atlas.mitre.org> (canonical YAML) · IBM AI Risk Atlas (Atlas Nexus / AIUC-1
 crosswalk / arXiv [2503.05780](https://arxiv.org/abs/2503.05780)) · 19 verified arXiv
-defense papers. Verified code `m8shift.py` v3.43.0.*
+defense papers. Verified code `m8shift.py` v3.44.0.*

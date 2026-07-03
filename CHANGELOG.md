@@ -1,5 +1,34 @@
 # Changelog
 
+## v3.44.0 — 2026-07-03
+
+Adoption and documentation release.
+
+Release scope:
+
+- RFC 044 — `init` gains a version-locked companion-install phase: `--companions
+  runtime,context,...` / `--with-*` / `--full` copy the selected companion scripts into
+  the kit dir, version-locked to the core, idempotent, no-clobber (edited/newer refused,
+  never downgrades), atomic, allowlisted selectors, static VERSION parse (no import),
+  merged `.m8shift/kit.json` manifest, and `--companion-source <dir>` to copy from a
+  release/checkout dir. Companion selection is preflighted before any mutation and exits
+  non-zero on failure (no half-initialized relay); the copy is serialized under the relay
+  lock. `doctor` gains read-only `kit.companions` checks (missing/skewed/edited).
+- RFC 045 — one reference/example page per shipped module under `docs/en/modules/`
+  (core-relay, runtime, context, worktree, headroom, i18n, e2e) plus an index, each with a
+  color Mermaid ownership diagram, a command table, tagged runnable examples, failure
+  modes, and links to owning RFCs/tests. A drift test keeps the pages in lockstep with the
+  module set. All pages carry the honest compression framing (RTK = lossy filter, Kompress
+  ~45–55% prose only, stored = excerpt).
+- RFC 040 — a Phase 2/3 implementation contract (usage `snapshot`/`adapters`/`guard` CLI +
+  exit codes + exact `usage.jsonl`/`usage-hold.json` bytes + RFC 034 adapter I/O + Claude/
+  Codex readers + a per-agent token-consumption timeline) and RFC 023 — a stricter
+  measurement methodology from the compression cross-test (documentation).
+- agents-guide §3 — a post-push GitHub hygiene step (verify CI/CodeQL green + no anomalous
+  issue/PR + delete merged branches) and a corrected honest token-economy figure.
+
+Validation: full suite green. Lockstep version surfaces bumped to `3.44.0`.
+
 ## v3.43.0 — 2026-07-03
 
 Optional Headroom/Kompress context-compression adapter — the feature deferred

@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.43.0"
+VERSION = "3.44.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -5725,6 +5725,60 @@ class TestRFC044CompanionInstall(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         with open(p, encoding="utf-8") as fh:
             self.assertNotIn("# EDIT MARKER", fh.read())
+
+
+
+# ─────────────────────────── RFC 045 — module reference ─────────────────────
+
+class TestRFC045ModuleReference(unittest.TestCase):
+    MODULES = {
+        "core-relay.md": "m8shift.py",
+        "runtime.md": "m8shift-runtime.py",
+        "context.md": "m8shift-context.py",
+        "worktree.md": "m8shift-worktree.py",
+        "headroom.md": "m8shift-headroom.py",
+        "i18n.md": "m8shift-i18n.py",
+        "e2e.md": "m8shift-e2e.py",
+    }
+    SECTIONS = ("## Purpose", "## Ownership diagram", "## Command surface",
+                "## Inputs and outputs", "## Safe examples", "## Failure modes",
+                "## Related RFCs and tests")
+
+    def _dir(self):
+        return os.path.join(REPO, "docs", "en", "modules")
+
+    def _read(self, page):
+        with open(os.path.join(self._dir(), page), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_every_module_has_a_page_and_the_script_exists(self):
+        for page, script in self.MODULES.items():
+            self.assertTrue(os.path.isfile(os.path.join(self._dir(), page)), "missing page " + page)
+            self.assertTrue(os.path.isfile(os.path.join(REPO, script)), "missing script " + script)
+
+    def test_index_lists_every_page(self):
+        idx = self._read("README.md")
+        for page in self.MODULES:
+            self.assertIn(page, idx, "index misses " + page)
+
+    def test_each_page_has_all_sections_and_links_the_index(self):
+        for page in self.MODULES:
+            txt = self._read(page)
+            for sec in self.SECTIONS:
+                self.assertIn(sec, txt, page + " missing " + sec)
+            self.assertIn("README.md", txt, page + " must link the module index")
+
+    def test_module_pages_have_no_stale_version_literals(self):
+        # every `m8shift-*.py X.Y.Z` version-output example must match the current lockstep VERSION
+        vpat = re.compile(r"m8shift[a-z0-9-]*\.py (\d+\.\d+\.\d+)")
+        for page in list(self.MODULES) + ["README.md"]:
+            for found in vpat.findall(self._read(page)):
+                self.assertEqual(found, cowork.VERSION, page + " has stale version literal " + found)
+
+    def test_no_page_overclaims_an_rtk_compression_percentage(self):
+        pat = re.compile(r"rtk[^.\n]{0,40}\d{2}\s*%[^.\n]{0,20}compress", re.IGNORECASE)
+        for page in self.MODULES:
+            self.assertIsNone(pat.search(self._read(page)), page + " overclaims RTK compression")
 
 
 if __name__ == "__main__":
