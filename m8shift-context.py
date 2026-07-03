@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.42.0"
+VERSION = "3.43.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -69,8 +69,8 @@ ADAPTER_AUTHORITIES = {"read_only", "advisory", "host_action", "mutating_m8shift
 ADAPTER_FAILURE_POLICIES = {"fallback_original", "fail_closed"}
 ADAPTER_NAME_RE = re.compile(r"[a-z][a-z0-9_.:-]{0,127}\Z")
 ADAPTER_PROGRAM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}\Z")
-ALLOWED_ADAPTER_PROGRAMS = {"rtk", "headroom"}
-DENIED_ADAPTER_PROGRAMS = {"m8shift.py", "m8shift-runtime.py", "m8shift-worktree.py", "m8shift-context.py"}
+ALLOWED_ADAPTER_PROGRAMS = {"rtk", "headroom", "m8shift-headroom"}
+DENIED_ADAPTER_PROGRAMS = {"m8shift.py", "m8shift-runtime.py", "m8shift-worktree.py", "m8shift-context.py", "m8shift-headroom.py"}
 
 
 DEFAULT_ADAPTERS = {
@@ -117,7 +117,7 @@ DEFAULT_ADAPTERS = {
         "type": "context_transform",
         "version": "0.1.0",
         "authority": "advisory",
-        "command": ["headroom", "m8shift-transform", "$M8SHIFT_ADAPTER_MODE"],
+        "command": ["m8shift-headroom", "m8shift-transform", "$M8SHIFT_ADAPTER_MODE"],
         "capabilities": ["compact_context", "compact_history", "compact_files", "compact_reports", "compact_diffs"],
         "input_schema": "text/plain",
         "output_schema": SCHEMA_COMPRESSED_CONTEXT_RECORD,
@@ -139,7 +139,7 @@ DEFAULT_ADAPTERS = {
         "policy": {
             "recommended_modes": ["conversation", "history", "file", "report", "diff", "large-context"],
             "not_evidence": True,
-            "operator_installs": "Headroom is not bundled; install and pin an adapter-compatible local headroom command separately.",
+            "operator_installs": "Headroom is optional; install with `install.sh --with-headroom` to create and pin the local m8shift-headroom venv launcher.",
             "network": "M8Shift invokes Headroom only as a local argv subprocess; proxy, MCP server, daemon, and network modes are outside this adapter contract.",
         },
     },
@@ -1303,34 +1303,51 @@ def local_adapter_bin_dir():
     return os.path.join(HERE, ".m8shift", "bin")
 
 
+def local_adapter_bin_dirs(program=None):
+    dirs = [local_adapter_bin_dir()]
+    if program in (None, "m8shift-headroom"):
+        dirs.append(os.path.join(HERE, ".m8shift", "venvs", "headroom", "bin"))
+    return dirs
+
+
 def local_adapter_provenance_path(program):
-    return os.path.join(local_adapter_bin_dir(), f"{program}.provenance.json")
+    return os.path.join(local_adapter_bin_dirs(program)[-1 if program == "m8shift-headroom" else 0], f"{program}.provenance.json")
+
+
+def local_adapter_provenance_paths(program):
+    paths = [os.path.join(bin_dir, f"{program}.provenance.json") for bin_dir in local_adapter_bin_dirs(program)]
+    if program == "m8shift-headroom":
+        paths.append(os.path.join(os.path.join(HERE, ".m8shift", "venvs", "headroom", "bin"), "headroom.provenance.json"))
+    return paths
 
 
 def safe_project_local_candidate(program):
-    local_bin = local_adapter_bin_dir()
-    local_bin_real = os.path.realpath(local_bin)
     here_real = os.path.realpath(HERE)
-    if os.path.islink(local_bin) or not is_path_under(local_bin_real, here_real):
-        return None
-    names = [program]
-    if os.name == "nt" and not program.lower().endswith(".exe"):
-        names.append(program + ".exe")
-    for name in names:
-        candidate = os.path.join(local_bin, name)
-        if os.path.islink(candidate):
+    for local_bin in local_adapter_bin_dirs(program):
+        local_bin_real = os.path.realpath(local_bin)
+        if os.path.islink(local_bin) or not is_path_under(local_bin_real, here_real):
             continue
-        real = os.path.realpath(candidate)
-        if not is_path_under(real, local_bin_real):
-            continue
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+        names = [program]
+        if os.name == "nt" and not program.lower().endswith(".exe"):
+            names.append(program + ".exe")
+        for name in names:
+            candidate = os.path.join(local_bin, name)
+            if os.path.islink(candidate):
+                continue
+            real = os.path.realpath(candidate)
+            if not is_path_under(real, local_bin_real):
+                continue
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
     return None
 
 
 def load_project_local_provenance(program, candidate):
-    path = local_adapter_provenance_path(program)
-    data = read_json(path, None)
+    data = None
+    for path in local_adapter_provenance_paths(program):
+        data = read_json(path, None)
+        if isinstance(data, dict):
+            break
     if not isinstance(data, dict):
         return None
     if data.get("schema") != "m8shift.installer.tool_provenance.v1":
@@ -1479,12 +1496,12 @@ def shutil_which(executable, include_local_bin=True):
     if os.name == "nt" and not executable.lower().endswith(".exe"):
         names.append(executable + ".exe")
     folders = [folder for folder in os.environ.get("PATH", os.defpath).split(os.pathsep) if folder]
-    local_bin_real = os.path.realpath(local_adapter_bin_dir())
+    local_bin_reals = [os.path.realpath(path) for path in local_adapter_bin_dirs(executable)]
     for folder in folders:
         for name in names:
             path = os.path.join(folder, name)
             if os.path.isfile(path) and os.access(path, os.X_OK):
-                if not include_local_bin and is_path_under(os.path.realpath(path), local_bin_real):
+                if not include_local_bin and any(is_path_under(os.path.realpath(path), local_bin_real) for local_bin_real in local_bin_reals):
                     continue
                 return path
     if include_local_bin:

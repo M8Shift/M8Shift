@@ -198,7 +198,7 @@ Reasoning:
 |------|-------------|-----------------|
 | `headroom-ai==0.28.0` base package + resolved wheel dependencies | **37.04 MiB** downloaded wheels | `python3 -m pip download --only-binary=:all: headroom-ai==0.28.0` on the implementation Mac |
 | `headroom-ai[all]==0.28.0` / proxy / ONNX + model path | **not completed** | PyPI resolution timed out repeatedly during implementation; no size is claimed |
-| Compression gain | **not claimed** | No adapter-compatible local Headroom one-shot command was available and no real-tokenizer + equivalence run was completed |
+| Compression gain | **~46–55%** (v3.43.0) | The v3.43.0 `m8shift-headroom` wrapper (`KompressCompressor`, ONNX int8, offline/cache-only) yields ~46–55% size reduction on RFC/prose content, measured end-to-end through `compress --backend headroom_ext`; still not evidence — verify against originals |
 
 The upstream Headroom CLI is primarily documented around `wrap`, `proxy`, and `mcp` flows; the
 M8Shift backend deliberately does **not** start those modes. `headroom_ext` is therefore an

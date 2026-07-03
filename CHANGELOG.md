@@ -1,5 +1,40 @@
 # Changelog
 
+## v3.43.0 — 2026-07-03
+
+Optional Headroom/Kompress context-compression adapter — the feature deferred
+from v3.42.0. Everything here is **opt-in**; the relay core stays stdlib-only,
+no-network, no-daemon, and unchanged.
+
+Release scope:
+
+- #95 — `compress --backend headroom_ext` routes context through a pinned,
+  project-local Headroom/Kompress wrapper that produces a real Kompress ONNX-int8
+  compact (~46–55% reduction on prose/RFC content) **offline** (socket-blocked,
+  `HF_HUB_OFFLINE`, model served from cache only). Verified end-to-end on a live
+  arm64 venv.
+- `m8shift-headroom.py` — offline wrapper: redaction-preserving, fail-closed on
+  import/runtime error with no secret echo, calls `KompressCompressor` directly and
+  gates on `compressed_tokens < original_tokens`.
+- `install.sh --with-headroom` — creates a native-arch venv
+  (`headroom-ai==0.28.0` + `onnxruntime==1.27.0` + `transformers==5.12.1`),
+  preloads `chopratejas/kompress-v2-base`, installs the launcher, and identity-pins
+  it (realpath + SHA-256) — requiring the `--allow-project-local-adapters` opt-in.
+- Routing stays conservative: explicit `--backend headroom_ext` only; `--backend
+  auto` remains on the builtin digest until the Phase D evidence gate
+  (`backends.headroom_ext.auto_enabled`) is opened. Redaction always runs before
+  the adapter.
+- Inherits the v3.42.0 case-insensitive-FS boundary fix; the project-local
+  exclusion is verified for the Headroom venv two-dir layout (a case-variant of
+  `.m8shift/venvs/headroom/bin` on `PATH` cannot bypass the opt-in).
+
+Validation:
+
+- Full suite green (400 tests) on the rebased branch; independent case-variant
+  bypass PoC (rtk + Headroom venv) and offline compression E2E confirmed.
+- Lockstep version surfaces bumped to `3.43.0` (including the new
+  `m8shift-headroom.py`, previously out of lockstep at `3.41.1`).
+
 ## v3.42.0 — 2026-07-03
 
 Security-hardening and portable-installer release. No new runtime features; this

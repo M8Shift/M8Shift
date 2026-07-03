@@ -28,6 +28,9 @@ DRY_RUN=0
 RTK_VERSION="${M8SHIFT_INSTALL_RTK_VERSION:-v0.43.0}"
 RTK_BASE_URL="${M8SHIFT_INSTALL_RTK_BASE_URL:-}"
 RTK_SOURCE_BUILD=0
+HEADROOM_PACKAGE="headroom-ai==0.28.0"
+HEADROOM_RUNTIME_PACKAGES="onnxruntime==1.27.0 transformers==5.12.1"
+HEADROOM_KOMPRESS_MODEL="chopratejas/kompress-v2-base"
 VERIFY_EXPLICIT=""   # --verify sets 1, --no-verify sets 0; otherwise env/default decide
 VERIFY_DOWNLOADS=1   # resolved after arg parsing (verification is ON by default)
 CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
@@ -60,7 +63,7 @@ Options:
   --allow-source-build
                       Allow RTK Cargo/Rust source build fallback when no
                       same-tag-checksummed prebuilt release asset matches this host.
-  --with-headroom     EXPERIMENTAL: install optional headroom-ai into a local venv.
+  --with-headroom     EXPERIMENTAL: install pinned headroom-ai + Kompress model into a local venv.
   --no-headroom       Do not install optional headroom-ai (default).
   --dry-run           Print the install plan and prerequisites; do not download or write files.
   --ref REF            Git ref used for downloads when --base-url is not set (default: main).
@@ -82,7 +85,9 @@ M8Shift downloads the matching RTK release asset, verifies it against the
 same release tag's checksums.txt (GitHub/TLS trust model), installs it under
 .m8shift/bin, records local provenance, and identity-pins the adapter manifest.
 Cargo/Rust source builds are disabled unless --allow-source-build is explicit.
-Headroom is experimental, unpinned pip install, and remains explicit opt-in.
+Headroom is experimental, pinned to headroom-ai==0.28.0 + onnxruntime==1.27.0
++ transformers==5.12.1, downloads the Kompress model at install time, and
+remains explicit opt-in.
 EOF
 }
 
@@ -188,8 +193,8 @@ add_expected_sha256() {
     *) die "--sha256 expects FILE:HEX" ;;
   esac
   case "$name" in
-    m8shift.py|m8shift-worktree.py|m8shift-runtime.py|m8shift-context.py) ;;
-    *) die "--sha256 file must be m8shift.py, m8shift-worktree.py, m8shift-runtime.py, or m8shift-context.py" ;;
+    m8shift.py|m8shift-worktree.py|m8shift-runtime.py|m8shift-context.py|m8shift-headroom.py) ;;
+    *) die "--sha256 file must be m8shift.py, m8shift-worktree.py, m8shift-runtime.py, m8shift-context.py, or m8shift-headroom.py" ;;
   esac
   printf '%s' "$hex" | grep -Eiq '^[0-9a-f]{64}$' || die "--sha256 expects a 64-char hex digest"
   EXPECTED_SHA256S="${EXPECTED_SHA256S}${hex} ${name}
@@ -220,7 +225,7 @@ Prerequisites:
   required: Python 3.8+, git, and one downloader (curl, wget, or Python urllib).
   required for verification: sha256sum, shasum, or Python hashlib.
   optional RTK (--with-rtk): tar for macOS/Linux .tar.gz assets; unzip or Python zipfile for Git Bash/Windows .zip assets; Cargo/Rust only with --allow-source-build.
-  optional Headroom (--with-headroom): Python venv + pip; headroom-ai is an unpinned best-effort install and Rust/Cargo may be needed when cryptography builds from source.
+  optional Headroom (--with-headroom): Python venv + pip; pinned headroom-ai==0.28.0 + onnxruntime==1.27.0 + transformers==5.12.1, install-time Kompress model download/cache; macOS requires an arm64-native Python because no x86_64 wheel is available.
 EOF
 }
 
@@ -384,6 +389,9 @@ Dry run plan:
   RTK: $RTK_CHOICE (release $RTK_VERSION, $RTK_BASE_URL)
   RTK source build fallback: $RTK_SOURCE_BUILD
   Headroom: $HEADROOM_CHOICE (experimental)
+  Headroom package: $HEADROOM_PACKAGE
+  Headroom runtime: $HEADROOM_RUNTIME_PACKAGES
+  Headroom model: $HEADROOM_KOMPRESS_MODEL, downloaded/cached at install time; runtime stays offline
 
 No files were downloaded or written.
 EOF
@@ -406,6 +414,9 @@ pins_cover_downloads() {
   fi
   if [ "$WITH_CONTEXT" -eq 1 ]; then
     printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-context.py$' || return 1
+  fi
+  if [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADROOM_CHOICE" = "1" ] || [ "$HEADROOM_CHOICE" = "true" ] || [ "$HEADROOM_CHOICE" = "True" ] || [ "$HEADROOM_CHOICE" = "TRUE" ]; then
+    printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-headroom.py$' || return 1
   fi
   return 0
 }
@@ -693,35 +704,130 @@ headroom_bin_dir() {
   fi
 }
 
+headroom_fail() {
+  local message="$1"
+  rm -rf "$(headroom_venv_dir)"
+  die "$message"
+}
+
+python_machine() {
+  "$1" - <<'PY'
+import platform
+print(platform.machine())
+PY
+}
+
+require_headroom_python_arch() {
+  local os_name host_arch py_arch
+  os_name="$(uname -s 2>/dev/null || printf unknown)"
+  host_arch="$(uname -m 2>/dev/null || printf unknown)"
+  py_arch="$(python_machine "$PYTHON_BIN")"
+  if [ "$os_name" = "Darwin" ]; then
+    case "$host_arch:$py_arch" in
+      arm64:arm64|arm64:aarch64) return 0 ;;
+      *)
+        die "Headroom --with-headroom requires an arm64-native Python on macOS; x86_64/Rosetta Python would fall back to source builds because no macOS x86_64 wheel is available"
+        ;;
+    esac
+  fi
+}
+
+headroom_preload_model() {
+  local hp="$1"
+  HEADROOM_OFFLINE=0 HF_HUB_DISABLE_TELEMETRY=1 "$hp" - "$HEADROOM_KOMPRESS_MODEL" <<'PY'
+import sys
+
+model_id = sys.argv[1]
+try:
+    from headroom.transforms.kompress_compressor import ensure_background_download
+except Exception as exc:
+    print(f"headroom.transforms.kompress_compressor.ensure_background_download unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    ensure_background_download(model_id=model_id)
+except Exception as exc:
+    print(f"Kompress model download/cache failed for {model_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"preloaded Kompress model {model_id}")
+PY
+}
+
+write_headroom_launcher() {
+  local hp="$1"
+  local source="$TARGET_DIR/m8shift-headroom.py"
+  local launcher="$2"
+  [ -f "$source" ] || headroom_fail "m8shift-headroom.py is required for --with-headroom"
+  "$PYTHON_BIN" - "$hp" "$source" "$launcher" <<'PY'
+import os
+import shlex
+import sys
+
+hp, source, launcher = sys.argv[1:]
+body = "#!/bin/sh\nexec " + shlex.quote(hp) + " " + shlex.quote(source) + ' "$@"\n'
+with open(launcher, "w", encoding="utf-8") as fh:
+    fh.write(body)
+os.chmod(launcher, 0o755)
+PY
+}
+
+write_headroom_provenance() {
+  local launcher="$1"
+  local out_path="$2"
+  local sha
+  sha="$(file_sha256 "$launcher")"
+  M8SHIFT_HEADROOM_RUNTIME_PACKAGES="$HEADROOM_RUNTIME_PACKAGES" M8SHIFT_HEADROOM_MODEL="$HEADROOM_KOMPRESS_MODEL" \
+    "$PYTHON_BIN" - "$launcher" "$sha" "$HEADROOM_PACKAGE" "$out_path" <<'PY'
+import json
+import os
+import sys
+
+path, sha, package, out_path = sys.argv[1:]
+payload = {
+    "schema": "m8shift.installer.tool_provenance.v1",
+    "program": "m8shift-headroom",
+    "path": os.path.realpath(path),
+    "sha256": sha,
+    "package": package,
+    "runtime_packages": os.environ.get("M8SHIFT_HEADROOM_RUNTIME_PACKAGES", ""),
+    "model": os.environ.get("M8SHIFT_HEADROOM_MODEL", "Kompress"),
+    "model_cache": "downloaded at install time; runtime wrapper runs offline/cache-only",
+    "source": "headroom-ai pinned pip package plus M8Shift wrapper launcher",
+    "trust_model": "pip package pin over configured pip index plus local launcher SHA-256 identity",
+}
+with open(out_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+}
+
 install_headroom() {
-  printf '→ optional Headroom install is EXPERIMENTAL and never blocks base M8Shift install\n'
-  printf '  package: headroom-ai; source builds may require Rust/Cargo for cryptography\n'
+  printf '→ optional Headroom install is EXPERIMENTAL and fail-closed\n'
+  printf '  package: %s + %s\n' "$HEADROOM_PACKAGE" "$HEADROOM_RUNTIME_PACKAGES"
+  require_headroom_python_arch
   local venv
   venv="$(headroom_venv_dir)"
-  if ! "$PYTHON_BIN" -m venv "$venv" >/dev/null 2>&1; then
-    printf 'warning: could not create Headroom venv at %s; install python3-venv/ensurepip and retry\n' "$venv" >&2
-    return 0
-  fi
+  rm -rf "$venv"
+  "$PYTHON_BIN" -m venv "$venv" >/dev/null 2>&1 || headroom_fail "could not create Headroom venv at $venv; install python3-venv/ensurepip and retry"
   local hp
   hp="$(headroom_python)"
-  if [ -z "$hp" ]; then
-    printf 'warning: Headroom venv was created but no Python executable was found\n' >&2
-    return 0
-  fi
-  if ! "$hp" -m pip install --upgrade pip >/dev/null 2>&1; then
-    printf 'warning: could not upgrade pip in Headroom venv; continuing without Headroom\n' >&2
-    return 0
-  fi
-  if ! "$hp" -m pip install headroom-ai; then
-    printf 'warning: headroom-ai install failed; if cryptography builds from source, install Rust/Cargo and retry. Base M8Shift install continues.\n' >&2
-    return 0
-  fi
-  printf '✓ headroom-ai installed in %s\n' "$venv"
+  [ -n "$hp" ] || headroom_fail "Headroom venv was created but no Python executable was found"
+  "$hp" -m pip install --upgrade pip >/dev/null 2>&1 || headroom_fail "could not upgrade pip in Headroom venv"
+  "$hp" -m pip install "$HEADROOM_PACKAGE" $HEADROOM_RUNTIME_PACKAGES || headroom_fail "could not install pinned $HEADROOM_PACKAGE + $HEADROOM_RUNTIME_PACKAGES"
+  printf '✓ %s + %s installed in %s\n' "$HEADROOM_PACKAGE" "$HEADROOM_RUNTIME_PACKAGES" "$venv"
+  printf '→ downloading/caching Kompress model for offline runtime\n'
+  headroom_preload_model "$hp" || headroom_fail "could not preload Kompress model $HEADROOM_KOMPRESS_MODEL; Headroom runtime would not be offline-ready"
   local hbin
   hbin="$(headroom_bin_dir)"
-  if [ -n "$hbin" ]; then
-    pin_context_adapters "$hbin"
-  fi
+  [ -n "$hbin" ] || headroom_fail "Headroom venv bin directory not found"
+  local launcher="$hbin/m8shift-headroom"
+  write_headroom_launcher "$hp" "$launcher"
+  write_headroom_provenance "$launcher" "$hbin/m8shift-headroom.provenance.json"
+  cp "$hbin/m8shift-headroom.provenance.json" "$hbin/headroom.provenance.json"
+  printf '✓ m8shift-headroom launcher installed in %s\n' "$launcher"
+  printf '✓ Headroom provenance written to %s\n' "$hbin/m8shift-headroom.provenance.json"
+  pin_context_adapters "$hbin" 1
 }
 
 offer_headroom() {
@@ -775,6 +881,9 @@ fi
 if [ "$WITH_CONTEXT" -eq 1 ]; then
   download_file "m8shift-context.py"
 fi
+if [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADROOM_CHOICE" = "1" ] || [ "$HEADROOM_CHOICE" = "true" ] || [ "$HEADROOM_CHOICE" = "True" ] || [ "$HEADROOM_CHOICE" = "TRUE" ]; then
+  download_file "m8shift-headroom.py"
+fi
 
 offer_rtk
 offer_headroom
@@ -819,7 +928,7 @@ if [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADR
   cat <<EOF
 
 Optional Headroom:
-  headroom-ai was requested as an experimental local venv install under .m8shift/venvs/headroom.
-  If installation failed, install Python venv/pip and Rust/Cargo, then rerun with --with-headroom.
+  headroom-ai==0.28.0 and the Kompress model were installed under .m8shift/venvs/headroom.
+  Runtime use stays offline through .m8shift/venvs/headroom/bin/m8shift-headroom.
 EOF
 fi
