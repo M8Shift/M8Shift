@@ -5770,7 +5770,7 @@ class TestRFC045ModuleReference(unittest.TestCase):
 
     def test_module_pages_have_no_stale_version_literals(self):
         # every `m8shift-*.py X.Y.Z` version-output example must match the current lockstep VERSION
-        vpat = re.compile(r"m8shift[a-z-]*\.py (\d+\.\d+\.\d+)")
+        vpat = re.compile(r"m8shift[a-z0-9-]*\.py (\d+\.\d+\.\d+)")
         for page in list(self.MODULES) + ["README.md"]:
             for found in vpat.findall(self._read(page)):
                 self.assertEqual(found, cowork.VERSION, page + " has stale version literal " + found)
