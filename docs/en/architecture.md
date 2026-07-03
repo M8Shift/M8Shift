@@ -196,8 +196,8 @@ flowchart TB
     end
     class RT,CX,WT,I18,HR companion
 
-    RTK["⚡ RTK — optional external filter<br/>argv-only · telemetry off · SHA-256 pinned<br/>default-if-pinned shell-output compression"]
-    HD["🧠 Headroom-compatible command — optional external transform<br/>argv-only · one-shot · SHA-256 pinned<br/>explicit / manual opt-in broad-context compression"]
+    RTK["⚡ RTK — optional external filter<br/>argv-only · telemetry off · SHA-256 pinned<br/>default-if-pinned shell-output <b>filter</b> (lossy semantic filter — not a compressor)"]
+    HD["🧠 Headroom/Kompress adapter (<code>m8shift-headroom</code>)<br/>install.sh --with-headroom · pinned headroom-ai==0.28.0 · identity-pinned<br/>opt-in broad-context compression ~45–55% on PROSE (errors on shell)"]
     class RTK,HD external
 
     subgraph TRACE["📋 Traceability"]
@@ -353,8 +353,8 @@ observability + advisory operations (presence, progress, notifications, usage co
 retention) without ever holding the pen. **`m8shift-context.py`** compresses the hand-off context
 into referenced packs and compression records. When [RTK](rfc/034-rfc-companion-adapter-interface.md)
 is present and identity-pinned, it runs it as an argv-only, telemetry-off shell-output filter; when
-an adapter-compatible Headroom command is present, identity-pinned, and explicitly selected with
-`--backend headroom_ext` or manually enabled through `backends.headroom_ext.auto_enabled`, it may run
+the bundled identity-pinned `m8shift-headroom` launcher is installed (`install.sh --with-headroom`, pinned `headroom-ai==0.28.0`) and explicitly selected with
+`--backend headroom_ext` (which requires `--allow-project-local-adapters`) or manually enabled through `backends.headroom_ext.auto_enabled`, it may run
 `headroom_ext` as an argv-only broad-context transform; RFC 042 access-mode signals are recorded but
 do not drive routing until the measured gate opens.
 **`m8shift-worktree.py`**
@@ -490,7 +490,7 @@ remains a passive single-file relay. The implementation contract is tracked in
 
 ### 2.3 Test strategy
 
-180 tests, with no external Python dependency: unit tests (pure functions and parsers)
+400 tests, with no external Python dependency: unit tests (pure functions and parsers)
 plus CLI regression tests in isolated subprocesses (claim→append model, mutex,
 N-agent concurrency with a single winner, canonical/override anchors, memory, tasks,
 session history, timezone-prefixed local-time display, archive, doctor, worktree companion, robustness,
