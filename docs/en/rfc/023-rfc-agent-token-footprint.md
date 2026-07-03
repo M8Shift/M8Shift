@@ -165,7 +165,109 @@ change.)
 
 ## Measurement method (for re-analysis)
 
-Token figures use `len(text.encode("utf-8")) // 4` as a portable proxy. Re-run with
-the engine pointed at the relay root (`M8SHIFT_ROOT=<relay> python3 m8shift.py
-status|recap|log`) and the helper on `M8SHIFT.protocol.md`. Post-implementation
-re-analysis reports the new core size and confirms the ≤ 2000-token budget.
+Token figures use `len(text.encode("utf-8")) // 4` as the portable proxy unless a
+real tokenizer is available. Re-run with the engine pointed at the relay root
+(`M8SHIFT_ROOT=<relay> python3 m8shift.py status|recap|log`) and the helper on
+`M8SHIFT.protocol.md`. Post-implementation re-analysis reports the new core size
+and confirms the ≤ 2000-token budget.
+
+The methodology is stricter after the 2026-07 compression cross-test. Every future
+token-footprint claim must measure the layer being claimed, not a convenient downstream
+artifact:
+
+| Layer | What is measured | What can be claimed |
+|-------|------------------|---------------------|
+| Raw source | original file / command output before M8Shift handling | baseline size |
+| Raw backend output | exact stdout/stderr or adapter result before M8Shift storage caps | backend behavior |
+| M8Shift-stored excerpt | head/tail excerpt, bounded reference, or sidecar actually stored by M8Shift | storage/display footprint only |
+| Agent-injected text | text actually pasted or read by the agent | prompt/context footprint |
+
+Do **not** compare raw source against a M8Shift head/tail excerpt and call the delta
+"compression". That measures M8Shift truncation / excerpting, not the backend.
+Reports must include both:
+
+```text
+raw_backend_output_tokens
+m8shift_stored_excerpt_tokens
+```
+
+### Filtering vs compression
+
+The report must classify the transformation:
+
+| Class | Definition | Reporting rule |
+|-------|------------|----------------|
+| `semantic_filtering` | selects task-relevant lines/facts and drops unrelated content | report retained-token ratio and lost-context risk; do not call it compression |
+| `compression` | rewrites the same content into fewer tokens while preserving intended coverage | report compression ratio plus an equivalence check |
+| `excerpting` | keeps bounded head/tail or slices | report excerpt ratio only |
+| `reference_only` | stores a path/digest/reference without inline content | report inline token savings, but state that retrieval is required |
+
+RTK-style outputs are usually `semantic_filtering`. Kompress-style broad prose
+reductions may be `compression`, but only for the measured content class. A claim such
+as "45–55% reduction" is valid only for the fixture family and versions that produced
+it; broad code, logs, tables, or JSON need separate measurements.
+
+### Cross-agent verification
+
+For any headline saving, Claude and Codex should independently verify:
+
+1. the raw input used;
+2. the raw backend output before M8Shift storage;
+3. the stored excerpt or reference M8Shift actually keeps;
+4. the classification (`semantic_filtering`, `compression`, `excerpting`,
+   `reference_only`);
+5. whether the output preserves the facts needed for the downstream task;
+6. tool versions, command line, policy thresholds, and fixture hash.
+
+If the two agents disagree, the report records the disagreement and uses the more
+conservative claim. Do not average away a semantic objection.
+
+### Required measurement record
+
+Every future re-analysis should emit a small record like:
+
+```json
+{
+  "schema": "m8shift.token_measurement.v1",
+  "subject": "M8SHIFT.protocol.md",
+  "tool_versions": {
+    "m8shift": "3.43.0",
+    "backend": "builtin"
+  },
+  "source_sha256": "…",
+  "raw_source_tokens": 4842,
+  "raw_backend_output_tokens": 1986,
+  "m8shift_stored_excerpt_tokens": 1986,
+  "agent_injected_tokens": 1986,
+  "transformation": "hand_split",
+  "lossiness": "none_for_operational_core; adoption reference moved on demand",
+  "verified_by": ["claude", "codex"],
+  "notes": "Reference file read on demand; command semantics unchanged."
+}
+```
+
+### Re-measure the historical 54% figure
+
+The early estimate — roughly **54%** of the adoption/protocol text being avoidable
+for an already-initialized relay — was a useful proxy, not a durable benchmark. It
+must be re-measured with the layered method above before being reused in release
+notes, site copy, or future RFCs:
+
+- measure the pre-split protocol as raw source;
+- measure the shipped operational core as agent-injected text;
+- measure the reference file separately as on-demand context;
+- report that the reduction is a **context-routing / hand split** result, not an
+  automatic compression-backend result.
+
+The safe claim format is:
+
+```text
+Mandatory first-read protocol context dropped from X proxy tokens to Y proxy tokens
+for agents operating an existing relay. The reference remains available on demand.
+```
+
+Avoid:
+
+```text
+M8Shift compresses protocol context by 54%.
+```
