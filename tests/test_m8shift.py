@@ -5622,6 +5622,7 @@ class TestRFC044CompanionInstall(unittest.TestCase):
         self.addCleanup(shutil.rmtree, rel, True)
         self._reversioned("m8shift-worktree.py", "9.9.9", rel)
         r = self.init("--companions", "worktree", "--companion-source", rel)
+        self.assertNotEqual(r.returncode, 0)
         self.assertIn("refused", r.stdout)
         self.assertFalse(self._present("m8shift-worktree.py"))
 
@@ -5631,6 +5632,7 @@ class TestRFC044CompanionInstall(unittest.TestCase):
         with open(p, "a", encoding="utf-8") as fh:
             fh.write("\n# LOCAL EDIT MARKER\n")
         r = self.init("--companions", "runtime", "--companion-source", REPO)
+        self.assertNotEqual(r.returncode, 0)
         self.assertIn("refused without --force-companions", r.stdout)
         with open(p, encoding="utf-8") as fh:
             self.assertIn("# LOCAL EDIT MARKER", fh.read())
@@ -5642,6 +5644,7 @@ class TestRFC044CompanionInstall(unittest.TestCase):
         p = os.path.join(self.proj, "m8shift-runtime.py")
         self._reversioned("m8shift-runtime.py", "99.0.0", self.proj)
         r = self.init("--companions", "runtime", "--companion-source", REPO, "--force-companions")
+        self.assertNotEqual(r.returncode, 0)
         self.assertIn("newer", r.stdout)
         with open(p, encoding="utf-8") as fh:
             self.assertIn('VERSION = "99.0.0"', fh.read())
@@ -5663,8 +5666,36 @@ class TestRFC044CompanionInstall(unittest.TestCase):
 
     def test_unknown_companion_is_a_hard_error(self):
         r = self.init("--companions", "nope", "--companion-source", REPO)
+        self.assertNotEqual(r.returncode, 0)
         self.assertIn("unknown companion", r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.proj, ".m8shift", "kit.json")))
+
+
+
+    def test_contradictory_flags_rejected(self):
+        r = self.init("--no-companions", "--with-runtime", "--companion-source", REPO)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot be combined", r.stdout)
+
+    def test_missing_selected_source_is_hard_error(self):
+        empty = tempfile.mkdtemp(prefix="m8shift-empty-")
+        self.addCleanup(shutil.rmtree, empty, True)
+        r = self.init("--companions", "runtime", "--companion-source", empty)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(self._present("m8shift-runtime.py"))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_source_symlink_is_refused(self):
+        rel = tempfile.mkdtemp(prefix="m8shift-rel-")
+        self.addCleanup(shutil.rmtree, rel, True)
+        outside = tempfile.mkdtemp(prefix="m8shift-out-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        target = os.path.join(outside, "m8shift-runtime.py")
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"), target)
+        os.symlink(target, os.path.join(rel, "m8shift-runtime.py"))
+        r = self.init("--companions", "runtime", "--companion-source", rel)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(self._present("m8shift-runtime.py"))
 
 
 if __name__ == "__main__":

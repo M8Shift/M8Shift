@@ -1674,7 +1674,12 @@ def _sha256_file(path):
 def selected_companions(args):
     """Resolve --companions / --with-* / --full / --no-companions to an ordered selector
     list. Returns (selectors, error_message_or_None). Unknown names are a hard error."""
-    if getattr(args, "no_companions", False):
+    no = bool(getattr(args, "no_companions", False))
+    has_with = any(getattr(args, ("with_headroom_companion" if k == "headroom" else "with_%s" % k), False)
+                   for k in COMPANION_REGISTRY)
+    if no and (bool(getattr(args, "companions", "")) or bool(getattr(args, "full", False)) or has_with):
+        return None, "--no-companions cannot be combined with --companions/--with-*/--full"
+    if no:
         return [], None
     sel = []
     for name in (n.strip() for n in (getattr(args, "companions", "") or "").split(",")):
@@ -1713,59 +1718,73 @@ def _write_kit_manifest(installed):
     os.replace(tmp, path)
 
 
-def install_companions(args):
-    """RFC 044: copy the selected companion scripts into the kit dir (HERE), version-locked
-    to the core VERSION, idempotent, never silently clobbering a newer or edited local copy,
-    no shell, no network. Returns human-readable result lines."""
+def plan_companions(args):
+    """RFC 044 preflight: validate the requested companion selection WITHOUT mutating
+    anything. Returns (plan, errors). An explicit selection that cannot be satisfied
+    (unknown/contradictory selector, missing/version-skewed/unparseable source, edited or
+    newer destination) is a FATAL error so `init` can exit non-zero before writing state."""
     selectors, err = selected_companions(args)
-    lines = []
     if err:
-        return ["companion selection error: " + err]
+        return [], [err]
+    plan, errors = [], []
     if not selectors:
-        return lines
+        return plan, errors
     core_ver = VERSION
     src_dir = os.path.realpath(getattr(args, "companion_source", "") or HERE)
     dest_dir = os.path.realpath(HERE)
     force = bool(getattr(args, "force_companions", False))
-    installed = []
     for sel in selectors:
         fname = COMPANION_REGISTRY[sel]
         src = os.path.realpath(os.path.join(src_dir, fname))
         # security: resolved source must be a regular file directly under the source dir
-        if os.path.dirname(src) != src_dir or not os.path.isfile(src):
+        if os.path.dirname(src) != src_dir or not os.path.isfile(src) or os.path.islink(os.path.join(src_dir, fname)):
             if src_dir == dest_dir:
-                lines.append("companion %s: not in the kit dir — pass --companion-source <release-dir>" % sel)
+                errors.append("companion %s: not in the kit dir — pass --companion-source <release-dir>" % sel)
             else:
-                lines.append("companion %s: source %s missing under %s" % (sel, fname, src_dir))
+                errors.append("companion %s: source %s missing (or not a regular file) under %s" % (sel, fname, src_dir))
             continue
         sver = _parse_script_version(src)
         if sver is None:
-            lines.append("companion %s: source has no parseable VERSION; refused" % sel)
+            errors.append("companion %s: source has no parseable VERSION; refused" % sel)
             continue
         if sver != core_ver:
-            lines.append("companion %s: source version %s != core %s; refused (version-locked kit)" % (sel, sver, core_ver))
+            errors.append("companion %s: source version %s != core %s; refused (version-locked kit)" % (sel, sver, core_ver))
             continue
         dest = os.path.join(dest_dir, fname)
-        ssha = _sha256_file(src)
+        action = "copy"
         if os.path.realpath(dest) == src:
-            lines.append("companion %s: already up to date (source is the kit dir)" % sel)
+            action = "same"
+        elif os.path.isfile(dest):
+            dsha, ssha = _sha256_file(dest), _sha256_file(src)
+            if dsha == ssha:
+                action = "uptodate"
+            else:
+                dt, ct = _version_tuple(_parse_script_version(dest)), _version_tuple(core_ver)
+                if dt and ct and dt > ct:
+                    errors.append("companion %s: local copy is newer than the core; refused (no downgrade)" % sel)
+                    continue
+                if not force:
+                    errors.append("companion %s: local copy differs (sha %s); refused without --force-companions" % (sel, dsha[:8]))
+                    continue
+                action = "replace"
+        plan.append({"sel": sel, "fname": fname, "src": src, "dest": dest, "sver": sver, "action": action})
+    return plan, errors
+
+
+def apply_companions(plan):
+    """Apply a validated companion plan (from plan_companions): atomic copies + merged
+    manifest. Assumes preflight already refused fatal cases. Returns result lines."""
+    lines, installed = [], []
+    for e in plan:
+        sel, fname, src, dest, sver, action = e["sel"], e["fname"], e["src"], e["dest"], e["sver"], e["action"]
+        ssha = _sha256_file(src)
+        if action in ("same", "uptodate"):
+            lines.append("companion %s: already up to date%s" % (sel, " (source is the kit dir)" if action == "same" else ""))
             installed.append(_kit_entry(sel, fname, sver, ssha, src))
             continue
-        if os.path.isfile(dest):
-            dsha = _sha256_file(dest)
-            if dsha == ssha:
-                lines.append("companion %s: already up to date" % sel)
-                installed.append(_kit_entry(sel, fname, sver, dsha, src))
-                continue
-            dt, ct = _version_tuple(_parse_script_version(dest)), _version_tuple(core_ver)
-            if dt and ct and dt > ct:
-                lines.append("companion %s: local copy is newer than the core; refused (no downgrade)" % sel)
-                continue
-            if not force:
-                lines.append("companion %s: local copy differs (sha %s); refused without --force-companions" % (sel, dsha[:8]))
-                continue
-            lines.append("companion %s: replacing local copy (was sha %s)" % (sel, dsha[:8]))
-        tmp = dest + ".m8shift-tmp"
+        if action == "replace":
+            lines.append("companion %s: replacing local copy" % sel)
+        tmp = os.path.join(os.path.dirname(dest), ".m8shift-" + fname + ".tmp")  # matches the .m8shift-*.tmp ignore
         try:
             with open(src, "rb") as rf, open(tmp, "wb") as wf:
                 wf.write(rf.read())
@@ -1774,18 +1793,17 @@ def install_companions(args):
             except OSError:
                 pass
             os.replace(tmp, dest)
-        except OSError as e:
+        except OSError as exc:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
-            lines.append("companion %s: copy failed: %s" % (sel, e))
+            lines.append("companion %s: copy failed: %s" % (sel, exc))
             continue
         lines.append("companion %s: installed %s v%s" % (sel, fname, sver))
         installed.append(_kit_entry(sel, fname, sver, ssha, src))
     if installed:
-        merged = _merge_kit_companions(installed)
-        _write_kit_manifest(merged)
+        _write_kit_manifest(_merge_kit_companions(installed))
         lines.append("kit manifest written to %s" % KIT_MANIFEST_REL)
     return lines
 
@@ -1862,6 +1880,15 @@ def cmd_init(args):
     if getattr(args, "agents", "") and (req_invalid or len(req_valid) < 2):
         sys.exit(tr("bad_roster", raw=repr(args.agents)))
 
+    # RFC 044: preflight the companion selection BEFORE any mutation. Explicit failures
+    # (unknown/contradictory selector, missing/version-skewed/edited source) are hard
+    # errors -> non-zero exit, no half-initialized relay.
+    _companion_plan, _companion_errors = plan_companions(args)
+    if _companion_errors:
+        for _e in _companion_errors:
+            print("  • " + _e)
+        sys.exit("companion install refused; no changes made")
+
     with file_lock() as guard:
         # Determine the ACTIVE roster UNDER the lock, so two concurrent inits cannot
         # compute different rosters before serializing. ALL declared names are active
@@ -1935,7 +1962,7 @@ def cmd_init(args):
             results.append(ensure_gitignore_block())
         else:
             results.append(tr("gitignore_skipped"))
-        results.extend(install_companions(args))
+        results.extend(apply_companions(_companion_plan))
 
         # M8SHIFT.md: preserved if it exists (state of the ongoing relay), unless --force
         if os.path.exists(COWORK) and not args.force:
