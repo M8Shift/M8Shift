@@ -19,10 +19,12 @@ native PowerShell/cmd.
   GitHub release tag, the binary is stored in `.m8shift/bin`, telemetry is
   disabled, installer provenance is recorded, and the adapter manifest is
   identity-pinned.
-- *(Experimental)* **Headroom** — `--with-headroom` attempts `pip install
-  headroom-ai` in `.m8shift/venvs/headroom`; this pip install is unpinned,
-  source builds may require Rust/Cargo, and failures do not block the base
-  install.
+- *(Experimental)* **Headroom** — `--with-headroom` creates
+  `.m8shift/venvs/headroom` and installs **pinned** `headroom-ai==0.28.0` +
+  `onnxruntime==1.27.0` + `transformers==5.12.1`, preloads the
+  `chopratejas/kompress-v2-base` model, then installs and identity-pins the
+  `m8shift-headroom` launcher (requires `--allow-project-local-adapters`). Source
+  builds may require Rust/Cargo; failures do not block the base install.
 
 ## Option A — WSL (recommended: closest to Linux/macOS)
 
