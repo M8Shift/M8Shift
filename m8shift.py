@@ -127,6 +127,20 @@ GITIGNORE_ENTRIES = (
 )
 DECISION_TARGETS = ("forge", "github", "both", "git", "md")
 
+# --- RFC 044: complete init / companion install ------------------------------
+COMPANION_REGISTRY = {
+    "runtime": "m8shift-runtime.py",
+    "context": "m8shift-context.py",
+    "worktree": "m8shift-worktree.py",
+    "headroom": "m8shift-headroom.py",
+    "i18n": "m8shift-i18n.py",
+    "e2e": "m8shift-e2e.py",
+}
+# --full installs the operational companions; e2e is a release test tool (explicit-only).
+COMPANION_FULL = ("runtime", "context", "worktree", "headroom", "i18n")
+KIT_MANIFEST_REL = os.path.join(".m8shift", "kit.json")
+_SCRIPT_VERSION_RE = re.compile(r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
+
 
 def project_root():
     return os.path.dirname(os.path.abspath(COWORK))
@@ -1630,6 +1644,235 @@ def ensure_gitignore_block():
     write(new, path)
     return tr("gitignore_updated" if existed else "gitignore_created")
 
+def _parse_script_version(path):
+    """RFC 044: static text parse of a top-level VERSION = "X.Y.Z". Never imports the file."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return None
+    m = _SCRIPT_VERSION_RE.search(head)
+    return m.group(1) if m else None
+
+
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except (AttributeError, ValueError):
+        return None
+
+
+def _sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def selected_companions(args):
+    """Resolve --companions / --with-* / --full / --no-companions to an ordered selector
+    list. Returns (selectors, error_message_or_None). Unknown names are a hard error."""
+    no = bool(getattr(args, "no_companions", False))
+    has_with = any(getattr(args, ("with_headroom_companion" if k == "headroom" else "with_%s" % k), False)
+                   for k in COMPANION_REGISTRY)
+    if no and (bool(getattr(args, "companions", "")) or bool(getattr(args, "full", False)) or has_with):
+        return None, "--no-companions cannot be combined with --companions/--with-*/--full"
+    if no:
+        return [], None
+    sel = []
+    for name in (n.strip() for n in (getattr(args, "companions", "") or "").split(",")):
+        if not name:
+            continue
+        if name not in COMPANION_REGISTRY:
+            return None, ("unknown companion %r; valid: %s"
+                          % (name, ", ".join(sorted(COMPANION_REGISTRY))))
+        if name not in sel:
+            sel.append(name)
+    for key in COMPANION_REGISTRY:
+        flag = "with_headroom_companion" if key == "headroom" else ("with_%s" % key)
+        if getattr(args, flag, False) and key not in sel:
+            sel.append(key)
+    if getattr(args, "full", False):
+        for key in COMPANION_FULL:
+            if key not in sel:
+                sel.append(key)
+    return sel, None
+
+
+def _kit_entry(name, script, version, sha256, source):
+    return {"name": name, "script": script, "version": version,
+            "sha256": sha256, "copied_at": iso(now()), "source": source}
+
+
+def _write_kit_manifest(installed):
+    path = os.path.join(HERE, KIT_MANIFEST_REL)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {"schema": "m8shift.kit.v1",
+            "core": {"script": "m8shift.py", "version": VERSION},
+            "companions": installed}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def plan_companions(args):
+    """RFC 044 preflight: validate the requested companion selection WITHOUT mutating
+    anything. Returns (plan, errors). An explicit selection that cannot be satisfied
+    (unknown/contradictory selector, missing/version-skewed/unparseable source, edited or
+    newer destination) is a FATAL error so `init` can exit non-zero before writing state."""
+    selectors, err = selected_companions(args)
+    if err:
+        return [], [err]
+    plan, errors = [], []
+    if not selectors:
+        return plan, errors
+    core_ver = VERSION
+    src_dir = os.path.realpath(getattr(args, "companion_source", "") or HERE)
+    dest_dir = os.path.realpath(HERE)
+    force = bool(getattr(args, "force_companions", False))
+    for sel in selectors:
+        fname = COMPANION_REGISTRY[sel]
+        src = os.path.realpath(os.path.join(src_dir, fname))
+        # security: resolved source must be a regular file directly under the source dir
+        if os.path.dirname(src) != src_dir or not os.path.isfile(src) or os.path.islink(os.path.join(src_dir, fname)):
+            if src_dir == dest_dir:
+                errors.append("companion %s: not in the kit dir — pass --companion-source <release-dir>" % sel)
+            else:
+                errors.append("companion %s: source %s missing (or not a regular file) under %s" % (sel, fname, src_dir))
+            continue
+        sver = _parse_script_version(src)
+        if sver is None:
+            errors.append("companion %s: source has no parseable VERSION; refused" % sel)
+            continue
+        if sver != core_ver:
+            errors.append("companion %s: source version %s != core %s; refused (version-locked kit)" % (sel, sver, core_ver))
+            continue
+        dest = os.path.join(dest_dir, fname)
+        if os.path.islink(dest) or (os.path.exists(dest) and not os.path.isfile(dest)):
+            errors.append("companion %s: destination %s exists but is not a regular file; refused" % (sel, fname))
+            continue
+        action = "copy"
+        if os.path.realpath(dest) == src:
+            action = "same"
+        elif os.path.isfile(dest):
+            dsha, ssha = _sha256_file(dest), _sha256_file(src)
+            if dsha == ssha:
+                action = "uptodate"
+            else:
+                dt, ct = _version_tuple(_parse_script_version(dest)), _version_tuple(core_ver)
+                if dt and ct and dt > ct:
+                    errors.append("companion %s: local copy is newer than the core; refused (no downgrade)" % sel)
+                    continue
+                if not force:
+                    errors.append("companion %s: local copy differs (sha %s); refused without --force-companions" % (sel, dsha[:8]))
+                    continue
+                action = "replace"
+        plan.append({"sel": sel, "fname": fname, "src": src, "dest": dest, "sver": sver, "action": action})
+    return plan, errors
+
+
+def apply_companions(plan):
+    """Apply a validated companion plan (from plan_companions): atomic copies + merged
+    manifest. Assumes preflight already refused fatal cases. Returns result lines."""
+    lines, installed, errors = [], [], []
+    for e in plan:
+        sel, fname, src, dest, sver, action = e["sel"], e["fname"], e["src"], e["dest"], e["sver"], e["action"]
+        ssha = _sha256_file(src)
+        if action in ("same", "uptodate"):
+            lines.append("companion %s: already up to date%s" % (sel, " (source is the kit dir)" if action == "same" else ""))
+            installed.append(_kit_entry(sel, fname, sver, ssha, src))
+            continue
+        if action == "replace":
+            lines.append("companion %s: replacing local copy" % sel)
+        tmp = os.path.join(os.path.dirname(dest), ".m8shift-" + fname + ".tmp")  # matches the .m8shift-*.tmp ignore
+        try:
+            with open(src, "rb") as rf, open(tmp, "wb") as wf:
+                wf.write(rf.read())
+            try:
+                os.chmod(tmp, os.stat(src).st_mode)
+            except OSError:
+                pass
+            os.replace(tmp, dest)
+        except OSError as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            errors.append(sel)
+            lines.append("companion %s: copy failed: %s" % (sel, exc))
+            continue
+        lines.append("companion %s: installed %s v%s" % (sel, fname, sver))
+        installed.append(_kit_entry(sel, fname, sver, ssha, src))
+    if installed:
+        _write_kit_manifest(_merge_kit_companions(installed))
+        lines.append("kit manifest written to %s" % KIT_MANIFEST_REL)
+    return lines, errors
+
+
+def _merge_kit_companions(installed):
+    """Merge this run's installed entries into the existing kit manifest (by name),
+    so the kit accumulates across init runs instead of being overwritten."""
+    path = os.path.join(HERE, KIT_MANIFEST_REL)
+    by_name = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            prev = json.load(fh)
+        for e in (prev.get("companions") or []):
+            if isinstance(e, dict) and e.get("name"):
+                by_name[e["name"]] = e
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+        pass
+    for e in installed:
+        by_name[e["name"]] = e
+    return [by_name[k] for k in sorted(by_name)]
+
+
+def _kit_doctor_findings():
+    """RFC 044: read-only checks over .m8shift/kit.json (companion install manifest)."""
+    path = os.path.join(HERE, KIT_MANIFEST_REL)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        return [doctor_finding("kit.companions", "warning",
+                               "%s is malformed: %s." % (KIT_MANIFEST_REL, e), KIT_MANIFEST_REL)]
+    if not isinstance(data, dict) or data.get("schema") != "m8shift.kit.v1":
+        return [doctor_finding("kit.companions", "warning",
+                               "%s has an unexpected schema." % KIT_MANIFEST_REL, KIT_MANIFEST_REL)]
+    out = []
+    for entry in (data.get("companions") or []):
+        if not isinstance(entry, dict):
+            continue
+        name, script = entry.get("name", "?"), entry.get("script", "")
+        if name not in COMPANION_REGISTRY or COMPANION_REGISTRY.get(name) != script:
+            out.append(doctor_finding("kit.companions", "warning",
+                                      "kit manifest lists unknown companion %r." % name, KIT_MANIFEST_REL))
+            continue
+        dest = os.path.join(HERE, script)
+        if not os.path.isfile(dest):
+            out.append(doctor_finding("kit.companions", "warning",
+                                      "companion %s (%s) is listed but missing." % (name, script), script,
+                                      "re-run `./m8shift.py init --companions %s --companion-source <dir>`" % name))
+            continue
+        dver = _parse_script_version(dest)
+        if dver is None:
+            out.append(doctor_finding("kit.companions", "warning",
+                                      "companion %s has no parseable VERSION." % script, script))
+        elif dver != VERSION:
+            out.append(doctor_finding("kit.companions", "warning",
+                                      "companion %s is v%s, core is v%s (version-skewed kit)." % (script, dver, VERSION), script,
+                                      "re-copy the matching companion so the kit is version-locked"))
+        elif entry.get("sha256") and _sha256_file(dest) != entry.get("sha256"):
+            out.append(doctor_finding("kit.companions", "info",
+                                      "companion %s was edited since install (hash differs)." % script, script))
+    return out
+
+
 def cmd_init(args):
     globals()["LANG"] = resolve_lang(explicit=getattr(args, "lang", "") or None)
     name = clean_project_name(args.name or os.path.basename(HERE) or "project")
@@ -1641,7 +1884,24 @@ def cmd_init(args):
     if getattr(args, "agents", "") and (req_invalid or len(req_valid) < 2):
         sys.exit(tr("bad_roster", raw=repr(args.agents)))
 
+    # RFC 044: preflight the companion selection BEFORE any mutation. Explicit failures
+    # (unknown/contradictory selector, missing/version-skewed/edited source) are hard
+    # errors -> non-zero exit, no half-initialized relay.
+    _companion_plan, _companion_errors = plan_companions(args)
+    if _companion_errors:
+        for _e in _companion_errors:
+            print("  • " + _e)
+        sys.exit("companion install refused; no changes made")
+
     with file_lock() as guard:
+        # RFC 044: apply the validated companion plan UNDER the lock (serialized), before any
+        # relay-state write, so concurrent inits cannot race on the companion files / kit.json
+        # and an apply-time failure exits non-zero with no half-initialized relay.
+        _companion_lines, _companion_apply_errors = apply_companions(_companion_plan)
+        if _companion_apply_errors:
+            for _l in _companion_lines:
+                print("  • " + _l)
+            sys.exit("companion install failed; relay not initialized")
         # Determine the ACTIVE roster UNDER the lock, so two concurrent inits cannot
         # compute different rosters before serializing. ALL declared names are active
         # members; the first two only seed the __A__/__B__ stanza placeholders.
@@ -1714,6 +1974,7 @@ def cmd_init(args):
             results.append(ensure_gitignore_block())
         else:
             results.append(tr("gitignore_skipped"))
+        results.extend(_companion_lines)
 
         # M8SHIFT.md: preserved if it exists (state of the ongoing relay), unless --force
         if os.path.exists(COWORK) and not args.force:
@@ -3663,6 +3924,7 @@ def collect_doctor_findings(security=False, contracts=False):
                             f"{rel} has invalid JSONL: {e}.",
                             rel,
                         ))
+    findings.extend(_kit_doctor_findings())
     if security:
         findings.extend(_security_doctor_findings(lk))
     if contracts and os.path.exists(COWORK):
@@ -5016,6 +5278,25 @@ def main():
                     help="add/refresh the generated M8Shift block in .gitignore (default in headless mode)")
     gi.add_argument("--no-gitignore", dest="gitignore", action="store_false",
                     help="do not modify .gitignore during init")
+    ci = i.add_argument_group("companion install (RFC 044)")
+    ci.add_argument("--companions", default="",
+                    help="comma-separated companions to copy into the kit dir: "
+                         "runtime,context,worktree,headroom,i18n,e2e")
+    ci.add_argument("--with-runtime", action="store_true", help="copy m8shift-runtime.py")
+    ci.add_argument("--with-context", action="store_true", help="copy m8shift-context.py")
+    ci.add_argument("--with-worktree", action="store_true", help="copy m8shift-worktree.py")
+    ci.add_argument("--with-headroom-companion", action="store_true",
+                    help="copy m8shift-headroom.py (the launcher only, not the venv/deps)")
+    ci.add_argument("--with-i18n", action="store_true", help="copy m8shift-i18n.py")
+    ci.add_argument("--with-e2e", action="store_true", help="copy m8shift-e2e.py")
+    ci.add_argument("--full", action="store_true",
+                    help="copy all operational companions (runtime,context,worktree,headroom,i18n)")
+    ci.add_argument("--no-companions", action="store_true", help="copy no companions (explicit opt-out)")
+    ci.add_argument("--companion-source", default="",
+                    help="directory to copy companions FROM (a release/checkout dir); "
+                         "defaults to the running m8shift.py dir, which is also the kit dir")
+    ci.add_argument("--force-companions", action="store_true",
+                    help="replace an older/edited local companion (never downgrades a newer one)")
     i.set_defaults(fn=cmd_init)
 
     st = sub.add_parser("status")
