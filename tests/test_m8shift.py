@@ -5805,6 +5805,7 @@ class TestRFC046ProjectIdentity(unittest.TestCase):
         self.assertIn("project", r.stdout)
         self.assertIn(self._name(), r.stdout)
         self.assertIn("cwd", r.stdout)
+        self.assertIn("root", r.stdout)
 
     def test_status_json_has_project_cwd_root(self):
         self._run("init", "--agents", "claude,codex", "--no-gitignore")
@@ -5817,6 +5818,44 @@ class TestRFC046ProjectIdentity(unittest.TestCase):
         self._run("init", "--agents", "claude,codex", "--no-gitignore")
         r = self._run("watch", "--once")
         self.assertIn(self._name(), r.stdout)
+
+    def test_cwd_is_getcwd_root_is_project_root_from_subdir(self):
+        # Finding 1 (Codex): human `cwd` must be the real working dir, `root` the relay root;
+        # they diverge when the tool is invoked from a subdirectory of the project.
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        sub = os.path.join(self.d, "sub", "deep")
+        os.makedirs(sub)
+        script = os.path.join(self.d, "m8shift.py")
+        dj = json.loads(subprocess.run(
+            [sys.executable, script, "status", "--json"], cwd=sub,
+            capture_output=True, text=True).stdout)
+        self.assertEqual(os.path.realpath(dj["cwd"]), os.path.realpath(sub))
+        self.assertEqual(os.path.realpath(dj["root"]), os.path.realpath(self.d))
+        self.assertNotEqual(os.path.realpath(dj["cwd"]), os.path.realpath(dj["root"]))
+        # Human block must agree with the JSON: the cwd line carries the subdir name.
+        r = subprocess.run([sys.executable, script, "status"], cwd=sub,
+                           capture_output=True, text=True)
+        self.assertIn("deep", r.stdout)
+
+    def test_init_name_overrides_folder_basename(self):
+        # Finding 2 (Codex): `init --name` must surface as the project label, not the folder.
+        self._run("init", "--agents", "claude,codex", "--no-gitignore",
+                  "--name", "Named Project")
+        r = self._run("status")
+        self.assertIn("Named Project", r.stdout)
+        d = json.loads(self._run("status", "--json").stdout)
+        self.assertEqual(d["project"], "Named Project")
+
+    def test_status_guard_in_generated_protocol(self):
+        # Finding 3 (Codex): the status-guard rule must live in the generated core, not only
+        # in the (optional) agents-guide that agents may never load.
+        self._run("init", "--agents", "claude,codex", "--no-gitignore")
+        blob = ""
+        for fn in os.listdir(self.d):
+            if fn.endswith(".md"):
+                with open(os.path.join(self.d, fn), encoding="utf-8") as f:
+                    blob += f.read()
+        self.assertIn("Status-guard", blob)
 
 
 if __name__ == "__main__":

@@ -4,13 +4,18 @@
 
 RFC 046 (part 1) — execution modes and project identity.
 
-- `status` and `watch` now surface the **project name and cwd** in their header (human,
-  `--json`, and the watch banner), so multiple open terminals stay distinguishable.
-- agents-guide gains the **interactive vs headless** distinction and the mandatory
-  **status-guard** rule: never announce the baton (holder/state/AWAITING_*/WORKING_*) from
-  memory — always re-read `M8SHIFT.md` or `status --for <agent>` immediately before
-  answering — plus the interactive-UI honesty message. This closes the stale-baton
-  desynchronization observed in a pure chat UI.
+- `status` and `watch` now surface the **project name, cwd, and root** in their header
+  (human, `--json`, and the watch banner), so multiple open terminals stay
+  distinguishable. `cwd` is the real working directory (`os.getcwd()`) and `root` is the
+  relay root (`project_root()`); the human block and `--json` agree, and the two diverge
+  correctly when the tool is invoked from a subdirectory.
+- The project label prefers the operator's **`init --name`** (persisted on the session
+  start event), falling back to the relay-root folder name.
+- The **status-guard** rule now lives in the generated protocol core (every anchor), not
+  only the agents-guide: never claim you hold the pen or reached `DONE` from memory —
+  re-run `status --for <agent>` before ending a turn or asserting state. agents-guide also
+  gains the **interactive vs headless** distinction and the interactive-UI honesty message.
+  This closes the stale-baton desynchronization observed in a pure chat UI.
 - The RFC 046 runner-install (copy `examples/headless_runner.py` + `scripts/watch-status.sh`
   on init) lands next.
 
