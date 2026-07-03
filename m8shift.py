@@ -1751,6 +1751,9 @@ def plan_companions(args):
             errors.append("companion %s: source version %s != core %s; refused (version-locked kit)" % (sel, sver, core_ver))
             continue
         dest = os.path.join(dest_dir, fname)
+        if os.path.islink(dest) or (os.path.exists(dest) and not os.path.isfile(dest)):
+            errors.append("companion %s: destination %s exists but is not a regular file; refused" % (sel, fname))
+            continue
         action = "copy"
         if os.path.realpath(dest) == src:
             action = "same"
@@ -1774,7 +1777,7 @@ def plan_companions(args):
 def apply_companions(plan):
     """Apply a validated companion plan (from plan_companions): atomic copies + merged
     manifest. Assumes preflight already refused fatal cases. Returns result lines."""
-    lines, installed = [], []
+    lines, installed, errors = [], [], []
     for e in plan:
         sel, fname, src, dest, sver, action = e["sel"], e["fname"], e["src"], e["dest"], e["sver"], e["action"]
         ssha = _sha256_file(src)
@@ -1798,6 +1801,7 @@ def apply_companions(plan):
                 os.unlink(tmp)
             except OSError:
                 pass
+            errors.append(sel)
             lines.append("companion %s: copy failed: %s" % (sel, exc))
             continue
         lines.append("companion %s: installed %s v%s" % (sel, fname, sver))
@@ -1805,7 +1809,7 @@ def apply_companions(plan):
     if installed:
         _write_kit_manifest(_merge_kit_companions(installed))
         lines.append("kit manifest written to %s" % KIT_MANIFEST_REL)
-    return lines
+    return lines, errors
 
 
 def _merge_kit_companions(installed):
@@ -1888,6 +1892,11 @@ def cmd_init(args):
         for _e in _companion_errors:
             print("  • " + _e)
         sys.exit("companion install refused; no changes made")
+    _companion_lines, _companion_apply_errors = apply_companions(_companion_plan)
+    if _companion_apply_errors:
+        for _l in _companion_lines:
+            print("  • " + _l)
+        sys.exit("companion install failed; relay not initialized")
 
     with file_lock() as guard:
         # Determine the ACTIVE roster UNDER the lock, so two concurrent inits cannot
@@ -1962,7 +1971,7 @@ def cmd_init(args):
             results.append(ensure_gitignore_block())
         else:
             results.append(tr("gitignore_skipped"))
-        results.extend(apply_companions(_companion_plan))
+        results.extend(_companion_lines)
 
         # M8SHIFT.md: preserved if it exists (state of the ongoing relay), unless --force
         if os.path.exists(COWORK) and not args.force:

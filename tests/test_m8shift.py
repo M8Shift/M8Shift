@@ -5698,6 +5698,35 @@ class TestRFC044CompanionInstall(unittest.TestCase):
         self.assertFalse(self._present("m8shift-runtime.py"))
 
 
+
+    def test_destination_directory_blocks_init(self):
+        os.mkdir(os.path.join(self.proj, "m8shift-runtime.py"))
+        r = self.init("--companions", "runtime", "--companion-source", REPO)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.proj, "M8SHIFT.md")))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_destination_symlink_blocks_init(self):
+        outside = tempfile.mkdtemp(prefix="m8shift-out-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        tgt = os.path.join(outside, "x.py")
+        open(tgt, "w").close()
+        os.symlink(tgt, os.path.join(self.proj, "m8shift-runtime.py"))
+        r = self.init("--companions", "runtime", "--companion-source", REPO)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.proj, "M8SHIFT.md")))
+
+    def test_force_replace_of_regular_edited_file_works(self):
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        p = os.path.join(self.proj, "m8shift-runtime.py")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("\n# EDIT MARKER\n")
+        r = self.init("--companions", "runtime", "--companion-source", REPO, "--force-companions")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(p, encoding="utf-8") as fh:
+            self.assertNotIn("# EDIT MARKER", fh.read())
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")
