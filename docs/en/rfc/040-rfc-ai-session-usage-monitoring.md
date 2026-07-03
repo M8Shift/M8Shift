@@ -1,6 +1,6 @@
 # RFC 040 — AI Session Usage Monitoring and Usage-Limit Cooldowns
 
-Status: draft (authored by Codex; Claude-reviewed and placed)  
+Status: draft; Phase 2/3 refined toward implementation on 2026-07-03
 Target stage: optional runtime companion  
 Authors: M8Shift maintainers  
 Date: 2026-06-30  
@@ -783,6 +783,232 @@ Usage adapters must follow these rules:
 
 ---
 
+## Phase 2/3 implementation contract (2026-07 refinement)
+
+This section makes Phase 2 (read-only snapshots) and Phase 3 (guard/advisory)
+implementable. If it conflicts with earlier high-level prose, this section is the
+more precise contract.
+
+### Command surface
+
+All commands live under `m8shift-runtime.py usage` for Phase 2/3. They never edit
+`M8SHIFT.md`; only Phase 4 core `cooldown` may transition the relay into `PAUSED`.
+
+```bash
+python3 m8shift-runtime.py usage init [--policy PATH] [--json]
+python3 m8shift-runtime.py usage adapters list [--agent AGENT] [--json]
+python3 m8shift-runtime.py usage adapters check [--agent AGENT] [--json]
+python3 m8shift-runtime.py usage snapshot [--agent AGENT] [--adapter NAME] [--write] [--json]
+python3 m8shift-runtime.py usage guard [--agent AGENT] [--apply] [--json]
+python3 m8shift-runtime.py usage watch [--agent AGENT] [--apply] [--interval SECONDS] [--once] [--json]
+python3 m8shift-runtime.py usage wait AGENT [--interval auto|SECONDS] [--max-block SECONDS] [--quiet]
+python3 m8shift-runtime.py usage resume [--agent AGENT] [--apply] [--json] [--force-with-reason TEXT]
+```
+
+Phase 2 ships `init`, `adapters list`, `adapters check`, `snapshot`, and `status`
+if status is needed for operator display. Phase 3 ships `guard`, `watch`, and
+advisory operator-inbox writes. `wait` and `resume` may be implemented in Phase 3
+as local-runtime helpers, but automatic core resume remains Phase 5.
+
+### Exit codes
+
+The runtime companion uses exit codes as automation hints. JSON output carries the
+full reason; scripts should not parse human text.
+
+| Code | Meaning |
+|-----:|---------|
+| `0` | command completed; no usage hold required, or wait/resume completed successfully |
+| `10` | warning threshold reached; no hold applied |
+| `11` | pause threshold or limit hit; hold recommended, written, or cooldown applied |
+| `12` | active holder is working; advisory interrupt queued instead of core mutation |
+| `20` | no usable usage data under `warn_open`; no hold applied |
+| `30` | adapter/config/policy error |
+| `40` | malformed usage sidecar or incompatible schema |
+| `64` | command-line usage error |
+| `70` | apply-time local I/O failure |
+| `75` | `usage wait` reached `--max-block` while still paused/held |
+
+Command-specific mapping:
+
+| Command | `0` | `10` | `11` / `12` | `20+` |
+|---------|-----|------|-------------|-------|
+| `snapshot` | at least one usable snapshot emitted | not used | not used | no data / config / sidecar error |
+| `guard` | below warning threshold | warn-only decision | hold/cooldown recommended or applied; `12` for working-holder interrupt | unknown or adapter errors |
+| `watch` | exits cleanly with no hold when `--once`, or on signal | propagated from guard | propagated from guard | propagated from guard |
+| `wait` | relay resumed, DONE, or no active usage hold | not used | not used | `75` if still paused after max block |
+| `resume` | resumed or nothing to do | reset not reached yet | usage still limit-hit | sidecar/config errors |
+
+### JSONL and JSON sidecar bytes
+
+Sidecars are UTF-8. JSONL files contain exactly one compact JSON object per line,
+followed by `\n`, using deterministic key order where practical. Pretty printing is
+allowed only for the single active hold file.
+
+Runtime-generated files:
+
+```text
+.m8shift/runtime/usage.jsonl
+.m8shift/runtime/usage-hold.json
+.m8shift/runtime/usage-adapter-errors.jsonl
+```
+
+#### `usage.jsonl` event
+
+Every `usage snapshot --write`, `usage guard --apply`, and `usage watch --apply`
+appends an event:
+
+```json
+{"schema":"m8shift.runtime.event.v1","type":"usage.snapshot","ts":"2026-07-03T09:00:00Z","agent":"claude","source":{"tool":"m8shift-runtime.py","version":"3.43.0"},"payload":{"snapshot":{"schema":"m8shift.usage.snapshot.v1","ts":"2026-07-03T09:00:00Z","agent":"claude","provider":"anthropic-claude","adapter":"claude-code-statusline","status":"near_limit","provenance":"official","confidence":"high","decision_ratio":0.91,"decision_window":"primary","windows":[{"id":"primary","kind":"rolling_session","label":"5h","used_ratio":0.91,"remaining_ratio":0.09,"used_tokens":80080,"limit_tokens":88000,"reset_at":"2026-07-03T11:15:00Z","source":"claude statusline rate_limits"}],"cost":null,"messages":null,"warnings":[]}}}
+```
+
+`decision_ratio` and `decision_window` are normalized convenience fields. They
+duplicate information from `windows[]` so guards do not need to re-derive the
+selected window after reading historical events.
+
+The event also gives a per-agent token-consumption timeline: downstream reports can
+group `usage.jsonl` by `agent`, `provider`, `adapter`, `window.id`, and time bucket,
+then compare `used_tokens` deltas across snapshots. That is advisory accounting, not
+billing truth; provenance and confidence must be preserved in every rollup.
+
+#### `usage-hold.json`
+
+The active hold file is a single object. It is overwritten atomically when the active
+hold changes and deleted or marked `state=cleared` when the cooldown is resolved.
+
+```json
+{
+  "schema": "m8shift.usage.hold.v1",
+  "state": "active",
+  "created_at": "2026-07-03T09:00:00Z",
+  "updated_at": "2026-07-03T09:00:00Z",
+  "resume_after": "2026-07-03T11:16:00Z",
+  "resume_for": "claude",
+  "reason": "claude primary window at 91%; wait for reset",
+  "decision": {
+    "action": "cooldown_recommended",
+    "relay_state": "AWAITING_CLAUDE",
+    "apply": false,
+    "exit_code": 11
+  },
+  "trigger": {
+    "threshold": 0.9,
+    "agent": "claude",
+    "provider": "anthropic-claude",
+    "adapter": "claude-code-statusline",
+    "window": "primary",
+    "used_ratio": 0.91,
+    "used_tokens": 80080,
+    "limit_tokens": 88000,
+    "reset_at": "2026-07-03T11:15:00Z",
+    "provenance": "official",
+    "confidence": "high"
+  },
+  "recommended_wait_interval_seconds": 300,
+  "notified_agents": ["claude", "codex"],
+  "snapshot_ref": ".m8shift/runtime/usage.jsonl#2026-07-03T09:00:00Z/claude/claude-code-statusline"
+}
+```
+
+#### `usage-adapter-errors.jsonl`
+
+Adapter failures are recorded separately so failed probes do not look like usage
+snapshots:
+
+```json
+{"schema":"m8shift.runtime.event.v1","type":"usage.adapter_error","ts":"2026-07-03T09:00:00Z","agent":"codex","source":{"tool":"m8shift-runtime.py","version":"3.43.0"},"payload":{"adapter":"codex-cli-rpc","provider":"openai-codex","exit_code":30,"message":"adapter identity mismatch","stderr_ref":null}}
+```
+
+### Adapter I/O contract
+
+Usage adapters reuse the RFC 034 hardened runner. The runtime companion must not add
+a second subprocess path.
+
+Adapter manifest records include:
+
+```json
+{
+  "name": "claude-code-statusline",
+  "agent": "claude",
+  "provider": "anthropic-claude",
+  "kind": "subprocess_json",
+  "argv": ["claude", "statusline", "--json"],
+  "resolved_path": "/usr/local/bin/claude",
+  "sha256": "…",
+  "timeout_seconds": 10,
+  "max_stdout_bytes": 262144,
+  "max_stderr_bytes": 16384,
+  "env_allowlist": ["HOME", "PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME"],
+  "failure_policy": "warn_open",
+  "provenance_preference": ["official", "local_estimate"]
+}
+```
+
+Runner rules:
+
+- resolve `argv[0]` to a realpath and compare SHA-256 before every run;
+- pass an argv array, never a shell string;
+- send no stdin unless a specific adapter kind requires JSON-RPC messages;
+- cap stdout/stderr before storing or parsing;
+- parse stdout as JSON for `subprocess_json`;
+- treat stderr as diagnostics only;
+- map adapter-specific exit codes to normalized `status`;
+- fail closed for adapter identity mismatch, malformed manifest, timeout, or output
+  over cap, but apply `failure_policy` when deciding whether to pause.
+
+Adapter output is normalized to `m8shift.usage.snapshot.v1`. Raw provider output may
+be kept only as a bounded local reference under `.m8shift/runtime/usage-raw/`; it is
+never copied into `M8SHIFT.md`.
+
+### Phase-2 readers
+
+#### Claude Code reader
+
+Preferred Phase-2 source is the official Claude Code statusline `rate_limits` payload
+when available, read through a pinned local command or an adapter-provided state
+file. The normalizer maps:
+
+| Source field | Snapshot field |
+|--------------|----------------|
+| provider/account identity | `provider`, `adapter_account` if present |
+| primary / five-hour window used or remaining ratio | `windows[].id="primary"` |
+| weekly window used or remaining ratio | `windows[].id="weekly"` |
+| reset timestamp | `windows[].reset_at` |
+| official statusline provenance | `provenance="official"`, `confidence="high"` |
+
+If only `claude-monitor` estimates are available, use `provenance="local_estimate"`
+and `confidence="medium"` or `"low"` depending on freshness. Official fresh
+`rate_limits` always wins over estimates.
+
+#### Codex reader
+
+Phase 2 may ship a conservative reader with two modes:
+
+1. **Historical/accounting mode** from local Codex session logs or `codex-stats`
+   exports. This produces `historical_estimate` snapshots for per-agent token and
+   cost reports but does not gate usage cooldowns unless an operator explicitly opts
+   into `fail_closed` or threshold use.
+2. **Live gating mode** through the Codex CLI read-only app-server RPC
+   (`initialize`, `account/read`, `account/rateLimits/read`) when that surface is
+   available and identity-pinned. This may produce `official` or `local_estimate`
+   windows suitable for `guard`.
+
+Phase 6 promotes the native Codex reader once the live RPC contract has stable
+fixtures. Until then, Codex historical snapshots are useful for the operator's
+token-consumption study but should not overclaim live rate-limit truth.
+
+### Resolved open questions for Phase 2/3
+
+| Question | Recommendation |
+|----------|----------------|
+| `cooldown` vs extending `pause` | Keep `cooldown` in core. It already shipped and expresses IDLE/AWAITING usage cooldown without weakening holder-only `pause`. |
+| `m8shift-runtime.py` vs `m8shift-usage.py` | Implement Phase 2/3 inside `m8shift-runtime.py usage`. Split later only if the file becomes unmaintainable. |
+| Committed policy or host-local | Host-local by default under `.m8shift/runtime/usage-policy.json`; allow checked-in examples under docs, not active policy. |
+| Unknown usage fail-open or fail-closed | Default `warn_open`; allow explicit per-adapter/per-agent `fail_closed` only with operator policy. |
+| Core `wait --quiet` | Keep quiet cooldown waits in runtime first (`usage wait`). Extend core `wait` only after runtime proves the need. |
+| Per-agent token tracking | Use `usage.jsonl` snapshots as an advisory per-agent timeline; never label estimates as provider billing truth. |
+
+---
+
 ## Implementation plan
 
 ### Phase 1 — RFC and docs only
@@ -799,26 +1025,30 @@ docs/en/guides/usage-monitoring.md
 Add to `m8shift-runtime.py` or a sibling `m8shift-usage.py`:
 
 ```bash
-usage init
-usage adapters list
-usage adapters check
-usage snapshot --json
-usage status --json
+usage init [--policy PATH] [--json]
+usage adapters list [--agent AGENT] [--json]
+usage adapters check [--agent AGENT] [--json]
+usage snapshot [--agent AGENT] [--adapter NAME] [--write] [--json]
+usage status [--json]
 ```
 
-No core state changes yet.
+No core state changes yet. Implement the exact exit-code, sidecar, adapter-runner,
+Claude reader, and Codex historical/live-reader contracts above.
 
 ### Phase 3 — guard and advisory notifications
 
 Add:
 
 ```bash
-usage guard --json
-usage guard --apply
-usage watch --apply
+usage guard [--agent AGENT] [--apply] [--json]
+usage watch [--agent AGENT] [--apply] [--interval SECONDS] [--once] [--json]
+usage wait AGENT [--interval auto|SECONDS] [--max-block SECONDS] [--quiet]
 ```
 
-`--apply` may only write runtime sidecars and operator inbox messages.
+`--apply` may only write runtime sidecars and operator inbox messages, except when
+Phase 4 `cooldown` is available and the relay is `IDLE` or `AWAITING_*`; in that
+case `guard --apply` may call the core `cooldown` command. It must never mutate a
+valid `WORKING_*` lock.
 
 ### Phase 4 — core cooldown command
 
