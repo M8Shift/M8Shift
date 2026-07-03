@@ -5768,6 +5768,13 @@ class TestRFC045ModuleReference(unittest.TestCase):
                 self.assertIn(sec, txt, page + " missing " + sec)
             self.assertIn("README.md", txt, page + " must link the module index")
 
+    def test_module_pages_have_no_stale_version_literals(self):
+        # every `m8shift-*.py X.Y.Z` version-output example must match the current lockstep VERSION
+        vpat = re.compile(r"m8shift[a-z-]*\.py (\d+\.\d+\.\d+)")
+        for page in list(self.MODULES) + ["README.md"]:
+            for found in vpat.findall(self._read(page)):
+                self.assertEqual(found, cowork.VERSION, page + " has stale version literal " + found)
+
     def test_no_page_overclaims_an_rtk_compression_percentage(self):
         pat = re.compile(r"rtk[^.\n]{0,40}\d{2}\s*%[^.\n]{0,20}compress", re.IGNORECASE)
         for page in self.MODULES:
