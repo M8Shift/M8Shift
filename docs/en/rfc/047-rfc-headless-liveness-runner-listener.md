@@ -15,10 +15,11 @@ headless side into an operationally safe liveness layer.
 It has two phases:
 
 1. **Runner final-state enforcement** (#17): after a provider command exits, the
-   runner re-reads relay state. If the relay is still open and the agent still owes
-   the turn, the run is **non-completion**, not success. The runner records that
-   state and keeps the work eligible for retry/backoff instead of pretending the
-   model's final text finished the relay task.
+   runner re-reads relay state and the turn transcript. Success is based first on
+   **authorship**: this agent must have authored a turn numbered greater than the
+   pre-run turn, or the relay must be `DONE`. State-only diffs are not enough. If
+   the relay is still open and the agent still owes the turn, the run is
+   **non-completion**, not success.
 2. **Listener lifecycle companion** (#21): ship a versioned companion command that
    supervises headless runners with zero model spend while it is not the agent's
    turn, then wakes exactly one bounded provider turn when the relay reaches
@@ -26,10 +27,10 @@ It has two phases:
    management, stale-PID detection, bounded backoff, OS backend selection, and
    doctor diagnostics.
 
-This RFC intentionally touches only the **TTL action-half** of issue #6: during a
-long headless turn, a runner may refresh its own valid `WORKING_<agent>` lock before
-expiry. It does **not** close #6's broader holder-liveness model, force-claim policy,
-or worktree-ownership model.
+This RFC intentionally touches only the **TTL self-refresh action-half** of issue #6:
+during a long headless turn, a runner may refresh its own valid `WORKING_<agent>`
+lock before expiry through a new refresh-only core guard. It does **not** close #6's
+broader holder-liveness model, force-claim policy, or worktree-ownership model.
 
 ## Problem
 
@@ -66,6 +67,11 @@ listener is a companion/runtime layer, not a new routing authority.
    state must also be acceptable.
 6. **Platform backends are lifecycle adapters, not different semantics.** `local`,
    `launchd`, `systemd`, and Windows backends expose the same listener contract.
+7. **One retry owner.** The listener owns consecutive failure counts and backoff.
+   The runner is a one-shot classifier that returns status and sidecar events.
+8. **Stdlib-only means Python stdlib-only.** OS service managers may be driven through
+   explicit argv subprocess calls behind backend adapters; no Python third-party
+   dependency, shell interpolation, daemon in core, or network service is introduced.
 
 ## Phase 1 — Runner final-state enforcement (#17)
 
@@ -84,20 +90,65 @@ Before launch, the runner records:
 
 After the child exits, the runner re-reads the LOCK and classifies the run.
 
-### Classification
+### Classification authority
 
-| Post-run state | Meaning | Runner status |
-|----------------|---------|---------------|
-| `DONE` | session closed | `completed` |
-| turn advanced and state handed to another agent | agent appended a turn | `advanced` |
-| state no longer requires this agent and turn changed | progress occurred | `advanced` |
-| `AWAITING_<agent>` with same turn as before | provider did not claim/append; still owed | `non_completion` |
-| `WORKING_<agent>` held by same agent | provider claimed then exited before append/done | `stuck_working` |
-| `WORKING_<peer>` or another holder with same turn | ambiguous external takeover | `external_transition` |
-| malformed/missing LOCK | cannot prove completion | `invalid_relay` |
+The primary authority is the turn transcript, not a state-only diff.
+
+The runner parses closed turn markers:
+
+```text
+M8SHIFT:TURN <n> <agent> BEGIN
+```
+
+Let `pre_turn` be the integer turn number before launch. A run is successful when
+either:
+
+- the post-run relay is `DONE`; or
+- the transcript contains at least one closed turn authored by **this agent** with
+  `n > pre_turn`.
+
+This rule handles the fast healthy ping-pong race: this agent can append turn `n+1`,
+the peer can immediately append turn `n+2`, and the post-run state can already be
+`AWAITING_<agent>` again. That is still success for this run because this agent
+authored `n+1`.
+
+State and turn relation then refine the classification.
+
+### Total classification table
+
+Definitions:
+
+- `same`: post `turn == pre_turn`
+- `advanced`: post `turn > pre_turn`
+- `reset`: post `turn < pre_turn`, missing turn after a valid pre-turn, or a new
+  session/reset event detected
+- `authored_by_me`: transcript contains a turn by this agent with `n > pre_turn`
+- `integrating`: LOCK has an active `integrating:` sentinel
+
+| Post state | Turn relation / authorship | Runner status | Retry counter |
+|------------|----------------------------|---------------|---------------|
+| `DONE` | any | `completed` | reset |
+| any valid state | `authored_by_me` | `advanced` | reset |
+| invalid/missing LOCK after bounded OSError retry | any | `invalid_relay` | increment |
+| any state | `reset` | `external_transition` | unchanged |
+| `PAUSED` | any non-reset | `suspended` | unchanged |
+| `IDLE` | `same` after starter launch | `non_completion` | increment |
+| `IDLE` | `advanced` but not `authored_by_me` | `external_transition` | unchanged |
+| `AWAITING_<agent>` | `same` | `non_completion` | increment |
+| `AWAITING_<agent>` | `advanced` but not `authored_by_me` | `external_transition` | unchanged |
+| `WORKING_<agent>` holder is this agent | `same`, no `integrating` | `stuck_working` | increment |
+| `WORKING_<agent>` holder is this agent | `same`, `integrating` active | `external_transition` | unchanged |
+| `AWAITING_<peer>` | `same` or advanced not authored by me | `external_transition` | unchanged |
+| `WORKING_<peer>` | `same` or advanced not authored by me | `external_transition` | unchanged |
+| other valid state | any | `external_transition` | unchanged |
 
 `non_completion`, `stuck_working`, and `invalid_relay` are failures for the run even
-when the provider process exits with rc 0.
+when the provider process exits with rc 0. `suspended` is neutral: it must not burn
+retries, because a usage cooldown or operator pause is not a provider failure.
+
+For stable malformed content, classify immediately as `invalid_relay`. For transient
+read errors such as Windows file-sharing errors during atomic replace, retry the read
+briefly (for example up to 3 attempts over ~1 second) before classifying.
 
 ### Exit code and retry
 
@@ -105,16 +156,20 @@ For a one-shot run:
 
 - `completed` / `advanced` => exit 0
 - `non_completion` / `stuck_working` / `invalid_relay` => non-zero
+- `external_transition` => dedicated non-zero code, not counted as provider failure by
+  a supervising listener
+- `suspended` => dedicated neutral code
 - timeout => existing timeout non-zero behavior
 
 For a continuous runner/listener:
 
 - record a runtime event;
-- increment the consecutive failure count;
-- apply bounded backoff;
+- listener increments the consecutive failure count only for `non_completion`,
+  `stuck_working`, `invalid_relay`, and timeout;
+- listener leaves the counter unchanged for `external_transition` / `suspended`;
+- listener applies bounded backoff;
 - keep the run eligible for retry until `--max-retries` is reached;
-- after max retries, stop launching provider commands and leave the relay for operator
-  recovery.
+- after max retries, enter `halted` and leave the relay for operator recovery.
 
 No automatic `claim --force` is introduced.
 
@@ -149,17 +204,18 @@ Minimum tests:
 4. provider closes `DONE` => runner returns zero and records `completed`;
 5. malformed/missing LOCK after child exit => non-zero `invalid_relay`;
 6. no automatic force-claim occurs in any failure path.
+7. fast peer ping-pong: this agent authors `n+1`, peer authors `n+2`, post state is
+   `AWAITING_<agent>` => runner returns zero because `authored_by_me`;
+8. operator reset / `init --force` during run => `external_transition`, not success;
+9. `PAUSED` during run => `suspended`, no retry burn;
+10. active `integrating:` sentinel prevents same-turn `WORKING_<agent>` from being
+    classified as ordinary stuck work.
 
 ## Phase 2 — Listener lifecycle companion (#21)
 
 ### Surface
 
-Add a versioned companion surface. The exact file can be either:
-
-- `m8shift-runtime.py listener ...`, if the runtime companion owns process lifecycle; or
-- a dedicated `m8shift-listener.py`, if keeping lifecycle separate is clearer.
-
-The RFC requires one stable command family regardless of file placement:
+Add the listener under the existing runtime companion:
 
 ```bash
 python3 m8shift-runtime.py listener start --agent codex --cmd-file .m8shift/providers/codex.json
@@ -169,7 +225,9 @@ python3 m8shift-runtime.py listener logs --agent codex
 python3 m8shift-runtime.py listener start --agent all
 ```
 
-If implemented as `m8shift-listener.py`, the command names stay equivalent.
+Do not create a new shipped script for v3.46. A separate `m8shift-listener.py` would
+increase version-lock, checksum, installer, and kit-manifest surface without adding a
+separate authority model.
 
 ### Listener loop
 
@@ -179,12 +237,16 @@ The listener is a cheap supervisor:
 2. if `DONE`, stop cleanly;
 3. if `AWAITING_<agent>`, launch exactly one runner/provider turn;
 4. if `IDLE` and this agent is the configured starter, launch exactly one turn;
-5. otherwise sleep;
-6. after every runner return, re-read state and apply the Phase-1 classification;
-7. back off on failures; reset backoff on progress.
+5. if `WORKING_<agent>` and the previous provider process is dead, launch a retry
+   only when the previous run was `stuck_working`, retry budget remains, and no
+   force-claim is needed;
+6. otherwise sleep;
+7. after every runner return, re-read state and apply the Phase-1 classification;
+8. back off on failures; reset backoff on progress.
 
 No provider process is launched while state is `AWAITING_<peer>`, `WORKING_*`,
-`PAUSED`, `IDLE` without starter permission, or `DONE`.
+`PAUSED`, `IDLE` without starter permission, or `DONE`, except for the explicit
+`WORKING_<agent>` stuck-work retry described above. Never launch on `WORKING_<peer>`.
 
 ### Backoff
 
@@ -196,8 +258,33 @@ failure backoff: 20s -> 40s -> 80s -> 160s -> 300s cap
 max consecutive failed turns: inherited from runner default, configurable
 ```
 
-Backoff is per agent and stored in sidecar state so `status` can explain why a
-listener is alive but sleeping.
+Backoff is owned by the listener, per agent, and stored in sidecar state so `status`
+can explain why a listener is alive but sleeping. The runner reports classification;
+it does not own retry counters.
+
+### Halted state
+
+After max retries, the listener enters a persistent `halted` phase instead of silently
+exiting and being restarted into the same failure loop.
+
+Sidecar:
+
+```json
+{
+  "schema": "m8shift.listener.state.v1",
+  "agent": "codex",
+  "phase": "halted",
+  "reason": "max_retries_after_non_completion",
+  "consecutive_failures": 3,
+  "last_run_id": "20260703T190000Z-codex-12345678"
+}
+```
+
+`listener status` must render `HALTED` distinctly from alive/stale/dead/sleeping.
+`doctor` emits `listener.halted`. A restarted listener reloads this sidecar and honors
+the halt until an explicit `listener start --restart` / `listener resume` clears it.
+Recommended behavior: the supervisor process may stay resident in halted phase so
+status/logs remain easy to inspect, but it must not launch providers.
 
 ### PID, process groups, and logs
 
@@ -217,7 +304,15 @@ Rules:
 - `status` detects alive/stale/dead PID;
 - `stop` terminates the whole process group, waits, then kills after grace;
 - stale PID files are removed only by explicit start/status repair or stop;
-- logs are append-only with bounded rotation.
+- logs are append-only with bounded rotation;
+- default log rotation is writer-side, 5 MiB per log, keep 3 rotated files;
+- `runs.jsonl` remains the runtime ledger and is governed by existing runtime
+  retention, not listener log rotation.
+
+On Windows, do not use `os.kill(pid, 0)` as an aliveness probe. It is not POSIX
+semantics. Use a backend aliveness adapter such as `OpenProcess`/`GetExitCodeProcess`
+via `ctypes` or `tasklist /FI`. Stop uses `taskkill /PID <pid> /T /F` after any
+documented best-effort graceful step.
 
 ### Backend selection
 
@@ -239,6 +334,24 @@ Semantics:
 
 The backend must not change relay semantics.
 
+Backend contracts:
+
+- POSIX local backend may use `start_new_session=True` / process groups.
+- Windows backend spawns with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
+  CREATE_NO_WINDOW`, redirects stdout/stderr to logs, and stops with
+  `taskkill /T /F` by PID. Do not rely on `CTRL_BREAK` reaching detached children.
+- `launchd` generated plists must not resurrect a halted listener indefinitely:
+  use `KeepAlive=false` or an equivalent condition that honors the persisted halted
+  sidecar.
+- `systemd` units must not erase the retry guarantee: use `Restart=no` or bounded
+  `Restart=on-failure` with `StartLimit*`, and always reload the listener state file
+  before launching providers.
+- Service-manager commands (`launchctl`, `systemctl`, `schtasks`, `taskkill`) are local
+  argv subprocess calls behind adapters. They do not violate the Python stdlib-only
+  constraint, but they must be explicit argv arrays with bounded output.
+- `auto` also falls back to `local` when no GUI/user service session is available
+  (for example SSH without a graphical session).
+
 ### macOS protected-folder detection
 
 On macOS, service managers may lack permission to access user-protected folders.
@@ -255,6 +368,26 @@ Required behavior:
 - `listener start --backend auto` falls back to `local` when launchd is likely to fail;
 - docs explain the class of failure without embedding local paths.
 
+### IDLE starter
+
+Starting from `IDLE` remains an explicit exception to "wake only on
+`AWAITING_<agent>`".
+
+Profile field:
+
+```json
+{
+  "start_on_idle": false
+}
+```
+
+Rules:
+
+- default is false;
+- at most one agent in a roster may be configured as starter;
+- `doctor` emits `listener.multiple_starters` when more than one starter is configured;
+- `listener start` refuses or loudly warns when a second starter would be active.
+
 ### Provider command profiles
 
 The listener should not bake provider-specific shell strings into code.
@@ -267,7 +400,8 @@ It may consume existing RFC 028 provider command templates or a local JSON profi
   "agent": "codex",
   "argv": ["codex", "exec", "--skip-git-repo-check", "..."],
   "cwd": ".",
-  "env_allowlist": ["HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER"]
+  "env_allowlist": ["HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER"],
+  "start_on_idle": false
 }
 ```
 
@@ -291,6 +425,8 @@ Add advisory findings:
 | `listener.protected_folder` | info/warning | macOS protected-folder symptoms detected | use `--backend local` or grant service permission |
 | `listener.version_skew` | warning | listener/runner version differs from core | update matching companions |
 | `listener.repeated_non_completion` | warning | repeated Phase-1 failures | inspect provider prompt/profile and relay status |
+| `listener.halted` | warning | listener reached max retries and persisted halted state | inspect logs; restart/resume explicitly |
+| `listener.multiple_starters` | warning | more than one agent has `start_on_idle=true` | leave only one starter |
 | `listener.log_too_large` | info | log exceeds rotation threshold | rotate/prune logs |
 
 ### Tests for Phase 2
@@ -309,6 +445,13 @@ Minimum tests:
 10. doctor emits listener findings as human output and JSON;
 11. version skew between core and listener is detected;
 12. logs rotate/prune without deleting active run ledger entries.
+13. Windows aliveness probe never calls `os.kill(pid, 0)`; backend uses a Windows-safe
+    probe seam;
+14. `start_on_idle` uniqueness warning/refusal is tested;
+15. `halted` survives process restart and is rendered by status/doctor;
+16. backoff is a pure function tested without sleeping;
+17. listener loop accepts fractional poll intervals and a `--max-ticks`/test seam so
+    tests do not sleep for real backoff durations.
 
 ## Interaction with issue #6
 
@@ -321,12 +464,24 @@ Issue #6 remains broader than RFC 047. It covers:
 RFC 047 only needs this subset:
 
 - while a runner-launched provider is still running and the relay is
-  `WORKING_<agent>` held by that same agent, the runner may run `claim <agent>` before
-  expiry to refresh the lock;
+  `WORKING_<agent>` held by that same agent, the runner may run a refresh-only claim
+  before expiry to refresh the lock;
 - if heartbeat refresh fails, record a sidecar event and continue to post-run
   validation;
 - never refresh another agent's lock;
 - never use heartbeat as proof that force-claim is safe or unsafe.
+
+Core prerequisite:
+
+```bash
+python3 m8shift.py claim <agent> --refresh
+```
+
+`--refresh` must refuse unless the current state is already `WORKING_<agent>` and
+`holder == <agent>`. A plain `claim <agent>` must not be used as the runner TTL
+self-refresh primitive, because a race between the runner's pre-check and the core
+file lock could otherwise open a fresh `WORKING_<agent>` after the provider already
+appended and the peer handed the turn back.
 
 Closing #6 requires a later design for a separate presence sidecar and force-claim
 policy. Do not mark #6 closed by implementing RFC 047.
@@ -337,8 +492,8 @@ Keep protocol-core changes budget-aware. Suggested compact addition:
 
 ```text
 Headless runs are not complete just because the provider process exits. A runner must
-re-read status after each turn; if the relay is still open and this agent still owes the
-turn, treat it as non-completion and retry/back off.
+re-read status and the turn markers after each turn; unless DONE or this agent authored
+a newer turn, treat an open owed turn as non-completion and retry/back off.
 ```
 
 Longer lifecycle details belong in `protocol-reference.md`, module docs, and the
@@ -358,28 +513,33 @@ listener/runner help output.
 
 ### Phase A — final-state enforcement
 
+- Add core `claim --refresh` before using runner TTL self-refresh.
 - Tighten `examples/headless_runner.py` post-run classification.
+- Parse transcript turn authorship for `authored_by_me`.
 - Add runtime events and exit statuses.
 - Add regression tests for provider exits without append.
 - Update docs/help.
 
 ### Phase B — listener command skeleton
 
-- Add the listener command family.
+- Add `m8shift-runtime.py listener ...` subcommands.
 - Add dry-run and profile validation.
 - Add PID/log paths and status rendering.
+- Add pure/testable backoff and backend-probe seams.
 
 ### Phase C — local backend + lifecycle
 
 - Implement local detach backend.
 - Implement start/stop/status/logs.
 - Add process-group termination and stale PID detection.
+- Add persistent `halted` sidecar and status/doctor rendering.
 
 ### Phase D — OS backend adapters
 
 - Add launchd/systemd/Windows backend plans.
 - Add auto-selection and protected-folder detection.
 - Keep platform-specific behavior behind testable adapter functions.
+- Add Windows-safe process aliveness and stop behavior.
 
 ### Phase E — doctor + docs + site
 
@@ -390,9 +550,14 @@ listener/runner help output.
 ## Definition of done
 
 - A provider run that exits without completing the relay is visibly non-complete.
+- A fast peer round-trip after this agent's successful append is classified as success,
+  not false non-completion.
 - A listener can be started/stopped/statused without hand-built project scripts.
 - No model is called while the relay is waiting on another agent.
-- Long headless turns refresh only their own valid working lock before expiry.
+- Long headless turns refresh only their own valid working lock before expiry through
+  `claim --refresh`.
+- A halted listener is persistent and visible.
+- Windows stop/status behavior is specified without POSIX-only probes.
 - Doctor can explain missing/dead/skewed listener state.
 - The implementation stays stdlib-only and keeps all relay mutations inside normal
   `m8shift.py claim/append/done` flows.
