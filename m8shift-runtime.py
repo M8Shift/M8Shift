@@ -19,6 +19,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -4952,6 +4953,62 @@ def record_usage_adapter_error(adapter_name, agent, message):
     trim_usage_errors_ledger()
 
 
+def run_usage_adapter_bounded(argv, timeout, cap):
+    """USAGE-1 (Codex review): bounded subprocess capture that NEVER materializes
+    unbounded adapter stdout in memory. Binary pipes + reader threads accumulate at
+    most cap+1 bytes each; the process is killed on stdout overflow or timeout.
+
+    Returns (returncode, stdout_bytes, stderr_bytes, overflowed, timed_out);
+    returncode is None when the process was killed before exiting on its own."""
+    proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                            shell=False)
+    buffers = {"out": b"", "err": b""}
+    overflow = threading.Event()
+
+    def reader(stream, key):
+        buf = bytearray()
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                take = cap + 1 - len(buf)
+                if take > 0:
+                    buf += chunk[:take]
+                if len(buf) > cap:
+                    overflow.set()          # stop accumulating; the main loop kills
+                    break
+        except (OSError, ValueError):
+            pass
+        buffers[key] = bytes(buf)
+
+    threads = [threading.Thread(target=reader, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=reader, args=(proc.stderr, "err"), daemon=True)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while proc.poll() is None:
+        if overflow.is_set():
+            proc.kill()
+            break
+        if time.monotonic() > deadline:
+            timed_out = True
+            proc.kill()
+            break
+        time.sleep(0.05)
+    proc.wait()
+    for t in threads:
+        t.join(timeout=5)
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+    return proc.returncode, buffers["out"], buffers["err"], overflow.is_set(), timed_out
+
+
 def run_usage_adapter(entry):
     """Read one ENABLED adapter. Bounded, argv-only, no shell, no network by
     M8Shift itself. Returns (doc, raw_text, error_message)."""
@@ -4985,16 +5042,20 @@ def run_usage_adapter(entry):
             return None, "", "adapter identity mismatch (sha256 pin); refusing to run"
     timeout = usage_timeout_s(entry)
     try:
-        r = subprocess.run([resolved] + argv[1:], cwd=HERE, capture_output=True,
-                           text=True, timeout=timeout, shell=False,
-                           stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return None, "", f"adapter timed out after {timeout:g}s"
+        rc, out_b, err_b, overflowed, timed_out = run_usage_adapter_bounded(
+            [resolved] + argv[1:], timeout, USAGE_MAX_STDOUT_BYTES)
     except OSError as e:
         return None, "", f"adapter failed to start: {e}"
-    stdout = (r.stdout or "")[:USAGE_MAX_STDOUT_BYTES]
-    if r.returncode != 0:
-        return None, stdout, f"adapter exited {r.returncode}: {redact_usage_excerpt(r.stderr or stdout)}"
+    if overflowed:
+        # Cap-specific finding: the output is discarded, never parsed (USAGE-1).
+        return None, "", (f"adapter stdout exceeded the {USAGE_MAX_STDOUT_BYTES}-byte cap; "
+                          "process killed, output discarded")
+    if timed_out:
+        return None, "", f"adapter timed out after {timeout:g}s"
+    stdout = out_b.decode("utf-8", errors="replace")
+    stderr = err_b.decode("utf-8", errors="replace")
+    if rc != 0:
+        return None, stdout, f"adapter exited {rc}: {redact_usage_excerpt(stderr or stdout)}"
     try:
         return json.loads(stdout), stdout, ""
     except json.JSONDecodeError as e:

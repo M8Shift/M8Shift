@@ -7323,6 +7323,35 @@ class TestRFC040UsagePRA(CLIBase):
         errors = [json.loads(line) for line in self.ledger_lines(self.ERRORS_REL)]
         self.assertTrue(any("identity mismatch" in e["payload"]["message"] for e in errors))
 
+    def test_cli_adapter_stdout_over_cap_is_killed_with_cap_finding(self):
+        # USAGE-1 (Codex review): unbounded adapter stdout must never be
+        # materialized in memory. An adapter emitting cap+1 bytes is killed,
+        # the run fails with the config-error code and a CAP-SPECIFIC finding —
+        # the truncated output is discarded, never parsed as JSON.
+        script = os.path.join(self.d, "flood-usage-cli.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(
+                "import sys\n"
+                "cap = 262144\n"
+                "chunk = 'x' * 65536\n"
+                "written = 0\n"
+                "while written <= cap:\n"
+                "    sys.stdout.write(chunk)\n"
+                "    written += len(chunk)\n"
+                "sys.stdout.flush()\n")
+        adapter = {
+            "name": "claude-flood", "agent": "claude", "kind": "cli_json",
+            "command": [sys.executable, script], "timeout_s": 30, "enabled": True,
+        }
+        self.write_adapters([adapter])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        messages = " ".join(f["message"] for f in json.loads(r.stdout)["findings"])
+        self.assertIn("exceeded", messages)
+        self.assertIn("cap", messages)
+        self.assertNotIn("not valid JSON", messages,
+                         "truncated output must not be parsed as JSON")
+
     def test_adapters_list_reports_enabled_and_identity_state(self):
         self.assertEqual(self.rt("usage", "init").returncode, 0)
         r = self.rt("usage", "adapters", "list", "--json")
