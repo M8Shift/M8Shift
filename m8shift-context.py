@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"
@@ -2671,12 +2671,14 @@ def cmd_doctor(args):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Optional M8Shift context companion (native Phase 1).")
-    p.add_argument("--version", action="version", version=f"m8shift-context.py {VERSION}")
+    p.add_argument("--version", action="version", version=f"m8shift-context.py {VERSION}",
+                   help="show tool version and exit")
     p.add_argument("--root", help="project root (default: $M8SHIFT_ROOT or script directory)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     si = sub.add_parser("init", help="create native context companion profile scaffold")
-    si.add_argument("--force", action="store_true")
+    si.add_argument("--force", action="store_true",
+                    help="overwrite existing profiles, adapter manifests, compression config, and README")
     si.add_argument(
         "--allow-project-local-adapters",
         action="store_true",
@@ -2685,9 +2687,10 @@ def main(argv=None):
     si.set_defaults(func=cmd_init)
 
     sp = sub.add_parser("pack", help="build a referenced native context pack")
-    sp.add_argument("--profile", choices=PROFILE_NAMES, default="reviewer")
-    sp.add_argument("--agent", default="")
-    sp.add_argument("--turns", type=int, default=3)
+    sp.add_argument("--profile", choices=PROFILE_NAMES, default="reviewer",
+                    help="context profile that selects included sources and inline limits (default: reviewer)")
+    sp.add_argument("--agent", default="", help="agent name recorded in the pack header")
+    sp.add_argument("--turns", type=int, default=3, help="number of latest relay turns to include (default: 3)")
     sp.add_argument("--include", action="append", default=[], help="include one project-relative file excerpt")
     sp.add_argument("--write", action="store_true", help="write pack, receipt, and metrics under .m8shift/context/")
     sp.add_argument("--output", help="write pack to this project-relative path")
@@ -2695,23 +2698,23 @@ def main(argv=None):
                     help="shell-output adapter for noisy context sources; default auto uses pinned RTK when available")
     sp.add_argument("--no-rtk", action="store_const", const="native", dest="adapter",
                     help="alias for --adapter native")
-    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sp.set_defaults(func=cmd_pack)
 
     sr = sub.add_parser("receipt", help="show a context pack receipt")
     sr.add_argument("--id", help="receipt id / pack id")
     sr.add_argument("--last", action="store_true", help="show latest receipt (default)")
-    sr.add_argument("--json", action="store_true")
+    sr.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sr.set_defaults(func=cmd_receipt)
 
     sm = sub.add_parser("metrics", help="show context metrics")
-    sm.add_argument("--last", action="store_true")
-    sm.add_argument("--json", action="store_true")
+    sm.add_argument("--last", action="store_true", help="show only the latest metrics row")
+    sm.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sm.set_defaults(func=cmd_metrics)
 
     sc = sub.add_parser("compress", help="write a redacted compressed-context record from raw input")
     sc.add_argument("--id", help="record id (safe id only)")
-    sc.add_argument("--agent", default="")
+    sc.add_argument("--agent", default="", help="agent name recorded in the compression record and handoff digest")
     sc.add_argument("--type", default="context", help="content type label, e.g. test_output or shell_output")
     sc.add_argument("--backend", default="auto", help="compression backend id (default: auto)")
     sc.add_argument("--access-mode", choices=sorted(COMPRESSION_ACCESS_MODES), default="retrieve",
@@ -2721,7 +2724,7 @@ def main(argv=None):
     csrc = sc.add_mutually_exclusive_group(required=True)
     csrc.add_argument("--stdin", action="store_true", help="read raw content from stdin")
     csrc.add_argument("--input", help="read raw content from a project-relative file")
-    sc.add_argument("--json", action="store_true")
+    sc.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sc.set_defaults(func=cmd_compress)
 
     sret = sub.add_parser("retrieve", help="retrieve bounded raw or compact content by record id")
@@ -2729,53 +2732,55 @@ def main(argv=None):
     sret.add_argument("--compact", action="store_true", help="retrieve compact digest instead of redacted raw reference")
     sret.add_argument("--lines", help="bounded line selector: N or START:END (default 80)")
     sret.add_argument("--grep", help="bounded native stdlib re scan")
-    sret.add_argument("--json", action="store_true")
+    sret.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sret.set_defaults(func=cmd_retrieve)
 
     ss = sub.add_parser("status", help="show context companion status, including RTK adapter state")
-    ss.add_argument("--json", action="store_true")
+    ss.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     ss.set_defaults(func=cmd_status)
 
     sb = sub.add_parser("benchmark", help="benchmark raw context versus native pack fixtures")
-    sb.add_argument("--profile", choices=PROFILE_NAMES, default="reviewer")
+    sb.add_argument("--profile", choices=PROFILE_NAMES, default="reviewer",
+                    help="profile label recorded in benchmark metrics rows (default: reviewer)")
     sb.add_argument("--real-tokens", help="JSON with {fixture: {without: N, with: N}} real token counts")
     sb.add_argument("--require-real-tokens", action="store_true", help="fail unless real token counts show reduction")
     sb.add_argument("--write", action="store_true", help="append benchmark result to .m8shift/context/benchmarks.jsonl")
-    sb.add_argument("--json", action="store_true")
+    sb.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sb.set_defaults(func=cmd_benchmark)
 
     sa = sub.add_parser("adapters", help="Phase-2 external adapter manifests and bounded runner")
     sa_sub = sa.add_subparsers(dest="verb", required=True)
     sai = sa_sub.add_parser("init", help="write shipped adapter manifests")
-    sai.add_argument("--force", action="store_true")
+    sai.add_argument("--force", action="store_true", help="overwrite existing adapter manifests")
     sai.add_argument(
         "--allow-project-local-adapters",
         action="store_true",
         help="allow installer-provenanced executables under .m8shift/bin to be identity-pinned",
     )
-    sai.add_argument("--json", action="store_true")
+    sai.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sai.set_defaults(func=cmd_adapters_init)
     sal = sa_sub.add_parser("list", help="list known adapter manifests")
-    sal.add_argument("--json", action="store_true")
+    sal.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sal.set_defaults(func=cmd_adapters_list)
     sas = sa_sub.add_parser("show", help="show one adapter manifest")
-    sas.add_argument("name")
+    sas.add_argument("name", help="adapter manifest name")
     sas.set_defaults(func=cmd_adapters_show)
     sac = sa_sub.add_parser("check", help="validate adapter manifests")
-    sac.add_argument("name", nargs="?")
-    sac.add_argument("--json", action="store_true")
+    sac.add_argument("name", nargs="?", help="adapter manifest name (default: validate all known manifests)")
+    sac.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sac.set_defaults(func=cmd_adapters_check)
     sar = sa_sub.add_parser("run", help="run one advisory adapter with bounded argv-only execution")
-    sar.add_argument("name")
-    sar.add_argument("--mode", required=True)
+    sar.add_argument("name", help="adapter manifest name")
+    sar.add_argument("--mode", required=True,
+                     help="adapter mode key from the manifest modes table (e.g. err, test, log)")
     src = sar.add_mutually_exclusive_group(required=True)
     src.add_argument("--stdin", action="store_true", help="read raw adapter input from stdin")
     src.add_argument("--input", help="read raw adapter input from a project-relative file")
-    sar.add_argument("--json", action="store_true")
+    sar.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sar.set_defaults(func=cmd_adapters_run)
 
     sd = sub.add_parser("doctor", help="read-only context companion diagnostics")
-    sd.add_argument("--json", action="store_true")
+    sd.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sd.set_defaults(func=cmd_doctor)
 
     args = p.parse_args(argv)

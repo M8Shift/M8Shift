@@ -32,7 +32,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = None        # canonical repo root (set in main, before any core read/write)
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")   # mirrors the core sentinel id class
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 
 
 def die(msg):
@@ -381,32 +381,37 @@ def cmd_integrate(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="m8shift-worktree.py", description=__doc__.splitlines()[0])
-    p.add_argument("--version", action="version", version=f"m8shift-worktree.py {VERSION}")
+    p.add_argument("--version", action="version", version=f"m8shift-worktree.py {VERSION}",
+                   help="show the companion version and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("claim", help="add a feature worktree on a (new) branch")
-    c.add_argument("id"); c.add_argument("agent")
+    c.add_argument("id", help="worktree id ([A-Za-z0-9][A-Za-z0-9_-]*, no '/' or '..'), also the default branch name")
+    c.add_argument("agent", help="agent claiming the worktree (must be on the LOCK roster)")
     c.add_argument("--base", required=True, help="commit/branch to branch from")
     c.add_argument("--branch", help="branch name (default: <id>)")
     c.set_defaults(fn=cmd_claim)
 
     d = sub.add_parser("done", help="note the task done (dumb ledger line)")
-    d.add_argument("id"); d.add_argument("agent")
+    d.add_argument("id", help="worktree id to record as done in the companion ledger")
+    d.add_argument("agent", help="agent recording the completion (must be on the LOCK roster)")
     d.set_defaults(fn=cmd_done)
 
     i = sub.add_parser("integrate", help="serialized non-committing merge + handoff")
-    i.add_argument("id"); i.add_argument("agent")
+    i.add_argument("id", help="worktree id whose feature branch is merged")
+    i.add_argument("agent", help="agent taking the integration pen (must be on the LOCK roster)")
     i.add_argument("--into", required=True, help="target branch to merge into")
     i.add_argument("--to", required=True, help="next agent to hand the pen to")
     i.set_defaults(fn=cmd_integrate)
 
     r = sub.add_parser("drop", help="remove a feature worktree (never automatic)")
-    r.add_argument("id"); r.add_argument("agent")
+    r.add_argument("id", help="worktree id to remove (git refuses if the tree is dirty)")
+    r.add_argument("agent", help="agent performing the drop")
     r.add_argument("--yes", action="store_true", help="confirm removal")
     r.set_defaults(fn=cmd_drop)
 
     s = sub.add_parser("status", help="canonical LOCK + companion worktrees")
-    s.add_argument("id", nargs="?")
+    s.add_argument("id", nargs="?", help="restrict the worktree listing to this id (default: list all)")
     s.set_defaults(fn=cmd_status)
     return p
 

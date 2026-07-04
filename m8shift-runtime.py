@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -3058,38 +3058,43 @@ def main():
     p = argparse.ArgumentParser(
         prog=os.path.basename(sys.argv[0]),
         description="Local runtime companion for M8Shift sidecars.")
-    p.add_argument("--version", action="version", version=f"m8shift-runtime.py {VERSION}")
+    p.add_argument("--version", action="version", version=f"m8shift-runtime.py {VERSION}",
+                   help="show the runtime companion version and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     ri = sub.add_parser("init", help="scaffold optional local runtime companion files")
     ri.add_argument("--agents", default="", help="comma-separated roster for provider defaults")
     ri.add_argument("--force", action="store_true", help="overwrite existing companion config files")
-    ri.add_argument("--json", action="store_true")
+    ri.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     ri.set_defaults(fn=cmd_runtime_init)
 
     w = sub.add_parser("watch", help="update local presence while watching relay state")
-    w.add_argument("agent")
+    w.add_argument("agent", help="agent name whose presence lane to update")
     w.add_argument("--session", default="", help="stable UI/session id for this agent lane")
     w.add_argument("--run", default="", help="optional run id")
-    w.add_argument("--interval", type=int, default=5)
-    w.add_argument("--stale-after", type=int, default=300)
+    w.add_argument("--interval", type=int, default=5,
+                   help="seconds to sleep between watch iterations (default: 5)")
+    w.add_argument("--stale-after", type=int, default=300,
+                   help="seconds after which another session's presence lane counts as stale (default: 300)")
     w.add_argument("--no-progress-warn-after", type=int, default=0,
                    help="warn when no progress/run event advances within N seconds (0 disables)")
     w.add_argument("--no-progress-block-after", type=int, default=0,
                    help="block this companion loop when no progress/run event advances within N seconds (0 disables)")
-    w.add_argument("--once", action="store_true")
+    w.add_argument("--once", action="store_true", help="run a single watch iteration and exit")
     w.add_argument("--takeover-stale", action="store_true",
                    help="explicitly take over a different session only when its lane is stale")
     w.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     w.add_argument("--no-notify", action="store_true",
                    help="do not emit local notifications from this watch loop")
-    w.add_argument("--json", action="store_true")
+    w.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     w.set_defaults(fn=cmd_watch)
 
     nt = sub.add_parser("notify", help="one-shot local notification or notification config")
     nt.add_argument("target", help="agent name, or 'config' for notification settings")
-    nt.add_argument("--event", choices=tuple(sorted(NOTIFY_EVENTS)), default="")
-    nt.add_argument("--message", default="")
+    nt.add_argument("--event", choices=tuple(sorted(NOTIFY_EVENTS)), default="",
+                    help="notification event to emit; required when target is an agent")
+    nt.add_argument("--message", default="",
+                    help="override notification text; defaults to the resume prompt or event name")
     nt.add_argument("--prompt-file", default="", help="read exact resume prompt from file")
     nt.add_argument("--enable", default="", help="config: comma-separated tiers stdout,file,bell,os,hook")
     nt.add_argument("--os-preset", default="", help="config: auto, off, osascript, notify-send, powershell, or executable")
@@ -3100,31 +3105,33 @@ def main():
     nt.add_argument("--dedup-window-seconds", type=int, default=None,
                     help="config: duplicate suppression window in seconds")
     nt.add_argument("--show", action="store_true", help="config: show effective config")
-    nt.add_argument("--json", action="store_true")
+    nt.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     nt.set_defaults(fn=cmd_notify)
 
     op = sub.add_parser("operator", help="queue an operator message for one agent lane")
-    op.add_argument("agent")
-    op.add_argument("--mode", choices=("followup", "collect", "interrupt", "status"), required=True)
-    op.add_argument("--idempotency-key", default="")
-    op.add_argument("message")
+    op.add_argument("agent", help="agent lane the message is queued for")
+    op.add_argument("--mode", choices=("followup", "collect", "interrupt", "status"), required=True,
+                    help="delivery contract recorded with the message (how the agent should handle it)")
+    op.add_argument("--idempotency-key", default="",
+                    help="skip the message as a duplicate if this key was already recorded")
+    op.add_argument("message", help="operator message text appended to the agent's inbox")
     op.set_defaults(fn=cmd_operator)
 
     pr = sub.add_parser("progress", help="append a long-turn progress note")
-    pr.add_argument("agent")
-    pr.add_argument("--run", required=True)
-    pr.add_argument("message")
+    pr.add_argument("agent", help="agent name recording the progress note")
+    pr.add_argument("--run", required=True, help="run id the progress note belongs to")
+    pr.add_argument("message", help="progress note text appended to the progress ledger")
     pr.set_defaults(fn=cmd_progress)
 
     sr = sub.add_parser("status-runtime", help="show relay status plus runtime sidecars")
-    sr.add_argument("agent", nargs="?")
+    sr.add_argument("agent", nargs="?", help="optional agent name to scope the runtime summary and headroom to")
     sr.add_argument("--brief", action="store_true", help="compact human output; ignored with --json")
-    sr.add_argument("--json", action="store_true")
+    sr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     sr.set_defaults(fn=cmd_status_runtime)
 
     hr = sub.add_parser("headroom", help="estimate context-window headroom from local proxy signals")
     hr.add_argument("agent", nargs="?", help="agent to authorize optional pause/checkpoint actions")
-    hr.add_argument("--json", action="store_true")
+    hr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     hr.add_argument("--checkpoint", action="store_true",
                     help="write a derived session-report checkpoint and record it in runtime runs")
     hr.add_argument("--pause-on", choices=("warning", "high"), default="",
@@ -3134,84 +3141,95 @@ def main():
                     help="optional harness-provided exact context-window signal")
     hr.add_argument("--window-reason", default="", help="reason attached to --window-status warning/high")
     hr.add_argument("--warn-after-turns-since-checkpoint", type=int,
-                    default=HEADROOM_DEFAULTS["warn_after_turns_since_checkpoint"])
+                    default=HEADROOM_DEFAULTS["warn_after_turns_since_checkpoint"],
+                    help="turns since the last checkpoint before headroom reports warning; 0 disables (default: 8)")
     hr.add_argument("--warn-after-handoff-body-bytes", type=int,
-                    default=HEADROOM_DEFAULTS["warn_after_handoff_body_bytes"])
+                    default=HEADROOM_DEFAULTS["warn_after_handoff_body_bytes"],
+                    help="largest handoff body size in bytes before headroom reports warning; 0 disables (default: 12000)")
     hr.add_argument("--warn-after-relay-bytes", type=int,
-                    default=HEADROOM_DEFAULTS["warn_after_relay_bytes"])
+                    default=HEADROOM_DEFAULTS["warn_after_relay_bytes"],
+                    help="relay file size in bytes before headroom reports warning; 0 disables (default: 250000)")
     hr.add_argument("--pause-recommendation-after-turns-since-checkpoint", type=int,
-                    default=HEADROOM_DEFAULTS["pause_recommendation_after_turns_since_checkpoint"])
+                    default=HEADROOM_DEFAULTS["pause_recommendation_after_turns_since_checkpoint"],
+                    help="turns since the last checkpoint before headroom reports high risk; 0 disables (default: 15)")
     hr.add_argument("--pause-recommendation-after-relay-bytes", type=int,
-                    default=HEADROOM_DEFAULTS["pause_recommendation_after_relay_bytes"])
+                    default=HEADROOM_DEFAULTS["pause_recommendation_after_relay_bytes"],
+                    help="relay file size in bytes before headroom reports high risk; 0 disables (default: 500000)")
     hr.set_defaults(fn=cmd_headroom)
 
     dr = sub.add_parser("doctor", help="read-only runtime sidecar diagnostics")
-    dr.add_argument("--json", action="store_true")
-    dr.add_argument("--stale-after", type=int, default=300)
+    dr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
+    dr.add_argument("--stale-after", type=int, default=300,
+                    help="seconds after which a runtime presence lane counts as stale (default: 300)")
     dr.set_defaults(fn=cmd_doctor)
 
     pv = sub.add_parser("providers", help="local provider/agent registry")
     pv_sub = pv.add_subparsers(dest="verb", required=True)
     pvi = pv_sub.add_parser("init", help="write .m8shift/providers.json")
     pvi.add_argument("--agents", default="", help="comma-separated roster for provider defaults")
-    pvi.add_argument("--force", action="store_true")
+    pvi.add_argument("--force", action="store_true", help="overwrite an existing .m8shift/providers.json")
     pvi.set_defaults(fn=cmd_providers_init)
     pvl = pv_sub.add_parser("list", help="list provider entries")
-    pvl.add_argument("--json", action="store_true")
+    pvl.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     pvl.set_defaults(fn=cmd_providers_list)
     pvs = pv_sub.add_parser("show", help="show one provider entry as JSON")
-    pvs.add_argument("agent")
+    pvs.add_argument("agent", help="agent name whose provider entry to print")
     pvs.set_defaults(fn=cmd_providers_show)
     pvc = pv_sub.add_parser("check", help="validate provider registry")
-    pvc.add_argument("agent", nargs="?")
-    pvc.add_argument("--json", action="store_true")
+    pvc.add_argument("agent", nargs="?", help="optional agent name to filter validation findings")
+    pvc.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     pvc.set_defaults(fn=cmd_providers_check)
     pvr = pv_sub.add_parser("render", help="render one provider argv array without shell interpolation")
-    pvr.add_argument("agent")
-    pvr.add_argument("--prompt", required=True)
-    pvr.add_argument("--run", default="")
-    pvr.add_argument("--json", action="store_true")
+    pvr.add_argument("agent", help="agent name whose provider argv to render")
+    pvr.add_argument("--prompt", required=True,
+                     help="prompt text substituted for the $M8SHIFT_PROMPT placeholder")
+    pvr.add_argument("--run", default="",
+                     help="optional run id substituted for the $M8SHIFT_RUN_ID placeholder")
+    pvr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     pvr.set_defaults(fn=cmd_providers_render)
 
     route = sub.add_parser("route", help="advisory model/task routing")
     route_sub = route.add_subparsers(dest="route_verb", required=True)
     rr = route_sub.add_parser("recommend", help="recommend a capable-enough model without launching")
-    rr.add_argument("--task-type", required=True)
-    rr.add_argument("--skill", default="")
-    rr.add_argument("--input-tokens", type=int, default=0)
+    rr.add_argument("--task-type", required=True,
+                    help="task type key from the routing skills manifest that selects floor/optimum models")
+    rr.add_argument("--skill", default="", help="optional skill label recorded in the recommendation output")
+    rr.add_argument("--input-tokens", type=int, default=0,
+                    help="estimated input size in tokens used to raise the required context class (default: 0)")
     rr.add_argument("--self", dest="self_model", default="", help="explicit pen-holder model id for fail-safe")
-    rr.add_argument("--json", action="store_true")
+    rr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     rr.set_defaults(fn=cmd_route_recommend)
 
     roles = sub.add_parser("roles", help="runtime role contracts")
     roles_sub = roles.add_subparsers(dest="verb", required=True)
-    rl = roles_sub.add_parser("list")
-    rl.add_argument("--json", action="store_true")
+    rl = roles_sub.add_parser("list", help="list role contracts found under .m8shift/roles/")
+    rl.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     rl.set_defaults(fn=cmd_roles_list)
-    rs = roles_sub.add_parser("show")
-    rs.add_argument("name")
+    rs = roles_sub.add_parser("show", help="print one role contract")
+    rs.add_argument("name", help="role contract name (file stem under .m8shift/roles/)")
     rs.set_defaults(fn=cmd_roles_show)
 
     workflows = sub.add_parser("workflows", help="runtime workflow definitions")
     workflows_sub = workflows.add_subparsers(dest="verb", required=True)
-    wl = workflows_sub.add_parser("list")
-    wl.add_argument("--json", action="store_true")
+    wl = workflows_sub.add_parser("list", help="list workflow definitions found under .m8shift/workflows/")
+    wl.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     wl.set_defaults(fn=cmd_workflows_list)
-    ws = workflows_sub.add_parser("show")
-    ws.add_argument("name")
+    ws = workflows_sub.add_parser("show", help="print one workflow definition as JSON")
+    ws.add_argument("name", help="workflow definition name (file stem under .m8shift/workflows/)")
     ws.set_defaults(fn=cmd_workflows_show)
 
     ap = sub.add_parser("approve", help="append one local approval decision")
-    ap.add_argument("run")
-    ap.add_argument("gate")
-    ap.add_argument("--by", required=True)
-    ap.add_argument("--decision", choices=("approved", "rejected", "waived"), required=True)
-    ap.add_argument("--reason", default="")
+    ap.add_argument("run", help="run id the approval applies to")
+    ap.add_argument("gate", help="gate id being decided")
+    ap.add_argument("--by", required=True, help="agent or operator name recording the decision")
+    ap.add_argument("--decision", choices=("approved", "rejected", "waived"), required=True,
+                    help="decision recorded for the gate")
+    ap.add_argument("--reason", default="", help="optional free-text reason stored with the decision")
     ap.set_defaults(fn=cmd_approve)
 
     rp = sub.add_parser("report", help="summarize one local runtime run")
-    rp.add_argument("run")
-    rp.add_argument("--json", action="store_true")
+    rp.add_argument("run", help="run id to summarize from the runtime ledgers")
+    rp.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     rp.add_argument("--write", action="store_true", help="write .m8shift/runs/<run>/report.md")
     rp.set_defaults(fn=cmd_report)
 
@@ -3221,18 +3239,18 @@ def main():
     rprune.add_argument("--keep", type=int, default=1000, help="rows to retain per ledger (default: 1000)")
     rprune.add_argument("--no-archive", action="store_true",
                         help="discard pruned rows instead of appending them under .m8shift/runtime/archive/")
-    rprune.add_argument("--json", action="store_true")
+    rprune.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     rprune.set_defaults(fn=cmd_retention_prune)
     rapp = ret_sub.add_parser("apply", help="apply .m8shift/runtime/retention.json policy")
     rapp.add_argument("--dry-run", action="store_true", help="show planned pruning without changing files")
     rapp.add_argument("--no-archive", action="store_true",
                       help="discard pruned rows instead of archiving them")
-    rapp.add_argument("--json", action="store_true")
+    rapp.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     rapp.set_defaults(fn=cmd_retention_apply)
     rpolicy = ret_sub.add_parser("policy", help="inspect runtime retention policy")
     rpolicy_sub = rpolicy.add_subparsers(dest="policy_verb", required=True)
     rpshow = rpolicy_sub.add_parser("show", help="show effective retention policy")
-    rpshow.add_argument("--json", action="store_true")
+    rpshow.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     rpshow.set_defaults(fn=cmd_retention_policy_show)
 
     args = p.parse_args()

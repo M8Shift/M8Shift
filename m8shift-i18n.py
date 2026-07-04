@@ -23,7 +23,7 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.join(HERE, "m8shift.py")
 PACKS_DIR = os.path.join(HERE, "i18n")
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 
 # family -> (dict name, constant prefix, pack file, raw-string?)  — raw must match the EN constant.
 FAMILIES = [
@@ -199,7 +199,8 @@ def _append_messages(src, msg_blocks):
 
 def main():
     ap = argparse.ArgumentParser(prog="m8shift-i18n.py", description=__doc__.splitlines()[0])
-    ap.add_argument("--version", action="version", version=f"m8shift-i18n.py {VERSION}")
+    ap.add_argument("--version", action="version", version=f"m8shift-i18n.py {VERSION}",
+                    help="print the tool version and exit")
     ap.add_argument("--langs", default="", help="comma-separated language codes (e.g. fr,es)")
     ap.add_argument("--into", default=".", help="output directory")
     ap.add_argument("--name", default="m8shift.py", help="output file name")

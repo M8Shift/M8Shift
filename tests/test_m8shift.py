@@ -14,6 +14,7 @@ Standard library only.
 import hashlib
 import json
 import os
+import ast
 import re
 import shutil
 import subprocess
@@ -28,7 +29,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -5856,6 +5857,49 @@ class TestRFC046ProjectIdentity(unittest.TestCase):
                 with open(os.path.join(self.d, fn), encoding="utf-8") as f:
                     blob += f.read()
         self.assertIn("Status-guard", blob)
+
+
+class TestDetailedHelpCoverage(unittest.TestCase):
+    """Operator requirement: every CLI parameter documents itself — each argparse
+    add_argument carries help= (one line per parameter in --help) and every
+    add_parser carries its one-line summary. AST-based: a regex scan misses calls
+    with nested parens like choices=tuple(sorted(...)) — proven by a Codex
+    mutation test on review — so the guard walks ast.Call nodes instead."""
+
+    SCRIPTS = [
+        "m8shift.py", "m8shift-runtime.py", "m8shift-context.py",
+        "m8shift-worktree.py", "m8shift-headroom.py", "m8shift-i18n.py",
+        "m8shift-e2e.py",
+    ]
+
+    @staticmethod
+    def _calls_missing_help(path, attr):
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+        missing = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == attr
+                    and not any(kw.arg == "help" for kw in node.keywords)):
+                missing.append(f"line {node.lineno}: {ast.unparse(node)[:80]}")
+        return missing
+
+    def test_every_argument_has_help(self):
+        for name in self.SCRIPTS:
+            with self.subTest(script=name):
+                missing = self._calls_missing_help(
+                    os.path.join(REPO, name), "add_argument")
+                self.assertEqual(missing, [],
+                                 f"{name}: add_argument calls without help=")
+
+    def test_every_subparser_has_help(self):
+        for name in self.SCRIPTS:
+            with self.subTest(script=name):
+                missing = self._calls_missing_help(
+                    os.path.join(REPO, name), "add_parser")
+                self.assertEqual(missing, [],
+                                 f"{name}: add_parser calls without help=")
 
 
 if __name__ == "__main__":

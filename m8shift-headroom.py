@@ -21,7 +21,7 @@ import sys
 from typing import Any, Iterable
 
 
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 OFFLINE_ENV = {
     "HEADROOM_OFFLINE": "1",
     "HF_HUB_OFFLINE": "1",
@@ -224,7 +224,12 @@ def run_transform(mode: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="M8Shift offline Headroom adapter wrapper.")
-    parser.add_argument("--version", action="version", version=f"m8shift-headroom.py {VERSION}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"m8shift-headroom.py {VERSION}",
+        help="show the wrapper version and exit",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
     transform = sub.add_parser("m8shift-transform", help="compress redacted stdin for M8Shift")
     transform.add_argument("mode", help="adapter mode supplied by m8shift-context.py")

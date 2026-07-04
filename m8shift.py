@@ -71,7 +71,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.45.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.45.1"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -5291,11 +5291,13 @@ def main():
     p = argparse.ArgumentParser(
         prog=os.path.basename(sys.argv[0]),
         description="Single-file multi-agent relay (M8Shift), portable.")
-    p.add_argument("--version", action="version", version=f"m8shift.py {VERSION}")
+    p.add_argument("--version", action="version", version=f"m8shift.py {VERSION}",
+                   help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     i = sub.add_parser("init", help="(re)generate the kit in this folder")
-    i.add_argument("--name", default="")
+    i.add_argument("--name", default="",
+                   help="project name used in the generated files (default: current folder name)")
     i.add_argument("--agents", default="",
                    help="comma-separated active roster (>=2, e.g. claude,codex,gemini); ALL "
                         "members relay — the holder hands the pen to any other via --to, one "
@@ -5329,7 +5331,7 @@ def main():
                     help="replace an older/edited local companion (never downgrades a newer one)")
     i.set_defaults(fn=cmd_init)
 
-    st = sub.add_parser("status")
+    st = sub.add_parser("status", help="read-only relay status snapshot (LOCK + roster)")
     st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
     st.add_argument("--brief", action="store_true",
                     help="compact human output: strict subset of the default status lines")
@@ -5339,12 +5341,12 @@ def main():
 
     mw = sub.add_parser("may-i-write",
                         help="read-only hard guard: rc 0 only while this agent holds a valid pen")
-    mw.add_argument("agent")
+    mw.add_argument("agent", help="agent whose pen ownership is checked")
     mw.set_defaults(fn=cmd_may_i_write)
 
     gd = sub.add_parser("guard",
                         help="alias for may-i-write")
-    gd.add_argument("agent")
+    gd.add_argument("agent", help="agent whose pen ownership is checked")
     gd.set_defaults(fn=cmd_may_i_write)
 
     wt = sub.add_parser("watch", help="continuous read-only status monitor")
@@ -5383,7 +5385,8 @@ def main():
     cv.set_defaults(fn=cmd_contract_validate)
 
     rc = sub.add_parser("recap", help="read-only briefing: LOCK + last N turns + memory + tasks")
-    rc.add_argument("--turns", type=int, default=6)
+    rc.add_argument("--turns", type=int, default=6,
+                    help="turn summaries to show (<=0 = all; default: 6)")
     rc.add_argument("--memory", type=int, default=5, help="memory headlines to show (<=0 = all)")
     rc.add_argument("--tasks", type=int, default=5, help="open-task headlines to show (<=0 = all)")
     rc.add_argument("--brief", action="store_true",
@@ -5391,18 +5394,20 @@ def main():
     rc.set_defaults(fn=cmd_recap)
 
     pk = sub.add_parser("peek", help="last handoff addressed to <agent> (rc 3 if not your turn)")
-    pk.add_argument("agent")
+    pk.add_argument("agent", help="agent whose last incoming handoff is printed")
     pk.set_defaults(fn=cmd_peek)
 
     lg = sub.add_parser("log", help="read-only relay timeline")
     lg.add_argument("--limit", type=int, default=0, help="show only the last N turns")
     lg.add_argument("--all", action="store_true", help="include archived turns")
-    lg.add_argument("--oneline", action="store_true")
+    lg.add_argument("--oneline", action="store_true",
+                    help="compact one-line-per-turn output")
     lg.set_defaults(fn=cmd_log)
 
     hs = sub.add_parser("history", help="read-only session history")
     hs.add_argument("--limit", type=int, default=0, help="show only the last N sessions")
-    hs.add_argument("--oneline", action="store_true")
+    hs.add_argument("--oneline", action="store_true",
+                    help="compact one-line-per-session output")
     hs.add_argument("--json", action="store_true", help="machine-readable session history")
     hs.set_defaults(fn=cmd_history)
 
@@ -5413,7 +5418,8 @@ def main():
     dec_t = dec_sub.add_parser("target", help="show or configure the decision traceability target")
     dec_t.add_argument("--set", choices=DECISION_TARGETS, default="",
                        help="persist an explicit target override in .m8shift/decisions.json")
-    dec_t.add_argument("--json", action="store_true")
+    dec_t.add_argument("--json", action="store_true",
+                       help="machine-readable target info")
     dec_t.set_defaults(fn=cmd_decisions)
     dec_s = dec_sub.add_parser("scaffold",
                                help="write a markdown decision record from session turns")
@@ -5424,8 +5430,10 @@ def main():
                        help="append to DECISIONS.md instead of docs/decisions/NNNN-*.md")
     dec_s.add_argument("--title", default="", help="decision title")
     dec_s.add_argument("--status", choices=("proposed", "accepted", "superseded"),
-                       default="proposed")
-    dec_s.add_argument("--json", action="store_true")
+                       default="proposed",
+                       help="status recorded in the decision record (default: proposed)")
+    dec_s.add_argument("--json", action="store_true",
+                       help="machine-readable scaffold result")
     dec_s.set_defaults(fn=cmd_decisions)
 
     se = sub.add_parser("session", help="read-only session inspection and Markdown reports")
@@ -5448,15 +5456,17 @@ def main():
     se_rep.add_argument("--force", action="store_true", help="overwrite an existing report")
     se_rep.add_argument("--include-body", action="store_true", help="include untrusted turn bodies")
 
-    w = sub.add_parser("wait")
-    w.add_argument("agent")
-    w.add_argument("--interval", type=int, default=60)
+    w = sub.add_parser("wait", help="block until it is this agent's turn (or DONE / stale peer lock)")
+    w.add_argument("agent", help="roster agent waiting for its turn")
+    w.add_argument("--interval", type=int, default=60,
+                   help="poll interval in seconds (default: 60)")
     w.add_argument("--once", action="store_true", help="check once and exit (rc 3 if not your turn)")
     w.set_defaults(fn=cmd_wait)
 
     nx = sub.add_parser("next", help="safe resumption: wait if needed, then claim + peek")
-    nx.add_argument("agent")
-    nx.add_argument("--interval", type=int, default=60)
+    nx.add_argument("agent", help="roster agent to resume: waits, claims the pen, prints its handoff")
+    nx.add_argument("--interval", type=int, default=60,
+                    help="poll interval in seconds while waiting (default: 60)")
     nx.add_argument("--once", action="store_true", help="single non-blocking check (rc 3 if not your turn)")
     nx.add_argument("--force", action="store_true", help="recover only a stale WORKING lock")
     nx.add_argument("--resume", action="store_true",
@@ -5464,9 +5474,11 @@ def main():
     nx.add_argument("--reason", default="", help="required with --resume")
     nx.set_defaults(fn=cmd_next)
 
-    c = sub.add_parser("claim")
-    c.add_argument("agent")
-    c.add_argument("--force", action="store_true")
+    c = sub.add_parser("claim",
+                       help="acquire the pen exclusively (from your turn, IDLE, or your own lock)")
+    c.add_argument("agent", help="roster agent taking the pen")
+    c.add_argument("--force", action="store_true",
+                   help="reclaim a stale WORKING lock only (refused while the holder's lock is valid)")
     c.add_argument("--check", action="store_true",
                    help="read-only advisory pre-claim probe (no pen taken): readiness + file overlap")
     c.add_argument("--files", default="", help="with --check: files you plan to touch (CSV)")
@@ -5474,13 +5486,19 @@ def main():
                    help="with --check: overlap window (<=0 = since your last turn; N = last N turns)")
     c.set_defaults(fn=cmd_claim)
 
-    a = sub.add_parser("append")  # requires WORKING_<agent>: run `claim` first
-    a.add_argument("agent")
-    a.add_argument("--to", required=True)
-    a.add_argument("--ask", default="")
-    a.add_argument("--done", default="")
-    a.add_argument("--files", default="")
-    a.add_argument("--body", default="")
+    a = sub.add_parser("append",  # requires WORKING_<agent>: run `claim` first
+                       help="close your turn and hand off the pen (requires a prior claim)")
+    a.add_argument("agent", help="roster agent closing its turn (must hold the pen via claim)")
+    a.add_argument("--to", required=True,
+                   help="recipient roster agent handed the pen (must differ from <agent>)")
+    a.add_argument("--ask", default="",
+                   help="single-line actionable request for the recipient (empty = the — placeholder)")
+    a.add_argument("--done", default="",
+                   help="single-line summary of what you just did (empty = the — placeholder)")
+    a.add_argument("--files", default="",
+                   help="files touched this turn, comma-separated (empty = the — placeholder)")
+    a.add_argument("--body", default="",
+                   help="free turn body: a file path, or - to read stdin (empty = header-only turn)")
     a.add_argument("--allow-large-body", action="store_true",
                    help=f"allow --body content above {MAX_BODY_BYTES} bytes")
     a.add_argument("--wait", action="store_true",
@@ -5488,22 +5506,40 @@ def main():
     a.add_argument("--wait-interval", type=int, default=60,
                    help="poll interval for --wait (default: 60)")
     # §5 advisory turn fields (optional, passthrough): sugar flags + open namespace
-    a.add_argument("--branch", default="")
-    a.add_argument("--commit", default="")
-    a.add_argument("--tests", default="")
-    a.add_argument("--next", default="")
-    a.add_argument("--blocked-on", dest="blocked_on", default="")
+    a.add_argument("--branch", default="",
+                   help="advisory turn field: branch worked on this turn (empty = omitted)")
+    a.add_argument("--commit", default="",
+                   help="advisory turn field: commit reference produced this turn (empty = omitted)")
+    a.add_argument("--tests", default="",
+                   help="advisory turn field: test status/result summary (empty = omitted)")
+    a.add_argument("--next", default="",
+                   help="advisory turn field: suggested next step (empty = omitted)")
+    a.add_argument("--blocked-on", dest="blocked_on", default="",
+                   help="advisory turn field: what this work is blocked on (empty = omitted)")
     # Stage 4 contract sugar flags. These serialize to the same advisory turn fields as --field.
-    a.add_argument("--role-from", dest="role_from", default="")
-    a.add_argument("--role-to", dest="role_to", default="")
-    a.add_argument("--relation", default="")
-    a.add_argument("--requires", default="")
-    a.add_argument("--expected-output", dest="expected_output", default="")
-    a.add_argument("--evidence", default="")
-    a.add_argument("--decision", default="")
-    a.add_argument("--waiver-reason", dest="waiver_reason", default="")
-    a.add_argument("--schema", default="")
-    a.add_argument("--permissions", default="")
+    a.add_argument("--role-from", dest="role_from", default="",
+                   help="advisory Stage-4 contract field: role of the sending agent")
+    a.add_argument("--role-to", dest="role_to", default="",
+                   help="advisory Stage-4 contract field: role expected to act on this turn")
+    a.add_argument("--relation", default="",
+                   help="advisory Stage-4 contract field: turn relation "
+                        "(handoff, review_request, review_result, escalation)")
+    a.add_argument("--requires", default="",
+                   help="advisory Stage-4 contract field: what the recipient needs to fulfil the request")
+    a.add_argument("--expected-output", dest="expected_output", default="",
+                   help="advisory Stage-4 contract field: deliverable expected back from the recipient")
+    a.add_argument("--evidence", default="",
+                   help="advisory Stage-4 contract field: evidence backing the result (tests, links, checks)")
+    a.add_argument("--decision", default="",
+                   help="advisory Stage-4 contract field: review decision "
+                        "(approve, revise, reject, waive)")
+    a.add_argument("--waiver-reason", dest="waiver_reason", default="",
+                   help="advisory Stage-4 contract field: justification required when decision=waive")
+    a.add_argument("--schema", default="",
+                   help="advisory Stage-4 contract field: contract schema tag (e.g. stage4.v1)")
+    a.add_argument("--permissions", default="",
+                   help="advisory Stage-4 contract field: permissions declared for the handoff "
+                        "(never enforced by the relay)")
     a.add_argument("--stance", default="",
                    help="explicit decision stance tag, e.g. FOR:option or AGAINST:option (advisory)")
     a.add_argument("--field", action="append", default=[], metavar="KEY=VALUE",
@@ -5544,12 +5580,12 @@ def main():
 
     rm = sub.add_parser("remember",
                         help="append one durable note to M8SHIFT.memory.md (no pen needed)")
-    rm.add_argument("agent")
-    rm.add_argument("note")
+    rm.add_argument("agent", help="roster agent recording the note")
+    rm.add_argument("note", help="single-line note text (no line breaks or reserved relay markers)")
     rm.set_defaults(fn=cmd_remember)
 
     ps = sub.add_parser("pause", help="park an open session with no active task (state=PAUSED)")
-    ps.add_argument("agent")
+    ps.add_argument("agent", help="roster agent parking the session")
     ps.add_argument("--reason", required=True,
                     help="why no agent should hold the pen until new user scope arrives")
     ps.set_defaults(fn=cmd_pause)
@@ -5565,7 +5601,7 @@ def main():
     cd.set_defaults(fn=cmd_cooldown)
 
     rs = sub.add_parser("resume", help="resume a PAUSED session for one agent")
-    rs.add_argument("agent")
+    rs.add_argument("agent", help="roster agent the PAUSED session is resumed for")
     rs.add_argument("--reason", required=True, help="new user scope / reason for resuming")
     rs.set_defaults(fn=cmd_resume)
 
@@ -5573,35 +5609,42 @@ def main():
     tk.set_defaults(fn=cmd_task)
     tk_sub = tk.add_subparsers(dest="verb", required=True)
     tk_add = tk_sub.add_parser("add", help="append a task")
-    tk_add.add_argument("agent")
-    tk_add.add_argument("desc")
+    tk_add.add_argument("agent", help="roster agent recording the task")
+    tk_add.add_argument("desc", help="single-line task description")
     tk_add.add_argument("--for", dest="for_", default="", help="advisory assignee (roster name)")
     tk_add.add_argument("--blocked-on", dest="blocked_on", default="",
                         help="advisory wait reason (free text — never enforced or resolved)")
     for v in ("done", "drop"):
         tp = tk_sub.add_parser(v, help=f"append a {v} event for a task id")
-        tp.add_argument("agent")
-        tp.add_argument("id", type=int)
+        tp.add_argument("agent", help="roster agent recording the event")
+        tp.add_argument("id", type=int, help="open task id (as shown by `task list`)")
     tk_list = tk_sub.add_parser("list", help="open tasks (--all includes done/drop)")
-    tk_list.add_argument("--all", action="store_true")
+    tk_list.add_argument("--all", action="store_true",
+                         help="also list tasks whose last event is done/drop, not only open ones")
     tk_show = tk_sub.add_parser("show", help="event history of one task id")
-    tk_show.add_argument("id", type=int)
+    tk_show.add_argument("id", type=int, help="task id whose event history is printed")
 
-    r = sub.add_parser("release")
-    r.add_argument("agent")
-    r.add_argument("--to", required=True)
-    r.add_argument("--force", action="store_true")
+    r = sub.add_parser("release",
+                       help="hand off the pen without writing a turn body (does not increment the turn)")
+    r.add_argument("agent", help="roster agent handing off (the holder, or anyone when nobody holds)")
+    r.add_argument("--to", required=True,
+                   help="recipient roster agent (must differ from <agent>)")
+    r.add_argument("--force", action="store_true",
+                   help="override when not the holder or a pending incoming turn exists (needs --reason)")
     r.add_argument("--reason", default="", help="required with --force; recorded in session audit events")
     r.set_defaults(fn=cmd_release)
 
-    d = sub.add_parser("done")
-    d.add_argument("agent")
-    d.add_argument("--force", action="store_true")
+    d = sub.add_parser("done", help="close the session (state=DONE, no further relay)")
+    d.add_argument("agent", help="roster agent closing the session (the holder, or anyone when nobody holds)")
+    d.add_argument("--force", action="store_true",
+                   help="close even while another agent holds the pen (needs --reason)")
     d.add_argument("--reason", default="", help="required with --force; recorded in session audit events")
     d.set_defaults(fn=cmd_done)
 
-    ar = sub.add_parser("archive")
-    ar.add_argument("--keep", type=int, default=6)
+    ar = sub.add_parser("archive",
+                        help="move old closed turns to M8SHIFT.archive.md (never turn #0)")
+    ar.add_argument("--keep", type=int, default=6,
+                    help="closed turns to keep in the living file (default: 6)")
     ar.set_defaults(fn=cmd_archive)
 
     args = p.parse_args()
