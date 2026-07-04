@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -89,6 +90,38 @@ HEADROOM_DEFAULTS = {
 }
 HEADROOM_LEVEL = {"ok": 0, "warning": 1, "high": 2}
 MAX_HASH_BYTES = 512 * 1024 * 1024
+# ── RFC 047 PR 1 (Phases B + C) — listener lifecycle companion, local backend ──
+SELF_PATH = os.path.abspath(__file__)
+RELAY_PATH = os.path.join(HERE, "M8SHIFT.md")
+RELAY_LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
+RELAY_LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
+LISTENERS_DIR = os.path.join(RUNTIME_DIR, "listeners")
+LISTENER_LOGS_DIR = os.path.join(RUNTIME_DIR, "logs")
+DEFAULT_RUNNER_PATH = os.path.join(HERE, "examples", "headless_runner.py")
+LISTENER_PROFILE_SCHEMA = "m8shift.listener.profile.v1"
+LISTENER_STATE_SCHEMA = "m8shift.listener.state.v1"
+LISTENER_PLAN_SCHEMA = "m8shift.listener.plan.v1"
+LISTENER_PHASES = ("polling", "backoff", "halted")
+LISTENER_BACKENDS = ("auto", "local", "launchd", "systemd", "windows")
+LISTENER_PR2_BACKENDS = ("launchd", "systemd", "windows")
+LISTENER_BACKOFF_BASE_S = 20
+LISTENER_MAX_BACKOFF_S = 300
+LISTENER_DEFAULT_POLL_S = 20.0
+LISTENER_DEFAULT_MAX_RETRIES = 3
+LISTENER_DETACHED_ENV = "M8SHIFT_LISTENER_DETACHED"
+# Runner one-shot exit vocabulary (RFC 047 Phase A / examples/headless_runner.py):
+# 0 success, 1 run failure, 2 infrastructure, 3 external_transition, 4 suspended.
+LISTENER_RUNNER_EXITS = {
+    0: "success",
+    1: "run_failure",
+    2: "infrastructure_failure",
+    3: "external_transition",
+    4: "suspended",
+}
+LISTENER_TURN_PROMPT = (
+    "Apply M8SHIFT.protocol.md: you are {agent}; take exactly one relay turn "
+    "(claim, work, append) and then exit."
+)
 
 
 def now():
@@ -3054,6 +3087,743 @@ def cmd_doctor(args):
     return 0 if ok else 1
 
 
+# ── RFC 047 PR 1 — listener lifecycle companion (Phases B + C, local backend) ──
+#
+# Advisory charter (never negotiable): the listener is a supervisor, NOT a routing
+# authority. It never writes M8SHIFT.md, never runs claim/append/done itself (only
+# the runner child performs relay actions, including its own `claim --refresh`
+# heartbeat), and never force-steals a pen. PAUSED / DONE / peer-owned / externally
+# moved relay states are first-class neutral: the listener sleeps. All process
+# control uses explicit argv arrays (no shell interpolation), and the Windows
+# aliveness/stop paths never use os.kill(pid, 0) or POSIX signals (RFC 047).
+# OS service adapters (launchd/systemd/windows), protected-folder detection, log
+# rotation, and doctor findings ship in PR 2.
+
+
+def listener_backoff(consecutive_failures, base=LISTENER_BACKOFF_BASE_S, cap=LISTENER_MAX_BACKOFF_S):
+    """RFC 047 bounded failure backoff ladder: 20 → 40 → 80 → 160 → 300 (capped).
+
+    Pure and sleep-free so it is unit-testable without waiting; the loop owns the
+    actual sleep. Zero/negative failure counts mean no backoff. The exponent is
+    clamped so a corrupted sidecar counter cannot force a huge-int computation.
+    """
+    if consecutive_failures <= 0:
+        return 0
+    cap = max(1, int(cap))
+    exponent = min(int(consecutive_failures) - 1, 32)
+    return int(min(base * (2 ** exponent), cap))
+
+
+def validate_listener_agent(raw):
+    agent = (raw or "").strip().lower()
+    if not AGENT_RE.fullmatch(agent):
+        sys.exit(f"m8shift-runtime: invalid agent name {raw!r}")
+    return agent
+
+
+def listener_paths(agent):
+    return {
+        "pid": os.path.join(LISTENERS_DIR, f"{agent}.pid"),
+        "state": os.path.join(LISTENERS_DIR, f"{agent}.json"),
+        "log": os.path.join(LISTENER_LOGS_DIR, f"{agent}-listener.log"),
+    }
+
+
+def listener_log_line(msg):
+    print(f"[m8shift-listener] {iso()} {msg}", flush=True)
+
+
+def read_relay_lock_fields():
+    """Read-only LOCK snapshot for the listener loop.
+
+    Returns the LOCK fields as a dict, or None when the relay file or its markers
+    are missing/unreadable. The listener never writes the relay; a missing or
+    invalid relay while polling is neutral (wait, never launch, never repair).
+    """
+    try:
+        with open(RELAY_PATH, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    if RELAY_LOCK_BEGIN not in text or RELAY_LOCK_END not in text:
+        return None
+    body = text[text.index(RELAY_LOCK_BEGIN) + len(RELAY_LOCK_BEGIN):text.index(RELAY_LOCK_END)]
+    fields = {}
+    for line in body.splitlines():
+        m = re.match(r"([a-z_]+):\s*(.*)$", line.strip())
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    return fields
+
+
+def resolve_listener_backend(backend):
+    """PR 1 ships only the portable `local` detach backend; `auto` resolves to it.
+
+    launchd/systemd/windows are RFC 047 Phase D adapters and are rejected loudly so
+    an operator never believes an OS service was installed when it was not.
+    """
+    if backend in LISTENER_PR2_BACKENDS:
+        sys.exit(
+            f"m8shift-runtime: --backend {backend} is not yet shipped "
+            "(RFC 047 PR 2 — OS service adapters); use --backend local (or auto, "
+            "which falls back to local) for now"
+        )
+    return "local"
+
+
+def listener_profile_findings(doc, agent):
+    """Validate a m8shift.listener.profile.v1 document; returns problem strings."""
+    if not isinstance(doc, dict):
+        return ["profile must be a JSON object"]
+    problems = []
+    if doc.get("schema") != LISTENER_PROFILE_SCHEMA:
+        problems.append(f"schema must be {LISTENER_PROFILE_SCHEMA}")
+    prof_agent = doc.get("agent", "")
+    if not isinstance(prof_agent, str) or not AGENT_RE.fullmatch(prof_agent):
+        problems.append("agent must match [a-z][a-z0-9_-]*")
+    elif agent and prof_agent != agent:
+        problems.append(f"profile agent {prof_agent!r} does not match --agent {agent!r}")
+    argv = doc.get("argv")
+    if isinstance(argv, str):
+        problems.append("argv must be an argv array, not a shell string")
+    elif not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
+        problems.append("argv must be a non-empty JSON array of non-empty strings")
+    cwd = doc.get("cwd", ".")
+    if not isinstance(cwd, str) or not cwd:
+        problems.append("cwd must be a non-empty string path")
+    else:
+        cwd_abs = cwd if os.path.isabs(cwd) else os.path.join(HERE, cwd)
+        if not os.path.isdir(cwd_abs):
+            problems.append(f"cwd is not an existing directory: {cwd}")
+    env_allow = doc.get("env_allowlist", [])
+    if env_allow in (None, ""):
+        env_allow = []
+    if not isinstance(env_allow, list) or not all(
+            isinstance(v, str) and ENV_RE.fullmatch(v) for v in env_allow):
+        problems.append("env_allowlist must be a list of environment variable names")
+    if not isinstance(doc.get("start_on_idle", False), bool):
+        problems.append("start_on_idle must be a boolean (default false)")
+    return problems
+
+
+def normalize_listener_profile(doc, source):
+    cwd = doc.get("cwd", ".") or "."
+    cwd_abs = cwd if os.path.isabs(cwd) else os.path.abspath(os.path.join(HERE, cwd))
+    return {
+        "schema": LISTENER_PROFILE_SCHEMA,
+        "agent": doc.get("agent", ""),
+        "argv": list(doc.get("argv") or []),
+        "cwd": cwd_abs,
+        "env_allowlist": list(doc.get("env_allowlist") or []),
+        "start_on_idle": bool(doc.get("start_on_idle", False)),
+        "source": source,
+    }
+
+
+def load_listener_profile(args, agent):
+    """Load and validate the provider profile BEFORE any process work (RFC 047)."""
+    if bool(args.cmd_file) == bool(args.provider):
+        sys.exit("m8shift-runtime: listener start requires exactly one of --cmd-file or --provider")
+    if args.cmd_file:
+        path = os.path.abspath(args.cmd_file)
+        if not os.path.exists(path):
+            sys.exit(f"m8shift-runtime: listener profile not found: {args.cmd_file}")
+        doc, err = read_json_diagnostic(path, {})
+        if err:
+            sys.exit(f"m8shift-runtime: cannot read listener profile {args.cmd_file}: {err}")
+        source = os.path.relpath(path, HERE)
+    else:
+        row = provider_by_name(agent)
+        if not row:
+            sys.exit(f"m8shift-runtime: no provider entry for {agent} in .m8shift/providers.json")
+        errors = [f for f in provider_entry_findings(row, agent) if f["severity"] == "error"]
+        if errors:
+            sys.exit(f"m8shift-runtime: provider entry for {agent} is invalid: "
+                     + "; ".join(f["message"] for f in errors))
+        argv, _platform = select_provider_argv(row)
+        if not argv:
+            sys.exit(f"m8shift-runtime: provider entry for {agent} has no argv (nothing to launch headlessly)")
+        doc = {
+            "schema": LISTENER_PROFILE_SCHEMA,
+            "agent": agent,
+            "argv": list(argv),
+            "cwd": ".",
+            "env_allowlist": row.get("env_allowlist") or [],
+            "start_on_idle": False,
+        }
+        source = os.path.relpath(PROVIDERS, HERE)
+    problems = listener_profile_findings(doc, agent)
+    if problems:
+        sys.exit(f"m8shift-runtime: invalid listener profile ({source}):\n  - "
+                 + "\n  - ".join(problems))
+    return normalize_listener_profile(doc, source)
+
+
+def new_listener_run_id(agent):
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{agent}-{uuid.uuid4().hex[:8]}"
+
+
+def listener_runner_argv(agent, profile, runner_path, run_id):
+    """One bounded runner turn as an explicit argv array (never a shell string).
+
+    The listener supervises the RUNNER; the runner supervises the provider and is
+    the one-shot classifier (RFC 047 Phase A exit codes). RFC 028 markers in the
+    provider argv are rendered here without shell interpolation.
+    """
+    provider_argv = render_argv_template(
+        profile["argv"],
+        agent=agent,
+        prompt=LISTENER_TURN_PROMPT.format(agent=agent),
+        run_id=run_id,
+    )
+    argv = [
+        sys.executable, runner_path, agent, "--once",
+        "--m8shift", RELAY_PATH,
+        "--m8shift-py", CORE_PATH,
+        "--runtime-dir", RUNTIME_DIR,
+        "--run-id", run_id,
+        "--cwd", profile["cwd"],
+    ]
+    if profile["env_allowlist"]:
+        argv += ["--env-allowlist", ",".join(profile["env_allowlist"])]
+    if profile["start_on_idle"]:
+        argv.append("--start-on-idle")
+    argv += ["--cmd", *provider_argv]
+    return argv
+
+
+def read_listener_state(agent):
+    doc, err = read_json_diagnostic(listener_paths(agent)["state"], {})
+    if err or not isinstance(doc, dict):
+        return {}
+    return doc
+
+
+def write_listener_state(agent, *, phase, consecutive_failures,
+                         last_run_id="", last_classification="", reason=""):
+    os.makedirs(LISTENERS_DIR, exist_ok=True)
+    doc = {
+        "schema": LISTENER_STATE_SCHEMA,
+        "agent": agent,
+        "phase": phase,
+        "consecutive_failures": consecutive_failures,
+        "last_run_id": last_run_id,
+        "last_classification": last_classification,
+        "updated_at": iso(),
+    }
+    if reason:
+        doc["reason"] = reason
+    path = listener_paths(agent)["state"]
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False, sort_keys=True, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return doc
+
+
+def read_listener_pid(agent):
+    """Return (pid_file_exists, pid_or_None); malformed content yields (True, None)."""
+    path = listener_paths(agent)["pid"]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        return True, None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return True, None
+    return True, pid if pid > 0 else None
+
+
+def write_listener_pid(agent, pid):
+    os.makedirs(LISTENERS_DIR, exist_ok=True)
+    path = listener_paths(agent)["pid"]
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(f"{pid}\n")
+    os.replace(tmp, path)
+
+
+def remove_listener_pid(agent):
+    try:
+        os.unlink(listener_paths(agent)["pid"])
+        return True
+    except OSError:
+        return False
+
+
+def remove_own_listener_pid(agent):
+    """Self-cleanup on clean loop exit: only the pid file naming THIS process."""
+    exists, pid = read_listener_pid(agent)
+    if exists and pid == os.getpid():
+        remove_listener_pid(agent)
+
+
+def windows_pid_alive(pid):  # pragma: no cover - exercised only on Windows hosts
+    """Windows aliveness probe via `tasklist` argv — never os.kill(pid, 0) (RFC 047)."""
+    try:
+        probe = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {int(pid)}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return f'"{int(pid)}"' in (probe.stdout or "")
+
+
+def listener_pid_alive(pid):
+    """Backend aliveness probe: POSIX signal-0; Windows tasklist (no os.kill there)."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
+        return windows_pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _posix_signal_group_or_pid(pid, sig):
+    """Signal the process group led by `pid`; fall back to the single process only
+    when the pid is alive but not a group leader. Never guesses another group."""
+    try:
+        os.killpg(pid, sig)
+        return True
+    except ProcessLookupError:
+        if not listener_pid_alive(pid):
+            return False  # group and leader already gone
+    except (PermissionError, OSError):
+        pass
+    try:
+        os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
+def listener_terminate_group(pid, grace):
+    """RFC 047 stop contract: TERM the WHOLE process group, wait `grace`, then KILL.
+
+    Windows path uses `taskkill /PID <pid> /T /F` as an explicit argv subprocess —
+    no POSIX signals and no os.kill aliveness probes on Windows. Returns True when
+    the supervised pid is confirmed dead.
+    """
+    if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
+        try:
+            subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                           capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        deadline = time.monotonic() + max(1.0, grace)
+        while time.monotonic() < deadline:
+            if not listener_pid_alive(pid):
+                return True
+            time.sleep(0.2)
+        return not listener_pid_alive(pid)
+    _posix_signal_group_or_pid(pid, signal.SIGTERM)
+    deadline = time.monotonic() + max(0.0, grace)
+    while time.monotonic() < deadline:
+        if not listener_pid_alive(pid):
+            break
+        time.sleep(0.1)
+    # Always follow with a group KILL so a TERM-ignoring grandchild cannot outlive
+    # its leader; signalling an already-empty group is a harmless no-op.
+    _posix_signal_group_or_pid(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not listener_pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not listener_pid_alive(pid)
+
+
+def listener_run_classification(run_id):
+    """Read the runner's own classification for `run_id` from the runs ledger.
+
+    Companion-side read of `.m8shift/runtime/runs.jsonl` only — never the relay.
+    Returns "" when the ledger has no run.ended row (e.g. stub/foreign runners).
+    """
+    rows, err = read_jsonl_diagnostic(RUNS)
+    if err:
+        return ""
+    for row in reversed(rows):
+        if row.get("run_id") == run_id and row.get("event") == "run.ended":
+            status = row.get("status") or row.get("verification_status") or ""
+            return status if isinstance(status, str) else ""
+    return ""
+
+
+def build_listener_plan(agent, profile, runner_path, args, backend):
+    paths = listener_paths(agent)
+    max_retries = args.max_retries
+    return {
+        "schema": LISTENER_PLAN_SCHEMA,
+        "agent": agent,
+        "backend": backend,
+        "mode": "foreground" if args.foreground else "detached",
+        "profile": {key: profile[key] for key in
+                    ("schema", "agent", "argv", "cwd", "env_allowlist", "start_on_idle")},
+        "profile_source": profile["source"],
+        "runner": os.path.relpath(runner_path, HERE),
+        "runner_exists": os.path.isfile(runner_path),
+        "runner_argv_preview": listener_runner_argv(agent, profile, runner_path, "RUN_ID"),
+        "poll_interval_seconds": args.poll_interval,
+        "max_ticks": args.max_ticks,
+        "max_retries": max_retries,
+        "max_backoff_seconds": args.max_backoff,
+        "backoff_ladder_seconds": [listener_backoff(n, cap=args.max_backoff)
+                                   for n in range(1, max_retries + 1)],
+        "pid_file": os.path.relpath(paths["pid"], HERE),
+        "state_file": os.path.relpath(paths["state"], HERE),
+        "log_file": os.path.relpath(paths["log"], HERE),
+        "runtime_version": VERSION,
+    }
+
+
+def spawn_detached_listener(args, agent, runner_path, backend):
+    """Local backend detach: stdlib process primitives only (RFC 047 Phase C).
+
+    POSIX detaches with start_new_session=True (child pid == pgid, so stop can
+    killpg the whole tree). Windows uses the documented creationflags and relies
+    on `taskkill /T` for stop. stdout/stderr are appended to the listener log.
+    """
+    os.makedirs(LISTENERS_DIR, exist_ok=True)
+    os.makedirs(LISTENER_LOGS_DIR, exist_ok=True)
+    child_argv = [
+        sys.executable, SELF_PATH, "listener", "start",
+        "--agent", agent, "--foreground", "--backend", backend,
+        "--poll-interval", str(args.poll_interval),
+        "--max-retries", str(args.max_retries),
+        "--max-backoff", str(args.max_backoff),
+        "--runner", runner_path,
+    ]
+    if args.cmd_file:
+        child_argv += ["--cmd-file", os.path.abspath(args.cmd_file)]
+    if args.provider:
+        child_argv.append("--provider")
+    if args.max_ticks:
+        child_argv += ["--max-ticks", str(args.max_ticks)]
+    env = os.environ.copy()
+    env[LISTENER_DETACHED_ENV] = "1"
+    popen_kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "cwd": HERE,
+        "env": env,
+    }
+    if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+    log_path = listener_paths(agent)["log"]
+    with open(log_path, "ab") as log_fh:
+        popen_kwargs["stdout"] = log_fh
+        popen_kwargs["stderr"] = log_fh
+        proc = subprocess.Popen(child_argv, **popen_kwargs)
+    write_listener_pid(agent, proc.pid)
+    return proc.pid
+
+
+def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retries, max_backoff):
+    """The RFC 047 listener loop — one bounded runner turn per wake, zero model spend
+    while it is not this agent's turn.
+
+    Decision table per tick (LOCK is read READ-ONLY; the listener never edits it):
+      DONE                                          → clean stop (exit 0)
+      AWAITING_<agent>                              → launch exactly ONE runner turn
+      IDLE + profile.start_on_idle                  → launch exactly ONE runner turn
+      WORKING_<agent> (holder==agent) + previous
+        run classified stuck_working + budget left  → one retry (runs are synchronous,
+                                                      so the previous provider process
+                                                      is necessarily dead here)
+      PAUSED / AWAITING_<peer> / WORKING_<peer> /
+        IDLE without starter / missing relay        → sleep (first-class neutral)
+    Runner exit mapping: 0 resets the failure counter; 1 and 2 increment it;
+    3 (external_transition) and 4 (suspended) leave it unchanged. At --max-retries
+    the loop persists phase=halted, stays resident, and launches nothing more; a
+    restarted listener reloads the sidecar and honors an existing halt until an
+    explicit `listener start --restart`.
+    """
+    me_awaiting = f"AWAITING_{agent.upper()}"
+    me_working = f"WORKING_{agent.upper()}"
+    persisted = read_listener_state(agent)
+    phase = persisted.get("phase") if persisted.get("phase") in LISTENER_PHASES else "polling"
+    fails = persisted.get("consecutive_failures")
+    fails = fails if isinstance(fails, int) and fails >= 0 else 0
+    last_run_id = persisted.get("last_run_id") if isinstance(persisted.get("last_run_id"), str) else ""
+    last_classification = (persisted.get("last_classification")
+                           if isinstance(persisted.get("last_classification"), str) else "")
+    reason = persisted.get("reason") if isinstance(persisted.get("reason"), str) else ""
+    if phase == "backoff":
+        phase = "polling"  # backoff timers are not resumed across restarts
+    if phase != "halted":
+        reason = ""
+    else:
+        listener_log_line(
+            f"{agent}: persisted halted phase found ({reason or 'max retries reached'}) — "
+            "supervising without launches; clear it with `listener start --restart`.")
+
+    def save():
+        write_listener_state(agent, phase=phase, consecutive_failures=fails,
+                             last_run_id=last_run_id,
+                             last_classification=last_classification, reason=reason)
+
+    save()
+    ticks = 0
+    try:
+        while True:
+            if max_ticks and ticks >= max_ticks:
+                listener_log_line(f"{agent}: max ticks reached ({max_ticks}) — leaving the loop.")
+                return 0
+            ticks += 1
+            if phase == "halted":
+                time.sleep(poll)  # resident so status/logs stay inspectable; never launches
+                continue
+            lk = read_relay_lock_fields()
+            if lk is None:
+                time.sleep(poll)  # missing/invalid relay is neutral: wait, never repair
+                continue
+            state = lk.get("state", "")
+            if state == "DONE":
+                listener_log_line(f"{agent}: relay session is DONE — stopping cleanly.")
+                save()
+                return 0
+            wake = ""
+            if state == me_awaiting:
+                wake = "awaiting_turn"
+            elif state == "IDLE" and profile["start_on_idle"]:
+                wake = "idle_start"
+            elif (state == me_working and lk.get("holder", "") == agent
+                    and last_classification == "stuck_working" and fails < max_retries):
+                wake = "stuck_working_retry"
+            if not wake:
+                # PAUSED, AWAITING_<peer>, WORKING_<peer>, a WORKING_<agent> lock this
+                # listener did not classify as stuck, and IDLE without starter
+                # permission are all neutral: sleep. Never launch on WORKING_<peer>.
+                if phase != "polling":
+                    phase = "polling"
+                    save()
+                time.sleep(poll)
+                continue
+            run_id = new_listener_run_id(agent)
+            argv = listener_runner_argv(agent, profile, runner_path, run_id)
+            listener_log_line(f"{agent}: state={state} ({wake}) → launching one runner turn, run {run_id}.")
+            try:
+                rc = subprocess.run(argv, cwd=HERE).returncode
+            except OSError as e:
+                listener_log_line(f"{agent}: runner launch failed: {e}")
+                rc = 2
+            last_run_id = run_id
+            last_classification = (listener_run_classification(run_id)
+                                   or LISTENER_RUNNER_EXITS.get(rc, "runner_crash"))
+            if rc == 0:
+                fails = 0
+                phase = "polling"
+                listener_log_line(f"{agent}: run {run_id} succeeded ({last_classification}); failure counter reset.")
+                save()
+                time.sleep(poll)
+                continue
+            if rc in (3, 4):
+                # external_transition / suspended never burn the retry budget (RFC 047).
+                phase = "polling"
+                listener_log_line(f"{agent}: run {run_id} was neutral ({last_classification}); counter unchanged.")
+                save()
+                time.sleep(poll)
+                continue
+            fails += 1
+            if fails >= max_retries:
+                phase = "halted"
+                reason = f"max_retries_after_{last_classification or 'failure'}"
+                listener_log_line(
+                    f"{agent}: run {run_id} failed ({last_classification}); {fails}/{max_retries} — "
+                    "HALTED. The relay is left for operator recovery; no force-claim is ever attempted.")
+                save()
+                continue
+            phase = "backoff"
+            delay = listener_backoff(fails, cap=max_backoff)
+            listener_log_line(
+                f"{agent}: run {run_id} failed ({last_classification}); {fails}/{max_retries} — "
+                f"backing off {delay}s.")
+            save()
+            time.sleep(delay)
+    finally:
+        remove_own_listener_pid(agent)
+
+
+def cmd_listener_start(args):
+    agent = validate_listener_agent(args.agent)
+    if args.poll_interval <= 0:
+        sys.exit("m8shift-runtime: --poll-interval must be > 0 (fractional seconds allowed)")
+    if args.max_ticks < 0:
+        sys.exit("m8shift-runtime: --max-ticks must be >= 0")
+    if args.max_retries < 1:
+        sys.exit("m8shift-runtime: --max-retries must be >= 1")
+    if args.max_backoff < 1:
+        sys.exit("m8shift-runtime: --max-backoff must be >= 1")
+    backend = resolve_listener_backend(args.backend)
+    profile = load_listener_profile(args, agent)
+    runner_path = os.path.abspath(args.runner) if args.runner else DEFAULT_RUNNER_PATH
+    if args.dry_run:
+        # Validation-only: prints the plan and writes NO pid, state, or log file.
+        plan = build_listener_plan(agent, profile, runner_path, args, backend)
+        print(json.dumps({"dry_run": True, "plan": plan},
+                         ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+    if not os.path.isfile(runner_path):
+        sys.exit(f"m8shift-runtime: headless runner not found at "
+                 f"{os.path.relpath(runner_path, HERE)} (pass --runner PATH)")
+    supervised = os.environ.get(LISTENER_DETACHED_ENV) == "1"
+    if not supervised:
+        exists, pid = read_listener_pid(agent)
+        if exists and pid and listener_pid_alive(pid):
+            if not args.restart:
+                sys.exit(f"m8shift-runtime: listener for {agent!r} is already running "
+                         f"(pid {pid}); stop it first or rerun with --restart")
+            if not listener_terminate_group(pid, 10.0):
+                sys.exit(f"m8shift-runtime: could not stop the running listener (pid {pid}) for --restart")
+            remove_listener_pid(agent)
+            print(f"replaced running listener for {agent} (pid {pid}).")
+        elif exists:
+            shown = pid if pid is not None else "invalid"
+            print(f"stale listener pid file for {agent} (pid {shown} is not alive) — repairing before start.")
+            remove_listener_pid(agent)
+        if args.restart:
+            # --restart is the explicit operator act that clears a persisted halt.
+            write_listener_state(agent, phase="polling", consecutive_failures=0,
+                                 last_run_id="", last_classification="", reason="")
+    if args.foreground:
+        if not supervised:
+            write_listener_pid(agent, os.getpid())
+        return run_listener_loop(
+            agent, profile, runner_path,
+            poll=args.poll_interval, max_ticks=args.max_ticks,
+            max_retries=args.max_retries, max_backoff=args.max_backoff)
+    pid = spawn_detached_listener(args, agent, runner_path, backend)
+    paths = listener_paths(agent)
+    print(f"✓ listener started for {agent} (pid {pid}, backend {backend}, detached)")
+    print(f"  log:   {os.path.relpath(paths['log'], HERE)}")
+    print(f"  state: {os.path.relpath(paths['state'], HERE)}")
+    return 0
+
+
+def cmd_listener_stop(args):
+    agent = validate_listener_agent(args.agent)
+    if args.grace < 0:
+        sys.exit("m8shift-runtime: --grace must be >= 0")
+    exists, pid = read_listener_pid(agent)
+    if not exists:
+        print(f"no listener pid file for {agent} (nothing to stop).")
+        return 0
+    if pid is None:
+        remove_listener_pid(agent)
+        print(f"removed malformed listener pid file for {agent}.")
+        return 0
+    if not listener_pid_alive(pid):
+        remove_listener_pid(agent)
+        print(f"stale listener pid file removed for {agent} (pid {pid} was already dead).")
+        return 0
+    if not listener_terminate_group(pid, args.grace):
+        print(f"m8shift-runtime: listener pid {pid} did not die after TERM/KILL; "
+              "pid file kept for inspection", file=sys.stderr)
+        return 1
+    remove_listener_pid(agent)  # only after confirmed death
+    print(f"✓ listener stopped for {agent} (pid {pid}, process group terminated).")
+    return 0
+
+
+def cmd_listener_status(args):
+    agent = validate_listener_agent(args.agent)
+    paths = listener_paths(agent)
+    exists, pid = read_listener_pid(agent)
+    alive = bool(pid) and listener_pid_alive(pid)
+    if not exists:
+        pid_status = "dead"
+    elif alive:
+        pid_status = "alive"
+    else:
+        pid_status = "stale"
+    doc = read_listener_state(agent)
+    phase = doc.get("phase") if doc.get("phase") in LISTENER_PHASES else ""
+    halted = phase == "halted"  # persisted: rendered even when the process is gone
+    repaired = False
+    if args.repair and pid_status == "stale":
+        repaired = remove_listener_pid(agent)
+        if repaired:
+            pid_status = "dead"
+    status_label = "HALTED" if halted else pid_status.upper()
+    fails = doc.get("consecutive_failures")
+    fails = fails if isinstance(fails, int) and fails >= 0 else 0
+    payload = {
+        "agent": agent,
+        "status": status_label,
+        "pid": pid,
+        "pid_status": pid_status,
+        "process_resident": alive,
+        "phase": phase,
+        "halted": halted,
+        "consecutive_failures": fails,
+        "last_run_id": doc.get("last_run_id", ""),
+        "last_classification": doc.get("last_classification", ""),
+        "updated_at": doc.get("updated_at", ""),
+        "reason": doc.get("reason", ""),
+        "repaired": repaired,
+        "pid_file": os.path.relpath(paths["pid"], HERE),
+        "state_file": os.path.relpath(paths["state"], HERE),
+        "log_file": os.path.relpath(paths["log"], HERE),
+        "runtime_version": VERSION,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    where = f" (pid {pid}, process {'resident' if alive else 'gone'})" if exists else ""
+    print(f"listener {agent}: {status_label}{where}")
+    if phase:
+        print(f"  phase: {phase}  consecutive_failures: {fails}")
+    if doc.get("last_run_id") or doc.get("last_classification"):
+        print(f"  last run: {doc.get('last_run_id') or '-'} "
+              f"classification={doc.get('last_classification') or '-'} "
+              f"updated={doc.get('updated_at') or '-'}")
+    if halted:
+        print(f"  reason: {doc.get('reason') or 'max retries reached'}")
+        print(f"  clear with: python3 m8shift-runtime.py listener start --agent {agent} --restart ...")
+    if pid_status == "stale":
+        print("  stale pid file — repair with `listener status --repair`, `listener stop`, "
+              "or a fresh `listener start`.")
+    if repaired:
+        print("  ✓ stale pid file removed.")
+    if args.repair and pid_status == "alive":
+        print("  listener is alive; nothing to repair.")
+    return 0
+
+
+def cmd_listener_logs(args):
+    agent = validate_listener_agent(args.agent)
+    if args.tail < 1:
+        sys.exit("m8shift-runtime: --tail must be >= 1")
+    path = listener_paths(agent)["log"]
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        sys.exit(f"m8shift-runtime: no listener log for {agent} at {os.path.relpath(path, HERE)}")
+    for line in lines[-args.tail:]:
+        print(line)
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(
         prog=os.path.basename(sys.argv[0]),
@@ -3252,6 +4022,58 @@ def main():
     rpshow = rpolicy_sub.add_parser("show", help="show effective retention policy")
     rpshow.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     rpshow.set_defaults(fn=cmd_retention_policy_show)
+
+    listener = sub.add_parser(
+        "listener",
+        help="supervise headless runner lifecycles (RFC 047; PR 1 ships the local backend)")
+    listener_sub = listener.add_subparsers(dest="verb", required=True)
+    lst = listener_sub.add_parser(
+        "start", help="start (or dry-run plan) one agent's listener loop")
+    lst.add_argument("--agent", required=True, help="agent name whose listener lane to start")
+    lst.add_argument("--cmd-file", default="",
+                     help="path to a m8shift.listener.profile.v1 JSON provider profile (argv array only)")
+    lst.add_argument("--provider", action="store_true",
+                     help="build the profile from this agent's .m8shift/providers.json entry instead of --cmd-file")
+    lst.add_argument("--backend", choices=LISTENER_BACKENDS, default="auto",
+                     help="lifecycle backend; PR 1 ships local only (auto falls back to local; "
+                          "launchd/systemd/windows arrive in PR 2)")
+    lst.add_argument("--restart", action="store_true",
+                     help="replace a live listener and clear a persisted halted phase")
+    lst.add_argument("--dry-run", action="store_true",
+                     help="validate the profile and print the launch plan; writes no pid/state/log file")
+    lst.add_argument("--poll-interval", type=float, default=LISTENER_DEFAULT_POLL_S,
+                     help="seconds between relay polls; fractional values allowed (default: 20)")
+    lst.add_argument("--max-ticks", type=int, default=0,
+                     help="bound the loop to N iterations (test seam; 0 = unbounded)")
+    lst.add_argument("--max-retries", type=int, default=LISTENER_DEFAULT_MAX_RETRIES,
+                     help="consecutive failed turns before the listener persists a halted phase (default: 3)")
+    lst.add_argument("--max-backoff", type=int, default=LISTENER_MAX_BACKOFF_S,
+                     help="cap in seconds on the 20/40/80/160/... failure backoff ladder (default: 300)")
+    lst.add_argument("--foreground", action="store_true",
+                     help="run the listener loop in this process instead of detaching")
+    lst.add_argument("--runner", default="",
+                     help="path to the headless runner script the listener supervises "
+                          "(default: examples/headless_runner.py beside this companion)")
+    lst.set_defaults(fn=cmd_listener_start)
+    lsp = listener_sub.add_parser(
+        "stop", help="terminate one agent's listener process group and remove its pid file")
+    lsp.add_argument("--agent", required=True, help="agent name whose listener lane to stop")
+    lsp.add_argument("--grace", type=float, default=10.0,
+                     help="seconds to wait after TERM before the group KILL (default: 10)")
+    lsp.set_defaults(fn=cmd_listener_stop)
+    lss = listener_sub.add_parser(
+        "status", help="show alive/stale/dead/HALTED listener state for one agent")
+    lss.add_argument("--agent", required=True, help="agent name whose listener lane to inspect")
+    lss.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    lss.add_argument("--repair", action="store_true",
+                     help="remove the pid file when it is stale (process dead); never touches a live listener")
+    lss.set_defaults(fn=cmd_listener_status)
+    lsl = listener_sub.add_parser("logs", help="print the tail of one agent's listener log")
+    lsl.add_argument("--agent", required=True, help="agent name whose listener log to print")
+    lsl.add_argument("--tail", type=int, default=50,
+                     help="number of trailing log lines to print (default: 50)")
+    lsl.set_defaults(fn=cmd_listener_logs)
 
     args = p.parse_args()
     sys.exit(args.fn(args))
