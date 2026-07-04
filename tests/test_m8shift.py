@@ -2774,7 +2774,8 @@ class TestAuditFixes(CLIBase):
         self.assertIn("read it before any\nempty handback", cowork.PROTOCOL["en"])
         s = cowork.stanza_for("claude")
         self.assertIn("idle` is not `DONE`", s)
-        self.assertIn("keep `./m8shift.py wait\nclaude` armed", s)
+        # RFC 048: the compact floor stanza keeps the keep-listening rule on one line.
+        self.assertIn("keep `./m8shift.py wait claude` armed", s)
         self.assertIn("Never bounce unread work", s)
 
     def test_version_surface(self):
@@ -7768,6 +7769,310 @@ class TestRFC040UsagePRB(CLIBase):
             with self.subTest(argv=argv):
                 r = self.rt(*argv)
                 self.assertEqual(r.returncode, 64, r.stdout + r.stderr)
+
+
+# ───────────────────────────── RFC 048 PR A: adoption surface ────────────────
+
+class TestRFC048PRA(CLIBase):
+    """RFC 048 (#18 + #20): init-delivered discipline pack (M8SHIFT.agent-pack.md),
+    the compact anchor stanza with its mandatory inline safety floor, and the
+    read-only doctor adoption-health findings."""
+
+    PACK = "M8SHIFT.agent-pack.md"
+    STANZA_BLOCK_RE = re.compile(
+        re.escape(cowork.STANZA_BEGIN) + r".*?" + re.escape(cowork.STANZA_END),
+        re.DOTALL,
+    )
+
+    def pack_path(self):
+        return os.path.join(self.d, self.PACK)
+
+    def read_file(self, name):
+        with open(os.path.join(self.d, name), encoding="utf-8") as f:
+            return f.read()
+
+    def write_file(self, name, text):
+        with open(os.path.join(self.d, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def doctor(self, *args):
+        r = self.cw("doctor", "--json", *args)
+        return r, json.loads(r.stdout)
+
+    def set_relay_banner_version(self, version):
+        """Simulate a project whose relay was initialized by another core version."""
+        self.write_file(
+            "M8SHIFT.md",
+            self.md().replace(f"**v{cowork.VERSION}**", f"**v{version}**"),
+        )
+
+    # ── #18: generated discipline pack ──────────────────────────────────────
+
+    def test_init_creates_pack_with_generated_header_and_content_floor(self):
+        self.init("--name", "demo")
+        body = self.read_file(self.PACK)
+        self.assertTrue(body.startswith(cowork.AGENT_PACK_BEGIN))
+        self.assertIn(cowork.AGENT_PACK_END, body)
+        for line in (f"version: {cowork.VERSION}", "project: demo",
+                     "agents: claude,codex", "source: m8shift.py init"):
+            self.assertIn(line, body)
+        self.assertRegex(body, r"generated_at: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+        # RFC 048 pack content floor, including the #99 delivery discipline verbatim.
+        for needle in (
+            "wait → claim → work → validate → append",   # work loop w/ validation
+            "may-i-write",                                # write-after-claim rule
+            "shell or runtime loop",                      # waiting rule (not chat polling)
+            "Never hold `WORKING_<you>` with no active task",   # no-parking rule
+            "`PAUSED`", "cooldown", "listener", "usage-wait",   # high-level pointers
+            "peek <you>",                                 # unread-turn rule
+            "never stop listening merely because you predict",  # keep-listening
+            "`IDLE` means no turn is opened, not that the task is complete",
+            "untrusted coordination data",                # prompt-security boundary
+            "Never force or steal a valid lock",          # stale-lock recovery
+            "advisory",                                   # companion boundaries
+            'An issue, branch, PR, or MR being opened is not "done"; done requires\n'
+            "implemented, verified, committed, pushed, and handed off or closed according\n"
+            "to the relay.",
+            "## When in doubt",
+        ):
+            self.assertIn(needle, body)
+
+    def test_pack_is_gitignored_like_protocol(self):
+        self.init()
+        with open(os.path.join(self.d, ".gitignore"), encoding="utf-8") as f:
+            self.assertIn("M8SHIFT.agent-pack.md", f.read())
+
+    def test_reinit_pack_idempotent_and_preserves_user_edits_outside_markers(self):
+        self.init("--name", "demo")
+        with open(self.pack_path(), "a", encoding="utf-8") as f:
+            f.write("\nMY-PROJECT-NOTES\n")
+        before = self.read_file(self.PACK)
+        self.init("--name", "demo")
+        # byte-stable: an unchanged generated block is not rewritten (volatile
+        # generated_at excluded from the comparison by design)
+        self.assertEqual(self.read_file(self.PACK), before)
+        after = self.read_file(self.PACK)
+        self.assertIn("MY-PROJECT-NOTES", after)
+        self.assertEqual(after.count(cowork.AGENT_PACK_BEGIN), 1)
+        self.assertEqual(after.count(cowork.AGENT_PACK_END), 1)
+
+    def test_corrupted_pack_refuses_refresh_and_force_generated_rebuilds(self):
+        self.init("--name", "demo")
+        corrupted = self.read_file(self.PACK).replace(cowork.AGENT_PACK_END, "")
+        self.write_file(self.PACK, corrupted)
+        r = self.cw("init", "--name", "demo")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--force-generated", r.stderr + r.stdout)
+        self.assertEqual(self.read_file(self.PACK), corrupted)   # refusal writes nothing
+        r = self.cw("init", "--name", "demo", "--force-generated")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(cowork.parse_agent_pack(self.read_file(self.PACK)))
+        with open(self.pack_path() + ".m8shift.bak", encoding="utf-8") as f:
+            self.assertEqual(f.read(), corrupted)                # corrupt file backed up
+
+    def test_force_generated_does_not_reset_relay(self):
+        self.init()
+        self.turn("claude", "codex")
+        self.write_file(self.PACK, "garbage, no markers\n")
+        self.assertEqual(self.cw("init", "--force-generated").returncode, 0)
+        self.assertEqual(self.lock()["turn"], "1")   # relay state untouched
+
+    # ── #18: anchor stanza floor ─────────────────────────────────────────────
+
+    def test_fresh_anchor_stanza_carries_all_five_floor_items(self):
+        self.init()
+        for name in ("CLAUDE.md", "AGENTS.md"):
+            content = self.read_file(name)
+            # The five RFC 048 floor items, asserted literally: 1. write guard,
+            # 2. status guard, 3. idle-is-not-done, 4. prompt security, 5. pointers.
+            self.assertIn("Write guard", content, name)
+            self.assertIn("Status guard", content, name)
+            self.assertIn("Idle is not done", content, name)
+            self.assertIn("Prompt security", content, name)
+            self.assertIn("M8SHIFT.agent-pack.md", content, name)
+            self.assertIn("M8SHIFT.protocol.md", content, name)
+
+    def test_stanza_floor_markers_match_template(self):
+        # doctor's staleness needles must stay in sync with the rendered stanza
+        s = cowork.stanza_for("claude")
+        for marker in cowork.STANZA_FLOOR_MARKERS:
+            self.assertIn(marker, s)
+
+    def test_stanza_byte_count_under_hard_ceiling(self):
+        self.addCleanup(setattr, cowork, "ROSTER", cowork.AGENTS)
+        cowork.ROSTER = ("claude", "codex")
+        n = len(cowork.stanza_for("claude").encode("utf-8"))
+        self.assertLess(n, 2048, f"rendered stanza is {n} bytes (target <1536)")
+
+    def test_existing_anchor_keeps_user_content_and_gets_floor_stanza(self):
+        old_stanza = (cowork.STANZA_BEGIN
+                      + "\nOLD RICH STANZA WITHOUT FLOOR MARKERS\n"
+                      + cowork.STANZA_END)
+        self.write_file("CLAUDE.md", old_stanza + "\n\nUSER-RULES\n")
+        self.init()
+        content = self.read_file("CLAUDE.md")
+        self.assertIn("USER-RULES", content)
+        self.assertNotIn("OLD RICH STANZA", content)
+        self.assertEqual(content.count(cowork.STANZA_BEGIN), 1)
+        for marker in cowork.STANZA_FLOOR_MARKERS:
+            self.assertIn(marker, content)
+
+    def test_bridge_still_works_with_pack(self):
+        self.write_file("CLAUDE.md", "# Shared\n\nBIZ-RULE\n")
+        self.init()
+        agents = self.read_file("AGENTS.md")
+        self.assertIn(cowork.BRIDGE["en"].strip(), agents)
+        self.assertTrue(agents.startswith(cowork.STANZA_BEGIN))
+
+    def test_override_sync_still_works_with_floor_stanza(self):
+        self.write_file("AGENTS.override.md", "# Temporary override\n\nKEEP-OVERRIDE\n")
+        self.init()
+        agents = self.read_file("AGENTS.md")
+        override = self.read_file("AGENTS.override.md")
+        blk = self.STANZA_BLOCK_RE.search(agents).group(0)
+        self.assertIn(blk, override)                 # same rendered stanza block
+        self.assertIn("KEEP-OVERRIDE", override)
+        _, d = self.doctor("--severity-min", "info")
+        self.assertNotIn("anchor.override_out_of_sync",
+                         {f["check"] for f in d["findings"]})
+
+    # ── #20: doctor adoption findings ────────────────────────────────────────
+
+    def test_doctor_pack_missing_pre048_is_info_and_lint_green(self):
+        self.init()
+        os.remove(self.pack_path())
+        self.set_relay_banner_version("3.41.0")      # pre-048 project
+        r, _ = self.doctor("--lint")
+        self.assertEqual(r.returncode, 0, r.stdout)  # advisory only: lint stays green
+        _, d = self.doctor("--severity-min", "info")
+        sev = {f["check"]: f["severity"] for f in d["findings"]}
+        self.assertEqual(sev.get("adoption.pack_missing"), "info")
+
+    def test_doctor_pack_missing_post048_is_warning(self):
+        self.init()
+        os.remove(self.pack_path())
+        self.set_relay_banner_version("3.49.0")      # post-048 project
+        r, d = self.doctor("--lint")
+        self.assertEqual(r.returncode, 1)
+        sev = {f["check"]: f["severity"] for f in d["findings"]}
+        self.assertEqual(sev.get("adoption.pack_missing"), "warning")
+
+    def test_doctor_pack_stale_and_invalid(self):
+        self.init()
+        stale = self.read_file(self.PACK).replace(
+            f"version: {cowork.VERSION}", "version: 0.0.1", 1)
+        self.write_file(self.PACK, stale)
+        _, d = self.doctor()
+        sev = {f["check"]: f["severity"] for f in d["findings"]}
+        self.assertEqual(sev.get("adoption.pack_stale"), "warning")
+        self.assertEqual(d["adoption"]["pack"]["status"], "stale")
+        self.write_file(self.PACK, stale.replace(cowork.AGENT_PACK_END, ""))
+        _, d = self.doctor()
+        sev = {f["check"]: f["severity"] for f in d["findings"]}
+        self.assertEqual(sev.get("adoption.pack_invalid"), "error")
+        self.assertNotIn("adoption.pack_stale", sev)     # one condition, one ID
+        self.assertEqual(d["adoption"]["pack"]["status"], "invalid")
+
+    def test_doctor_stanza_missing_and_incomplete_keep_anchor_ids(self):
+        self.init()
+        agents = self.read_file("AGENTS.md")
+        blk = self.STANZA_BLOCK_RE.search(agents).group(0)
+        self.write_file("AGENTS.md", agents.replace(blk, "").lstrip("\n") or "# empty\n")
+        claude = self.read_file("CLAUDE.md")
+        self.write_file("CLAUDE.md", claude + "\n" + blk + "\n")   # duplicated block
+        _, d = self.doctor("--severity-min", "info")
+        sev = {f["check"]: f["severity"] for f in d["findings"]}
+        self.assertEqual(sev.get("anchor.stanza_missing"), "warning")
+        self.assertEqual(sev.get("anchor.stanza_incomplete"), "error")
+        # conditions already covered by anchor.* must not resurface as adoption.*
+        self.assertFalse([c for c in sev if c.startswith("adoption.stanza")], sev)
+        self.assertNotIn("adoption.anchor_missing", sev)
+
+    def test_doctor_stanza_stale_when_floor_missing(self):
+        self.init()                                   # pack present → post-048
+        old = (cowork.STANZA_BEGIN + "\nold stanza body, no floor\n" + cowork.STANZA_END)
+        self.write_file("CLAUDE.md", self.STANZA_BLOCK_RE.sub(
+            lambda m: old, self.read_file("CLAUDE.md"), count=1))
+        _, d = self.doctor()
+        stale = [f for f in d["findings"] if f["check"] == "anchor.stanza_stale"]
+        self.assertEqual(len(stale), 1, d["findings"])
+        self.assertEqual(stale[0]["severity"], "warning")
+        self.assertEqual(stale[0]["path"], "CLAUDE.md")
+        entry = next(a for a in d["adoption"]["anchors"] if a["agent"] == "claude")
+        self.assertEqual(entry["stanza"], "stale")
+
+    def test_doctor_lint_green_on_pre048_project_with_old_stanzas(self):
+        self.init()
+        os.remove(self.pack_path())
+        self.set_relay_banner_version("3.41.0")
+        old = (cowork.STANZA_BEGIN + "\nold stanza body, no floor\n" + cowork.STANZA_END)
+        for name in ("CLAUDE.md", "AGENTS.md"):
+            self.write_file(name, self.STANZA_BLOCK_RE.sub(
+                lambda m: old, self.read_file(name), count=1))
+        r, _ = self.doctor("--lint")
+        self.assertEqual(r.returncode, 0, r.stdout)   # pre-048 stays lint-green
+        _, d = self.doctor("--severity-min", "info")
+        sev = {f["check"]: f["severity"] for f in d["findings"]}
+        self.assertEqual(sev.get("adoption.pack_missing"), "info")
+        self.assertEqual(sev.get("anchor.stanza_stale"), "info")
+
+    def test_doctor_json_adoption_section_healthy(self):
+        self.write_file("AGENTS.override.md", "# override\n")
+        self.init()
+        _, d = self.doctor()
+        self.assertTrue(d["ok"])
+        pack = d["adoption"]["pack"]
+        self.assertEqual((pack["path"], pack["status"], pack["version"]),
+                         (self.PACK, "current", cowork.VERSION))
+        anchors = {a["agent"]: a for a in d["adoption"]["anchors"]}
+        self.assertEqual(anchors["claude"]["stanza"], "current")
+        self.assertEqual(anchors["codex"]["stanza"], "current")
+        self.assertEqual(anchors["codex"]["override"], "synced")
+
+    def test_doctor_is_read_only_byte_for_byte(self):
+        self.init()
+        os.remove(self.pack_path())                   # a finding-producing condition
+
+        def snapshot():
+            out = {}
+            for root, _, files in os.walk(self.d):
+                for f in files:
+                    p = os.path.join(root, f)
+                    with open(p, "rb") as fh:
+                        out[p] = fh.read()
+            return out
+
+        before = snapshot()
+        r = self.cw("doctor", "--json", "--security", "--contracts",
+                    "--severity-min", "info")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(snapshot(), before)
+
+    def test_adoption_ids_are_disjoint_from_existing_doctor_ids(self):
+        with open(SCRIPT, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        ids = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "doctor_finding" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                ids.add(node.args[0].value)
+        for new in ("adoption.pack_missing", "adoption.pack_stale",
+                    "adoption.pack_invalid", "anchor.stanza_stale"):
+            self.assertIn(new, ids)
+        # RFC 048: one condition, one ID — no adoption.* duplicates of anchor.* checks
+        for dup in ("adoption.anchor_missing", "adoption.stanza_missing",
+                    "adoption.stanza_incomplete", "adoption.stanza_stale",
+                    "adoption.override_desync"):
+            self.assertNotIn(dup, ids)
+        # runtime: one synthetic condition yields exactly one finding about it
+        self.init()
+        stripped = self.STANZA_BLOCK_RE.sub("", self.read_file("AGENTS.md")).lstrip("\n")
+        self.write_file("AGENTS.md", stripped or "# x\n")
+        _, d = self.doctor("--severity-min", "info")
+        about = [f["check"] for f in d["findings"] if f.get("path") == "AGENTS.md"]
+        self.assertEqual(about, ["anchor.stanza_missing"])
 
 
 class TestDetailedHelpCoverage(unittest.TestCase):
