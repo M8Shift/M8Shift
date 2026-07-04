@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-VERSION = "3.45.1"
+VERSION = "3.46.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"

@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.46.0 — 2026-07-04
+
+RFC 047 Phase A — headless runner final-state enforcement (closes #17).
+
+- Post-run classification is now **authorship-primary and total**: a run succeeds iff
+  the relay is `DONE` or this agent authored a transcript turn numbered above the
+  pre-run turn. Statuses: `completed`/`advanced`/`non_completion`/`stuck_working`/
+  `suspended`/`external_transition`/`invalid_relay`; bounded LOCK re-read for
+  transient errors; exit map 0 success / 1 failure / 2 infrastructure-timeout /
+  3 external transition / 4 suspended; the retry counter moves only on provider
+  failures. Covers the fast peer ping-pong race, operator reset, the `integrating:`
+  sentinel, and usage cooldowns (never burn retries).
+- New core guard `claim <agent> --refresh`: refresh-only TTL heartbeat, refused unless
+  the agent already holds its own `WORKING` lock, mutually exclusive with `--force` —
+  closes the plain-claim ghost-claim TOCTOU found in the RFC 047 adversarial review.
+  Runners must never heartbeat with a plain claim (protocol core, EF-7, module docs).
+- `run.non_completion` runtime events with pre/post snapshots; heartbeat failures emit
+  `run.heartbeat_failed` and never abort the run; no automatic force-claim anywhere.
+- Listener lifecycle companion (#21) = RFC 047 Phases B–E, next.
+
+Lockstep bump to `3.46.0`. Full suite green (442).
+
 ## v3.45.1 — 2026-07-04
 
 Detailed help release (operator request): every CLI parameter documents itself.
