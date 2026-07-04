@@ -19,6 +19,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -3097,6 +3098,10 @@ def cmd_doctor(args):
         findings.extend(listener_doctor_findings())
     except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
         findings.append({"severity": "warning", "check": "runtime.listener", "message": str(e)})
+    try:
+        findings.extend(usage_doctor_findings())
+    except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
+        findings.append({"severity": "warning", "check": "runtime.usage", "message": str(e)})
     ok = not any(f["severity"] == "error" for f in findings)
     if args.json:
         print(json.dumps({
@@ -4595,6 +4600,795 @@ def cmd_listener_logs(args):
     return 0
 
 
+# ── RFC 040 PR A — read-only usage snapshots (Phase 2 slice) ──
+#
+# Advisory charter (never negotiable, mirrors the listener charter): the usage
+# companion OBSERVES provider session usage, it never routes and never pauses.
+# PR A is strictly read-only with respect to the relay: it never writes
+# M8SHIFT.md or LOCK, never calls core pause/resume/cooldown, never queues a
+# cooperative WORKING_* interrupt, and never launches a provider. Adapters run
+# as explicit argv arrays only (no shell strings) with a bounded timeout and a
+# capped stdout; M8Shift itself never opens the network — an adapter is a local
+# CLI or a local fixture/status file. Raw adapter output is never stored
+# verbatim: only normalized m8shift.usage.snapshot.v1 fields plus an optional
+# size-capped redacted excerpt reach the sidecars. Unknown usage is fail-open:
+# status "unknown", exit 0, warning finding. Exit codes 30/40 are advisory
+# automation hints, nothing more (RFC 040, "PR A scope").
+
+USAGE_DIR = os.path.join(PROJECT_DIR, "usage")
+USAGE_ADAPTERS = os.path.join(USAGE_DIR, "adapters.json")
+USAGE_FIXTURES_DIR = os.path.join(USAGE_DIR, "fixtures")
+USAGE_LEDGER = os.path.join(RUNTIME_DIR, "usage.jsonl")
+USAGE_ERRORS = os.path.join(RUNTIME_DIR, "usage-adapter-errors.jsonl")
+USAGE_ADAPTERS_SCHEMA = "m8shift.usage.adapters.v1"
+USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"
+USAGE_FIXTURE_SCHEMA = "m8shift.usage.fixture.v1"
+USAGE_ADAPTER_KINDS = ("cli_json", "fixture")
+USAGE_PROVENANCE = ("official", "local_estimate", "proxy_reported",
+                    "historical_estimate", "manual", "unknown")
+USAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+USAGE_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+USAGE_ADAPTER_KEYS = {"//", "name", "agent", "provider", "kind", "command",
+                      "fixture_path", "timeout_s", "enabled", "sha256"}
+USAGE_TIMEOUT_MIN_S = 1
+USAGE_TIMEOUT_MAX_S = 60
+USAGE_TIMEOUT_DEFAULT_S = 10
+USAGE_MAX_STDOUT_BYTES = 262144
+USAGE_RAW_EXCERPT_MAX_CHARS = 240
+USAGE_ERRORS_KEEP = 200
+USAGE_WARN_THRESHOLD_DEFAULT = 0.80
+USAGE_LIMIT_THRESHOLD_DEFAULT = 1.0
+USAGE_STALE_AFTER_MINUTES_DEFAULT = 30
+# PR A advisory exit codes (read-only surface only; RFC 040 "PR A scope"):
+# 0 ok/unknown (fail-open), 12 adapter/config error, 30 near_limit advisory,
+# 40 limit_hit advisory. Precedence: 40 > 30 > 12 > 0.
+USAGE_EXIT_OK = 0
+USAGE_EXIT_CONFIG = 12
+USAGE_EXIT_NEAR_LIMIT = 30
+USAGE_EXIT_LIMIT_HIT = 40
+# Redaction for the optional raw excerpt: token/key-shaped runs never reach the
+# sidecars (no existing runtime redaction helper to reuse; patterns mirror the
+# context companion's redact-before-store intent).
+USAGE_REDACT_PATTERNS = (
+    re.compile(r"(?i)\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?key|token|secret|password|authorization|credential)\b\s*[:=]\s*\S+"),
+    re.compile(r"\b[A-Za-z0-9+/_-]{32,}={0,2}\b"),
+)
+
+
+def default_usage_adapters():
+    return {
+        "schema": USAGE_ADAPTERS_SCHEMA,
+        "generated_by": f"m8shift-runtime.py {VERSION}",
+        "adapters": [
+            {
+                "//": ("Disabled example: point `command` at a local `claude usage`-style CLI "
+                       "that prints m8shift.usage.fixture.v1 JSON on stdout "
+                       "(see examples/usage-fixtures/claude.json), then set enabled:true."),
+                "name": "claude-usage-cli",
+                "agent": "claude",
+                "provider": "anthropic-claude",
+                "kind": "cli_json",
+                "command": ["claude-usage-example", "--json"],
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
+            {
+                "//": ("Disabled example: point `fixture_path` at a local status file with the "
+                       "same m8shift.usage.fixture.v1 shape, then set enabled:true."),
+                "name": "codex-usage-fixture",
+                "agent": "codex",
+                "provider": "openai-codex",
+                "kind": "fixture",
+                "fixture_path": ".m8shift/usage/fixtures/codex.json",
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
+        ],
+    }
+
+
+def sample_usage_fixture(agent):
+    """Obviously synthetic m8shift.usage.fixture.v1 sample (round numbers, epoch-ish dates)."""
+    return {
+        "schema": USAGE_FIXTURE_SCHEMA,
+        "agent": agent,
+        "provenance": "manual",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "used_tokens": 12500,
+        "limit_tokens": 100000,
+        "windows": [
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z",
+             "used": 12500, "limit": 100000},
+            {"kind": "weekly", "resets_at": "2026-01-08T00:00:00Z",
+             "used": 50000, "limit": 1000000},
+        ],
+    }
+
+
+def usage_timeout_s(entry):
+    value = entry.get("timeout_s", USAGE_TIMEOUT_DEFAULT_S)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return float(USAGE_TIMEOUT_DEFAULT_S)
+    if not (USAGE_TIMEOUT_MIN_S <= value <= USAGE_TIMEOUT_MAX_S):
+        return float(USAGE_TIMEOUT_DEFAULT_S)
+    return float(value)
+
+
+def usage_adapter_entry_findings(entry, prefix, seen):
+    findings = []
+    if not isinstance(entry, dict):
+        return [{"severity": "error", "check": "usage.adapter",
+                 "message": f"{prefix} is not an object"}]
+    name = entry.get("name", "")
+    if not isinstance(name, str) or not USAGE_NAME_RE.fullmatch(name):
+        findings.append({"severity": "error", "check": "usage.name",
+                         "message": f"{prefix}.name is invalid"})
+    elif name in seen:
+        findings.append({"severity": "error", "check": "usage.name_duplicate",
+                         "message": f"duplicate adapter name {name}"})
+    if isinstance(name, str):
+        seen.add(name)
+    label = name or prefix
+    agent = entry.get("agent", "")
+    if not isinstance(agent, str) or not AGENT_RE.fullmatch(agent):
+        findings.append({"severity": "error", "check": "usage.agent",
+                         "message": f"{label}: agent is invalid"})
+    provider = entry.get("provider", "")
+    if provider not in (None, "") and not isinstance(provider, str):
+        findings.append({"severity": "error", "check": "usage.provider",
+                         "message": f"{label}: provider must be a string"})
+    kind = entry.get("kind", "")
+    if kind not in USAGE_ADAPTER_KINDS:
+        findings.append({"severity": "error", "check": "usage.kind",
+                         "message": f"{label}: kind must be one of {', '.join(USAGE_ADAPTER_KINDS)}"})
+    command = entry.get("command")
+    if kind == "cli_json" or command is not None:
+        if isinstance(command, str):
+            findings.append({"severity": "error", "check": "usage.command_string",
+                             "message": f"{label}: command must be an argv array, not a shell string"})
+        elif not isinstance(command, list) or not command or not all(isinstance(v, str) and v for v in command):
+            findings.append({"severity": "error", "check": "usage.command",
+                             "message": f"{label}: command must be a non-empty list of non-empty strings"})
+        else:
+            exe = command[0]
+            if not os.path.isabs(exe) and ("/" in exe or "\\" in exe):
+                findings.append({"severity": "error", "check": "usage.command_path",
+                                 "message": f"{label}: command[0] must be a bare PATH program or an absolute path"})
+    if kind == "fixture":
+        fixture_path = entry.get("fixture_path", "")
+        if not isinstance(fixture_path, str) or not fixture_path.strip():
+            findings.append({"severity": "error", "check": "usage.fixture_path",
+                             "message": f"{label}: fixture kind requires a non-empty fixture_path"})
+    timeout = entry.get("timeout_s", USAGE_TIMEOUT_DEFAULT_S)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
+            or not (USAGE_TIMEOUT_MIN_S <= timeout <= USAGE_TIMEOUT_MAX_S):
+        findings.append({"severity": "error", "check": "usage.timeout",
+                         "message": f"{label}: timeout_s must be a number between "
+                                    f"{USAGE_TIMEOUT_MIN_S} and {USAGE_TIMEOUT_MAX_S}"})
+    enabled = entry.get("enabled", False)
+    if not isinstance(enabled, bool):
+        findings.append({"severity": "error", "check": "usage.enabled",
+                         "message": f"{label}: enabled must be a boolean"})
+    pin = entry.get("sha256", "")
+    if pin not in (None, "") and (not isinstance(pin, str) or not USAGE_SHA256_RE.fullmatch(pin.lower())):
+        findings.append({"severity": "error", "check": "usage.sha256",
+                         "message": f"{label}: sha256 must be a 64-hex-character digest"})
+    for key in sorted(set(entry) - USAGE_ADAPTER_KEYS):
+        findings.append({"severity": "warning", "check": "usage.unknown_key",
+                         "message": f"{label}: unknown key {key!r} ignored"})
+    return findings
+
+
+def usage_config_findings(doc):
+    findings = []
+    if not isinstance(doc, dict):
+        return [{"severity": "error", "check": "usage.schema",
+                 "message": "usage adapters config is not a JSON object"}], []
+    if doc.get("schema") != USAGE_ADAPTERS_SCHEMA:
+        findings.append({"severity": "error", "check": "usage.schema",
+                         "message": f"expected schema {USAGE_ADAPTERS_SCHEMA}"})
+    adapters = doc.get("adapters")
+    if not isinstance(adapters, list):
+        return findings + [{"severity": "error", "check": "usage.adapters",
+                            "message": "adapters must be a list"}], []
+    seen = set()
+    for idx, entry in enumerate(adapters):
+        findings.extend(usage_adapter_entry_findings(entry, f"adapters[{idx}]", seen))
+    entries = [entry for entry in adapters if isinstance(entry, dict)]
+    return findings, entries
+
+
+def load_usage_config():
+    """Returns (entries, findings, config_error). Missing/invalid file => config_error."""
+    doc, err = read_json_diagnostic(USAGE_ADAPTERS, {})
+    if err:
+        return [], [{"severity": "error", "check": "usage.config",
+                     "message": f"{os.path.relpath(USAGE_ADAPTERS, HERE)}: {err}"}], True
+    if not doc:
+        return [], [{"severity": "error", "check": "usage.config",
+                     "message": "missing .m8shift/usage/adapters.json (run: usage init)"}], True
+    findings, entries = usage_config_findings(doc)
+    return entries, findings, any(f["severity"] == "error" for f in findings)
+
+
+def redact_usage_excerpt(text, cap=USAGE_RAW_EXCERPT_MAX_CHARS):
+    out = text or ""
+    for pattern in USAGE_REDACT_PATTERNS:
+        out = pattern.sub("[REDACTED]", out)
+    out = " ".join(out.split())
+    return out[:cap]
+
+
+def _usage_int_or_none(value, field, warnings):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        warnings.append(f"{field} must be a non-negative integer; ignored")
+        return None
+    return value
+
+
+def _usage_iso_or_none(value, field, warnings):
+    if value in (None, ""):
+        return None
+    if isinstance(value, str) and parse_utc(value):
+        return value
+    warnings.append(f"{field} must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ); ignored")
+    return None
+
+
+def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="", include_raw_excerpt=False):
+    """Normalize one m8shift.usage.fixture.v1 document to the pinned
+    m8shift.usage.snapshot.v1 shape (RFC 040 "PR A snapshot schema bytes").
+    Returns (snapshot, warnings); snapshot is None only on unusable input."""
+    warnings = []
+    if not isinstance(doc, dict):
+        return None, ["adapter output is not a JSON object"]
+    schema = doc.get("schema")
+    if schema not in (None, USAGE_FIXTURE_SCHEMA):
+        return None, [f"unsupported input schema {schema!r} (expected {USAGE_FIXTURE_SCHEMA})"]
+    if schema is None:
+        warnings.append(f"input does not declare schema {USAGE_FIXTURE_SCHEMA}")
+    doc_agent = doc.get("agent")
+    if isinstance(doc_agent, str) and doc_agent and doc_agent != agent:
+        warnings.append(f"input agent {doc_agent!r} differs from adapter agent {agent!r}; adapter config wins")
+    provenance = doc.get("provenance", "unknown")
+    if provenance not in USAGE_PROVENANCE:
+        warnings.append(f"unknown provenance {provenance!r}; recorded as \"unknown\"")
+        provenance = "unknown"
+    captured_at = _usage_iso_or_none(doc.get("captured_at"), "captured_at", warnings) or iso()
+    used_tokens = _usage_int_or_none(doc.get("used_tokens"), "used_tokens", warnings)
+    limit_tokens = _usage_int_or_none(doc.get("limit_tokens"), "limit_tokens", warnings)
+    raw_windows = doc.get("windows", [])
+    if raw_windows in (None, ""):
+        raw_windows = []
+    if not isinstance(raw_windows, list):
+        warnings.append("windows must be a list; ignored")
+        raw_windows = []
+    windows = []
+    for idx, win in enumerate(raw_windows):
+        if not isinstance(win, dict):
+            warnings.append(f"windows[{idx}] is not an object; dropped")
+            continue
+        wkind = win.get("kind")
+        if not isinstance(wkind, str) or not wkind:
+            warnings.append(f"windows[{idx}].kind must be a non-empty string; window dropped")
+            continue
+        windows.append({
+            "kind": wkind,
+            "resets_at": _usage_iso_or_none(win.get("resets_at"), f"windows[{idx}].resets_at", warnings),
+            "used": _usage_int_or_none(win.get("used"), f"windows[{idx}].used", warnings),
+            "limit": _usage_int_or_none(win.get("limit"), f"windows[{idx}].limit", warnings),
+        })
+    ratios = [w["used"] / w["limit"] for w in windows
+              if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0]
+    if not ratios and used_tokens is not None and isinstance(limit_tokens, int) and limit_tokens > 0:
+        ratios = [used_tokens / limit_tokens]
+    decision_ratio = round(max(ratios), 4) if ratios else None
+    known = {"schema", "agent", "provenance", "captured_at", "used_tokens", "limit_tokens", "windows"}
+    for key in sorted(set(doc) - known):
+        warnings.append(f"unknown input key {key!r} ignored")
+    snapshot = {
+        "schema": USAGE_SNAPSHOT_SCHEMA,
+        "agent": agent,
+        "source": {"adapter": adapter_name, "kind": kind, "provenance": provenance},
+        "captured_at": captured_at,
+        "used_tokens": used_tokens,
+        "limit_tokens": limit_tokens,
+        "decision_ratio": decision_ratio,
+        "windows": windows,
+    }
+    if include_raw_excerpt and raw_text:
+        snapshot["raw_excerpt_redacted"] = redact_usage_excerpt(raw_text)
+    return snapshot, warnings
+
+
+def classify_usage_ratio(ratio, warn_threshold, limit_threshold):
+    if ratio is None:
+        return "unknown"
+    if ratio >= limit_threshold:
+        return "limit_hit"
+    if ratio >= warn_threshold:
+        return "near_limit"
+    return "ok"
+
+
+def usage_exit_code(classifications, had_adapter_error):
+    """PR A advisory precedence: 40 > 30 > 12 > 0 (unknown/ok are fail-open 0)."""
+    if "limit_hit" in classifications:
+        return USAGE_EXIT_LIMIT_HIT
+    if "near_limit" in classifications:
+        return USAGE_EXIT_NEAR_LIMIT
+    if had_adapter_error:
+        return USAGE_EXIT_CONFIG
+    return USAGE_EXIT_OK
+
+
+def trim_usage_errors_ledger(keep=USAGE_ERRORS_KEEP):
+    """Bound the adapter-error sidecar to its last `keep` raw lines (bytes preserved)."""
+    try:
+        with open(USAGE_ERRORS, encoding="utf-8") as fh:
+            lines = [line for line in fh.read().splitlines() if line.strip()]
+    except OSError:
+        return
+    if len(lines) <= keep:
+        return
+    reject_symlinked_runtime_path(USAGE_ERRORS)
+    tmp = f"{USAGE_ERRORS}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines[-keep:]) + "\n")
+    os.replace(tmp, USAGE_ERRORS)
+
+
+def record_usage_adapter_error(adapter_name, agent, message):
+    row = runtime_event(
+        "usage.adapter_error",
+        agent=agent if isinstance(agent, str) and AGENT_RE.fullmatch(agent or "") else "",
+        payload={"adapter": adapter_name, "message": redact_usage_excerpt(message),
+                 "exit_code": USAGE_EXIT_CONFIG},
+    )
+    append_jsonl(USAGE_ERRORS, row)
+    trim_usage_errors_ledger()
+
+
+def run_usage_adapter_bounded(argv, timeout, cap):
+    """USAGE-1 (Codex review): bounded subprocess capture that NEVER materializes
+    unbounded adapter stdout in memory. Binary pipes + reader threads accumulate at
+    most cap+1 bytes each; the process is killed on stdout overflow or timeout.
+
+    Returns (returncode, stdout_bytes, stderr_bytes, overflowed, timed_out);
+    returncode is None when the process was killed before exiting on its own."""
+    proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                            shell=False)
+    buffers = {"out": b"", "err": b""}
+    overflow = threading.Event()
+
+    def reader(stream, key):
+        buf = bytearray()
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                take = cap + 1 - len(buf)
+                if take > 0:
+                    buf += chunk[:take]
+                if len(buf) > cap:
+                    overflow.set()          # stop accumulating; the main loop kills
+                    break
+        except (OSError, ValueError):
+            pass
+        buffers[key] = bytes(buf)
+
+    threads = [threading.Thread(target=reader, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=reader, args=(proc.stderr, "err"), daemon=True)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while proc.poll() is None:
+        if overflow.is_set():
+            proc.kill()
+            break
+        if time.monotonic() > deadline:
+            timed_out = True
+            proc.kill()
+            break
+        time.sleep(0.05)
+    proc.wait()
+    for t in threads:
+        t.join(timeout=5)
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+    return proc.returncode, buffers["out"], buffers["err"], overflow.is_set(), timed_out
+
+
+def run_usage_adapter(entry):
+    """Read one ENABLED adapter. Bounded, argv-only, no shell, no network by
+    M8Shift itself. Returns (doc, raw_text, error_message)."""
+    kind = entry.get("kind")
+    if kind == "fixture":
+        path = entry.get("fixture_path", "")
+        if not os.path.isabs(path):
+            path = os.path.join(HERE, path)
+        try:
+            if os.path.getsize(path) > USAGE_MAX_STDOUT_BYTES:
+                return None, "", "fixture exceeds the size cap"
+            raw = read_text(path)
+        except OSError as e:
+            return None, "", f"fixture unreadable: {e}"
+        try:
+            return json.loads(raw), raw, ""
+        except json.JSONDecodeError as e:
+            return None, raw, f"fixture is not valid JSON: {e}"
+    argv = list(entry.get("command") or [])
+    exe = argv[0]
+    resolved = exe if os.path.isabs(exe) else shutil.which(exe)
+    if not resolved or not os.path.exists(resolved):
+        return None, "", f"executable {exe!r} not found"
+    pin = (entry.get("sha256") or "").lower()
+    if pin:
+        try:
+            digest = sha256_file(os.path.realpath(resolved))
+        except (OSError, ValueError) as e:
+            return None, "", f"cannot hash executable for identity pin: {e}"
+        if digest != pin:
+            return None, "", "adapter identity mismatch (sha256 pin); refusing to run"
+    timeout = usage_timeout_s(entry)
+    try:
+        rc, out_b, err_b, overflowed, timed_out = run_usage_adapter_bounded(
+            [resolved] + argv[1:], timeout, USAGE_MAX_STDOUT_BYTES)
+    except OSError as e:
+        return None, "", f"adapter failed to start: {e}"
+    if overflowed:
+        # Cap-specific finding: the output is discarded, never parsed (USAGE-1).
+        return None, "", (f"adapter stdout exceeded the {USAGE_MAX_STDOUT_BYTES}-byte cap; "
+                          "process killed, output discarded")
+    if timed_out:
+        return None, "", f"adapter timed out after {timeout:g}s"
+    stdout = out_b.decode("utf-8", errors="replace")
+    stderr = err_b.decode("utf-8", errors="replace")
+    if rc != 0:
+        return None, stdout, f"adapter exited {rc}: {redact_usage_excerpt(stderr or stdout)}"
+    try:
+        return json.loads(stdout), stdout, ""
+    except json.JSONDecodeError as e:
+        return None, stdout, f"adapter stdout is not valid JSON: {e}"
+
+
+def usage_agent_filter(raw):
+    """Validated --agent filter. Returns (agent, error); agent '' means no filter."""
+    if not raw:
+        return "", None
+    value = raw.strip().lower()
+    if not AGENT_RE.fullmatch(value):
+        return "", f"invalid agent name {raw!r}"
+    return value, None
+
+
+def selected_usage_entries(entries, agent_filter):
+    matching = [e for e in entries
+                if not agent_filter or e.get("agent") == agent_filter]
+    enabled = [e for e in matching if e.get("enabled") is True]
+    return enabled, len(matching) - len(enabled)
+
+
+def print_usage_findings(findings):
+    for f in findings:
+        print(f"{f['severity']} {f['check']}: {f['message']}")
+
+
+def cmd_usage_init(args):
+    os.makedirs(USAGE_FIXTURES_DIR, exist_ok=True)
+    created = []
+    if write_json_if_missing(USAGE_ADAPTERS, default_usage_adapters()):
+        created.append(".m8shift/usage/adapters.json")
+    codex_fixture = os.path.join(USAGE_FIXTURES_DIR, "codex.json")
+    if write_json_if_missing(codex_fixture, sample_usage_fixture("codex")):
+        created.append(".m8shift/usage/fixtures/codex.json")
+    ensure_runtime_gitignore()
+    if args.json:
+        print(json.dumps({"created": created, "runtime_version": VERSION},
+                         ensure_ascii=False, sort_keys=True))
+        return USAGE_EXIT_OK
+    if created:
+        print(f"✓ usage scaffold ready ({len(created)} file(s) written; adapters stay disabled until edited).")
+        for path in created:
+            print(f"  {path}")
+    else:
+        print("✓ kept existing .m8shift/usage/ files (no clobber).")
+    return USAGE_EXIT_OK
+
+
+def cmd_usage_adapters_list(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_EXIT_CONFIG
+    entries, findings, config_error = load_usage_config()
+    rows = []
+    for entry in entries:
+        if agent_filter and entry.get("agent") != agent_filter:
+            continue
+        rows.append({
+            "name": entry.get("name", ""),
+            "agent": entry.get("agent", ""),
+            "provider": entry.get("provider", ""),
+            "kind": entry.get("kind", ""),
+            "enabled": entry.get("enabled") is True,
+            "timeout_s": usage_timeout_s(entry),
+            "identity_pinned": bool(entry.get("sha256")),
+        })
+    if args.json:
+        print(json.dumps({"adapters": rows, "findings": findings,
+                          "ok": not config_error, "runtime_version": VERSION},
+                         ensure_ascii=False, sort_keys=True))
+        return USAGE_EXIT_CONFIG if config_error else USAGE_EXIT_OK
+    if not rows and not findings:
+        print("no usage adapters configured (run: usage init)")
+    for row in rows:
+        state = "enabled" if row["enabled"] else "disabled"
+        pin = "pinned" if row["identity_pinned"] else "unpinned"
+        print(f"{row['name']}  agent={row['agent']} kind={row['kind']} {state} {pin} timeout={row['timeout_s']:g}s")
+    print_usage_findings(findings)
+    return USAGE_EXIT_CONFIG if config_error else USAGE_EXIT_OK
+
+
+def cmd_usage_adapters_check(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_EXIT_CONFIG
+    entries, findings, config_error = load_usage_config()
+    probed = []
+    if not config_error:
+        enabled, _skipped = selected_usage_entries(entries, agent_filter)
+        for entry in enabled:
+            name = entry.get("name", "")
+            doc, _raw, err = run_usage_adapter(entry)
+            if err:
+                record_usage_adapter_error(name, entry.get("agent", ""), err)
+                findings.append({"severity": "error", "check": "usage.probe",
+                                 "message": f"{name}: {err}"})
+                probed.append({"name": name, "ok": False})
+                continue
+            snapshot, warnings = normalize_usage_snapshot(
+                doc, agent=entry.get("agent", ""), adapter_name=name,
+                kind=entry.get("kind", ""))
+            if snapshot is None:
+                record_usage_adapter_error(name, entry.get("agent", ""), warnings[0])
+                findings.append({"severity": "error", "check": "usage.probe",
+                                 "message": f"{name}: {warnings[0]}"})
+                probed.append({"name": name, "ok": False})
+                continue
+            for message in warnings:
+                findings.append({"severity": "warning", "check": "usage.normalize",
+                                 "message": f"{name}: {message}"})
+            probed.append({"name": name, "ok": True})
+    ok = not any(f["severity"] == "error" for f in findings)
+    if args.json:
+        print(json.dumps({"ok": ok, "probed": probed, "findings": findings,
+                          "runtime_version": VERSION},
+                         ensure_ascii=False, sort_keys=True))
+        return USAGE_EXIT_OK if ok else USAGE_EXIT_CONFIG
+    if not findings:
+        print("✓ usage adapters config OK"
+              + (f" ({len(probed)} enabled adapter(s) probed)" if probed else " (no enabled adapters probed)"))
+    print_usage_findings(findings)
+    return USAGE_EXIT_OK if ok else USAGE_EXIT_CONFIG
+
+
+def cmd_usage_snapshot(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_EXIT_CONFIG
+    entries, findings, config_error = load_usage_config()
+    if config_error:
+        if args.json:
+            print(json.dumps({"ok": False, "snapshots": [], "findings": findings,
+                              "runtime_version": VERSION},
+                             ensure_ascii=False, sort_keys=True))
+        else:
+            print_usage_findings(findings)
+        return USAGE_EXIT_CONFIG
+    enabled, skipped_disabled = selected_usage_entries(entries, agent_filter)
+    results = []
+    had_adapter_error = False
+    for entry in enabled:
+        name = entry.get("name", "")
+        agent = entry.get("agent", "")
+        doc, raw, err = run_usage_adapter(entry)
+        if err:
+            had_adapter_error = True
+            record_usage_adapter_error(name, agent, err)
+            findings.append({"severity": "error", "check": "usage.adapter",
+                             "message": f"{name}: {err}"})
+            continue
+        snapshot, warnings = normalize_usage_snapshot(
+            doc, agent=agent, adapter_name=name, kind=entry.get("kind", ""),
+            raw_text=raw, include_raw_excerpt=args.raw_excerpt)
+        if snapshot is None:
+            had_adapter_error = True
+            record_usage_adapter_error(name, agent, warnings[0])
+            findings.append({"severity": "error", "check": "usage.adapter",
+                             "message": f"{name}: {warnings[0]}"})
+            continue
+        append_jsonl(USAGE_LEDGER, runtime_event(
+            "usage.snapshot", agent=agent, payload={"snapshot": snapshot}))
+        classification = classify_usage_ratio(
+            snapshot["decision_ratio"], args.warn_threshold, args.limit_threshold)
+        if classification == "unknown":
+            findings.append({"severity": "warning", "check": "usage.unknown",
+                             "message": f"{name}: usage unknown for {agent}; fail-open (no pause)"})
+        for message in warnings:
+            findings.append({"severity": "warning", "check": "usage.normalize",
+                             "message": f"{name}: {message}"})
+        results.append({"adapter": name, "classification": classification,
+                        "snapshot": snapshot})
+    if not enabled:
+        findings.append({"severity": "warning", "check": "usage.no_adapter",
+                         "message": "no enabled usage adapter matched; usage unknown (fail-open)"})
+    code = usage_exit_code({r["classification"] for r in results}, had_adapter_error)
+    if args.json:
+        print(json.dumps({"ok": code in (USAGE_EXIT_OK, USAGE_EXIT_NEAR_LIMIT, USAGE_EXIT_LIMIT_HIT),
+                          "exit_code": code, "snapshots": results,
+                          "skipped_disabled": skipped_disabled, "findings": findings,
+                          "runtime_version": VERSION},
+                         ensure_ascii=False, sort_keys=True))
+        return code
+    for r in results:
+        s = r["snapshot"]
+        ratio = "-" if s["decision_ratio"] is None else f"{s['decision_ratio']:g}"
+        tokens = f"{s['used_tokens']}/{s['limit_tokens']}" \
+            if s["used_tokens"] is not None and s["limit_tokens"] is not None else "-"
+        print(f"{s['agent']}  {r['classification']}  ratio={ratio} tokens={tokens} "
+              f"adapter={r['adapter']} captured={s['captured_at']}")
+    print_usage_findings(findings)
+    return code
+
+
+def read_usage_ledger_diagnostic():
+    """Tolerant usage.jsonl reader: malformed lines become warning findings, never crashes."""
+    rows, findings = [], []
+    try:
+        with open(USAGE_LEDGER, encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, RecursionError, ValueError) as e:
+                    findings.append({"severity": "warning", "check": "usage.ledger",
+                                     "message": f".m8shift/runtime/usage.jsonl:{n}: {e}"})
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+                else:
+                    findings.append({"severity": "warning", "check": "usage.ledger",
+                                     "message": f".m8shift/runtime/usage.jsonl:{n}: not a JSON object"})
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        findings.append({"severity": "warning", "check": "usage.ledger", "message": str(e)})
+    return rows, findings
+
+
+def latest_usage_snapshots(rows, findings):
+    latest = {}
+    for row in rows:
+        if row.get("type") != "usage.snapshot":
+            continue
+        snapshot = (row.get("payload") or {}).get("snapshot") \
+            if isinstance(row.get("payload"), dict) else None
+        if not isinstance(snapshot, dict) or snapshot.get("schema") != USAGE_SNAPSHOT_SCHEMA:
+            findings.append({"severity": "warning", "check": "usage.ledger",
+                             "message": "usage.snapshot event without a valid "
+                                        f"{USAGE_SNAPSHOT_SCHEMA} payload skipped"})
+            continue
+        agent = snapshot.get("agent")
+        if not isinstance(agent, str) or not agent:
+            findings.append({"severity": "warning", "check": "usage.ledger",
+                             "message": "usage.snapshot event without agent skipped"})
+            continue
+        latest[agent] = snapshot  # append order: last one wins
+    return latest
+
+
+def cmd_usage_status(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_EXIT_CONFIG
+    rows, findings = read_usage_ledger_diagnostic()
+    latest = latest_usage_snapshots(rows, findings)
+    if agent_filter:
+        latest = {agent: snap for agent, snap in latest.items() if agent == agent_filter}
+    stale_after_s = max(0, args.stale_after_minutes) * 60
+    report = []
+    for agent in sorted(latest):
+        snapshot = latest[agent]
+        captured = parse_utc(snapshot.get("captured_at", ""))
+        age_s = int((now() - captured).total_seconds()) if captured else None
+        stale = age_s is None or age_s > stale_after_s
+        classification = classify_usage_ratio(
+            snapshot.get("decision_ratio"), args.warn_threshold, args.limit_threshold)
+        effective = classification
+        if stale:
+            effective = "unknown"
+            findings.append({"severity": "warning", "check": "usage.stale",
+                             "message": f"{agent}: latest snapshot is stale "
+                                        f"(older than {args.stale_after_minutes}m); "
+                                        "treated as unknown (fail-open)"})
+        elif classification == "unknown":
+            findings.append({"severity": "warning", "check": "usage.unknown",
+                             "message": f"{agent}: usage unknown; fail-open (no pause)"})
+        report.append({
+            "agent": agent,
+            "adapter": (snapshot.get("source") or {}).get("adapter", ""),
+            "captured_at": snapshot.get("captured_at", ""),
+            "age_seconds": age_s,
+            "stale": stale,
+            "decision_ratio": snapshot.get("decision_ratio"),
+            "used_tokens": snapshot.get("used_tokens"),
+            "limit_tokens": snapshot.get("limit_tokens"),
+            "classification": effective,
+        })
+    if not report:
+        findings.append({"severity": "warning", "check": "usage.no_data",
+                         "message": "no usage snapshots recorded; usage unknown (fail-open)"})
+    code = usage_exit_code({row["classification"] for row in report}, False)
+    if args.json:
+        print(json.dumps({"ok": True, "exit_code": code, "agents": report,
+                          "findings": findings, "runtime_version": VERSION},
+                         ensure_ascii=False, sort_keys=True))
+        return code
+    print(f"m8shift-runtime.py v{VERSION}")
+    print("── usage status (advisory, read-only) ─")
+    for row in report:
+        ratio = "-" if row["decision_ratio"] is None else f"{row['decision_ratio']:g}"
+        tokens = f"{row['used_tokens']}/{row['limit_tokens']}" \
+            if row["used_tokens"] is not None and row["limit_tokens"] is not None else "-"
+        freshness = "stale" if row["stale"] else "fresh"
+        print(f"{row['agent']}  {row['classification']}  ratio={ratio} tokens={tokens} "
+              f"{freshness} captured={row['captured_at'] or '-'}")
+    print_usage_findings(findings)
+    return code
+
+
+def usage_doctor_findings():
+    """Advisory usage-sidecar diagnostics for `doctor` (existence-guarded)."""
+    findings = []
+    if os.path.exists(USAGE_ADAPTERS):
+        doc, err = read_json_diagnostic(USAGE_ADAPTERS, {})
+        if err:
+            findings.append({"severity": "warning", "check": "usage.config",
+                             "message": f"{os.path.relpath(USAGE_ADAPTERS, HERE)}: {err}"})
+        else:
+            config_findings, _entries = usage_config_findings(doc)
+            findings.extend(config_findings)
+    for path in (USAGE_LEDGER, USAGE_ERRORS):
+        if not os.path.exists(path):
+            continue
+        rows, err = read_jsonl_diagnostic(path)
+        if err:
+            findings.append({"severity": "warning", "check": "usage.jsonl", "message": err})
+            continue
+        if any(row.get("schema") != RUNTIME_EVENT_SCHEMA for row in rows):
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.event_schema",
+                "message": f"{os.path.relpath(path, HERE)} has an event without schema {RUNTIME_EVENT_SCHEMA}",
+            })
+    return findings
+
+
 def main():
     p = argparse.ArgumentParser(
         prog=os.path.basename(sys.argv[0]),
@@ -4852,6 +5646,54 @@ def main():
     lsl.add_argument("--tail", type=int, default=50,
                      help="number of trailing log lines to print (default: 50)")
     lsl.set_defaults(fn=cmd_listener_logs)
+
+    usage = sub.add_parser(
+        "usage",
+        help="read-only AI session usage snapshots (RFC 040 PR A: advisory, never pauses)")
+    usage_sub = usage.add_subparsers(dest="verb", required=True)
+    uin = usage_sub.add_parser(
+        "init", help="scaffold .m8shift/usage/adapters.json with disabled example adapters (no clobber)")
+    uin.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    uin.set_defaults(fn=cmd_usage_init)
+    uad = usage_sub.add_parser("adapters", help="inspect and validate the usage adapter registry")
+    uad_sub = uad.add_subparsers(dest="adapters_verb", required=True)
+    ual = uad_sub.add_parser("list", help="list usage adapter entries with enabled/identity state")
+    ual.add_argument("--agent", default="", help="only list adapters for this agent")
+    ual.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    ual.set_defaults(fn=cmd_usage_adapters_list)
+    uac = uad_sub.add_parser(
+        "check", help="validate the adapter config and probe ONLY enabled adapters (bounded argv run)")
+    uac.add_argument("--agent", default="", help="only check adapters for this agent")
+    uac.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    uac.set_defaults(fn=cmd_usage_adapters_check)
+    usn = usage_sub.add_parser(
+        "snapshot",
+        help="read enabled adapters, normalize to m8shift.usage.snapshot.v1, append to usage.jsonl")
+    usn.add_argument("--agent", default="", help="only snapshot adapters for this agent")
+    usn.add_argument("--warn-threshold", type=float, default=USAGE_WARN_THRESHOLD_DEFAULT,
+                     help="decision_ratio at or above which the advisory near_limit exit 30 fires (default: 0.80)")
+    usn.add_argument("--limit-threshold", type=float, default=USAGE_LIMIT_THRESHOLD_DEFAULT,
+                     help="decision_ratio at or above which the advisory limit_hit exit 40 fires (default: 1.0)")
+    usn.add_argument("--raw-excerpt", action="store_true",
+                     help="include a size-capped REDACTED raw excerpt in the stored snapshot")
+    usn.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    usn.set_defaults(fn=cmd_usage_snapshot)
+    ust = usage_sub.add_parser(
+        "status", help="latest snapshot per agent from the ledger with freshness and advisory classification")
+    ust.add_argument("--agent", default="", help="only report this agent")
+    ust.add_argument("--stale-after-minutes", type=int, default=USAGE_STALE_AFTER_MINUTES_DEFAULT,
+                     help="snapshots older than this degrade to unknown/fail-open (default: 30)")
+    ust.add_argument("--warn-threshold", type=float, default=USAGE_WARN_THRESHOLD_DEFAULT,
+                     help="decision_ratio at or above which the advisory near_limit exit 30 fires (default: 0.80)")
+    ust.add_argument("--limit-threshold", type=float, default=USAGE_LIMIT_THRESHOLD_DEFAULT,
+                     help="decision_ratio at or above which the advisory limit_hit exit 40 fires (default: 1.0)")
+    ust.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    ust.set_defaults(fn=cmd_usage_status)
 
     args = p.parse_args()
     sys.exit(args.fn(args))
