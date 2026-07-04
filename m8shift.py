@@ -1018,6 +1018,8 @@ MESSAGES = {
         "bad_interval": "--interval must be an integer >= 1.",
         "claim_active": "refused: {holder}'s lock is still valid (expires {expires}). --force only reclaims a stale lock (protocol §5).",
         "claim_refused": "refused: state={st}, holder={holder} — it is not your turn.",
+        "claim_refresh_refused": "refused: --refresh only extends a WORKING lock you already hold (state={st}, holder={holder}); a heartbeat must never open a fresh work window.",
+        "claim_refresh_no_force": "refused: --refresh and --force are mutually exclusive (a refresh never steals).",
         "note_reclaim": "reclaimed after {holder}'s stale lock",
         "note_holds": "{agent} holds the pen",
         "claim_ok": "✓ pen taken by {agent} (expires {expires}{suffix}).",
@@ -4656,6 +4658,16 @@ def cmd_claim(args):
         _guard_integrating(args, lk, "claim")   # §8: refuse --force; allow only holder's TTL refresh
         exp = parse_iso(lk.get("expires"))
         stale = st.startswith("WORKING_") and exp is not None and now() > exp
+        if args.refresh:
+            # RFC 047: refresh-only guard — a heartbeat must never open a FRESH work
+            # window. Between a runner's pre-check and this file lock, the provider may
+            # have appended and the peer handed the turn back (AWAITING_<agent>): a plain
+            # claim would legally ghost-claim that new turn. Refuse anything but
+            # extending a lock this agent already holds.
+            if args.force:
+                sys.exit(tr("claim_refresh_no_force"))
+            if not (st == f"WORKING_{agent.upper()}" and holder == agent):
+                sys.exit(tr("claim_refresh_refused", st=st, holder=holder))
         # your turn / IDLE / your own lock (TTL refresh); --force ONLY if stale.
         mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")
         if not (mine or (args.force and stale)):
@@ -5479,6 +5491,9 @@ def main():
     c.add_argument("agent", help="roster agent taking the pen")
     c.add_argument("--force", action="store_true",
                    help="reclaim a stale WORKING lock only (refused while the holder's lock is valid)")
+    c.add_argument("--refresh", action="store_true",
+                   help="RFC 047: refresh-only TTL extension — refused unless you already hold "
+                        "your own WORKING lock (runners must use this, never a plain claim)")
     c.add_argument("--check", action="store_true",
                    help="read-only advisory pre-claim probe (no pen taken): readiness + file overlap")
     c.add_argument("--files", default="", help="with --check: files you plan to touch (CSV)")
