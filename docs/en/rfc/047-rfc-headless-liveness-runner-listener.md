@@ -1,8 +1,8 @@
 # RFC 047 — Headless liveness: final-state enforcement and listener lifecycle
 
-- Status: draft
+- Status: implemented
 - Date: 2026-07-03
-- Target version: v3.46.0
+- Target version: v3.47.0 (Phase A shipped in v3.46.0; Phases B–E in v3.47.0)
 - Tracks: GitHub #17, #21; cross-references #6 without closing it
 - Builds on: [RFC 020 Headless runner hardening](020-rfc-headless-runner-hardening.md), [RFC 035 Interactive listener gap](035-rfc-interactive-listener-gap.md), [RFC 046 Interactive/headless modes and runner install](046-rfc-interactive-headless-runner-install.md)
 - Related: [RFC 027 Notifications](027-rfc-notifications.md), [RFC 028 Headless command templates](028-rfc-headless-command-templates.md), [RFC 034 Companion adapter interface](034-rfc-companion-adapter-interface.md), [RFC 040 AI session usage monitoring](040-rfc-ai-session-usage-monitoring.md)
