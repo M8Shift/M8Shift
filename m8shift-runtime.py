@@ -4655,6 +4655,38 @@ USAGE_REDACT_PATTERNS = (
     re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?key|token|secret|password|authorization|credential)\b\s*[:=]\s*\S+"),
     re.compile(r"\b[A-Za-z0-9+/_-]{32,}={0,2}\b"),
 )
+# ── RFC 040 PR B — guard/watch/wait/resume constants ──
+USAGE_HOLD = os.path.join(RUNTIME_DIR, "usage-hold.json")
+USAGE_HOLD_SCHEMA = "m8shift.usage.hold.v1"
+USAGE_HOLD_SOURCE = "usage-monitor"
+USAGE_CORE_TIMEOUT_S = 30
+USAGE_WATCH_INTERVAL_DEFAULT_S = 60.0
+USAGE_WAIT_INTERVAL_DEFAULT_S = 30.0
+# PR B uses the RFC 040 GENERAL exit-code table (the PR A 0/12/30/40 advisory
+# mapping applies to the five read-only commands ONLY): 0 ok, 10 near_limit
+# advisory, 11 limit_hit (hold recommended/applied), 12 working-holder
+# advisory, 20 unknown (fail-open), 30 adapter/config/policy error, 40
+# malformed usage sidecar, 64 CLI usage error, 70 apply-time I/O failure,
+# 75 wait still held. Precedence: 40 > 64 > 30 > 70 > 12 > 11 > 10 > 20 > 0.
+USAGE_GUARD_EXIT_OK = 0
+USAGE_GUARD_EXIT_WARN = 10
+USAGE_GUARD_EXIT_HOLD = 11
+USAGE_GUARD_EXIT_WORKING = 12
+USAGE_GUARD_EXIT_UNKNOWN = 20
+USAGE_GUARD_EXIT_ERROR = 30
+USAGE_GUARD_EXIT_MALFORMED = 40
+USAGE_GUARD_EXIT_USAGE = 64
+USAGE_GUARD_EXIT_IO = 70
+USAGE_WAIT_EXIT_STILL_HELD = 75
+USAGE_GUARD_PRECEDENCE = (40, 64, 30, 70, 12, 11, 10, 20, 0)
+USAGE_VERDICT_ORDER = ("limit_hit", "near_limit", "unknown", "ok")
+USAGE_VERDICT_EXIT = {"limit_hit": USAGE_GUARD_EXIT_HOLD,
+                      "near_limit": USAGE_GUARD_EXIT_WARN,
+                      "unknown": USAGE_GUARD_EXIT_UNKNOWN,
+                      "ok": USAGE_GUARD_EXIT_OK}
+# The core cmd_cooldown LOCK-note signature; recognizing it is how the guard
+# family distinguishes a usage cooldown from a plain operator pause.
+USAGE_COOLDOWN_NOTE_RE = re.compile(r"cooldown until (\S+) for ([a-z][a-z0-9_-]*|any): ")
 
 
 def default_usage_adapters():
@@ -5184,20 +5216,14 @@ def cmd_usage_adapters_check(args):
     return USAGE_EXIT_OK if ok else USAGE_EXIT_CONFIG
 
 
-def cmd_usage_snapshot(args):
-    agent_filter, agent_err = usage_agent_filter(args.agent)
-    if agent_err:
-        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
-        return USAGE_EXIT_CONFIG
+def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
+                            include_raw_excerpt):
+    """Shared PR A/PR B snapshot collection: runs the enabled adapters and appends
+    each normalized snapshot to the ledger. Returns
+    (results, findings, had_adapter_error, skipped_disabled, config_error)."""
     entries, findings, config_error = load_usage_config()
     if config_error:
-        if args.json:
-            print(json.dumps({"ok": False, "snapshots": [], "findings": findings,
-                              "runtime_version": VERSION},
-                             ensure_ascii=False, sort_keys=True))
-        else:
-            print_usage_findings(findings)
-        return USAGE_EXIT_CONFIG
+        return [], findings, False, 0, True
     enabled, skipped_disabled = selected_usage_entries(entries, agent_filter)
     results = []
     had_adapter_error = False
@@ -5213,7 +5239,7 @@ def cmd_usage_snapshot(args):
             continue
         snapshot, warnings = normalize_usage_snapshot(
             doc, agent=agent, adapter_name=name, kind=entry.get("kind", ""),
-            raw_text=raw, include_raw_excerpt=args.raw_excerpt)
+            raw_text=raw, include_raw_excerpt=include_raw_excerpt)
         if snapshot is None:
             had_adapter_error = True
             record_usage_adapter_error(name, agent, warnings[0])
@@ -5223,7 +5249,7 @@ def cmd_usage_snapshot(args):
         append_jsonl(USAGE_LEDGER, runtime_event(
             "usage.snapshot", agent=agent, payload={"snapshot": snapshot}))
         classification = classify_usage_ratio(
-            snapshot["decision_ratio"], args.warn_threshold, args.limit_threshold)
+            snapshot["decision_ratio"], warn_threshold, limit_threshold)
         if classification == "unknown":
             findings.append({"severity": "warning", "check": "usage.unknown",
                              "message": f"{name}: usage unknown for {agent}; fail-open (no pause)"})
@@ -5235,6 +5261,25 @@ def cmd_usage_snapshot(args):
     if not enabled:
         findings.append({"severity": "warning", "check": "usage.no_adapter",
                          "message": "no enabled usage adapter matched; usage unknown (fail-open)"})
+    return results, findings, had_adapter_error, skipped_disabled, False
+
+
+def cmd_usage_snapshot(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_EXIT_CONFIG
+    results, findings, had_adapter_error, skipped_disabled, config_error = \
+        collect_usage_snapshots(agent_filter, args.warn_threshold,
+                                args.limit_threshold, args.raw_excerpt)
+    if config_error:
+        if args.json:
+            print(json.dumps({"ok": False, "snapshots": [], "findings": findings,
+                              "runtime_version": VERSION},
+                             ensure_ascii=False, sort_keys=True))
+        else:
+            print_usage_findings(findings)
+        return USAGE_EXIT_CONFIG
     code = usage_exit_code({r["classification"] for r in results}, had_adapter_error)
     if args.json:
         print(json.dumps({"ok": code in (USAGE_EXIT_OK, USAGE_EXIT_NEAR_LIMIT, USAGE_EXIT_LIMIT_HIT),
@@ -5301,16 +5346,15 @@ def latest_usage_snapshots(rows, findings):
     return latest
 
 
-def cmd_usage_status(args):
-    agent_filter, agent_err = usage_agent_filter(args.agent)
-    if agent_err:
-        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
-        return USAGE_EXIT_CONFIG
+def usage_ledger_report(agent_filter, warn_threshold, limit_threshold, stale_after_minutes):
+    """Freshest ledger snapshot per agent, classified with staleness degradation
+    (shared by `usage status` and the PR B guard family). Returns
+    (report_rows, latest_snapshots_by_agent, findings)."""
     rows, findings = read_usage_ledger_diagnostic()
     latest = latest_usage_snapshots(rows, findings)
     if agent_filter:
         latest = {agent: snap for agent, snap in latest.items() if agent == agent_filter}
-    stale_after_s = max(0, args.stale_after_minutes) * 60
+    stale_after_s = max(0, stale_after_minutes) * 60
     report = []
     for agent in sorted(latest):
         snapshot = latest[agent]
@@ -5318,13 +5362,13 @@ def cmd_usage_status(args):
         age_s = int((now() - captured).total_seconds()) if captured else None
         stale = age_s is None or age_s > stale_after_s
         classification = classify_usage_ratio(
-            snapshot.get("decision_ratio"), args.warn_threshold, args.limit_threshold)
+            snapshot.get("decision_ratio"), warn_threshold, limit_threshold)
         effective = classification
         if stale:
             effective = "unknown"
             findings.append({"severity": "warning", "check": "usage.stale",
                              "message": f"{agent}: latest snapshot is stale "
-                                        f"(older than {args.stale_after_minutes}m); "
+                                        f"(older than {stale_after_minutes}m); "
                                         "treated as unknown (fail-open)"})
         elif classification == "unknown":
             findings.append({"severity": "warning", "check": "usage.unknown",
@@ -5343,6 +5387,16 @@ def cmd_usage_status(args):
     if not report:
         findings.append({"severity": "warning", "check": "usage.no_data",
                          "message": "no usage snapshots recorded; usage unknown (fail-open)"})
+    return report, latest, findings
+
+
+def cmd_usage_status(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_EXIT_CONFIG
+    report, _latest, findings = usage_ledger_report(
+        agent_filter, args.warn_threshold, args.limit_threshold, args.stale_after_minutes)
     code = usage_exit_code({row["classification"] for row in report}, False)
     if args.json:
         print(json.dumps({"ok": True, "exit_code": code, "agents": report,
@@ -5362,9 +5416,553 @@ def cmd_usage_status(args):
     return code
 
 
+# ── RFC 040 PR B — guard / watch / wait / resume (completes the usage block) ──
+#
+# PR B charter: guard/watch/wait are read-only with respect to everything but
+# their own verdict output; `--apply` may write ONLY the usage-hold.json
+# sidecar plus a usage.jsonl audit event, and may transition the relay ONLY by
+# calling the core `cooldown` command as an argv subprocess (usage `resume`
+# likewise calls core `resume`). The companion never edits M8SHIFT.md/LOCK
+# itself, never interrupts or force-claims a WORKING_* lock, never launches a
+# provider, never opens the network, and NEVER resumes automatically — the
+# only road back is an explicit `usage resume` invocation. Exit codes follow
+# the RFC 040 GENERAL table (PR B constants above), not the PR A read-only
+# mapping, which stays pinned to the five read-only commands.
+
+
+def parse_usage_cooldown_note(note):
+    """Recognize the core cooldown LOCK-note signature
+    (`cooldown until <ISO> for <agent|any>: <reason>`). Returns
+    {"until", "resume_for"} or None for any other note (operator pause)."""
+    m = USAGE_COOLDOWN_NOTE_RE.match(note or "")
+    if not m:
+        return None
+    return {"until": m.group(1), "resume_for": m.group(2)}
+
+
+def usage_relay_snapshot():
+    """Read-only relay view for the guard family (state/holder/turn/note).
+    A missing or unreadable relay yields {} — callers degrade gracefully."""
+    try:
+        core = load_core()
+        _, lk = load_status(core)
+    except (SystemExit, Exception):
+        return {}
+    return {
+        "state": lk.get("state", ""),
+        "holder": lk.get("holder", ""),
+        "turn": lk.get("turn", ""),
+        "note": lk.get("note", ""),
+    }
+
+
+def run_core_command(argv_tail, timeout=USAGE_CORE_TIMEOUT_S):
+    """PR B core interaction: an argv subprocess to the project's own m8shift.py
+    beside this companion (resolved like the listener resolves its runner) —
+    never a shell string, never an inlined core transition. Capture is bounded
+    through the PR A adapter runner. Returns (returncode, stdout, stderr,
+    error_message); returncode is None when the call never completed."""
+    if not os.path.isfile(CORE_PATH):
+        return None, "", "", f"missing core at {os.path.relpath(CORE_PATH, HERE)}"
+    argv = [sys.executable, CORE_PATH] + [str(a) for a in argv_tail]
+    try:
+        rc, out_b, err_b, overflowed, timed_out = run_usage_adapter_bounded(
+            argv, timeout, USAGE_MAX_STDOUT_BYTES)
+    except OSError as e:
+        return None, "", "", f"core call failed to start: {e}"
+    if timed_out:
+        return None, "", "", f"core call timed out after {timeout:g}s"
+    if overflowed:
+        return None, "", "", "core call stdout exceeded the byte cap"
+    return (rc, out_b.decode("utf-8", errors="replace"),
+            err_b.decode("utf-8", errors="replace"), "")
+
+
+def core_argv_display(argv_tail):
+    """Audit-friendly core argv for sidecar events (relative names only — the
+    sidecars must never record host-specific absolute paths)."""
+    return ["python3", "m8shift.py"] + [str(a) for a in argv_tail]
+
+
+def read_usage_hold():
+    """Returns (hold, error). Missing file => (None, None); a hold that does not
+    parse or does not match m8shift.usage.hold.v1 => (None, message) — PR B
+    commands map that to exit 40 (malformed usage sidecar)."""
+    if not os.path.exists(USAGE_HOLD):
+        return None, None
+    rel = os.path.relpath(USAGE_HOLD, HERE)
+    doc, err = read_json_diagnostic(USAGE_HOLD, {})
+    if err:
+        return None, f"{rel}: {err}"
+    if doc.get("schema") != USAGE_HOLD_SCHEMA:
+        return None, f"{rel}: expected schema {USAGE_HOLD_SCHEMA}"
+    agent = doc.get("agent")
+    if not isinstance(agent, str) or not AGENT_RE.fullmatch(agent):
+        return None, f"{rel}: agent is invalid"
+    for field in ("placed_at", "resets_at"):
+        value = doc.get(field)
+        if value is not None and (not isinstance(value, str) or not parse_utc(value)):
+            return None, f"{rel}: {field} must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ) or null"
+    return doc, None
+
+
+def usage_snapshot_ref(snapshot):
+    adapter = (snapshot.get("source") or {}).get("adapter", "")
+    return (".m8shift/runtime/usage.jsonl#"
+            f"{snapshot.get('captured_at', '')}/{snapshot.get('agent', '')}/{adapter}")
+
+
+def usage_reset_candidate(snapshot, limit_threshold):
+    """core `--until` candidate: the earliest resets_at among windows at/above
+    the limit threshold; fallback the earliest known resets_at; None when the
+    snapshot names no reset (the monitor never invents a provider reset)."""
+    limited, known = [], []
+    for win in snapshot.get("windows") or []:
+        if not isinstance(win, dict):
+            continue
+        resets = win.get("resets_at")
+        t = parse_utc(resets) if isinstance(resets, str) else None
+        if not t:
+            continue
+        known.append((t, resets))
+        used, limit = win.get("used"), win.get("limit")
+        if isinstance(used, int) and isinstance(limit, int) and limit > 0 \
+                and used / limit >= limit_threshold:
+            limited.append((t, resets))
+    pool = limited or known
+    return min(pool)[1] if pool else None
+
+
+def post_usage_hold(agent, resets_at, reason, snapshot_ref):
+    """Idempotent hold write (RFC 040 PR B bytes: exactly seven keys). An
+    existing hold for the same agent whose resets_at is at/after the candidate
+    is kept byte-identical (placed_at preserved). Returns (written, hold_row,
+    error)."""
+    existing, err = read_usage_hold()
+    if err:
+        return False, None, err
+    if existing and existing.get("agent") == agent:
+        old = parse_utc(existing.get("resets_at") or "")
+        new = parse_utc(resets_at or "")
+        if not new or (old and old >= new):
+            return False, existing, None
+    row = {
+        "schema": USAGE_HOLD_SCHEMA,
+        "agent": agent,
+        "placed_at": iso(),
+        "resets_at": resets_at,
+        "reason": reason,
+        "source": USAGE_HOLD_SOURCE,
+        "snapshot_ref": snapshot_ref,
+    }
+    try:
+        reject_symlinked_runtime_path(USAGE_HOLD)
+        atomic_write_json(USAGE_HOLD, row)
+    except OSError as e:
+        return False, None, f"cannot write {os.path.relpath(USAGE_HOLD, HERE)}: {e}"
+    return True, row, None
+
+
+def clear_usage_hold():
+    """Delete the hold file (clearing = deletion; the audit trail lives in
+    usage.jsonl). Returns (cleared, error)."""
+    if not os.path.exists(USAGE_HOLD):
+        return False, None
+    try:
+        reject_symlinked_runtime_path(USAGE_HOLD)
+        os.remove(USAGE_HOLD)
+    except OSError as e:
+        return False, f"cannot remove {os.path.relpath(USAGE_HOLD, HERE)}: {e}"
+    return True, None
+
+
+def append_usage_action_event(event_type, agent, payload):
+    """Audit append for --apply/resume ACTIONS (mandatory per RFC 040 PR B;
+    guard verdicts alone are never recorded)."""
+    append_jsonl(USAGE_LEDGER, runtime_event(event_type, agent=agent, payload=payload))
+
+
+def usage_worst_verdict(report):
+    present = {row["classification"] for row in report}
+    for verdict in USAGE_VERDICT_ORDER:
+        if verdict in present:
+            return verdict
+    return "unknown"
+
+
+def usage_pick_code(codes):
+    for code in USAGE_GUARD_PRECEDENCE:
+        if code in codes:
+            return code
+    return USAGE_GUARD_EXIT_OK
+
+
+def usage_apply_hold(agent, row, snapshot, relay, args):
+    """The `guard --apply` decision table (limit_hit only; RFC 040 "PR B scope").
+    Returns (exit_code, applied_payload, findings). Relay transitions happen
+    ONLY through the core cooldown argv call below."""
+    findings = []
+    state = relay.get("state", "")
+    ratio = row.get("decision_ratio")
+    ratio_txt = "-" if ratio is None else f"{ratio:g}"
+    reason = (f"{agent} usage limit_hit (decision_ratio {ratio_txt} >= "
+              f"limit threshold {args.limit_threshold:g})")
+    ref = usage_snapshot_ref(snapshot)
+    resets_at = usage_reset_candidate(snapshot, args.limit_threshold)
+
+    def warn(check, message):
+        findings.append({"severity": "warning", "check": check, "message": message})
+
+    if state == f"WORKING_{agent.upper()}":
+        # Own lock: cooperative advisory only — hold sidecar + audit event,
+        # exit 12. No core call, no interrupt, no force (RFC 040 PR B).
+        written, hold_row, io_err = post_usage_hold(agent, resets_at, reason, ref)
+        if io_err:
+            findings.append({"severity": "error", "check": "usage.hold_io", "message": io_err})
+            return USAGE_GUARD_EXIT_IO, None, findings
+        append_usage_action_event("usage.hold_advisory", agent, {
+            "action": "advisory_hold" if written else "advisory_hold_already_active",
+            "relay_state_before": state, "relay_state_after": state,
+            "hold": hold_row, "snapshot_ref": ref, "core": None,
+        })
+        warn("usage.working",
+             f"{agent} holds the pen (state={state}): advisory hold "
+             f"{'posted' if written else 'already active'}; pause at the next safe "
+             "point (no core call, no interrupt, no force)")
+        return USAGE_GUARD_EXIT_WORKING, {"action": "advisory_hold", "written": written,
+                                          "hold": hold_row}, findings
+    if state.startswith("WORKING_"):
+        warn("usage.working_peer",
+             f"relay is {state} for another agent: nothing written or called "
+             "(the next guard tick re-evaluates)")
+        return USAGE_GUARD_EXIT_WORKING, {"action": "peer_working_advisory"}, findings
+    if state == "DONE":
+        warn("usage.done", "relay session is DONE: left alone, no hold placed")
+        return USAGE_GUARD_EXIT_HOLD, {"action": "done_left_alone"}, findings
+
+    if state == "PAUSED":
+        cool = parse_usage_cooldown_note(relay.get("note", ""))
+        if not cool:
+            warn("usage.operator_pause",
+                 "relay is PAUSED by an operator pause (not a usage cooldown): "
+                 "never converted, nothing written")
+            return USAGE_GUARD_EXIT_HOLD, {"action": "operator_pause_left_alone"}, findings
+        existing_until = parse_utc(cool["until"])
+        candidate = parse_utc(resets_at or "")
+        if not candidate or (existing_until and existing_until >= candidate):
+            warn("usage.hold_active",
+                 f"usage cooldown already active until {cool['until']}; nothing to extend")
+            return USAGE_GUARD_EXIT_HOLD, {"action": "hold_already_active",
+                                           "until": cool["until"]}, findings
+        argv_tail = ["cooldown", "--until", resets_at, "--reason", reason,
+                     "--source", USAGE_HOLD_SOURCE, "--replace"]
+        if cool["resume_for"] != "any":
+            argv_tail += ["--for", cool["resume_for"]]
+    else:
+        if not resets_at:
+            findings.append({
+                "severity": "error", "check": "usage.no_reset",
+                "message": f"{agent} hit its limit but no window names a resets_at; "
+                           "refusing to invent one — place a manual cooldown via "
+                           "`python3 m8shift.py cooldown --until ... --reason ...`"})
+            return USAGE_GUARD_EXIT_ERROR, None, findings
+        argv_tail = ["cooldown", "--until", resets_at, "--reason", reason,
+                     "--source", USAGE_HOLD_SOURCE]
+        if state in ("IDLE", f"AWAITING_{agent.upper()}"):
+            # From AWAITING_<peer>, --for is omitted so the core keeps its own
+            # awaited-agent inference (it refuses a mismatched --for).
+            argv_tail += ["--for", agent]
+
+    rc, _out, err_txt, run_err = run_core_command(argv_tail)
+    if run_err or rc != 0:
+        detail = run_err or redact_usage_excerpt(err_txt) or f"exit {rc}"
+        findings.append({"severity": "error", "check": "usage.core_call",
+                         "message": f"core cooldown call failed: {detail}"})
+        return USAGE_GUARD_EXIT_ERROR, None, findings
+    relay_after = usage_relay_snapshot()
+    written, hold_row, io_err = post_usage_hold(agent, resets_at, reason, ref)
+    if io_err:
+        findings.append({"severity": "error", "check": "usage.hold_io", "message": io_err})
+        return USAGE_GUARD_EXIT_IO, None, findings
+    append_usage_action_event("usage.hold_placed", agent, {
+        "action": "cooldown_applied",
+        "relay_state_before": state, "relay_state_after": relay_after.get("state", ""),
+        "hold": hold_row, "snapshot_ref": ref,
+        "core": {"argv": core_argv_display(argv_tail), "returncode": rc},
+    })
+    warn("usage.hold_placed",
+         f"usage hold placed for {agent} until {resets_at}; relay is "
+         f"{relay_after.get('state', 'PAUSED')}")
+    return USAGE_GUARD_EXIT_HOLD, {"action": "cooldown_applied", "until": resets_at,
+                                   "written": written, "hold": hold_row}, findings
+
+
+def usage_guard_evaluate(args, agent_filter, *, apply_mode, snapshot_findings=None,
+                         snapshot_error=False):
+    """Shared PR B evaluation (the guard command and each watch tick).
+    Returns (exit_code, payload)."""
+    findings = list(snapshot_findings or [])
+    relay = usage_relay_snapshot()
+    hold, hold_err = read_usage_hold()
+    if hold_err:
+        findings.append({"severity": "error", "check": "usage.hold", "message": hold_err})
+        return USAGE_GUARD_EXIT_MALFORMED, {
+            "verdict": "unknown", "agents": [], "relay": relay, "hold": None,
+            "applied": None, "findings": findings}
+    report, latest, ledger_findings = usage_ledger_report(
+        agent_filter, args.warn_threshold, args.limit_threshold, args.stale_after_minutes)
+    findings.extend(ledger_findings)
+    verdict = usage_worst_verdict(report)
+    codes = [USAGE_VERDICT_EXIT[verdict]]
+    if snapshot_error:
+        codes.append(USAGE_GUARD_EXIT_ERROR)
+    applied = None
+    if apply_mode:
+        if verdict == "limit_hit":
+            apply_row = next(r for r in report if r["classification"] == "limit_hit")
+            apply_code, applied, apply_findings = usage_apply_hold(
+                apply_row["agent"], apply_row, latest.get(apply_row["agent"], {}),
+                relay, args)
+            findings.extend(apply_findings)
+            codes.append(apply_code)
+            hold, _refresh_err = read_usage_hold()  # refresh after a possible write
+        else:
+            findings.append({"severity": "warning", "check": "usage.apply",
+                             "message": f"verdict is {verdict}: nothing applied "
+                                        "(holds are placed on limit_hit only)"})
+    return usage_pick_code(codes), {
+        "verdict": verdict, "agents": report, "relay": relay, "hold": hold,
+        "applied": applied, "findings": findings}
+
+
+def print_usage_guard_result(command, code, payload, json_mode):
+    if json_mode:
+        out = dict(payload)
+        out["ok"] = code in (USAGE_GUARD_EXIT_OK, USAGE_GUARD_EXIT_WARN,
+                             USAGE_GUARD_EXIT_HOLD, USAGE_GUARD_EXIT_WORKING,
+                             USAGE_GUARD_EXIT_UNKNOWN)
+        out["exit_code"] = code
+        out["runtime_version"] = VERSION
+        print(json.dumps(out, ensure_ascii=False, sort_keys=True), flush=True)
+        return code
+    relay_state = (payload.get("relay") or {}).get("state") or "-"
+    print(f"{command}: verdict={payload['verdict']} relay={relay_state} exit={code}",
+          flush=True)
+    for row in payload["agents"]:
+        ratio = "-" if row["decision_ratio"] is None else f"{row['decision_ratio']:g}"
+        freshness = "stale" if row["stale"] else "fresh"
+        print(f"  {row['agent']}  {row['classification']}  ratio={ratio} {freshness} "
+              f"captured={row['captured_at'] or '-'}")
+    applied = payload.get("applied")
+    if applied:
+        print(f"  applied: {applied.get('action')}")
+    print_usage_findings(payload["findings"])
+    return code
+
+
+def cmd_usage_guard(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    if args.apply and not agent_filter:
+        print("m8shift-runtime: usage guard --apply requires --agent", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    code, payload = usage_guard_evaluate(args, agent_filter, apply_mode=args.apply)
+    return print_usage_guard_result("usage guard", code, payload, args.json)
+
+
+def cmd_usage_watch(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    if args.apply and not agent_filter:
+        print("m8shift-runtime: usage watch --apply requires --agent", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    if args.interval <= 0:
+        print("m8shift-runtime: --interval must be > 0 (fractional seconds allowed)",
+              file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    if args.max_ticks < 0:
+        print("m8shift-runtime: --max-ticks must be >= 0", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    ticks = 0
+    while True:
+        ticks += 1
+        _results, snapshot_findings, had_error, _skipped, config_error = \
+            collect_usage_snapshots(agent_filter, args.warn_threshold,
+                                    args.limit_threshold, False)
+        code, payload = usage_guard_evaluate(
+            args, agent_filter, apply_mode=args.apply,
+            snapshot_findings=snapshot_findings,
+            snapshot_error=(had_error or config_error))
+        payload["tick"] = ticks
+        # A watch tick that sees an ok verdict NEVER resumes anything (PR B
+        # non-goal: no automatic resume; only `usage resume` may resume).
+        print_usage_guard_result(f"usage watch tick {ticks}", code, payload, args.json)
+        if args.max_ticks and ticks >= args.max_ticks:
+            return code
+        time.sleep(args.interval)
+
+
+def cmd_usage_wait(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    if args.interval <= 0:
+        print("m8shift-runtime: --interval must be > 0 (fractional seconds allowed)",
+              file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    if args.max_ticks < 0:
+        print("m8shift-runtime: --max-ticks must be >= 0", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    ticks = 0
+    while True:
+        ticks += 1
+        _hold, hold_err = read_usage_hold()
+        if hold_err:
+            print(f"m8shift-runtime: {hold_err}", file=sys.stderr)
+            return USAGE_GUARD_EXIT_MALFORMED
+        report, _latest, findings = usage_ledger_report(
+            agent_filter, args.warn_threshold, args.limit_threshold,
+            args.stale_after_minutes)
+        verdict = usage_worst_verdict(report)
+        released = verdict == "ok" or (verdict == "unknown" and not args.until_ok)
+        if args.json:
+            print(json.dumps({"tick": ticks, "verdict": verdict, "released": released,
+                              "findings": findings, "runtime_version": VERSION},
+                             ensure_ascii=False, sort_keys=True), flush=True)
+        else:
+            print(f"usage wait tick {ticks}: verdict={verdict}"
+                  f"{' — released' if released else ''}", flush=True)
+        if released:
+            return USAGE_GUARD_EXIT_OK
+        if args.max_ticks and ticks >= args.max_ticks:
+            if not args.json:
+                print(f"usage wait: still held after {ticks} tick(s) (exit 75)",
+                      flush=True)
+            return USAGE_WAIT_EXIT_STILL_HELD
+        time.sleep(args.interval)
+
+
+def cmd_usage_resume(args):
+    agent_filter, agent_err = usage_agent_filter(args.agent)
+    if agent_err:
+        print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    findings = []
+    hold, hold_err = read_usage_hold()
+    if hold_err:
+        print(f"m8shift-runtime: {hold_err}", file=sys.stderr)
+        return USAGE_GUARD_EXIT_MALFORMED
+    relay = usage_relay_snapshot()
+    state = relay.get("state", "")
+    cool = parse_usage_cooldown_note(relay.get("note", "")) if state == "PAUSED" else None
+    agent = agent_filter
+    if not agent and cool and cool["resume_for"] != "any":
+        agent = cool["resume_for"]
+    if not agent and hold:
+        agent = hold.get("agent", "")
+    if not agent:
+        print("m8shift-runtime: cannot determine the agent to resume for; pass --agent",
+              file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
+    # The verdict gate uses the hold's agent when a hold exists (the LIMITED
+    # agent must have recovered), else the resume agent.
+    gate_agent = hold.get("agent") if hold else agent
+    report, _latest, ledger_findings = usage_ledger_report(
+        gate_agent, args.warn_threshold, args.limit_threshold, args.stale_after_minutes)
+    findings.extend(ledger_findings)
+    verdict = usage_worst_verdict(report)
+
+    def emit(code, action, extra=None):
+        if args.json:
+            out = {"ok": code in (USAGE_GUARD_EXIT_OK, USAGE_GUARD_EXIT_WARN,
+                                  USAGE_GUARD_EXIT_HOLD),
+                   "exit_code": code, "action": action, "agent": agent,
+                   "gate_agent": gate_agent, "verdict": verdict, "relay": relay,
+                   "hold": hold, "findings": findings, "runtime_version": VERSION}
+            out.update(extra or {})
+            print(json.dumps(out, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"usage resume: {action} (verdict={verdict}, exit={code})")
+            print_usage_findings(findings)
+        return code
+
+    if verdict == "limit_hit":
+        findings.append({"severity": "warning", "check": "usage.resume_refused",
+                         "message": f"{gate_agent} is still limit_hit; hold and relay "
+                                    "left untouched"})
+        return emit(USAGE_GUARD_EXIT_HOLD, "refused_still_limit_hit")
+    if verdict != "ok":
+        findings.append({"severity": "warning", "check": "usage.resume_refused",
+                         "message": f"{gate_agent} verdict is {verdict} (not ok); "
+                                    "hold and relay left untouched"})
+        return emit(USAGE_GUARD_EXIT_WARN, "refused_not_ok_yet")
+    if cool:
+        if cool["resume_for"] not in ("any", agent):
+            findings.append({"severity": "error", "check": "usage.resume_mismatch",
+                             "message": f"active usage cooldown is for "
+                                        f"{cool['resume_for']}, not {agent}; refusing "
+                                        "to steal the lane"})
+            return emit(USAGE_GUARD_EXIT_ERROR, "refused_cooldown_for_other_agent")
+        argv_tail = ["resume", agent, "--reason",
+                     f"usage window ok for {gate_agent}; cleared by usage-monitor"]
+        rc, _out, err_txt, run_err = run_core_command(argv_tail)
+        if run_err or rc != 0:
+            detail = run_err or redact_usage_excerpt(err_txt) or f"exit {rc}"
+            findings.append({"severity": "error", "check": "usage.core_call",
+                             "message": f"core resume call failed: {detail}"})
+            return emit(USAGE_GUARD_EXIT_ERROR, "core_resume_failed")
+        relay_after = usage_relay_snapshot()
+        cleared, clear_err = clear_usage_hold()
+        if clear_err:
+            findings.append({"severity": "error", "check": "usage.hold_io",
+                             "message": clear_err})
+            return emit(USAGE_GUARD_EXIT_IO, "hold_clear_failed")
+        append_usage_action_event("usage.hold_cleared", agent, {
+            "action": "resumed",
+            "relay_state_before": state,
+            "relay_state_after": relay_after.get("state", ""),
+            "hold": hold, "hold_cleared": cleared,
+            "snapshot_ref": (hold or {}).get("snapshot_ref"),
+            "core": {"argv": core_argv_display(argv_tail), "returncode": rc},
+        })
+        findings.append({"severity": "warning", "check": "usage.resumed",
+                         "message": f"relay resumed for {agent} "
+                                    f"(state {relay_after.get('state', '')}); "
+                                    "usage hold cleared"})
+        return emit(USAGE_GUARD_EXIT_OK, "resumed", {"relay_after": relay_after})
+    if hold:
+        # Stale hold: the relay is not usage-cooldown-PAUSED (running, IDLE,
+        # operator-PAUSED, DONE). Clear the sidecar only — an operator pause is
+        # NEVER resumed by the usage monitor.
+        cleared, clear_err = clear_usage_hold()
+        if clear_err:
+            findings.append({"severity": "error", "check": "usage.hold_io",
+                             "message": clear_err})
+            return emit(USAGE_GUARD_EXIT_IO, "hold_clear_failed")
+        append_usage_action_event("usage.hold_cleared", agent, {
+            "action": "stale_hold_cleared",
+            "relay_state_before": state, "relay_state_after": state,
+            "hold": hold, "hold_cleared": cleared,
+            "snapshot_ref": hold.get("snapshot_ref"), "core": None,
+        })
+        findings.append({"severity": "warning", "check": "usage.hold_cleared",
+                         "message": "stale usage hold cleared; relay untouched "
+                                    "(no usage cooldown is active)"})
+        return emit(USAGE_GUARD_EXIT_OK, "stale_hold_cleared")
+    return emit(USAGE_GUARD_EXIT_OK, "nothing_to_do")
+
+
 def usage_doctor_findings():
     """Advisory usage-sidecar diagnostics for `doctor` (existence-guarded)."""
     findings = []
+    _hold, hold_err = read_usage_hold()
+    if hold_err:
+        findings.append({"severity": "warning", "check": "usage.hold", "message": hold_err})
     if os.path.exists(USAGE_ADAPTERS):
         doc, err = read_json_diagnostic(USAGE_ADAPTERS, {})
         if err:
@@ -5649,8 +6247,18 @@ def main():
 
     usage = sub.add_parser(
         "usage",
-        help="read-only AI session usage snapshots (RFC 040 PR A: advisory, never pauses)")
+        help="AI session usage monitoring (RFC 040: read-only snapshots + advisory "
+             "guard family; the relay is only ever parked THROUGH core cooldown/resume)")
     usage_sub = usage.add_subparsers(dest="verb", required=True)
+
+    def usage_threshold_flags(sp):
+        sp.add_argument("--warn-threshold", type=float, default=USAGE_WARN_THRESHOLD_DEFAULT,
+                        help="decision_ratio at or above which the verdict is near_limit (default: 0.80)")
+        sp.add_argument("--limit-threshold", type=float, default=USAGE_LIMIT_THRESHOLD_DEFAULT,
+                        help="decision_ratio at or above which the verdict is limit_hit (default: 1.0)")
+        sp.add_argument("--stale-after-minutes", type=int, default=USAGE_STALE_AFTER_MINUTES_DEFAULT,
+                        help="ledger snapshots older than this degrade to unknown/fail-open (default: 30)")
+
     uin = usage_sub.add_parser(
         "init", help="scaffold .m8shift/usage/adapters.json with disabled example adapters (no clobber)")
     uin.add_argument("--json", action="store_true",
@@ -5694,6 +6302,64 @@ def main():
     ust.add_argument("--json", action="store_true",
                      help="emit machine-readable JSON instead of human output")
     ust.set_defaults(fn=cmd_usage_status)
+    ugd = usage_sub.add_parser(
+        "guard",
+        help="advisory verdict from the freshest ledger snapshots (RFC 040 PR B); "
+             "--apply parks the relay ONLY through the core cooldown command")
+    ugd.add_argument("--agent", default="",
+                     help="agent whose usage verdict to evaluate (required with --apply)")
+    ugd.add_argument("--apply", action="store_true",
+                     help="on limit_hit only: write usage-hold.json and call core cooldown "
+                          "via argv (cooperative: a WORKING_* relay is never mutated; "
+                          "near_limit/unknown never apply)")
+    usage_threshold_flags(ugd)
+    ugd.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    ugd.set_defaults(fn=cmd_usage_guard)
+    uwt = usage_sub.add_parser(
+        "watch",
+        help="poll loop: re-snapshot enabled adapters each tick, then evaluate the guard "
+             "verdict (never resumes anything)")
+    uwt.add_argument("--agent", default="",
+                     help="agent to snapshot and guard (required with --apply)")
+    uwt.add_argument("--interval", type=float, default=USAGE_WATCH_INTERVAL_DEFAULT_S,
+                     help="seconds between ticks; fractional values allowed (default: 60)")
+    uwt.add_argument("--max-ticks", type=int, default=0,
+                     help="bound the loop to N ticks (test seam; 0 = unbounded); exit code "
+                          "is the final tick's guard code")
+    uwt.add_argument("--apply", action="store_true",
+                     help="apply the guard --apply rules on each tick (limit_hit only)")
+    usage_threshold_flags(uwt)
+    uwt.add_argument("--json", action="store_true",
+                     help="emit one machine-readable JSON line per tick")
+    uwt.set_defaults(fn=cmd_usage_watch)
+    uwa = usage_sub.add_parser(
+        "wait",
+        help="token-free local blocker: re-read the ledger verdict each tick until it "
+             "releases (writes nothing, calls nothing)")
+    uwa.add_argument("--agent", default="", help="only wait on this agent's verdict")
+    uwa.add_argument("--until-ok", action="store_true",
+                     help="release only on a genuine ok verdict (default also releases on "
+                          "unknown, fail-open)")
+    uwa.add_argument("--interval", type=float, default=USAGE_WAIT_INTERVAL_DEFAULT_S,
+                     help="seconds between ticks; fractional values allowed (default: 30)")
+    uwa.add_argument("--max-ticks", type=int, default=0,
+                     help="exit 75 after N ticks while still held (test seam; 0 = unbounded)")
+    usage_threshold_flags(uwa)
+    uwa.add_argument("--json", action="store_true",
+                     help="emit one machine-readable JSON line per tick")
+    uwa.set_defaults(fn=cmd_usage_wait)
+    urs = usage_sub.add_parser(
+        "resume",
+        help="explicitly clear the usage hold and resume a usage cooldown through core "
+             "resume (the ONLY road back; never automatic)")
+    urs.add_argument("--agent", default="",
+                     help="agent to resume for (default: the cooldown note's resume_for, "
+                          "then the hold's agent)")
+    usage_threshold_flags(urs)
+    urs.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    urs.set_defaults(fn=cmd_usage_resume)
 
     args = p.parse_args()
     sys.exit(args.fn(args))

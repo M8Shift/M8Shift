@@ -925,6 +925,197 @@ status `"unknown"`, exit `0`, and a warning finding — fail-open, never pause.
 A snapshot older than `--stale-after-minutes` degrades to `"unknown"` for
 exit-code purposes and emits a warning finding.
 
+### PR B scope (guard / watch / wait / resume — completes the usage block)
+
+PR B is the second shipped slice: the Phase 3 guard family plus the explicit
+resume helper. Where this subsection is narrower or differs from the general
+contract, **this subsection wins for the PR B commands** (`usage guard`,
+`usage watch`, `usage wait`, `usage resume`); the PR A subsection keeps
+governing the five read-only commands, and the general exit-code table below
+remains the vocabulary this subsection pins against.
+
+#### PR B command surface
+
+```bash
+python3 m8shift-runtime.py usage guard  [--agent AGENT] [--apply] [--json] \
+    [--warn-threshold R] [--limit-threshold R] [--stale-after-minutes M]
+python3 m8shift-runtime.py usage watch  [--agent AGENT] [--interval SECONDS] [--max-ticks N] [--apply] [--json] \
+    [--warn-threshold R] [--limit-threshold R] [--stale-after-minutes M]
+python3 m8shift-runtime.py usage wait   [--agent AGENT] [--until-ok] [--interval SECONDS] [--max-ticks N] [--json] \
+    [--warn-threshold R] [--limit-threshold R] [--stale-after-minutes M]
+python3 m8shift-runtime.py usage resume [--agent AGENT] [--json] \
+    [--warn-threshold R] [--limit-threshold R] [--stale-after-minutes M]
+```
+
+All four share the PR A threshold/staleness knobs and the PR A verdict
+vocabulary — `ok` / `near_limit` / `limit_hit` / `unknown`, computed from the
+**freshest ledger snapshot per agent** in `.m8shift/runtime/usage.jsonl`; a
+snapshot older than `--stale-after-minutes` degrades to `unknown` (fail-open),
+exactly like `usage status`. Every core interaction is an argv subprocess to
+the project's own `m8shift.py` beside the companion (bounded timeout, output
+captured bounded) — the companion **never** reimplements or inlines a core
+state transition.
+
+**`usage guard`** — advisory verdict. Without `--apply` it is fully read-only
+(writes nothing anywhere, not even the ledger); the exit code is the pure
+verdict mapping in the table below, and the current relay state plus any
+active hold are reported in the JSON without changing the code.
+
+**`usage guard --apply`** — acts on **`limit_hit` only**, requires `--agent`
+(`64` otherwise), and follows this decision table against the live relay
+state (read read-only first):
+
+- relay `IDLE` / `AWAITING_*`: place the usage hold by calling the **core**
+  `cooldown` command via argv —
+  `[python3, m8shift.py, cooldown, --until, <resets_at>, --reason, …,
+  --source, usage-monitor]` — then write `usage-hold.json` and append a
+  `usage.hold_placed` audit event; exit `11`. `--for <agent>` is passed only
+  when the relay is `IDLE` or already `AWAITING_<agent>`; from
+  `AWAITING_<peer>` it is omitted so the core keeps its own awaited-agent
+  inference. `--until` is the earliest `resets_at` among the windows at or
+  above the limit threshold (fallback: the earliest known `resets_at`); **no
+  known reset time → refusal with exit `30`** — the monitor never invents a
+  provider reset.
+- relay `PAUSED` by an earlier usage cooldown (recognized by the core
+  cooldown note signature `cooldown until <ISO> for <agent|any>: …`):
+  idempotent — the core is re-called **only with `--replace` and only when
+  the new `resets_at` is strictly later** than the active cooldown's
+  `--until`; otherwise nothing is called and the hold file is left
+  byte-identical (exit `11`, hold already active).
+- relay `PAUSED` by a plain operator pause (any other note): never converted,
+  never `--replace`d; nothing written, exit `11` with a finding.
+- relay `WORKING_<agent>` — the guarded agent's **own** lock: cooperative
+  advisory only — post/update the `usage-hold.json` sidecar (same
+  idempotency rule; `resets_at` may be `null` here) plus a
+  `usage.hold_advisory` event, and exit `12`. No core call, no interrupt
+  queued, no force. The holder is expected to pause at its next safe point.
+- relay `WORKING_<peer>`: **nothing is written or called** — exit `12` with a
+  finding (a hold naming the limited agent while a peer works would only
+  mislead the resume machinery; the next guard tick re-evaluates).
+- relay `DONE`: left alone; nothing written, exit `11` with a finding.
+- `near_limit` **never** applies anything (exit `10`); `unknown` never
+  applies (exit `20`); `ok` applies nothing (exit `0`).
+
+**`usage watch`** — poll loop: each tick re-snapshots the enabled adapters
+(the PR A snapshot path, which appends to the ledger as always), evaluates
+the guard verdict from the refreshed ledger, and with `--apply` follows
+exactly the guard `--apply` rules above. `--max-ticks N` bounds the loop
+(0 = unbounded) and fractional `--interval` (default 60) is the test seam,
+mirroring the listener loop. The exit code is the final tick's guard code.
+A watch tick that observes an `ok` verdict **never** resumes anything.
+
+**`usage wait`** — token-free local blocker for cooled-down runners: each
+tick re-reads the ledger verdict only. It releases with exit `0` when the
+verdict is `ok` **or** `unknown` (fail-open: unknown usage must not block
+forever), or only on a genuine `ok` when `--until-ok` is passed; it exits
+`75` when `--max-ticks` is exhausted while still held. Fractional
+`--interval` (default 30). It writes nothing and calls nothing.
+
+**`usage resume`** — the **only** road back: explicit, never automatic. It
+resolves the resume agent as `--agent`, else the relay cooldown note's
+`resume_for` (when not `any`), else the hold's `agent` (`64` when none of
+those yields an agent). The verdict gate uses the hold's `agent` when a hold
+exists (the limited agent must have recovered), else the resume agent.
+
+- verdict not `ok` → refuse everything: relay untouched, hold untouched;
+  exit `11` when still `limit_hit`, exit `10` when `near_limit` or `unknown`.
+- verdict `ok` + relay `PAUSED` with the core cooldown note for that agent
+  (note `resume_for` is the agent or `any`) → call core
+  `resume <agent> --reason …` via argv, delete `usage-hold.json` if present,
+  append `usage.hold_cleared`; exit `0`.
+- verdict `ok` + relay `PAUSED` with a cooldown note for a **different**
+  agent → refuse, exit `30` (never steal another lane's cooldown).
+- verdict `ok` + relay not usage-cooldown-`PAUSED` (running, `IDLE`,
+  operator-`PAUSED`, `DONE`) + a hold exists → clear the stale hold only
+  (delete + `usage.hold_cleared` event), **no core call** (an operator pause
+  is never resumed by the usage monitor); exit `0`.
+- verdict `ok` + no hold + relay not usage-cooldown-`PAUSED` → nothing to do,
+  exit `0`.
+- a core `resume` argv failure surfaces as exit `30` with the captured
+  diagnostics; the hold is kept.
+
+#### PR B `usage-hold.json` bytes
+
+The active hold is a single pretty-printed JSON object (sorted keys) at
+`.m8shift/runtime/usage-hold.json`, schema `m8shift.usage.hold.v1`, with
+**exactly** these seven keys:
+
+```json
+{
+  "schema": "m8shift.usage.hold.v1",
+  "agent": "claude",
+  "placed_at": "2026-07-03T09:00:00Z",
+  "resets_at": "2026-07-03T11:15:00Z",
+  "reason": "claude usage limit_hit (decision_ratio 1.0 >= limit threshold 1.0)",
+  "source": "usage-monitor",
+  "snapshot_ref": ".m8shift/runtime/usage.jsonl#2026-07-03T09:00:00Z/claude/claude-usage-cli"
+}
+```
+
+- `agent` is the limited agent the hold was placed for; `placed_at` is the
+  write time; `resets_at` is the provider reset used as the core `--until`
+  (`null` only on the advisory own-`WORKING` hold); `source` is always
+  `usage-monitor` for holds this companion writes; `snapshot_ref` points at
+  the triggering ledger snapshot as
+  `.m8shift/runtime/usage.jsonl#<captured_at>/<agent>/<adapter>`.
+- Placement is idempotent: an existing hold for the same agent whose
+  `resets_at` is at or after the candidate is kept **byte-identical**
+  (`placed_at` preserved); the file is atomically rewritten only when
+  `resets_at` moves strictly later (which is also the only case that
+  re-calls core `cooldown --replace`).
+- Clearing a hold means **deleting the file** (the audit trail lives in
+  `usage.jsonl`); this PR B shape supersedes the richer
+  `state`/`trigger`/`decision` prose example above.
+- Any PR B command that reads a hold file which does not parse or does not
+  match this schema exits `40` (malformed usage sidecar) with a finding.
+
+#### PR B exit codes (guard family)
+
+The PR A table does **not** apply here; PR B uses the general table with this
+pinned per-command mapping (precedence within one run:
+`40` > `64` > `30` > `70` > `12` > `11` > `10` > `20` > `0`):
+
+| Code | `guard` / `watch` (final tick) | `wait` | `resume` |
+|-----:|-------------------------------|--------|----------|
+| `0` | verdict `ok` (nothing applied) | released: verdict `ok` (or `unknown` without `--until-ok`) | resumed, stale hold cleared, or nothing to do |
+| `10` | verdict `near_limit` — advisory only, **never** applies | — | refused: verdict still `near_limit` / `unknown` |
+| `11` | verdict `limit_hit`: hold recommended (no `--apply`), cooldown applied / hold already active / relay `DONE` or operator-`PAUSED` left alone (`--apply`) | — | refused: verdict still `limit_hit` |
+| `12` | `--apply` while a `WORKING_*` lock is held: own lock → advisory hold posted; peer lock → advisory only, nothing written | — | — |
+| `20` | verdict `unknown` (no snapshot, stale, or no ratio) — fail-open, never applies | — | — |
+| `30` | adapter/config/policy error: missing core, refused core call, no known reset time, cooldown owned by another lane | — | same |
+| `40` | malformed `usage-hold.json` / incompatible hold schema | same | same |
+| `64` | command-line usage error (`--apply` without `--agent`, invalid agent, non-positive `--interval`, negative `--max-ticks`) | same | same (no resolvable agent) |
+| `70` | apply-time local sidecar I/O failure | — | same |
+| `75` | — | `--max-ticks` exhausted while still held | — |
+
+All non-zero codes stay advisory automation hints; JSON output carries the
+full reason.
+
+#### PR B audit events
+
+Only `--apply`/`resume` **actions** must be recorded in
+`.m8shift/runtime/usage.jsonl` (guard verdicts alone are not recorded; watch
+ticks record their snapshots through the PR A snapshot path). Action events
+use the standard `m8shift.runtime.event.v1` envelope with types
+`usage.hold_placed`, `usage.hold_advisory`, and `usage.hold_cleared`, and a
+payload carrying pre/post refs: `relay_state_before`, `relay_state_after`
+(re-read after the core call), the hold bytes as written (or `null` on
+clear), `snapshot_ref`, and the core argv result when a core command was
+called.
+
+#### PR B non-goals
+
+- **No automatic resume.** Nothing in this slice resumes the relay except an
+  explicit `usage resume` invocation (a watch/guard tick seeing `ok` never
+  resumes; expiry of `resets_at` never resumes).
+- No force-claim, no stealing or expiring `WORKING_*` locks, and no
+  operator-inbox writes in this slice (the cooperative interrupt message of
+  the general design is deferred).
+- No relay writes except **through** the core `cooldown` / `resume` argv
+  calls; the companion never edits `M8SHIFT.md` or `LOCK` itself.
+- No provider launch, no network access, no new subprocess surface beyond
+  the PR A bounded runner and the core argv calls.
+
 ### Command surface
 
 All commands live under `m8shift-runtime.py usage` for Phase 2/3. They never edit
