@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.49.0 — 2026-07-04
+
+RFC 048 PR A complete — adoption discipline pack and adoption-health diagnostics
+(closes #18 and #20).
+
+- **Generated agent pack**: `init` now creates `M8SHIFT.agent-pack.md`, a concise
+  first-read discipline document for agents. It carries the operational floor:
+  claim-before-write, shell/runtime waiting, no parking, unread-turn handling,
+  keep-listening / idle-is-not-done, prompt-security boundaries, stale-lock recovery,
+  companion boundaries, and the incident #99 delivery discipline.
+- **Compact anchor floor**: `CLAUDE.md` / `AGENTS.md` stanzas now point to the pack
+  and protocol while keeping the mandatory inline guardrails. The stanza is measured
+  and tested at 1615 bytes, over the soft 1536-byte target only because the
+  safety floor is mandatory; the hard ceiling remains 2048 bytes.
+- **Adoption doctor**: `doctor` reports pack presence, integrity and staleness plus
+  stanza-floor health using the existing anchor finding IDs where appropriate.
+  Pre-3.49 projects receive informational adoption findings so `doctor --lint`
+  remains green until `init` delivers the new surface.
+- **Safe generated-file repair**: `init --force-generated` rebuilds only a corrupted
+  generated pack block, backs the previous file up as `*.m8shift.bak`, and never
+  resets the relay state.
+
+Lockstep bump to `3.49.0`. Full pytest suite: 526 passed, 374 subtests passed.
+
 ## v3.48.0 — 2026-07-04
 
 RFC 040 Phase 2 complete — AI session usage monitoring (advisory, cooperative).
