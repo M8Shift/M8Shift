@@ -31,6 +31,11 @@ Design (the points a naive `while wait; do …` loop gets wrong):
   * **Run ledger**: every launched turn receives `M8SHIFT_RUN_ID` in the child
     environment and appends lifecycle events to `.m8shift/runtime/runs.jsonl`.
   * **Bounded backoff + retry cap**, and **static argv** (no shell eval).
+  * **Resume-working (RFC 047 PR 2)**: `--resume-working --once` also wakes on this
+    agent's OWN `WORKING_<me>` lock (holder == me): no claim is run (the pen is already
+    held) and the child receives `M8SHIFT_RESUME_WORKING=1` so the provider knows to
+    finish the held work and append/done instead of starting a fresh claim→work→append
+    turn. Supervising listeners use this for the stuck-work retry.
 
 Usage:
   examples/headless_runner.py claude --cmd claude -p "Apply M8SHIFT.protocol.md: take your
@@ -59,6 +64,10 @@ RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 DEFAULT_ENV_ALLOWLIST = "HOME,PATH,LANG,LC_ALL,LC_CTYPE,TERM,USER"
 MANDATORY_ENV = ("M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TURN")
+# RFC 047 PR 2: exported to the provider child ONLY when this run resumes an
+# already-held WORKING_<agent> lock (--resume-working), so the provider can tell
+# "finish the held turn, then append/done — do NOT claim" from a normal turn.
+RESUME_ENV = "M8SHIFT_RESUME_WORKING"
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
@@ -247,6 +256,8 @@ def validate_run_plan(plan):
         raise SystemExit("run plan timeout must be a non-negative integer")
     if not isinstance(plan["kill_grace"], int) or plan["kill_grace"] < 0:
         raise SystemExit("run plan kill_grace must be a non-negative integer")
+    if not isinstance(plan.get("resume_working", False), bool):
+        raise SystemExit("run plan resume_working must be a boolean")
     resolve_argv(plan["argv"])
     expected = plan["expected_transition"]
     if not isinstance(expected, dict) or expected.get("type") not in {"core_state_advanced", "none"}:
@@ -273,7 +284,16 @@ def expected_post_run(me, lk):
     }
 
 
-def make_run_plan(args, run_id, me, lk):
+def resume_eligible(args, me, me_working, lk):
+    """RFC 047 PR 2: an explicit --resume-working run may ALSO start from this
+    agent's own WORKING lock (holder == agent). The pen is already held, so no
+    claim happens — the provider finishes the work and appends/dones."""
+    return bool(args.resume_working and lk
+                and lk.get("state", "") == me_working
+                and lk.get("holder", "") == me)
+
+
+def make_run_plan(args, run_id, me, lk, resumed=False):
     argv = resolve_argv(list(args.cmd))
     cwd = os.path.abspath(args.cwd)
     if not os.path.isdir(cwd):
@@ -298,6 +318,7 @@ def make_run_plan(args, run_id, me, lk):
         "env_allowlist": normalize_env_allowlist(args.env_allowlist),
         "timeout": args.turn_timeout,
         "kill_grace": args.kill_grace,
+        "resume_working": bool(resumed),
         "expected_transition": expected,
         "command": {
             "argv": argv,
@@ -444,6 +465,11 @@ def child_env_for_plan(plan, lk, m8shift_path):
         "M8SHIFT_AGENT": plan["agent"],
         "M8SHIFT_TURN": lk.get("turn", ""),
     })
+    if plan.get("resume_working"):
+        # Only a genuine resume launch (started from the agent's own WORKING lock)
+        # carries the marker — a normal AWAITING/IDLE launch must never suggest to
+        # the provider that a claim can be skipped.
+        env[RESUME_ENV] = "1"
     return env
 
 
@@ -497,6 +523,9 @@ def validate_args(args):
         raise SystemExit("--turn-timeout must be >= 0")
     if args.kill_grace < 0:
         raise SystemExit("--kill-grace must be >= 0")
+    if args.resume_working and not args.once:
+        raise SystemExit("--resume-working requires --once (it is a one-shot recovery "
+                         "launch for an already-held WORKING lock, not a polling mode)")
 
 
 def stop_child(proc, grace):
@@ -579,6 +608,15 @@ def main():
             "  3  external_transition — the relay moved outside this run's authorship (neutral,\n"
             "     never counted as a provider failure by a supervising listener)\n"
             "  4  suspended — relay is PAUSED (operator pause / usage cooldown; neutral)\n"
+            "\n"
+            "resume-working (RFC 047 PR 2):\n"
+            "  --resume-working (with --once) also makes the run eligible when the relay is\n"
+            "  WORKING_<agent> with holder == <agent>: the pen is ALREADY held, so no claim\n"
+            "  happens — the child gets M8SHIFT_RESUME_WORKING=1 in its environment to signal\n"
+            "  'finish the held work, then append/done; do not claim again'. The runner still\n"
+            "  heartbeats the TTL via `claim <agent> --refresh` and classifies the run with\n"
+            "  the normal table (authored newer turn => advanced; still WORKING same turn =>\n"
+            "  stuck_working). The marker is never exported for AWAITING/IDLE launches.\n"
         ),
     )
     p.add_argument("--version", action="version", version=f"headless_runner.py {VERSION}")
@@ -586,6 +624,10 @@ def main():
     p.add_argument("--m8shift", default="M8SHIFT.md", help="path to M8SHIFT.md")
     p.add_argument("--start-on-idle", action="store_true",
                    help="this agent starts the relay when state is IDLE (designate ONE)")
+    p.add_argument("--resume-working", action="store_true",
+                   help="with --once: also start when state is WORKING_<agent> held by this "
+                        "agent — resume an interrupted turn WITHOUT claiming; the child gets "
+                        "M8SHIFT_RESUME_WORKING=1 (see epilog)")
     p.add_argument("--interval", type=int, default=30, help="poll seconds when waiting")
     p.add_argument("--max-retries", type=int, default=3,
                    help="consecutive failed turns before giving up")
@@ -625,7 +667,9 @@ def main():
     me_awaiting = f"AWAITING_{me.upper()}"
     fails = 0
     if args.dry_run:
-        plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, read_lock(args.m8shift) or {"state": "IDLE", "turn": "0"})
+        lk0 = read_lock(args.m8shift) or {"state": "IDLE", "turn": "0"}
+        plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, lk0,
+                             resumed=resume_eligible(args, me, me_working, lk0))
         print(json.dumps({"agent": me, "cmd": plan["argv"], "run_plan": plan, "runner_version": VERSION}, sort_keys=True))
         return 0
 
@@ -641,15 +685,20 @@ def main():
             log("session DONE — exiting.")
             return 0
 
-        my_turn = state == me_awaiting or (state == "IDLE" and args.start_on_idle)
+        resumed = resume_eligible(args, me, me_working, lk)
+        my_turn = state == me_awaiting or (state == "IDLE" and args.start_on_idle) or resumed
         if not my_turn:
             time.sleep(args.interval)
             continue
 
         # It is our turn: run the headless agent for exactly one turn (static argv).
-        log(f"state={state} → running the agent for one turn.")
+        if resumed:
+            log(f"state={state} → resume-working: finishing the held turn (no claim; "
+                f"child gets {RESUME_ENV}=1).")
+        else:
+            log(f"state={state} → running the agent for one turn.")
         run_id = validate_run_id(args.run_id or new_run_id(me))
-        plan = make_run_plan(args, run_id, me, lk)
+        plan = make_run_plan(args, run_id, me, lk, resumed=resumed)
         try:
             plan_path = write_run_plan(args.runtime_dir, plan)
         except FileExistsError:
