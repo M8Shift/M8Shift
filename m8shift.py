@@ -4658,7 +4658,7 @@ def cmd_claim(args):
         _guard_integrating(args, lk, "claim")   # §8: refuse --force; allow only holder's TTL refresh
         exp = parse_iso(lk.get("expires"))
         stale = st.startswith("WORKING_") and exp is not None and now() > exp
-        if args.refresh:
+        if getattr(args, "refresh", False):  # `next` reuses cmd_claim with its own Namespace
             # RFC 047: refresh-only guard — a heartbeat must never open a FRESH work
             # window. Between a runner's pre-check and this file lock, the provider may
             # have appended and the peer handed the turn back (AWAITING_<agent>): a plain
