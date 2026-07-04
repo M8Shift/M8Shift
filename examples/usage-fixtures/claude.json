@@ -1,0 +1,22 @@
+{
+  "schema": "m8shift.usage.fixture.v1",
+  "agent": "claude",
+  "provenance": "official",
+  "captured_at": "2026-01-01T00:00:00Z",
+  "used_tokens": 42000,
+  "limit_tokens": 100000,
+  "windows": [
+    {
+      "kind": "session_5h",
+      "resets_at": "2026-01-01T05:00:00Z",
+      "used": 42000,
+      "limit": 100000
+    },
+    {
+      "kind": "weekly",
+      "resets_at": "2026-01-08T00:00:00Z",
+      "used": 130000,
+      "limit": 500000
+    }
+  ]
+}

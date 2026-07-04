@@ -7013,6 +7013,338 @@ class TestRFC046ProjectIdentity(unittest.TestCase):
         self.assertIn("Status-guard", blob)
 
 
+class TestRFC040UsagePRA(CLIBase):
+    """RFC 040 PR A — read-only usage snapshots. Advisory only: exit codes
+    0 (ok/unknown fail-open), 12 (adapter/config error), 30 (near_limit),
+    40 (limit_hit); no command ever mutates the relay."""
+
+    ADAPTERS_REL = os.path.join(".m8shift", "usage", "adapters.json")
+    LEDGER_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
+    ERRORS_REL = os.path.join(".m8shift", "runtime", "usage-adapter-errors.jsonl")
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(self.d, "m8shift-runtime.py"))
+
+    def rt(self, *args):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", *args],
+            cwd=self.d, capture_output=True, text=True,
+        )
+
+    @staticmethod
+    def fresh_iso():
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def write_adapters(self, adapters):
+        path = os.path.join(self.d, self.ADAPTERS_REL)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.usage.adapters.v1", "adapters": adapters}, fh)
+
+    def write_fixture(self, doc, rel=os.path.join(".m8shift", "usage", "fixtures", "test.json")):
+        path = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return rel
+
+    def fixture_adapter(self, *, name="claude-fx", agent="claude", enabled=True,
+                        path=None, **extra):
+        entry = {
+            "name": name, "agent": agent, "kind": "fixture",
+            "fixture_path": path or os.path.join(".m8shift", "usage", "fixtures", "test.json"),
+            "timeout_s": 5, "enabled": enabled,
+        }
+        entry.update(extra)
+        return entry
+
+    def usage_doc(self, *, agent="claude", used=42000, limit=100000,
+                  captured_at="2026-01-01T00:00:00Z", provenance="official", windows=()):
+        return {
+            "schema": "m8shift.usage.fixture.v1",
+            "agent": agent,
+            "provenance": provenance,
+            "captured_at": captured_at,
+            "used_tokens": used,
+            "limit_tokens": limit,
+            "windows": list(windows),
+        }
+
+    def ledger_lines(self, rel=None):
+        try:
+            with open(os.path.join(self.d, rel or self.LEDGER_REL), encoding="utf-8") as fh:
+                return [line for line in fh.read().splitlines() if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    def snapshot_for(self, doc, *, agent="claude"):
+        """Write fixture + enabled adapter, run `usage snapshot`, return CompletedProcess."""
+        rel = self.write_fixture(doc)
+        self.write_adapters([self.fixture_adapter(agent=agent, path=rel)])
+        return self.rt("usage", "snapshot", "--json")
+
+    def test_usage_init_is_idempotent_and_no_clobber(self):
+        first = self.rt("usage", "init", "--json")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        created = json.loads(first.stdout)["created"]
+        self.assertIn(".m8shift/usage/adapters.json", created)
+        self.assertIn(".m8shift/usage/fixtures/codex.json", created)
+        path = os.path.join(self.d, self.ADAPTERS_REL)
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["schema"], "m8shift.usage.adapters.v1")
+        by_name = {a["name"]: a for a in doc["adapters"]}
+        claude = by_name["claude-usage-cli"]
+        codex = by_name["codex-usage-fixture"]
+        for entry in (claude, codex):
+            self.assertFalse(entry["enabled"])          # DISABLED examples
+            self.assertEqual(entry["timeout_s"], 10)    # bounded default
+        self.assertEqual(claude["kind"], "cli_json")
+        self.assertIsInstance(claude["command"], list)  # argv array, not shell string
+        self.assertEqual(codex["kind"], "fixture")
+        doc["marker"] = "operator-edited"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        second = self.rt("usage", "init", "--json")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(second.stdout)["created"], [])
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["marker"], "operator-edited")
+
+    def test_adapters_check_refuses_shell_string_and_bad_timeout_warns_unknown_key(self):
+        self.write_adapters([
+            {"name": "bad-shell", "agent": "claude", "kind": "cli_json",
+             "command": "claude usage --json", "timeout_s": 10, "enabled": False},
+            {"name": "bad-timeout-low", "agent": "claude", "kind": "cli_json",
+             "command": ["claude-usage-example"], "timeout_s": 0, "enabled": False},
+            {"name": "bad-timeout-high", "agent": "codex", "kind": "cli_json",
+             "command": ["codex-usage-example"], "timeout_s": 999, "enabled": False},
+            {"name": "odd-key", "agent": "codex", "kind": "fixture",
+             "fixture_path": "x.json", "timeout_s": 5, "enabled": False,
+             "surprise": True},
+        ])
+        r = self.rt("usage", "adapters", "check", "--json")
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertFalse(payload["ok"])
+        checks = {(f["severity"], f["check"]) for f in payload["findings"]}
+        self.assertIn(("error", "usage.command_string"), checks)
+        self.assertIn(("error", "usage.timeout"), checks)
+        self.assertIn(("warning", "usage.unknown_key"), checks)
+        timeout_errors = [f for f in payload["findings"] if f["check"] == "usage.timeout"]
+        self.assertEqual(len(timeout_errors), 2)  # both 0 and 999 refused
+
+    def test_fixture_normalization_matches_pinned_schema_bytes(self):
+        with open(os.path.join(REPO, "examples", "usage-fixtures", "claude.json"),
+                  encoding="utf-8") as fh:
+            shipped = json.load(fh)
+        r = self.snapshot_for(shipped)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(len(payload["snapshots"]), 1)
+        snapshot = payload["snapshots"][0]["snapshot"]
+        expected = {
+            "schema": "m8shift.usage.snapshot.v1",
+            "agent": "claude",
+            "source": {"adapter": "claude-fx", "kind": "fixture", "provenance": "official"},
+            "captured_at": "2026-01-01T00:00:00Z",
+            "used_tokens": 42000,
+            "limit_tokens": 100000,
+            "decision_ratio": 0.42,
+            "windows": [
+                {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z",
+                 "used": 42000, "limit": 100000},
+                {"kind": "weekly", "resets_at": "2026-01-08T00:00:00Z",
+                 "used": 130000, "limit": 500000},
+            ],
+        }
+        self.assertEqual(json.dumps(snapshot, sort_keys=True),
+                         json.dumps(expected, sort_keys=True))
+        ledger = self.ledger_lines()
+        self.assertEqual(len(ledger), 1)
+        event = json.loads(ledger[0])
+        self.assertEqual(event["schema"], "m8shift.runtime.event.v1")
+        self.assertEqual(event["type"], "usage.snapshot")
+        self.assertEqual(json.dumps(event["payload"]["snapshot"], sort_keys=True),
+                         json.dumps(expected, sort_keys=True))
+
+    def test_snapshot_appends_and_never_edits_prior_ledger_lines(self):
+        rel = self.write_fixture(self.usage_doc())
+        self.write_adapters([self.fixture_adapter(path=rel)])
+        self.assertEqual(self.rt("usage", "snapshot").returncode, 0)
+        with open(os.path.join(self.d, self.LEDGER_REL), encoding="utf-8") as fh:
+            before = fh.read()
+        self.assertEqual(self.rt("usage", "snapshot").returncode, 0)
+        with open(os.path.join(self.d, self.LEDGER_REL), encoding="utf-8") as fh:
+            after = fh.read()
+        self.assertTrue(after.startswith(before))  # append-only, prior bytes untouched
+        self.assertEqual(len(self.ledger_lines()), 2)
+
+    def test_advisory_exit_codes_ok_near_limit_limit_hit_unknown(self):
+        cases = (
+            (50000, "ok", 0),
+            (85000, "near_limit", 30),
+            (100000, "limit_hit", 40),
+        )
+        for used, expected_class, expected_exit in cases:
+            with self.subTest(used=used):
+                r = self.snapshot_for(self.usage_doc(used=used, limit=100000,
+                                                     captured_at=self.fresh_iso()))
+                self.assertEqual(r.returncode, expected_exit, r.stdout + r.stderr)
+                payload = json.loads(r.stdout)
+                self.assertEqual(payload["snapshots"][0]["classification"], expected_class)
+                status = self.rt("usage", "status", "--json")
+                self.assertEqual(status.returncode, expected_exit, status.stdout)
+                agents = json.loads(status.stdout)["agents"]
+                self.assertEqual(agents[0]["classification"], expected_class)
+                os.remove(os.path.join(self.d, self.LEDGER_REL))  # isolate subtests
+        unknown_doc = self.usage_doc(used=None, limit=None, captured_at=self.fresh_iso())
+        r = self.snapshot_for(unknown_doc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # fail-open, never pause
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["snapshots"][0]["classification"], "unknown")
+        self.assertIn("usage.unknown", {f["check"] for f in payload["findings"]})
+        status = self.rt("usage", "status", "--json")
+        self.assertEqual(status.returncode, 0, status.stdout)
+        status_payload = json.loads(status.stdout)
+        self.assertEqual(status_payload["agents"][0]["classification"], "unknown")
+        self.assertIn("usage.unknown", {f["check"] for f in status_payload["findings"]})
+
+    def test_stale_snapshot_degrades_to_unknown_with_warning(self):
+        r = self.snapshot_for(self.usage_doc(used=95000, limit=100000,
+                                             captured_at="2026-01-01T00:00:00Z"))
+        self.assertEqual(r.returncode, 30)  # snapshot itself classifies fresh data
+        status = self.rt("usage", "status", "--stale-after-minutes", "30", "--json")
+        self.assertEqual(status.returncode, 0, status.stdout)  # stale => unknown => fail-open
+        payload = json.loads(status.stdout)
+        row = payload["agents"][0]
+        self.assertTrue(row["stale"])
+        self.assertEqual(row["classification"], "unknown")
+        self.assertIn("usage.stale", {f["check"] for f in payload["findings"]})
+
+    def test_malformed_ledger_line_is_diagnostic_not_crash(self):
+        ledger = os.path.join(self.d, self.LEDGER_REL)
+        os.makedirs(os.path.dirname(ledger), exist_ok=True)
+        good_event = {
+            "schema": "m8shift.runtime.event.v1", "type": "usage.snapshot",
+            "ts": self.fresh_iso(), "agent": "claude",
+            "payload": {"snapshot": {
+                "schema": "m8shift.usage.snapshot.v1", "agent": "claude",
+                "source": {"adapter": "x", "kind": "fixture", "provenance": "manual"},
+                "captured_at": self.fresh_iso(), "used_tokens": 90000,
+                "limit_tokens": 100000, "decision_ratio": 0.9, "windows": [],
+            }},
+        }
+        with open(ledger, "w", encoding="utf-8") as fh:
+            fh.write("{this is not json\n")
+            fh.write(json.dumps(good_event) + "\n")
+        status = self.rt("usage", "status", "--json")
+        self.assertEqual(status.returncode, 30, status.stdout + status.stderr)
+        payload = json.loads(status.stdout)
+        ledger_findings = [f for f in payload["findings"] if f["check"] == "usage.ledger"]
+        self.assertTrue(ledger_findings)
+        self.assertIn("usage.jsonl:1", ledger_findings[0]["message"])
+        self.assertEqual(payload["agents"][0]["classification"], "near_limit")
+
+    def test_disabled_adapter_is_skipped_silently(self):
+        rel = self.write_fixture(self.usage_doc(used=100000, limit=100000))
+        self.write_adapters([
+            self.fixture_adapter(name="off-a", agent="claude", path=rel, enabled=False),
+            self.fixture_adapter(name="off-b", agent="codex", path=rel, enabled=False),
+        ])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["snapshots"], [])
+        self.assertEqual(payload["skipped_disabled"], 2)
+        self.assertFalse(any(f["severity"] == "error" for f in payload["findings"]))
+        self.assertEqual(self.ledger_lines(), [])
+        self.assertEqual(self.ledger_lines(self.ERRORS_REL), [])
+
+    def test_no_relay_mutation_across_snapshot_and_status_cycle(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt("usage", "init").returncode, 0)
+        rel = self.write_fixture(self.usage_doc(used=95000, limit=100000,
+                                                captured_at=self.fresh_iso()))
+        self.write_adapters([self.fixture_adapter(path=rel)])
+        self.assertEqual(self.rt("usage", "snapshot").returncode, 30)
+        self.assertEqual(self.rt("usage", "status").returncode, 30)
+        self.assertEqual(self.md(), before)  # byte-identical relay
+
+    def test_adapter_errors_ledger_is_bounded_at_200_lines(self):
+        errors = os.path.join(self.d, self.ERRORS_REL)
+        os.makedirs(os.path.dirname(errors), exist_ok=True)
+        with open(errors, "w", encoding="utf-8") as fh:
+            for n in range(250):
+                fh.write(json.dumps({"schema": "m8shift.runtime.event.v1",
+                                     "type": "usage.adapter_error", "seq": n}) + "\n")
+        self.write_adapters([{
+            "name": "missing-cli", "agent": "claude", "kind": "cli_json",
+            "command": ["definitely-missing-usage-cli-1a2b3c"],
+            "timeout_s": 5, "enabled": True,
+        }])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        lines = self.ledger_lines(self.ERRORS_REL)
+        self.assertEqual(len(lines), 200)
+        newest = json.loads(lines[-1])
+        self.assertEqual(newest["payload"]["adapter"], "missing-cli")
+        self.assertEqual(json.loads(lines[0])["seq"], 51)  # oldest rows dropped
+
+    def test_cli_json_adapter_probe_and_identity_pin(self):
+        script = os.path.join(self.d, "fake-usage-cli.py")
+        doc = self.usage_doc(used=85000, limit=100000, captured_at=self.fresh_iso())
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("import json\nprint(json.dumps(" + repr(doc) + "))\n")
+        adapter = {
+            "name": "claude-cli", "agent": "claude", "kind": "cli_json",
+            "command": [sys.executable, script], "timeout_s": 10, "enabled": True,
+        }
+        self.write_adapters([adapter])
+        check = self.rt("usage", "adapters", "check", "--json")
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        self.assertEqual(json.loads(check.stdout)["probed"], [{"name": "claude-cli", "ok": True}])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 30, r.stdout + r.stderr)
+        snapshot = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snapshot["source"],
+                         {"adapter": "claude-cli", "kind": "cli_json", "provenance": "official"})
+        self.assertEqual(snapshot["decision_ratio"], 0.85)
+        adapter["sha256"] = "0" * 64  # wrong pin: identity mismatch fails closed
+        self.write_adapters([adapter])
+        pinned = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(pinned.returncode, 12, pinned.stdout + pinned.stderr)
+        payload = json.loads(pinned.stdout)
+        self.assertIn("identity mismatch",
+                      " ".join(f["message"] for f in payload["findings"]))
+        errors = [json.loads(line) for line in self.ledger_lines(self.ERRORS_REL)]
+        self.assertTrue(any("identity mismatch" in e["payload"]["message"] for e in errors))
+
+    def test_adapters_list_reports_enabled_and_identity_state(self):
+        self.assertEqual(self.rt("usage", "init").returncode, 0)
+        r = self.rt("usage", "adapters", "list", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = {a["name"]: a for a in json.loads(r.stdout)["adapters"]}
+        self.assertEqual(set(rows), {"claude-usage-cli", "codex-usage-fixture"})
+        for row in rows.values():
+            self.assertFalse(row["enabled"])
+            self.assertFalse(row["identity_pinned"])
+        only_codex = json.loads(self.rt("usage", "adapters", "list",
+                                        "--agent", "codex", "--json").stdout)
+        self.assertEqual([a["name"] for a in only_codex["adapters"]],
+                         ["codex-usage-fixture"])
+
+    def test_snapshot_without_config_is_config_error(self):
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("usage init", " ".join(f["message"] for f in payload["findings"]))
+
+
 class TestDetailedHelpCoverage(unittest.TestCase):
     """Operator requirement: every CLI parameter documents itself — each argparse
     add_argument carries help= (one line per parameter in --help) and every

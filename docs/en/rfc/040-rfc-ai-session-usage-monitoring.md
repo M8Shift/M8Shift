@@ -789,6 +789,142 @@ This section makes Phase 2 (read-only snapshots) and Phase 3 (guard/advisory)
 implementable. If it conflicts with earlier high-level prose, this section is the
 more precise contract.
 
+### PR A scope (reviewer-pinned read-only slice)
+
+PR A is the first shipped slice of Phase 2. Where this subsection is narrower or
+differs from the rest of the contract, **this subsection wins for the PR A
+commands**; the general contract continues to govern the PR B guard family.
+
+#### PR A command surface
+
+PR A ships ONLY the read-only surface, in `m8shift-runtime.py`:
+
+```bash
+python3 m8shift-runtime.py usage init [--json]
+python3 m8shift-runtime.py usage adapters list [--agent AGENT] [--json]
+python3 m8shift-runtime.py usage adapters check [--agent AGENT] [--json]
+python3 m8shift-runtime.py usage snapshot [--agent AGENT] [--json] [--raw-excerpt]
+python3 m8shift-runtime.py usage status [--agent AGENT] [--json]
+```
+
+Threshold and freshness knobs are CLI flags in PR A (the host-local policy file
+lands with PR B): `--warn-threshold` (default `0.80`), `--limit-threshold`
+(default `1.0`) on `snapshot`/`status`, and `--stale-after-minutes` (default
+`30`) on `status`. In PR A, `snapshot` **always** appends to the
+`.m8shift/runtime/usage.jsonl` ledger (there is no separate `--write` mode yet);
+`status` reads that ledger and writes nothing.
+
+`usage init` scaffolds `.m8shift/usage/adapters.json`
+(schema `m8shift.usage.adapters.v1`) with **disabled** example entries for
+`claude` (`kind: cli_json`, argv-array `command`) and `codex` (`kind: fixture`,
+`fixture_path`), plus a synthetic sample fixture under
+`.m8shift/usage/fixtures/codex.json`. It is idempotent and never clobbers
+existing files. PR A adapter entries carry exactly: `name`, `agent`,
+optional `provider`, `kind` (`cli_json` | `fixture`), `command` (argv array of
+strings — a shell string is a config **error**), `fixture_path` (fixture kind),
+`timeout_s` (number, bounded `1..60`, default `10`), `enabled` (bool, default
+`false`), optional `sha256` (identity pin for `command[0]`; mismatch fails
+closed), and optional `//` comments. Unknown keys are **warnings**.
+`adapters check` probes only **enabled** adapters, with a bounded argv-only
+subprocess run (never a shell string, never network access by M8Shift itself);
+adapter failures are appended to `.m8shift/runtime/usage-adapter-errors.jsonl`,
+which is bounded to the **last 200 lines**.
+
+#### PR A snapshot schema bytes
+
+Adapter output is normalized to `m8shift.usage.snapshot.v1` with exactly these
+fields (compact, sorted keys in the JSONL ledger):
+
+```json
+{
+  "schema": "m8shift.usage.snapshot.v1",
+  "agent": "claude",
+  "source": {"adapter": "claude-usage-cli", "kind": "cli_json", "provenance": "official"},
+  "captured_at": "2026-01-01T00:00:00Z",
+  "used_tokens": 42000,
+  "limit_tokens": 100000,
+  "decision_ratio": 0.42,
+  "windows": [
+    {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z", "used": 42000, "limit": 100000},
+    {"kind": "weekly", "resets_at": "2026-01-08T00:00:00Z", "used": 130000, "limit": 500000}
+  ],
+  "raw_excerpt_redacted": "optional; present only with --raw-excerpt"
+}
+```
+
+- `source` is an object with exactly `adapter`, `kind`, and `provenance`
+  (provenance vocabulary from the design principles; anything else is recorded
+  as `"unknown"` with a warning).
+- `used_tokens` / `limit_tokens` and each window's `used` / `limit` are
+  non-negative integers or `null`.
+- `decision_ratio = round(max(used/limit across windows with used and a
+  positive limit), 4)`, falling back to `used_tokens/limit_tokens`, else
+  `null`.
+- `windows[]` entries carry exactly `kind`, `resets_at` (UTC ISO 8601 or
+  `null`), `used`, `limit`.
+- `raw_excerpt_redacted` is optional, size-capped, and **never** verbatim
+  provider output: secrets/token-like runs are redacted before storage, and it
+  is emitted only when the operator passes `--raw-excerpt`.
+
+The ledger event wraps that snapshot in the standard
+`m8shift.runtime.event.v1` envelope with `type: "usage.snapshot"` and is
+append-only: new snapshots never rewrite prior lines. Grouping events by
+`agent` over time remains the advisory per-agent token timeline.
+
+PR A readers consume one documented input shape, `m8shift.usage.fixture.v1` —
+the JSON that a `claude usage`-style CLI prints on stdout (`kind: cli_json`) or
+that a local status file contains (`kind: fixture`):
+
+```json
+{
+  "schema": "m8shift.usage.fixture.v1",
+  "agent": "claude",
+  "provenance": "official",
+  "captured_at": "2026-01-01T00:00:00Z",
+  "used_tokens": 42000,
+  "limit_tokens": 100000,
+  "windows": [
+    {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z", "used": 42000, "limit": 100000},
+    {"kind": "weekly", "resets_at": "2026-01-08T00:00:00Z", "used": 130000, "limit": 500000}
+  ]
+}
+```
+
+A synthetic sample ships in the repository under
+`examples/usage-fixtures/claude.json`. The Claude normalization is first-class;
+the Codex adapter is a fixture/stub path normalized to the **same** snapshot
+schema.
+
+#### PR A exit codes (read-only commands only)
+
+For the five PR A commands, this mapping is the contract and supersedes the
+general exit-code table below (which continues to apply to the PR B
+guard/watch/wait/resume surface):
+
+| Code | Meaning (PR A read-only surface) |
+|-----:|----------------------------------|
+| `0` | ok — including **unknown** usage (fail-open) |
+| `12` | adapter or config error (invalid manifest, shell-string argv, bad timeout, identity mismatch, probe/parse failure with no usable snapshot) |
+| `30` | `near_limit` **advisory** on `snapshot`/`status` when `decision_ratio >= warn threshold` |
+| `40` | `limit_hit` **advisory** when `decision_ratio >= limit threshold` |
+
+Precedence when several apply: `40` > `30` > `12` > `0`. All non-zero codes are
+**advisory automation hints only** — no PR A command ever mutates the relay,
+pauses anything, or blocks a shift.
+
+#### PR A non-goals
+
+PR A ships **no `usage guard`, no `--apply`, no watch/wait/resume, no
+cooldown/pause/resume calls, no relay mutation, no provider launch, no
+cooperative `WORKING_*` interrupt** (all PR B after review).
+
+#### Unknown usage
+
+Unknown usage (no enabled adapter, no data, or no computable ratio) yields
+status `"unknown"`, exit `0`, and a warning finding — fail-open, never pause.
+A snapshot older than `--stale-after-minutes` degrades to `"unknown"` for
+exit-code purposes and emits a warning finding.
+
 ### Command surface
 
 All commands live under `m8shift-runtime.py usage` for Phase 2/3. They never edit
