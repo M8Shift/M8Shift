@@ -29,7 +29,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.50.0"
+VERSION = "3.50.1"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -8250,8 +8250,11 @@ class TestRFC048PRB(CLIBase):
         self.assertEqual(comps["core"], "updated")
 
     def test_baseline_pre_341_refuses_with_manual_upgrade_message(self):
+        # v3.50.1: refusal requires EVERY parseable authority below the floor —
+        # banner AND target script (no kit.json here).
         self.init()
         self._set_banner("3.40.0")
+        self._reversion(os.path.join(self.d, "m8shift.py"), "3.40.0")
         before = self._snapshot(self.d)
         r = self.update()
         self.assertNotEqual(r.returncode, 0)
@@ -8259,6 +8262,21 @@ class TestRFC048PRB(CLIBase):
         self.assertIn("3.41", msg)
         self.assertIn("upgrade manually", msg)
         self.assertEqual(self._snapshot(self.d), before)   # refusal writes nothing
+
+    def test_stale_banner_with_current_script_is_supported(self):
+        # v3.50.1 hotfix regression (found dogfooding v3.50.1 against the live
+        # relay): a long-lived relay keeps its ORIGINAL banner (v3.14.0 from the
+        # pre-rename era) across promotions while its installed script is current.
+        # The banner must never veto a target whose script proves support.
+        self.init()
+        self._set_banner("3.14.0")
+        relay_before = self.read_target("M8SHIFT.md")
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.read_target("M8SHIFT.md"), relay_before,
+                         "relay must stay byte-identical through update")
+        d, comps = self._components(r)
+        self.assertNotIn("refused", comps.values())
 
     # ── generated-marker safety ──────────────────────────────────────────────
 

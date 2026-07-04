@@ -74,7 +74,7 @@ if os.environ.get("M8SHIFT_ROOT"):   # opt-in: coordinate against a canonical re
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.50.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.50.1"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -2166,22 +2166,34 @@ def _target_version_before(target_root, relay_text):
 
 
 def _update_baseline_version(target_root, relay_text):
-    """Init-era baseline authority (RFC 048): kit.json when present, else the
-    relay banner (the generated header stamped at init), else the target script
-    VERSION. None when nothing is parseable → manual_review_required."""
+    """Init-era baseline authority (RFC 048): the BEST provable version among
+    kit.json, the relay banner, and the target script VERSION.
+
+    v3.50.1 hotfix (found dogfooding the release against a long-lived relay):
+    a relay file preserved across many promotions keeps its ORIGINAL banner
+    (e.g. v3.14.0 from the pre-rename era) even though the installed script is
+    current — the banner must never veto a target whose script (or kit.json)
+    proves a supported version. A target is refused only when every parseable
+    authority is below the floor; None when nothing is parseable at all
+    (→ manual_review_required)."""
+    candidates = []
     try:
         with open(os.path.join(target_root, KIT_MANIFEST_REL), encoding="utf-8") as fh:
             data = json.load(fh)
         v = ((data.get("core") or {}).get("version") or "").strip()
         if _version_tuple(v):
-            return v
+            candidates.append(v)
     except (OSError, json.JSONDecodeError, ValueError, AttributeError):
         pass
     m = _RELAY_BANNER_VERSION_RE.search(relay_text or "")
-    if m:
-        return m.group(1)
+    if m and _version_tuple(m.group(1)):
+        candidates.append(m.group(1))
     v = _parse_script_version(os.path.join(target_root, "m8shift.py"))
-    return v if _version_tuple(v) else None
+    if _version_tuple(v):
+        candidates.append(v)
+    if not candidates:
+        return None
+    return max(candidates, key=_version_tuple)
 
 
 def _update_result_rank(result):
