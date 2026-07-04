@@ -195,6 +195,7 @@ Garanzia:
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generates the kit here
+./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: aggiornamento locale guidato dalla sorgente — eseguire la NUOVA copia sorgente; ogni scrittura finisce in --target
 ./m8shift.py status                                # lock + last turn (NON-blocking)
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # monitor live locale, sola lettura
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # controlli salute/sicurezza/contratti in sola lettura
