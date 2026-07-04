@@ -1,5 +1,26 @@
 # Changelog
 
+## v3.48.0 — 2026-07-04
+
+RFC 040 Phase 2 complete — AI session usage monitoring (advisory, cooperative).
+
+- **Read-only surface (PR A)**: `usage init` / `adapters list|check` / `snapshot` /
+  `status` — argv-only bounded adapters (identity pin fail-closed, stdout hard-capped by
+  a killing bounded reader, zero network by M8Shift), normalization to
+  `m8shift.usage.snapshot.v1`, append-only `usage.jsonl` ledger, always-redacted
+  excerpts, advisory exits, unknown = fail-open (never a pause).
+- **Guard family (PR B)**: `usage guard [--apply]` / `watch` / `wait` / `resume` —
+  holds placed ONLY through the core `cooldown` argv call with the snapshot's
+  `resets_at` (never an invented reset); own-`WORKING` = advisory hold + exit 12, no
+  interrupt; peer-`WORKING` = advice only, nothing written; an ok watch tick never
+  resumes; `usage resume` is the explicit-only road back, gated on verdict exactly
+  `ok`. `m8shift.usage.hold.v1` sidecar; audit via `usage.hold_*` events.
+- Motivated by two real worker losses to provider session limits during dogfooding on
+  2026-07-04: an unattended lane can now check its budget before waking and hold
+  through a quota window instead of dying silently.
+
+Lockstep bump to `3.48.0`. Full pytest suite: 506 passed.
+
 ## v3.47.0 — 2026-07-04
 
 RFC 047 complete — the headless liveness block (closes #21; #6 keeps its broader
