@@ -3614,6 +3614,390 @@ class TestRFC047PhaseA(CLIBase):
         self.assertNotIn("claim --force", src)
 
 
+class TestRFC047ListenerPR1(CLIBase):
+    """RFC 047 Phases B+C (PR 1) — listener lifecycle companion, local backend only:
+    profile validation (argv arrays, never shell strings), dry-run planning, PID
+    lifecycle (live/stale/repair), process-group stop, the poll/launch decision
+    table, the pure bounded backoff ladder, persisted HALTED honored across
+    restarts, PR-2 backend rejection, and the advisory charter (the listener never
+    mutates the relay and never force-claims)."""
+
+    RUNTIME = os.path.join(REPO, "m8shift-runtime.py")
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(self.RUNTIME, os.path.join(self.d, "m8shift-runtime.py"))
+
+    def rt(self, *args, timeout=60):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", *args],
+            cwd=self.d, capture_output=True, text=True, timeout=timeout,
+        )
+
+    def _load_runtime(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_rfc047_pr1", self.RUNTIME)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def profile_path(self, drop=(), **overrides):
+        doc = {
+            "schema": "m8shift.listener.profile.v1",
+            "agent": "claude",
+            "argv": ["provider-cli", "one-turn"],
+            "cwd": ".",
+            "env_allowlist": ["HOME", "PATH"],
+            "start_on_idle": False,
+        }
+        doc.update(overrides)
+        for key in drop:
+            doc.pop(key, None)
+        with open(os.path.join(self.d, "listener-profile.json"), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return "listener-profile.json"
+
+    def stub_runner(self, *, rc=0, take_turn=False, sleep_s=0, pid_file=""):
+        """A recorded runner stand-in (the --runner test seam): appends its argv to
+        launches.txt, optionally writes its own pid, takes one real relay turn, or
+        sleeps, then exits with `rc` (the RFC 047 one-shot exit vocabulary)."""
+        lines = [
+            "import json, os, sys, time",
+            "with open('launches.txt', 'a', encoding='utf-8') as fh:",
+            "    fh.write(json.dumps(sys.argv[1:]) + '\\n')",
+        ]
+        if pid_file:
+            lines += [
+                f"with open({pid_file!r}, 'w', encoding='utf-8') as fh:",
+                "    fh.write(str(os.getpid()))",
+            ]
+        if take_turn:
+            lines += [
+                "import subprocess",
+                "m = [sys.executable, 'm8shift.py']",
+                "subprocess.check_call(m + ['claim', 'claude'])",
+                "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',",
+                "                           '--ask', 'review', '--done', 'one turn'])",
+            ]
+        if sleep_s:
+            lines.append(f"time.sleep({sleep_s})")
+        lines.append(f"sys.exit({rc})")
+        with open(os.path.join(self.d, "stub_runner.py"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return "stub_runner.py"
+
+    def launches(self):
+        path = os.path.join(self.d, "launches.txt")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [line for line in fh if line.strip()]
+
+    def pid_path(self):
+        return os.path.join(self.d, ".m8shift", "runtime", "listeners", "claude.pid")
+
+    def write_pid_file(self, pid):
+        os.makedirs(os.path.dirname(self.pid_path()), exist_ok=True)
+        with open(self.pid_path(), "w", encoding="utf-8") as fh:
+            fh.write(f"{pid}\n")
+
+    def state_doc(self):
+        path = os.path.join(self.d, ".m8shift", "runtime", "listeners", "claude.json")
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def awaiting_me(self):
+        """init + one codex turn → AWAITING_CLAUDE (the listener's wake state)."""
+        self.init()
+        r = self.turn("codex", "claude")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+
+    def awaiting_peer(self):
+        """init + one claude turn → AWAITING_CODEX (a neutral state for claude)."""
+        self.init()
+        r = self.turn("claude", "codex")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
+    def test_t1_profile_validation_refuses_shell_strings_and_missing_fields(self):
+        # RFC 047 PR1 test 1: argv arrays only — validated BEFORE any process work.
+        self.init()
+        shell = self.profile_path(argv="provider-cli --one-turn && echo owned")
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", shell, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("shell string", r.stderr)
+        missing = self.profile_path(drop=("argv",))
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", missing, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("argv", r.stderr)
+        nonlist = self.profile_path(argv={"cmd": "provider-cli"})
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", nonlist, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("argv", r.stderr)
+        noschema = self.profile_path(drop=("schema",))
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", noschema, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("m8shift.listener.profile.v1", r.stderr)
+        mismatch = self.profile_path(agent="codex")
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", mismatch, "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not match", r.stderr)
+        neither = self.rt("listener", "start", "--agent", "claude", "--dry-run")
+        self.assertNotEqual(neither.returncode, 0)
+        self.assertIn("exactly one of --cmd-file or --provider", neither.stderr)
+        # a real (non-dry) start with an invalid profile fails BEFORE any pid work
+        bad_real = self.rt("listener", "start", "--agent", "claude", "--cmd-file", shell,
+                           "--foreground", "--max-ticks", "1", "--poll-interval", "0.05")
+        self.assertNotEqual(bad_real.returncode, 0)
+        self.assertFalse(os.path.exists(self.pid_path()))
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "listeners")))
+
+    def test_t2_dry_run_prints_plan_and_writes_no_pid_or_log(self):
+        # RFC 047 PR1 test 2 (RFC Phase-2 test 1): dry-run is a plan, not a process.
+        self.init()
+        prof = self.profile_path()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--backend", "auto", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertTrue(payload["dry_run"])
+        plan = payload["plan"]
+        self.assertEqual(plan["schema"], "m8shift.listener.plan.v1")
+        self.assertEqual(plan["agent"], "claude")
+        self.assertEqual(plan["backend"], "local")          # auto → local in PR 1
+        self.assertEqual(plan["profile"]["argv"], ["provider-cli", "one-turn"])
+        self.assertIn("--once", plan["runner_argv_preview"])
+        self.assertEqual(plan["backoff_ladder_seconds"], [20, 40, 80])
+        self.assertFalse(os.path.exists(self.pid_path()))
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "listeners")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.d, ".m8shift", "runtime", "logs", "claude-listener.log")))
+
+    def test_t3_start_refuses_live_pid_without_restart(self):
+        # RFC 047 PR1 test 3 (RFC Phase-2 test 2): one listener per agent lane.
+        self.init()
+        prof = self.profile_path()
+        stub = self.stub_runner()
+        self.write_pid_file(os.getpid())    # this test process is definitely alive
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "1",
+                    "--poll-interval", "0.05")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already running", r.stderr)
+        self.assertIn("--restart", r.stderr)
+        self.assertEqual(self.launches(), [])
+        with open(self.pid_path(), encoding="utf-8") as fh:   # untouched by the refusal
+            self.assertEqual(int(fh.read().strip()), os.getpid())
+
+    def test_t4_status_detects_stale_pid_and_repair_removes_it(self):
+        # RFC 047 PR1 test 4 (RFC Phase-2 test 3): stale detection is explicit-repair only.
+        self.init()
+        ghost = subprocess.Popen([sys.executable, "-c", "pass"])
+        ghost.wait()
+        self.write_pid_file(ghost.pid)      # a pid that existed and is now dead
+        st = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(st["pid_status"], "stale")
+        self.assertEqual(st["status"], "STALE")
+        human = self.rt("listener", "status", "--agent", "claude")
+        self.assertIn("STALE", human.stdout)
+        self.assertTrue(os.path.exists(self.pid_path()), "status alone must not repair")
+        rep = json.loads(self.rt("listener", "status", "--agent", "claude",
+                                 "--json", "--repair").stdout)
+        self.assertTrue(rep["repaired"])
+        self.assertFalse(os.path.exists(self.pid_path()))
+        after = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(after["pid_status"], "dead")
+        self.assertEqual(after["status"], "DEAD")
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group semantics (Windows uses taskkill /T)")
+    def test_t5_stop_terminates_the_spawned_process_group(self):
+        # RFC 047 PR1 test 5 (RFC Phase-2 test 4): stop kills the WHOLE tree —
+        # detached listener leader plus the runner child it launched.
+        self.awaiting_me()
+        prof = self.profile_path()
+        stub = self.stub_runner(sleep_s=120, pid_file="runner.pid")
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--poll-interval", "0.2")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(self.pid_path(), encoding="utf-8") as fh:
+            listener_pid = int(fh.read().strip())
+        runner_pid_path = os.path.join(self.d, "runner.pid")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not os.path.exists(runner_pid_path):
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(runner_pid_path), "listener never launched the runner")
+        with open(runner_pid_path, encoding="utf-8") as fh:
+            runner_pid = int(fh.read().strip())
+        alive = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(alive["status"], "ALIVE")
+        stop = self.rt("listener", "stop", "--agent", "claude", "--grace", "2")
+        self.assertEqual(stop.returncode, 0, stop.stdout + stop.stderr)
+        self.assertFalse(os.path.exists(self.pid_path()),
+                         "pid file must be removed after confirmed death")
+
+        def dead(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            return False
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (dead(listener_pid) and dead(runner_pid)):
+            time.sleep(0.1)
+        self.assertTrue(dead(listener_pid), "listener survived stop")
+        self.assertTrue(dead(runner_pid), "runner child survived the process-group stop")
+
+    def test_t6_loop_sleeps_without_launching_on_awaiting_peer(self):
+        # RFC 047 PR1 test 6 (RFC Phase-2 test 5): peer turns are first-class neutral.
+        self.awaiting_peer()
+        prof = self.profile_path()
+        stub = self.stub_runner()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "3",
+                    "--poll-interval", "0.05")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.launches(), [])
+        self.assertFalse(os.path.exists(self.pid_path()),
+                         "a cleanly exited foreground loop removes its own pid file")
+
+    def test_t7_loop_launches_exactly_one_turn_on_awaiting_me(self):
+        # RFC 047 PR1 test 7 (RFC Phase-2 test 6): one bounded runner turn per wake.
+        self.awaiting_me()
+        prof = self.profile_path()
+        stub = self.stub_runner(take_turn=True)
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "4",
+                    "--poll-interval", "0.05")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        launches = self.launches()
+        self.assertEqual(len(launches), 1, launches)
+        argv = json.loads(launches[0])
+        self.assertEqual(argv[0], "claude")
+        self.assertIn("--once", argv)
+        self.assertIn("--cmd", argv)
+        self.assertEqual(argv[argv.index("--cmd") + 1:], ["provider-cli", "one-turn"])
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")   # turn really advanced
+        doc = self.state_doc()
+        self.assertEqual(doc["schema"], "m8shift.listener.state.v1")
+        self.assertEqual(doc["phase"], "polling")
+        self.assertEqual(doc["consecutive_failures"], 0)
+        self.assertTrue(doc["last_run_id"])
+
+    def test_stuck_working_is_visible_neutral_no_retry_in_pr1(self):
+        # Codex review of PR 1 (option B): the reference runner only wakes on
+        # AWAITING_<agent>/IDLE, so a stuck_working retry launch would poll forever.
+        # PR 1 must NOT launch on an own stuck WORKING lock — it sleeps neutrally
+        # and says so visibly; the resume-working runner mode lands in PR 2.
+        self.awaiting_me()
+        r = self.cw("claim", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)          # WORKING_CLAUDE, holder=claude
+        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.listener.state.v1",
+                "agent": "claude",
+                "phase": "polling",
+                "consecutive_failures": 1,
+                "last_run_id": "seeded",
+                "last_classification": "stuck_working",
+                "updated_at": "2026-07-04T00:00:00Z",
+            }, fh)
+        prof = self.profile_path()
+        stub = self.stub_runner()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "3",
+                    "--poll-interval", "0.05")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.launches(), [],
+                         "PR 1 must never launch a retry on an own stuck WORKING lock")
+        self.assertIn("does not auto-retry", r.stdout)
+        self.assertIn("PR 2", r.stdout)
+        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")   # untouched
+
+    def test_t8_backoff_pure_function_ladder_and_cap(self):
+        # RFC 047 PR1 test 8 (RFC Phase-2 tests 7+16): pure, sleep-free, bounded.
+        rt = self._load_runtime()
+        self.assertEqual([rt.listener_backoff(n) for n in range(1, 7)],
+                         [20, 40, 80, 160, 300, 300])
+        self.assertEqual(rt.listener_backoff(0), 0)
+        self.assertEqual(rt.listener_backoff(-3), 0)
+        self.assertEqual(rt.listener_backoff(3, cap=60), 60)       # --max-backoff cap
+        self.assertEqual(rt.listener_backoff(1, cap=60), 20)
+        self.assertEqual(rt.listener_backoff(10 ** 6), 300)        # clamped exponent
+
+    def test_t9_max_retries_persists_halted_and_restart_honors_it(self):
+        # RFC 047 PR1 test 9 (RFC Phase-2 test 15): HALTED is persistent and visible.
+        self.awaiting_me()
+        prof = self.profile_path()
+        stub = self.stub_runner(rc=1)      # every turn fails (non-completion family)
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "3",
+                    "--poll-interval", "0.05", "--max-retries", "1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.launches()), 1)
+        doc = self.state_doc()
+        self.assertEqual(doc["phase"], "halted")
+        self.assertEqual(doc["consecutive_failures"], 1)
+        self.assertIn("max_retries", doc["reason"])
+        st = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(st["status"], "HALTED")
+        self.assertTrue(st["halted"])
+        human = self.rt("listener", "status", "--agent", "claude")
+        self.assertIn("HALTED", human.stdout)
+        # a restarted listener RELOADS the sidecar and honors the halt (no launches)
+        r2 = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                     "--runner", stub, "--foreground", "--max-ticks", "3",
+                     "--poll-interval", "0.05", "--max-retries", "1")
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertEqual(len(self.launches()), 1, "a halted listener must not launch")
+        self.assertEqual(self.state_doc()["phase"], "halted")
+        # --restart is the explicit operator act that clears the halt
+        r3 = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                     "--runner", stub, "--foreground", "--max-ticks", "2",
+                     "--poll-interval", "0.05", "--max-retries", "1", "--restart")
+        self.assertEqual(r3.returncode, 0, r3.stdout + r3.stderr)
+        self.assertEqual(len(self.launches()), 2)
+
+    def test_t10_polling_cycle_never_mutates_the_relay(self):
+        # RFC 047 PR1 test 10 (charter): a poll-only listener cycle leaves
+        # M8SHIFT.md byte-identical, and the companion never force-claims.
+        self.awaiting_peer()
+        prof = self.profile_path()
+        stub = self.stub_runner()
+        with open(os.path.join(self.d, "M8SHIFT.md"), "rb") as fh:
+            before = fh.read()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "5",
+                    "--poll-interval", "0.05")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.d, "M8SHIFT.md"), "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        with open(self.RUNTIME, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("claim --force", src)
+
+    def test_t11_pr2_backends_rejected_with_clear_message(self):
+        # RFC 047 PR1 test 11: OS service adapters are PR 2 — reject loudly.
+        self.init()
+        prof = self.profile_path()
+        for backend in ("launchd", "systemd", "windows"):
+            with self.subTest(backend=backend):
+                r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                            "--backend", backend, "--dry-run")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("PR 2", r.stderr)
+                self.assertIn("not yet shipped", r.stderr)
+        ok = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                     "--backend", "local", "--dry-run")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(json.loads(ok.stdout)["plan"]["backend"], "local")
+
+
 class TestLoopGuardrails(CLIBase):
     """Regression tests for operator-loop guardrails: next/status hints/append --wait."""
 
