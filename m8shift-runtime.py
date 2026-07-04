@@ -3546,9 +3546,10 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
       AWAITING_<agent>                              → launch exactly ONE runner turn
       IDLE + profile.start_on_idle                  → launch exactly ONE runner turn
       WORKING_<agent> (holder==agent) + previous
-        run classified stuck_working + budget left  → one retry (runs are synchronous,
-                                                      so the previous provider process
-                                                      is necessarily dead here)
+        run classified stuck_working               → VISIBLE neutral sleep (PR 1 does
+                                                      not auto-retry; the runner
+                                                      resume-working mode lands in
+                                                      PR 2 and re-enables the retry)
       PAUSED / AWAITING_<peer> / WORKING_<peer> /
         IDLE without starter / missing relay        → sleep (first-class neutral)
     Runner exit mapping: 0 resets the failure counter; 1 and 2 increment it;
@@ -3561,6 +3562,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
     me_working = f"WORKING_{agent.upper()}"
     persisted = read_listener_state(agent)
     phase = persisted.get("phase") if persisted.get("phase") in LISTENER_PHASES else "polling"
+    stuck_notice_logged = False
     fails = persisted.get("consecutive_failures")
     fails = fails if isinstance(fails, int) and fails >= 0 else 0
     last_run_id = persisted.get("last_run_id") if isinstance(persisted.get("last_run_id"), str) else ""
@@ -3607,8 +3609,21 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             elif state == "IDLE" and profile["start_on_idle"]:
                 wake = "idle_start"
             elif (state == me_working and lk.get("holder", "") == agent
-                    and last_classification == "stuck_working" and fails < max_retries):
-                wake = "stuck_working_retry"
+                    and last_classification == "stuck_working"):
+                # PR 1 deliberately does NOT retry an own stuck WORKING lock: the
+                # reference runner only wakes on AWAITING_<agent>/IDLE, so a launch
+                # here would sit polling forever (deadlock found in Codex review).
+                # PR 2 adds the runner resume-working mode, then re-enables this
+                # wake path. Until then the condition stays VISIBLE, not silent.
+                if not stuck_notice_logged:
+                    listener_log_line(
+                        f"{agent}: own WORKING lock classified stuck_working — PR 1 does "
+                        "not auto-retry it (runner resume-working mode lands in PR 2). "
+                        f"Manual recovery: finish/append as {agent}, or wait for the TTL "
+                        "to expire so the peer can recover per protocol.")
+                    stuck_notice_logged = True
+                time.sleep(poll)
+                continue
             if not wake:
                 # PAUSED, AWAITING_<peer>, WORKING_<peer>, a WORKING_<agent> lock this
                 # listener did not classify as stuck, and IDLE without starter
@@ -3618,6 +3633,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     save()
                 time.sleep(poll)
                 continue
+            stuck_notice_logged = False
             run_id = new_listener_run_id(agent)
             argv = listener_runner_argv(agent, profile, runner_path, run_id)
             listener_log_line(f"{agent}: state={state} ({wake}) → launching one runner turn, run {run_id}.")

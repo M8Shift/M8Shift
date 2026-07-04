@@ -3887,6 +3887,38 @@ class TestRFC047ListenerPR1(CLIBase):
         self.assertEqual(doc["consecutive_failures"], 0)
         self.assertTrue(doc["last_run_id"])
 
+    def test_stuck_working_is_visible_neutral_no_retry_in_pr1(self):
+        # Codex review of PR 1 (option B): the reference runner only wakes on
+        # AWAITING_<agent>/IDLE, so a stuck_working retry launch would poll forever.
+        # PR 1 must NOT launch on an own stuck WORKING lock — it sleeps neutrally
+        # and says so visibly; the resume-working runner mode lands in PR 2.
+        self.awaiting_me()
+        r = self.cw("claim", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)          # WORKING_CLAUDE, holder=claude
+        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.listener.state.v1",
+                "agent": "claude",
+                "phase": "polling",
+                "consecutive_failures": 1,
+                "last_run_id": "seeded",
+                "last_classification": "stuck_working",
+                "updated_at": "2026-07-04T00:00:00Z",
+            }, fh)
+        prof = self.profile_path()
+        stub = self.stub_runner()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "3",
+                    "--poll-interval", "0.05")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.launches(), [],
+                         "PR 1 must never launch a retry on an own stuck WORKING lock")
+        self.assertIn("does not auto-retry", r.stdout)
+        self.assertIn("PR 2", r.stdout)
+        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")   # untouched
+
     def test_t8_backoff_pure_function_ladder_and_cap(self):
         # RFC 047 PR1 test 8 (RFC Phase-2 tests 7+16): pure, sleep-free, bounded.
         rt = self._load_runtime()
