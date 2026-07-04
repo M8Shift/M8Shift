@@ -235,6 +235,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 
 ```
 ./m8shift.py init [--name PROJET] [--agents a,b,c…] [--lang <code>] [--force]  # (re)génère le kit ici
+./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048 : mise à jour locale pilotée par la source — exécuter la NOUVELLE copie source ; chaque écriture atterrit dans --target
 ./m8shift.py status [--for <agent>]                # verrou + dernier tour + action suivante
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # surveillance locale live, lecture seule
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # diagnostics santé/sécurité/contrats en lecture seule

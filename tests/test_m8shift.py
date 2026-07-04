@@ -8075,6 +8075,388 @@ class TestRFC048PRA(CLIBase):
         self.assertEqual(about, ["anchor.stanza_missing"])
 
 
+class TestRFC048PRB(CLIBase):
+    """RFC 048 (#19): source-driven `update --target --source`. The driver is the
+    NEW source copy; every generated write is rebased onto the target and every
+    generated stamp uses the SOURCE version. self.d is the TARGET project;
+    self.src is the SOURCE dir; commands run from self.out (a third dir) to prove
+    nothing depends on the invoking cwd."""
+
+    PACK = "M8SHIFT.agent-pack.md"
+    AUDIT_REL = os.path.join(".m8shift", "update-audit.jsonl")
+
+    def setUp(self):
+        super().setUp()
+        self.src = tempfile.mkdtemp(prefix="m8shift-src-")
+        self.addCleanup(shutil.rmtree, self.src, True)
+        shutil.copy(SCRIPT, os.path.join(self.src, "m8shift.py"))
+        self.out = tempfile.mkdtemp(prefix="m8shift-out-")
+        self.addCleanup(shutil.rmtree, self.out, True)
+
+    def update(self, *extra, src=None, target=None, cwd=None):
+        src = src or self.src
+        return subprocess.run(
+            [sys.executable, os.path.join(src, "m8shift.py"), "update",
+             "--target", target or self.d, "--source", src, *extra],
+            cwd=cwd or self.out, capture_output=True, text=True,
+        )
+
+    @staticmethod
+    def _reversion(path, version):
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        body = re.sub(r'^VERSION = "\d+\.\d+\.\d+"', 'VERSION = "%s"' % version,
+                      body, count=1, flags=re.M)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def _set_banner(self, version):
+        p = os.path.join(self.d, "M8SHIFT.md")
+        with open(p, encoding="utf-8") as fh:
+            t = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(t.replace("**v%s**" % cowork.VERSION, "**v%s**" % version))
+
+    def read_target(self, name):
+        with open(os.path.join(self.d, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    @staticmethod
+    def _snapshot(root):
+        out = {}
+        for dirpath, _, files in os.walk(root):
+            for f in files:
+                p = os.path.join(dirpath, f)
+                with open(p, "rb") as fh:
+                    out[os.path.relpath(p, root)] = fh.read()
+        return out
+
+    def _components(self, r):
+        d = json.loads(r.stdout)
+        return d, {row["component"]: row["result"] for row in d["components"]}
+
+    # ── first hop + rebase ───────────────────────────────────────────────────
+
+    def test_first_hop_old_target_updated_by_source_copy_from_outside(self):
+        """A project inited by an older core (banner + script v3.41.0) is updated
+        by invoking SOURCE/m8shift.py from OUTSIDE both dirs. All writes land in
+        the TARGET; the relay M8SHIFT.md stays byte-identical."""
+        self.init("--name", "demo")
+        self._reversion(os.path.join(self.d, "m8shift.py"), "3.41.0")
+        self._set_banner("3.41.0")
+        relay_before = self._snapshot(self.d)["M8SHIFT.md"]
+        r = self.update()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        after = self._snapshot(self.d)
+        self.assertEqual(after["M8SHIFT.md"], relay_before)      # relay untouched
+        self.assertIn('VERSION = "%s"' % cowork.VERSION, self.read_target("m8shift.py"))
+        pack = self.read_target(self.PACK)
+        self.assertIn("version: %s" % cowork.VERSION, pack)      # SOURCE stamp
+        self.assertIn("source: m8shift.py update", pack)
+        self.assertEqual(self.read_target("M8SHIFT.protocol.md"), cowork.PROTOCOL["en"])
+        # every generated write landed in the TARGET, none next to the source script
+        self.assertEqual(os.listdir(self.src), ["m8shift.py"])
+        self.assertTrue(os.path.exists(os.path.join(self.d, self.AUDIT_REL)))
+
+    def test_generated_stamps_use_source_version_not_target(self):
+        self.init()
+        self._reversion(os.path.join(self.src, "m8shift.py"), "9.9.9")
+        relay_before = self._snapshot(self.d)["M8SHIFT.md"]
+        r = self.update()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("version: 9.9.9", self.read_target(self.PACK))
+        self.assertIn('VERSION = "9.9.9"', self.read_target("m8shift.py"))
+        self.assertEqual(self._snapshot(self.d)["M8SHIFT.md"], relay_before)
+
+    def test_target_dot_confirms_current_directory(self):
+        self.init()
+        r = self.update(target=".", cwd=self.d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_target_flag_is_required(self):
+        r = subprocess.run(
+            [sys.executable, os.path.join(self.src, "m8shift.py"), "update"],
+            cwd=self.out, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--target", r.stderr)
+
+    # ── dry-run / result vocabulary ──────────────────────────────────────────
+
+    def test_dry_run_writes_nothing_and_reports_a_full_plan(self):
+        self.init()
+        before = self._snapshot(self.d)
+        r = self.update("--dry-run", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertTrue(d["dry_run"])
+        self.assertEqual(d["driver"], "source")
+        self.assertEqual(set(comps),
+                         {"core", "protocol", "pack", "anchors", "companions"})
+        self.assertEqual(comps["companions"], "skipped")   # not selected by default
+        self.assertEqual(comps["pack"], "updated")         # init→update source stamp
+        self.assertEqual(self._snapshot(self.d), before)   # byte-for-byte read-only
+        self.assertEqual(os.listdir(self.src), ["m8shift.py"])
+
+    def test_result_vocabulary_exact_strings(self):
+        self.init()
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        allowed = {"updated", "already_current", "skipped", "refused",
+                   "manual_review_required", "staged"}
+        self.assertTrue(set(comps.values()) <= allowed, comps)
+        self.assertEqual(comps, {
+            "protocol": "already_current",
+            "pack": "updated",              # header source: init → update
+            "anchors": "already_current",
+            "companions": "skipped",
+            "core": "already_current",
+        })
+        self.assertTrue(d["ok"])
+
+    # ── downgrade / checksum / baseline safety ───────────────────────────────
+
+    def test_downgrade_refused_without_allow_downgrade(self):
+        self.init()
+        self._reversion(os.path.join(self.d, "m8shift.py"), "99.0.0")
+        r = self.update()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("downgrade", r.stderr + r.stdout)
+        self.assertIn('VERSION = "99.0.0"', self.read_target("m8shift.py"))  # untouched
+        r = self.update("--allow-downgrade")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('VERSION = "%s"' % cowork.VERSION, self.read_target("m8shift.py"))
+
+    def test_checksum_mismatch_refuses_core_and_match_updates(self):
+        self.init()
+        self._reversion(os.path.join(self.d, "m8shift.py"), "3.45.0")
+        manifest = os.path.join(self.src, "checksums.sha256")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write("0" * 64 + "  m8shift.py\n")
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertEqual(comps["core"], "refused")
+        core = next(row for row in d["components"] if row["component"] == "core")
+        self.assertIn("checksum", core["detail"])
+        self.assertIn('VERSION = "3.45.0"', self.read_target("m8shift.py"))  # untouched
+        with open(os.path.join(self.src, "m8shift.py"), "rb") as fh:
+            good = hashlib.sha256(fh.read()).hexdigest()
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write(good + "  m8shift.py\n")
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["core"], "updated")
+
+    def test_baseline_pre_341_refuses_with_manual_upgrade_message(self):
+        self.init()
+        self._set_banner("3.40.0")
+        before = self._snapshot(self.d)
+        r = self.update()
+        self.assertNotEqual(r.returncode, 0)
+        msg = r.stderr + r.stdout
+        self.assertIn("3.41", msg)
+        self.assertIn("upgrade manually", msg)
+        self.assertEqual(self._snapshot(self.d), before)   # refusal writes nothing
+
+    # ── generated-marker safety ──────────────────────────────────────────────
+
+    def test_corrupted_stanza_markers_refuse_without_force_generated(self):
+        self.init()
+        corrupted = self.read_target("CLAUDE.md").replace(cowork.STANZA_END, "")
+        with open(os.path.join(self.d, "CLAUDE.md"), "w", encoding="utf-8") as fh:
+            fh.write(corrupted)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertEqual(comps["anchors"], "refused")
+        self.assertIn("--force-generated",
+                      next(row for row in d["components"]
+                           if row["component"] == "anchors")["detail"])
+        self.assertEqual(self.read_target("CLAUDE.md"), corrupted)   # untouched
+        r = self.update("--json", "--force-generated")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["anchors"], "updated")
+        rebuilt = self.read_target("CLAUDE.md")
+        self.assertEqual(rebuilt.count(cowork.STANZA_BEGIN), 1)
+        self.assertEqual(rebuilt.count(cowork.STANZA_END), 1)
+        for marker in cowork.STANZA_FLOOR_MARKERS:
+            self.assertIn(marker, rebuilt)
+        with open(os.path.join(self.d, "CLAUDE.md.m8shift.bak"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), corrupted)                    # backed up
+
+    def test_corrupted_pack_markers_refuse_without_force_generated(self):
+        self.init()
+        corrupted = self.read_target(self.PACK).replace(cowork.AGENT_PACK_END, "")
+        with open(os.path.join(self.d, self.PACK), "w", encoding="utf-8") as fh:
+            fh.write(corrupted)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["pack"], "refused")
+        self.assertEqual(self.read_target(self.PACK), corrupted)
+        r = self.update("--json", "--force-generated")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNotNone(cowork.parse_agent_pack(self.read_target(self.PACK)))
+
+    # ── companions ───────────────────────────────────────────────────────────
+
+    def test_companions_refreshed_only_when_installed(self):
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"), self.src)
+        shutil.copy(os.path.join(REPO, "m8shift-context.py"), self.src)
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        runtime = os.path.join(self.d, "m8shift-runtime.py")
+        with open(runtime, "a", encoding="utf-8") as fh:
+            fh.write("\n# LOCAL DRIFT MARKER\n")
+        r = self.update("--components", "core,protocol,pack,anchors,companions", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["companions"], "updated")
+        with open(runtime, encoding="utf-8") as fh:
+            self.assertNotIn("# LOCAL DRIFT MARKER", fh.read())       # refreshed
+        # ABSENT companion is not silently added even though the source ships it
+        self.assertFalse(os.path.exists(os.path.join(self.d, "m8shift-context.py")))
+        with open(os.path.join(self.d, ".m8shift", "kit.json"), encoding="utf-8") as fh:
+            names = sorted(c["name"] for c in json.load(fh)["companions"])
+        self.assertEqual(names, ["runtime"])
+
+    def test_explicitly_selected_companion_is_added(self):
+        shutil.copy(os.path.join(REPO, "m8shift-context.py"), self.src)
+        self.init()
+        r = self.update("--companions", "context", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["companions"], "updated")
+        self.assertTrue(os.path.exists(os.path.join(self.d, "m8shift-context.py")))
+
+    # ── source ownership / relay-state hygiene ───────────────────────────────
+
+    def test_source_project_relay_state_never_copied(self):
+        """SOURCE_DIR being an initialized M8Shift project must never leak its
+        relay state (M8SHIFT.md, sessions, requests, tasks, memory) into the target."""
+        r = subprocess.run([sys.executable, "m8shift.py", "init", "--name", "sourceproj",
+                            "--no-gitignore"],
+                           cwd=self.src, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.init("--name", "targetproj")
+        before = self._snapshot(self.d)
+        r = self.update()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        after = self._snapshot(self.d)
+        self.assertEqual(after["M8SHIFT.md"], before["M8SHIFT.md"])
+        self.assertEqual(after["M8SHIFT.sessions.jsonl"], before["M8SHIFT.sessions.jsonl"])
+        with open(os.path.join(self.src, "M8SHIFT.md"), "rb") as fh:
+            self.assertNotEqual(after["M8SHIFT.md"], fh.read())
+        self.assertIn("targetproj", after[self.PACK].decode("utf-8"))
+        self.assertNotIn("sourceproj", after[self.PACK].decode("utf-8"))
+
+    # ── relay-state / lock policy ────────────────────────────────────────────
+
+    def test_update_refused_while_target_working(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        r = self.update()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("WORKING", r.stderr + r.stdout)
+        r = self.update("--allow-working")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")   # relay untouched
+
+    # ── path confinement ─────────────────────────────────────────────────────
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_symlinked_target_root_accepted_when_physical(self):
+        self.init()
+        link = os.path.join(self.out, "target-link")
+        os.symlink(self.d, link)
+        r = self.update(target=link)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_symlink_escape_of_target_file_refused(self):
+        self.init()
+        outside = os.path.join(self.out, "outside-protocol.md")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("OUTSIDE CONTENT\n")
+        proto = os.path.join(self.d, "M8SHIFT.protocol.md")
+        os.remove(proto)
+        os.symlink(outside, proto)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["protocol"], "refused")
+        with open(outside, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "OUTSIDE CONTENT\n")   # never written through
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_symlinked_source_core_refused(self):
+        self.init()
+        src2 = tempfile.mkdtemp(prefix="m8shift-src2-")
+        self.addCleanup(shutil.rmtree, src2, True)
+        os.symlink(os.path.join(self.src, "m8shift.py"), os.path.join(src2, "m8shift.py"))
+        r = subprocess.run(
+            [sys.executable, os.path.join(self.src, "m8shift.py"), "update",
+             "--target", self.d, "--source", src2],
+            cwd=self.out, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("symlink", r.stderr + r.stdout)
+
+    # ── audit sidecar ────────────────────────────────────────────────────────
+
+    def test_audit_row_appended_and_bounded(self):
+        self.init()
+        audit = os.path.join(self.d, self.AUDIT_REL)
+        os.makedirs(os.path.dirname(audit), exist_ok=True)
+        with open(audit, "w", encoding="utf-8") as fh:
+            fh.write("".join('{"schema":"x","n":%d}\n' % i for i in range(105)))
+        r = self.update()   # pack init→update stamp = at least one real write
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(audit, encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        self.assertLessEqual(len(lines), 100)                      # bounded
+        row = json.loads(lines[-1])
+        self.assertEqual(row["schema"], "m8shift.update.audit.v1")
+        self.assertEqual(row["driver"], "source")
+        self.assertEqual(row["source_version"], cowork.VERSION)
+        self.assertEqual(row["target_version_before"], cowork.VERSION)
+        self.assertRegex(row["at"], r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+        self.assertEqual({c["component"] for c in row["components"]},
+                         {"core", "protocol", "pack", "anchors", "companions"})
+        self.assertIn("companions_refreshed", row)
+        # a run with zero real writes appends no row
+        with open(audit, encoding="utf-8") as fh:
+            before = fh.read()
+        r = self.update()   # everything already_current now
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(audit, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), before)
+
+    # ── doctor --source (PR B home of adoption.update_recommended) ───────────
+
+    def test_doctor_source_reports_update_recommended_when_source_newer(self):
+        self.init()
+        self._reversion(os.path.join(self.src, "m8shift.py"), "9.9.9")
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        findings = {f["check"]: f for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("adoption.update_recommended", findings)
+        self.assertEqual(findings["adoption.update_recommended"]["severity"], "info")
+        self.assertIn("9.9.9", findings["adoption.update_recommended"]["message"])
+
+    def test_doctor_source_silent_when_source_not_newer(self):
+        self.init()
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertNotIn("adoption.update_recommended", checks)
+        # and without --source the finding can never fire (needs a source version)
+        r = self.cw("doctor", "--json", "--severity-min", "info")
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertNotIn("adoption.update_recommended", checks)
+
+
 class TestDetailedHelpCoverage(unittest.TestCase):
     """Operator requirement: every CLI parameter documents itself — each argparse
     add_argument carries help= (one line per parameter in --help) and every

@@ -73,6 +73,7 @@ same metadata and serializes unavailable values as `null`.
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
+./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
 ./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
@@ -151,7 +152,22 @@ same metadata and serializes unavailable values as `null`.
   malformed `.m8shift.lock`, project-root status checks, session/request-ledger shape,
   multiple open relay sessions for the same roster, and livelock indicators.
   It never repairs files, prompts, contacts the network, or changes legal
-  `LOCK` transitions.
+  `LOCK` transitions. With `--source DIR` it also compares this core against a
+  candidate source copy and reports `adoption.update_recommended` when the
+  source is newer.
+- **Local update (RFC 048)**: `update` is driven by the **new source copy**
+  (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
+  so projects created before the command existed can still be upgraded
+  (baseline: projects initialized with M8Shift 3.41+). Every generated write is
+  rebased onto the target and stamped with the **source** version; the source's
+  `checksums.sha256` is verified when it ships one; the target's file lock is
+  taken; a `WORKING_*` relay, a downgrade, and corrupted generated markers are
+  refused by default (`--allow-working`, `--allow-downgrade`,
+  `--force-generated` override — the latter never resets relay state). Update
+  never claims, appends, forces, or resets: `M8SHIFT.md`, sessions, requests,
+  tasks, and memory stay byte-identical, and nothing is ever copied from a
+  source dir that happens to be an initialized project. Each real run appends a
+  bounded audit row (`m8shift.update.audit.v1`) to `.m8shift/update-audit.jsonl`.
 
 ---
 
