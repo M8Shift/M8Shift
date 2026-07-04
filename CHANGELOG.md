@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.50.1 — 2026-07-04
+
+Hotfix — `update` baseline authority (found dogfooding v3.50.0 against the live relay).
+
+- A long-lived relay keeps its ORIGINAL `M8SHIFT.md` banner across dogfood promotions
+  (the live relay still said v3.14.0 from the pre-rename era) while its installed
+  script is current: the baseline chain let the stale banner VETO a supported target.
+  The baseline is now the BEST provable version among kit.json, the banner, and the
+  target script — refusal requires every parseable authority below the 3.41 floor.
+- Regressions: stale-banner+current-script accepted with the relay byte-identical;
+  banner+script both pre-3.41 still refused with the manual-upgrade message.
+
+Lockstep bump to `3.50.1`.
+
 ## v3.50.0 — 2026-07-04
 
 RFC 048 PR B complete — source-driven local update for adopted projects
