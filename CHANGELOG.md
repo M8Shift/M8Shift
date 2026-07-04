@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.50.0 — 2026-07-04
+
+RFC 048 PR B complete — source-driven local update for adopted projects
+(closes #19).
+
+- **First-hop update model**: run the new source copy, not the old target copy:
+  `python3 SOURCE/m8shift.py update --target TARGET --source SOURCE`. Every write
+  is rebased onto the target; the source directory remains untouched.
+- **Safe component order**: protocol, agent pack, anchors, installed companions, and
+  core are processed in that order, with the core copied last. `M8SHIFT.md` relay
+  state is never copied from the source and stays byte-identical during update.
+- **Safety gates**: baseline v3.41+, downgrade refusal by default, checksum
+  verification when the source ships `checksums.sha256`, source/driver version
+  split refusal, target file-lock serialization, and `WORKING_*` refusal unless
+  explicitly overridden with `--allow-working`.
+- **Generated-file repair and audit**: `--force-generated` repairs only generated
+  pack/stanza marker blocks after backup; update writes bounded audit rows to
+  `.m8shift/update-audit.jsonl`; `doctor --source` reports update recommendations
+  and unreadable source paths.
+
+Lockstep bump to `3.50.0`. Full pytest suite: 547 passed, 382 subtests passed.
+
 ## v3.49.0 — 2026-07-04
 
 RFC 048 PR A complete — adoption discipline pack and adoption-health diagnostics
