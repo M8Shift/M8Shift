@@ -408,6 +408,12 @@ harness, so name the mode you are in:
 - **interactive** — a plain chat UI does **not** re-wake the agent after a final response;
   `wait` is only a protocol intention, and the agent resumes on the next human turn.
 
+For an unattended lane, do not hand-build a `wait` wrapper script:
+`python3 m8shift-runtime.py listener start --agent <you> --cmd-file .m8shift/providers/<you>.json`
+is the supported supervisor (RFC 047). It polls with zero model spend, wakes one bounded
+runner turn per handoff, and persists a visible `HALTED` state instead of crash-looping —
+see [`docs/en/modules/runtime.md`](modules/runtime.md).
+
 Two rules follow, and they are mandatory:
 
 - **Status-guard — never announce the baton from memory.** Before any response that mentions

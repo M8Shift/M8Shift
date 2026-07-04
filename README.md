@@ -58,7 +58,7 @@ every surface where Claude Code or Codex run, and it adds **zero credentials**.
 
 | Surface | Works? | Notes |
 |---------|--------|-------|
-| Terminal / CLI | ✅ | headless (`claude -p`, `codex exec`, cron) can be **fully automated** — see [`examples/headless_runner.py`](examples/headless_runner.py), which emits `M8SHIFT_RUN_ID` and `.m8shift/runtime/runs.jsonl` lifecycle events |
+| Terminal / CLI | ✅ | headless (`claude -p`, `codex exec`, cron) can be **fully automated** — one `m8shift-runtime.py listener start` supervises a whole lane (RFC 047, see [`docs/en/modules/runtime.md`](docs/en/modules/runtime.md)); [`examples/headless_runner.py`](examples/headless_runner.py) runs the individual turns and emits `M8SHIFT_RUN_ID` + `.m8shift/runtime/runs.jsonl` lifecycle events |
 | Desktop app (Mac/Windows) | ✅ | interactive: a human resumes each agent between turns |
 | VS Code / JetBrains (IDE) | ✅ | same as desktop |
 | Web (claude.ai/code) | ✅ | anywhere the agent can run a shell and read its anchor |
@@ -373,6 +373,24 @@ Verified by the tests and by multi-agent review:
 > lifecycle/finding events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
 > companion adds local presence, operator inbox, progress, and runtime diagnostics
 > under `.m8shift/runtime/`.
+
+> [!TIP]
+> **You no longer hand-build that loop.** Since RFC 047 the runtime companion ships a
+> supervised listener: one command runs a whole headless lane —
+>
+> ```bash
+> python3 m8shift-runtime.py listener start --agent codex --cmd-file .m8shift/providers/codex.json
+> ```
+>
+> It polls the relay with **zero model spend** while it is not the agent's turn, wakes
+> **exactly one** bounded runner turn per handoff, backs off on failures, and after the
+> retry budget persists a **visible `HALTED` state** instead of crash-looping (never a
+> force-claim — the relay is left for the operator). `--backend launchd|systemd|windows`
+> installs it as a user service (definitions never resurrect a halted lane:
+> `KeepAlive=false` / `Restart=no`), with a printed fallback to a plain detached process
+> when the host cannot run one. `listener stop/status/logs` and the runtime `doctor`
+> findings cover the lifecycle — details in
+> [`docs/en/modules/runtime.md`](docs/en/modules/runtime.md).
 - **Cooperative, N-agent, advisory** — see the
   [specification](docs/en/specification.md) §8 (cooperative mutex, advisory lock, one
   writer at a time).

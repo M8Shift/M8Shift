@@ -14,7 +14,7 @@ reads state M8Shift already stores, never writes the `LOCK`, and never routes wo
 | Page | Script | Primary authority |
 |------|--------|-------------------|
 | [Core relay](./core-relay.md) | `m8shift.py` | one-pen relay, `LOCK`, turn ledger, session reports, task board, shared memory, core `doctor`, companion install (RFC 044) |
-| [Runtime companion](./runtime.md) | `m8shift-runtime.py` | runtime presence, operator inbox, progress, notifications, provider registry, model/task routing, retention, local reports |
+| [Runtime companion](./runtime.md) | `m8shift-runtime.py` | runtime presence, operator inbox, progress, notifications, provider registry, model/task routing, retention, local reports, headless listener lifecycle (RFC 047) |
 | [Context companion](./context.md) | `m8shift-context.py` | context packs, redacted compression/retrieval records, adapter execution (builtin digest + RTK filter + optional Headroom/Kompress) |
 | [Worktree toolbox](./worktree.md) | `m8shift-worktree.py` | isolated degree-2 feature lanes and serialized integration |
 | [Headroom adapter launcher](./headroom.md) | `m8shift-headroom.py` | optional offline Headroom/Kompress launcher (`m8shift-transform`) |

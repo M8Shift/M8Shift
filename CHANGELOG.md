@@ -1,5 +1,33 @@
 # Changelog
 
+## v3.47.0 — 2026-07-04
+
+RFC 047 complete — the headless liveness block (closes #21; #6 keeps its broader
+holder-liveness/force-claim scope).
+
+- **Listener lifecycle companion** (`m8shift-runtime.py listener start|stop|status|logs`):
+  a supervised headless lane in one command — zero model spend while polling, exactly one
+  bounded runner turn per wake, `start_on_idle` opt-in (one starter per roster, enforced),
+  PID/process-group lifecycle with stale-PID detection/repair, persistent `halted` phase
+  honored across restarts AND service managers, writer-side log rotation (5 MiB, keep 3,
+  `runs.jsonl` exempt).
+- **OS service backends** behind a pure selection matrix + injectable probe seam:
+  launchd (plist, `KeepAlive=false`), systemd user unit (`Restart=no`, link+start),
+  Windows schtasks — all argv-only; `auto` falls back to `local` with a printed reason
+  (no GUI/user session, macOS protected folder).
+- **Runner `--resume-working`** (requires `--once`): recovery launches on an own
+  `WORKING` lock; the provider child gets `M8SHIFT_RESUME_WORKING=1` only on genuine
+  resume launches. The listener's stuck-`WORKING` retry is re-enabled exclusively
+  through this path (deadlock found in review of the PR-1 draft path).
+- **Doctor**: 9 advisory `listener.*` findings (not_installed, dead, backend_failed,
+  protected_folder, version_skew, repeated_non_completion, halted, multiple_starters,
+  log_too_large).
+- Phase E docs: runtime module page, README, specification EF-30 + RFC-surface row,
+  agents-guide headless note.
+
+Lockstep bump to `3.47.0`. Full pytest suite: 473 passed (pytest `tests/`;
+the equivalent single-module unittest run counts 411 — both green).
+
 ## v3.46.0 — 2026-07-04
 
 RFC 047 Phase A — headless runner final-state enforcement (closes #17).
