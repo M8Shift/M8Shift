@@ -368,7 +368,7 @@ Verified by the tests and by multi-agent review:
 > by itself.
 >
 > An example runner is provided: [`examples/headless_runner.py`](examples/headless_runner.py).
-> It supports `--once`, manual TTL heartbeat, `M8SHIFT_RUN_ID`, immutable local run
+> It supports `--once`, manual TTL heartbeat (`claim <agent> --refresh` — extends your own `WORKING` lock only), `M8SHIFT_RUN_ID`, immutable local run
 > plans, post-run `LOCK` verification, and local `.m8shift/runtime/runs.jsonl`
 > lifecycle/finding events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
 > companion adds local presence, operator inbox, progress, and runtime diagnostics
