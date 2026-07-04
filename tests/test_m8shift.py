@@ -3109,9 +3109,9 @@ subprocess.check_call([
         self.assertIn("relay", rows[0])
         self.assertIn("payload", rows[0])
         self.assertEqual(rows[0]["run_id"], run_id)
-        self.assertEqual(rows[1]["status"], "ok")
+        self.assertEqual(rows[1]["status"], "advanced")
         self.assertTrue(rows[1]["verification_ok"])
-        self.assertEqual(rows[1]["verification_status"], "core_advanced")
+        self.assertEqual(rows[1]["verification_status"], "advanced")
         self.assertEqual(rows[1]["relay_state"], "AWAITING_CODEX")
         plan_path = os.path.join(self.d, ".m8shift", "runtime", "run-plans", f"{run_id}.json")
         with open(plan_path, encoding="utf-8") as f:
@@ -3250,10 +3250,11 @@ subprocess.check_call([
             rows = [json.loads(line) for line in fh if line.strip()]
         events = [row["event"] for row in rows]
         self.assertIn("run.verification_failed", events)
+        self.assertIn("run.non_completion", events)   # RFC 047 sidecar event
         ended = [row for row in rows if row["event"] == "run.ended"][-1]
-        self.assertEqual(ended["status"], "no_progress")
+        self.assertEqual(ended["status"], "non_completion")
         self.assertFalse(ended["verification_ok"])
-        self.assertEqual(ended["verification_status"], "no_progress")
+        self.assertEqual(ended["verification_status"], "non_completion")
         self.assertFalse(ended["success"])
         self.assertIn("headless.post_run_core_state", {f["check"] for f in ended["runtime_findings"]})
 
@@ -3275,11 +3276,13 @@ subprocess.check_call([
              "--interval", "1", "--max-retries", "1", "--cmd", sys.executable, "-c", stolen],
             cwd=self.d, capture_output=True, text=True, timeout=8,
         )
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        # RFC 047: a same-turn handoff to the peer without this agent's authorship is
+        # an external transition — dedicated neutral-failure exit code 3, no retry burn.
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as fh:
             rows = [json.loads(line) for line in fh if line.strip()]
         ended = [row for row in rows if row["event"] == "run.ended"][-1]
-        self.assertEqual(ended["verification_status"], "lock_stolen")
+        self.assertEqual(ended["verification_status"], "external_transition")
         self.assertFalse(ended["success"])
 
         self.init("--force")
@@ -3352,6 +3355,262 @@ sys.exit(7)
                             "--check", "_zzbadtest"], capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("format-safe", r.stderr)
+
+
+class TestRFC047PhaseA(CLIBase):
+    """RFC 047 Phase A — headless runner final-state enforcement: authorship-based
+    total classification (transcript authority, not state diffs), the one-shot exit
+    code map (0/1/2/3/4), run.non_completion sidecar events, neutral statuses that
+    never burn retries, no automatic force recovery, and the core `claim --refresh`
+    heartbeat guard."""
+
+    RUNNER = os.path.join(REPO, "examples", "headless_runner.py")
+
+    def _load_runner(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("headless_runner_rfc047", self.RUNNER)
+        hr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hr)
+        return hr
+
+    def runner_once(self, code, *extra, timeout=30):
+        """One-shot runner as `claude` with retries left (so --once decides the rc)."""
+        return subprocess.run(
+            [sys.executable, self.RUNNER, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--once", "--interval", "1",
+             "--max-retries", "3", *extra, "--cmd", sys.executable, "-c", code],
+            cwd=self.d, capture_output=True, text=True, timeout=timeout,
+        )
+
+    def rows(self):
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def ended(self):
+        return [row for row in self.rows() if row["event"] == "run.ended"][-1]
+
+    def awaiting_me(self):
+        """init + one codex turn → AWAITING_CLAUDE, turn 1 (the runner's wake state)."""
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        r = self.cw("append", "codex", "--to", "claude",
+                    "--ask", "take a turn", "--done", "setup")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lk = self.lock()
+        self.assertEqual(lk["state"], "AWAITING_CLAUDE")
+        self.assertEqual(lk["turn"], "1")
+
+    def test_t1_non_completion_when_provider_exits_clean_without_touching_relay(self):
+        # RFC 047 test 1: rc 0 + untouched relay while AWAITING_<me> is NOT success.
+        self.awaiting_me()
+        before = self.lock()
+        r = self.runner_once("pass")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "non_completion")
+        self.assertEqual(ended["verification_status"], "non_completion")
+        self.assertFalse(ended["success"])
+        nc = [row for row in self.rows() if row["event"] == "run.non_completion"]
+        self.assertEqual(len(nc), 1)
+        self.assertEqual(nc[0]["schema"], "m8shift.runtime.event.v1")
+        self.assertEqual(nc[0]["pre"],
+                         {"state": "AWAITING_CLAUDE", "holder": "claude", "turn": "1"})
+        self.assertEqual(nc[0]["post"],
+                         {"state": "AWAITING_CLAUDE", "holder": "claude", "turn": "1"})
+        self.assertTrue(nc[0]["reason"])
+        # t6: no automatic recovery — the LOCK is byte-identical, no force anywhere.
+        self.assertEqual(self.lock(), before)
+        self.assertNotIn("claim --force", r.stdout + r.stderr)
+
+    def test_t2_stuck_working_when_provider_claims_then_exits(self):
+        # RFC 047 test 2: claim without append is a mid-turn crash, not progress.
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "subprocess.check_call([sys.executable, 'm8shift.py', 'claim', 'claude'])\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "stuck_working")
+        # t6: the pen is left exactly as the provider left it (manual recovery only).
+        lk = self.lock()
+        self.assertEqual(lk["state"], "WORKING_CLAUDE")
+        self.assertEqual(lk["holder"], "claude")
+        self.assertNotIn("claim --force", r.stdout + r.stderr)
+
+    def test_t3_advanced_when_provider_appends_to_peer(self):
+        # RFC 047 test 3: an authored newer turn is success even though the relay is open.
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "m = [sys.executable, 'm8shift.py']\n"
+            "subprocess.check_call(m + ['claim', 'claude'])\n"
+            "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',\n"
+            "                          '--ask', 'review', '--done', 'one turn'])\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "advanced")
+        self.assertTrue(ended["success"])
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
+    def test_t4_completed_when_provider_closes_the_session(self):
+        # RFC 047 test 4: DONE is success regardless of turn authorship.
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "subprocess.check_call([sys.executable, 'm8shift.py', 'done', 'claude'])\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "completed")
+        self.assertTrue(ended["success"])
+        self.assertEqual(self.lock()["state"], "DONE")
+
+    def test_t5_invalid_relay_when_lock_file_removed_by_provider(self):
+        # RFC 047 test 5: missing/invalid LOCK after the bounded re-read.
+        self.awaiting_me()
+        r = self.runner_once("import os\nos.remove('M8SHIFT.md')\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "invalid_relay")
+        # t6: no recovery attempt — the runner did not recreate or rewrite the relay.
+        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+        self.assertNotIn("claim --force", r.stdout + r.stderr)
+
+    def test_bounded_reread_retries_missing_but_classifies_malformed_immediately(self):
+        # The bounded re-read (~3 attempts / ~1s) applies ONLY to missing/OSError reads;
+        # stable malformed content (markers gone) classifies immediately.
+        hr = self._load_runner()
+        missing = os.path.join(self.d, "not-there.md")
+        t0 = time.monotonic()
+        fields, text = hr.read_relay_post_run(missing)
+        self.assertGreaterEqual(time.monotonic() - t0, 0.9)
+        self.assertIsNone(fields)
+        self.assertIsNone(text)
+        malformed = os.path.join(self.d, "malformed.md")
+        with open(malformed, "w", encoding="utf-8") as f:
+            f.write("no LOCK markers here\n")
+        t0 = time.monotonic()
+        fields, text = hr.read_relay_post_run(malformed)
+        self.assertLess(time.monotonic() - t0, 0.5)
+        self.assertIsNone(fields)
+        self.assertEqual(text, "no LOCK markers here\n")
+
+    def test_t7_ping_pong_peer_hands_turn_back_is_still_advanced(self):
+        # RFC 047 test 7 (review B2): this agent authors n+1, the peer immediately
+        # authors n+2, post state is AWAITING_<me> again — success, not non_completion.
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "m = [sys.executable, 'm8shift.py']\n"
+            "subprocess.check_call(m + ['claim', 'claude'])\n"
+            "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',\n"
+            "                          '--ask', 'peer turn', '--done', 'mine'])\n"
+            "subprocess.check_call(m + ['claim', 'codex'])\n"
+            "subprocess.check_call(m + ['append', 'codex', '--to', 'claude',\n"
+            "                          '--ask', 'back to you', '--done', 'peer'])\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "advanced")
+        self.assertTrue(ended["success"])
+        lk = self.lock()
+        self.assertEqual(lk["state"], "AWAITING_CLAUDE")
+        self.assertEqual(lk["turn"], "3")   # pre-turn 1 → advanced by 2
+
+    def test_operator_reset_during_run_is_external_transition(self):
+        # RFC 047 test 8: init --force during the run resets the turn → neutral rc 3.
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "subprocess.check_call([sys.executable, 'm8shift.py', 'init', '--force'])\n")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "external_transition")
+
+    def test_paused_during_run_is_suspended_with_neutral_exit_4(self):
+        # RFC 047 test 9: PAUSED is neutral (cooldown/operator pause), never a failure.
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "m = [sys.executable, 'm8shift.py']\n"
+            "subprocess.check_call(m + ['claim', 'claude'])\n"
+            "subprocess.check_call(m + ['pause', 'claude', '--reason', 'usage cooldown'])\n")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "suspended")
+        events = [row["event"] for row in self.rows()]
+        self.assertNotIn("run.non_completion", events)
+        self.assertNotIn("run.verification_failed", events)   # neutral, not a failure
+
+    def test_integrating_sentinel_is_external_transition_not_stuck_working(self):
+        # RFC 047 test 10: an active `integrating:` sentinel on our own same-turn
+        # WORKING lock is an in-flight merge, not ordinary stuck work.
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "subprocess.check_call([sys.executable, 'm8shift.py', 'claim', 'claude'])\n"
+            "lb = '<!-- M8SHIFT:LOCK:BEGIN -->'\n"
+            "with open('M8SHIFT.md', encoding='utf-8') as f:\n"
+            "    t = f.read()\n"
+            "t = t.replace(lb, lb + '\\nintegrating: lane1@abcdef1', 1)\n"
+            "with open('M8SHIFT.md', 'w', encoding='utf-8') as f:\n"
+            "    f.write(t)\n")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "external_transition")
+
+    def test_timeout_once_exits_2_when_retries_remain(self):
+        # Timeout keeps the infrastructure exit code (2) in one-shot mode.
+        self.awaiting_me()
+        r = self.runner_once("import time\ntime.sleep(10)\n",
+                             "--turn-timeout", "1", "--kill-grace", "0", timeout=20)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        events = [row["event"] for row in self.rows()]
+        self.assertIn("run.timeout", events)
+        self.assertEqual(self.ended()["status"], "timeout")
+
+    def test_authored_by_me_parses_turn_markers_defensively(self):
+        hr = self._load_runner()
+        text = ("<!-- M8SHIFT:TURN 1 codex BEGIN -->\nx\n<!-- M8SHIFT:TURN 1 codex END -->\n"
+                "<!-- M8SHIFT:TURN 2 claude BEGIN -->\ny\n<!-- M8SHIFT:TURN 2 claude END -->\n")
+        self.assertTrue(hr.authored_by_me(text, "claude", "1"))
+        self.assertTrue(hr.authored_by_me(text, "claude", 1))          # int pre-turn
+        self.assertFalse(hr.authored_by_me(text, "claude", "2"))       # nothing newer
+        self.assertFalse(hr.authored_by_me(text, "codex", "1"))        # peer authorship
+        self.assertFalse(hr.authored_by_me(text, "claude", "n/a"))     # defensive pre-turn
+        self.assertFalse(hr.authored_by_me(None, "claude", "1"))
+        path = os.path.join(self.d, "relay-copy.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        self.assertTrue(hr.authored_by_me(path, "claude", "1"))        # path form
+
+    def test_t8_claim_refresh_guard(self):
+        # Core RFC 047 prerequisite: --refresh only EXTENDS an already-held WORKING lock.
+        self.awaiting_me()   # AWAITING_CLAUDE — our turn, but no lock held yet
+        before = self.md()
+        r = self.cw("claim", "claude", "--refresh")
+        self.assertNotEqual(r.returncode, 0,
+                            "--refresh must not open a fresh work window from AWAITING")
+        self.assertEqual(self.md(), before)                    # refusal is read-only
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        exp1 = self.lock()["expires"]
+        time.sleep(1.1)
+        r = self.cw("claim", "claude", "--refresh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        exp2 = self.lock()["expires"]
+        self.assertGreater(exp2, exp1, "refresh must strictly extend the holder's TTL")
+        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")
+        self.assertNotEqual(self.cw("claim", "codex", "--refresh").returncode, 0,
+                            "--refresh must refuse the non-holder")
+        self.assertNotEqual(self.cw("claim", "claude", "--refresh", "--force").returncode, 0,
+                            "--refresh and --force are mutually exclusive")
+        lk = self.lock()
+        self.assertEqual((lk["state"], lk["holder"]), ("WORKING_CLAUDE", "claude"))
+
+    def test_heartbeat_uses_refresh_only_claim(self):
+        # The runner's TTL heartbeat must spawn `claim <me> --refresh`, never a plain
+        # claim (a plain claim could legally ghost-claim a fresh turn mid-race).
+        with open(self.RUNNER, encoding="utf-8") as f:
+            src = f.read()
+        m = re.search(r"cmd = \[sys\.executable, args\.m8shift_py, ([^\]]*)\]", src)
+        self.assertIsNotNone(m, "heartbeat claim argv not found in the runner")
+        self.assertIn('"--refresh"', m.group(1).replace("'", '"'))
+        self.assertNotIn("claim --force", src)
 
 
 class TestLoopGuardrails(CLIBase):

@@ -17,11 +17,17 @@ Design (the points a naive `while wait; do …` loop gets wrong):
     from `IDLE`.
   * **Heartbeat for long turns**: while the agent process is running, if this
     runner sees `WORKING_<me>` with less than 5 minutes before `expires`, it runs
-    `python3 m8shift.py claim <me>` to refresh the TTL. This is a manual heartbeat:
-    it extends only the holder's own lock and never steals another agent's pen.
-  * **Post-run validation**: if the agent process exits while the pen is still
-    `WORKING_<me>` (it claimed then died without `append`), that is a crash → retry,
-    up to a cap, then stop and leave the pen for manual recovery (never force-steals).
+    `python3 m8shift.py claim <me> --refresh` (RFC 047 refresh-only guard). This is a
+    manual heartbeat: it can only EXTEND a lock this agent already holds — the core
+    refuses it in every other state, so a heartbeat can never ghost-claim a fresh
+    turn and never steals another agent's pen.
+  * **Post-run classification (RFC 047)**: after the child exits, the runner re-reads
+    the LOCK and the turn transcript. The authority is AUTHORSHIP, not a state diff:
+    the run succeeded only if the relay is `DONE` or this agent authored a turn
+    numbered greater than the pre-run turn. Otherwise the run is classified via a
+    total table (non_completion / stuck_working / invalid_relay = failures that
+    retry up to a cap; external_transition / suspended = neutral, no retry burn).
+    The pen is always left for manual recovery (never force-steals).
   * **Run ledger**: every launched turn receives `M8SHIFT_RUN_ID` in the child
     environment and appends lifecycle events to `.m8shift/runtime/runs.jsonl`.
   * **Bounded backoff + retry cap**, and **static argv** (no shell eval).
@@ -56,6 +62,11 @@ MANDATORY_ENV = ("M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TUR
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+TURN_BEGIN_RE = re.compile(r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN -->")
+# RFC 047 total classification vocabulary (verify_post_run status values).
+SUCCESS_STATUSES = ("completed", "advanced", "not_required")
+FAILURE_STATUSES = ("non_completion", "stuck_working", "invalid_relay")
+NEUTRAL_STATUSES = ("external_transition", "suspended")
 
 
 def read_lock(m8shift_path):
@@ -74,6 +85,65 @@ def read_lock(m8shift_path):
         if m:
             fields[m.group(1)] = m.group(2).strip()
     return fields
+
+
+def parse_turn_authors(text):
+    """Return [(n, agent), ...] for every closed-turn BEGIN marker in the relay text."""
+    return [(int(m.group(1)), m.group(2)) for m in TURN_BEGIN_RE.finditer(text)]
+
+
+def authored_by_me(m8shift_text_or_path, me, pre_turn):
+    """RFC 047 authorship rule: True iff the transcript contains a turn authored by
+    `me` with int(n) > int(pre_turn).
+
+    Accepts either the relay text or a path to it. `pre_turn` is parsed defensively:
+    a non-integer pre-turn means authorship can never be established (the caller's
+    classification table handles the run via state rules instead).
+    """
+    text = m8shift_text_or_path
+    if text is None:
+        return False
+    if "\n" not in text and os.path.isfile(text):
+        try:
+            with open(text, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return False
+    try:
+        pre = int(str(pre_turn).strip())
+    except (TypeError, ValueError):
+        return False
+    return any(agent == me and n > pre for n, agent in parse_turn_authors(text))
+
+
+def read_relay_post_run(m8shift_path, attempts=3, delay=0.5):
+    """Post-run relay read with a bounded re-read for transient errors (RFC 047).
+
+    A missing file / OSError can be a transient window during an atomic replace:
+    retry up to `attempts` reads over ~1 second. A readable file whose LOCK markers
+    are missing is STABLE malformed content and classifies immediately, without
+    burning the retry budget. Returns (lock_fields_or_None, text_or_None).
+    """
+    last_text = None
+    for i in range(attempts):
+        try:
+            with open(m8shift_path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            if i + 1 < attempts:
+                time.sleep(delay)
+            continue
+        last_text = text
+        if LOCK_BEGIN not in text or LOCK_END not in text:
+            return None, text          # stable malformed content: classify immediately
+        body = text[text.index(LOCK_BEGIN) + len(LOCK_BEGIN):text.index(LOCK_END)]
+        fields = {}
+        for line in body.splitlines():
+            m = re.match(r"([a-z_]+):\s*(.*)$", line.strip())
+            if m:
+                fields[m.group(1)] = m.group(2).strip()
+        return fields, text
+    return None, last_text
 
 
 def log(msg):
@@ -194,10 +264,12 @@ def expected_post_run(me, lk):
     return {
         "type": "core_state_advanced",
         "pre_state": lk.get("state", ""),
+        "pre_holder": lk.get("holder", ""),
         "pre_turn": lk.get("turn", ""),
         "agent": me,
         "stuck_state": f"WORKING_{me.upper()}",
-        "success_rule": "post turn changed OR post state differs from both pre_state and stuck_state",
+        "success_rule": ("post relay is DONE OR the transcript contains a turn authored "
+                         "by this agent with n > pre_turn (RFC 047)"),
     }
 
 
@@ -254,42 +326,80 @@ def write_run_plan(runtime_dir, plan):
     return path
 
 
-def verify_post_run(plan, after):
-    expected = plan.get("expected_transition") or plan["expected_post_run"]
-    actual = {
-        "state": after.get("state", ""),
-        "holder": after.get("holder", ""),
-        "turn": after.get("turn", ""),
-    }
-    pre_state = expected.get("pre_state", "")
-    pre_turn = expected.get("pre_turn", "")
-    stuck_state = expected.get("stuck_state", "")
+def _turn_int(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_post_run(expected, after, post_text):
+    """RFC 047 total classification of one finished provider run → (status, reason).
+
+    Evaluation order (per the RFC table): invalid relay, read-only expectation,
+    DONE, authorship, turn reset, PAUSED, then per-state rows; anything else is an
+    external transition. Authorship — a transcript turn by this agent numbered
+    greater than pre_turn — is the success authority, never a state-only diff.
+    """
     me = expected.get("agent", "")
-    stolen = actual["turn"] == pre_turn and actual["holder"] not in ("", "none", me)
-    progressed = actual["turn"] != pre_turn or actual["state"] not in (pre_state, stuck_state)
-    if stolen:
-        status = "lock_stolen"
-        ok = False
-    elif expected.get("type") == "none":
-        status = "not_required"
-        ok = True
-    elif actual["state"] == stuck_state and actual["holder"] == me:
-        status = "stuck_working"
-        ok = False
-    elif progressed:
-        status = "core_advanced"
-        ok = True
-    else:
-        status = "no_progress"
-        ok = False
+    if after is None or not after.get("state", ""):
+        return "invalid_relay", "post-run LOCK is missing or invalid after the bounded re-read"
+    if expected.get("type") == "none":
+        return "not_required", "read-only run; no relay state transition required"
+    state = after.get("state", "")
+    if state == "DONE":
+        return "completed", "relay session is DONE"
+    if authored_by_me(post_text, me, expected.get("pre_turn", "")):
+        return "advanced", "this agent authored a turn newer than the pre-run turn"
+    pre_turn = _turn_int(expected.get("pre_turn"))
+    post_turn = _turn_int(after.get("turn"))
+    same = pre_turn is not None and post_turn == pre_turn
+    if pre_turn is not None and (post_turn is None or post_turn < pre_turn):
+        return "external_transition", "turn reset detected (operator reset / re-init during the run)"
+    if state == "PAUSED":
+        return "suspended", "relay is PAUSED (operator pause or usage cooldown)"
+    if state == "IDLE":
+        if same and expected.get("pre_state", "") == "IDLE":
+            return "non_completion", "provider exited without starting the relay from IDLE"
+        return "external_transition", "relay is IDLE without a turn authored by this agent"
+    if state == f"AWAITING_{me.upper()}":
+        if same:
+            return "non_completion", "provider exited without claim/append/done"
+        return "external_transition", "turn advanced but was not authored by this agent"
+    if state == f"WORKING_{me.upper()}" and after.get("holder", "") == me:
+        if same:
+            if after.get("integrating"):
+                return "external_transition", "integration merge in flight (active integrating sentinel)"
+            return "stuck_working", "provider exited holding the pen without append"
+        return "external_transition", "own working lock but the turn moved without this agent's authorship"
+    return "external_transition", f"relay moved to state {state} outside this run's authorship"
+
+
+def verify_post_run(plan, after, post_text=None):
+    """Classify a finished run against its immutable plan (RFC 047).
+
+    `after` is the post-run LOCK dict (None = invalid/missing after the bounded
+    re-read in read_relay_post_run); `post_text` is the post-run relay text used
+    for the authorship check. Success statuses: completed / advanced / not_required.
+    Failures (retryable): non_completion / stuck_working / invalid_relay.
+    Neutral (never burn retries): external_transition / suspended.
+    """
+    expected = plan.get("expected_transition") or plan["expected_post_run"]
+    status, reason = classify_post_run(expected, after, post_text)
+    actual = {
+        "state": (after or {}).get("state", ""),
+        "holder": (after or {}).get("holder", ""),
+        "turn": (after or {}).get("turn", ""),
+    }
+    ok = status in SUCCESS_STATUSES
     finding = None
-    if not ok:
+    if status in FAILURE_STATUSES:
         finding = {
             "severity": "error",
             "check": "headless.post_run_core_state",
             "message": (
-                f"run {plan['run_id']} ended without expected core state advance "
-                f"(status={status})"
+                f"run {plan['run_id']} ended without relay completion or authorship "
+                f"(status={status}: {reason})"
             ),
             "hint": "Inspect the relay and agent output; no automatic force recovery is performed.",
         }
@@ -299,6 +409,7 @@ def verify_post_run(plan, after):
         "expected": expected,
         "actual": actual,
         "finding": finding,
+        "reason": reason,
     }
 
 
@@ -416,7 +527,15 @@ def parse_iso_z(value):
 
 
 def maybe_refresh_ttl(args, me, me_working, run_id):
-    """Refresh our own working lock when expiry is close. Never force-steals."""
+    """Refresh our own working lock when expiry is close. Never force-steals.
+
+    RFC 047: the heartbeat is `claim <me> --refresh` — a refresh-only core guard that
+    can only EXTEND a WORKING lock this agent already holds. A plain `claim` must
+    never be used here: between this runner's pre-check and the core file lock, the
+    provider may already have appended and the peer handed the turn back, and a plain
+    claim would ghost-claim that fresh turn. A failed refresh is recorded as a
+    sidecar event and the run continues to post-run classification (never aborts).
+    """
     margin = max(0, args.heartbeat_before_expiry)
     if margin == 0:
         return
@@ -429,12 +548,13 @@ def maybe_refresh_ttl(args, me, me_working, run_id):
     remaining = (exp - dt.datetime.now(dt.timezone.utc)).total_seconds()
     if remaining > margin:
         return
-    cmd = [sys.executable, args.m8shift_py, "claim", me]
+    cmd = [sys.executable, args.m8shift_py, "claim", me, "--refresh"]
     try:
         r = subprocess.run(cmd, check=False, text=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as e:
         log(f"heartbeat failed to launch {args.m8shift_py}: {e}")
+        append_run_event(args, "run.heartbeat_failed", run_id, me, detail=str(e))
         return
     if r.returncode == 0:
         log(f"heartbeat refreshed TTL ({remaining:.0f}s remained).")
@@ -447,7 +567,20 @@ def maybe_refresh_ttl(args, me, me_working, run_id):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Headless M8Shift runner for one agent.")
+    p = argparse.ArgumentParser(
+        description="Headless M8Shift runner for one agent.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "exit codes (RFC 047, one-shot --once):\n"
+            "  0  success — post-run classification is completed, advanced, or not_required\n"
+            "  1  run failure — non_completion, stuck_working, invalid_relay, partial/ledger\n"
+            "     failure, or the consecutive-failure retry cap was reached\n"
+            "  2  infrastructure — launch failure, immutable run-plan collision, or turn timeout\n"
+            "  3  external_transition — the relay moved outside this run's authorship (neutral,\n"
+            "     never counted as a provider failure by a supervising listener)\n"
+            "  4  suspended — relay is PAUSED (operator pause / usage cooldown; neutral)\n"
+        ),
+    )
     p.add_argument("--version", action="version", version=f"headless_runner.py {VERSION}")
     p.add_argument("agent", help="your agent name (must be in the M8SHIFT.md roster)")
     p.add_argument("--m8shift", default="M8SHIFT.md", help="path to M8SHIFT.md")
@@ -550,9 +683,18 @@ def main():
             except subprocess.TimeoutExpired:
                 maybe_refresh_ttl(args, me, me_working, run_id)
 
-        # Post-run validation against the immutable run plan and the new core state.
-        after = read_lock(args.m8shift) or {}
-        verification = verify_post_run(plan, after)
+        # Post-run classification (RFC 047): re-read the LOCK (bounded re-read for
+        # transient read errors) and the transcript — authorship is the authority.
+        after, post_text = read_relay_post_run(args.m8shift)
+        verification = verify_post_run(plan, after, post_text)
+        status = verification["status"]
+        reason = verification.get("reason", "")
+        post_snapshot = verification["actual"]
+        pre_snapshot = {
+            "state": lk.get("state", ""),
+            "holder": lk.get("holder", ""),
+            "turn": lk.get("turn", ""),
+        }
         finding = verification.get("finding")
         findings = [finding] if finding else []
         ledger_ok = run_ledger_has_event(args, run_id, "run.started")
@@ -567,56 +709,78 @@ def main():
                              verification=verification, runtime_findings=findings)
         process_ok = proc.returncode == 0
         success = (not timed_out) and process_ok and verification["ok"] and ledger_ok
+        once_rc = 1
         if timed_out:
             fails += 1
+            once_rc = 2
             append_run_event(args, "run.ended", run_id, me, status="timeout",
-                             returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""),
+                             returncode=proc.returncode, relay_state=post_snapshot["state"],
+                             relay_turn=post_snapshot["turn"],
                              verification_ok=verification["ok"],
-                             verification_status=verification["status"],
+                             verification_status=status,
                              ledger_ok=ledger_ok,
                              success=False,
                              runtime_findings=findings)
-        elif verification["status"] == "stuck_working":
-            # claimed but exited without append → crashed mid-turn.
-            fails += 1
-            log(f"agent exited holding the pen (crash {fails}/{args.max_retries}).")
-            append_run_event(args, "run.ended", run_id, me, status="stuck_working",
-                             returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""),
+        elif status in NEUTRAL_STATUSES:
+            # external_transition / suspended are NEUTRAL: not a provider failure, so
+            # the consecutive-failure counter stays UNCHANGED — sleep, back to polling.
+            log(f"run ended {status}: {reason} (retry counter unchanged).")
+            append_run_event(args, "run.ended", run_id, me, status=status,
+                             returncode=proc.returncode, relay_state=post_snapshot["state"],
+                             relay_turn=post_snapshot["turn"],
                              verification_ok=False,
-                             verification_status=verification["status"],
+                             verification_status=status,
                              ledger_ok=ledger_ok,
                              success=False,
+                             reason=reason,
+                             runtime_findings=findings)
+            if args.once:
+                return 3 if status == "external_transition" else 4
+            time.sleep(args.interval)
+            continue
+        elif status in FAILURE_STATUSES:
+            # non_completion / stuck_working / invalid_relay are run failures even
+            # when the provider exited rc 0 — never force-recovered, only retried.
+            fails += 1
+            log(f"run classified {status}: {reason} ({fails}/{args.max_retries}).")
+            if status == "non_completion":
+                append_run_event(args, "run.non_completion", run_id, me,
+                                 pre=pre_snapshot, post=post_snapshot, reason=reason)
+            append_run_event(args, "run.ended", run_id, me, status=status,
+                             returncode=proc.returncode, relay_state=post_snapshot["state"],
+                             relay_turn=post_snapshot["turn"],
+                             verification_ok=False,
+                             verification_status=status,
+                             ledger_ok=ledger_ok,
+                             success=False,
+                             reason=reason,
                              runtime_findings=findings)
         elif success:
-            fails = 0  # a turn was posted / the state advanced — real progress.
-            append_run_event(args, "run.ended", run_id, me, status="ok",
-                             returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""),
+            fails = 0  # completed / advanced / not_required — authored, real progress.
+            append_run_event(args, "run.ended", run_id, me, status=status,
+                             returncode=proc.returncode, relay_state=post_snapshot["state"],
+                             relay_turn=post_snapshot["turn"],
                              verification_ok=True,
-                             verification_status=verification["status"],
+                             verification_status=status,
                              ledger_ok=True,
                              success=True,
                              runtime_findings=[])
             if args.once:
                 return 0
         else:
+            # relay classification succeeded but the process/ledger side failed.
             fails += 1
             if verification["ok"] and not process_ok:
-                status = "failed_partial"
+                ended_status = "failed_partial"
                 log(f"agent advanced the relay but exited non-zero ({fails}/{args.max_retries}).")
-            elif verification["ok"] and not ledger_ok:
-                status = "failed_missing_ledger"
-                log(f"agent advanced the relay but run ledger is incomplete ({fails}/{args.max_retries}).")
             else:
-                status = verification["status"] if verification["status"] != "not_required" else "failed_partial"
-                log(f"agent ran but did not satisfy run-plan validation ({fails}/{args.max_retries}).")
-            append_run_event(args, "run.ended", run_id, me, status=status,
-                             returncode=proc.returncode, relay_state=after.get("state", ""),
-                             relay_turn=after.get("turn", ""),
+                ended_status = "failed_missing_ledger"
+                log(f"agent advanced the relay but run ledger is incomplete ({fails}/{args.max_retries}).")
+            append_run_event(args, "run.ended", run_id, me, status=ended_status,
+                             returncode=proc.returncode, relay_state=post_snapshot["state"],
+                             relay_turn=post_snapshot["turn"],
                              verification_ok=verification["ok"],
-                             verification_status=verification["status"],
+                             verification_status=status,
                              ledger_ok=ledger_ok,
                              success=False,
                              runtime_findings=findings)
@@ -626,7 +790,7 @@ def main():
             append_run_event(args, "run.retry_cap", run_id, me, failures=fails)
             return 1
         if args.once:
-            return 1
+            return once_rc
         if fails:
             time.sleep(min(args.interval * (2 ** fails), args.max_backoff))
 
