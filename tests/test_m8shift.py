@@ -7374,6 +7374,402 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertIn("usage init", " ".join(f["message"] for f in payload["findings"]))
 
 
+class TestRFC040UsagePRB(CLIBase):
+    """RFC 040 PR B — the guard/watch/wait/resume family. GENERAL-table exit
+    codes (pinned in the RFC "PR B scope" subsection): 0 ok, 10 near_limit
+    advisory, 11 limit_hit (hold recommended/applied), 12 working-holder
+    advisory, 20 unknown fail-open, 30 policy error, 40 malformed hold,
+    64 CLI usage error, 75 wait still held. The relay is only ever parked
+    THROUGH the core cooldown/resume argv calls; nothing resumes automatically."""
+
+    LEDGER_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
+    HOLD_REL = os.path.join(".m8shift", "runtime", "usage-hold.json")
+    ADAPTERS_REL = os.path.join(".m8shift", "usage", "adapters.json")
+    HOLD_KEYS = {"schema", "agent", "placed_at", "resets_at", "reason",
+                 "source", "snapshot_ref"}
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(self.d, "m8shift-runtime.py"))
+
+    def rt(self, *args):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", *args],
+            cwd=self.d, capture_output=True, text=True, timeout=120,
+        )
+
+    @staticmethod
+    def iso_in(seconds):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
+
+    def fresh_iso(self):
+        return self.iso_in(0)
+
+    def ledger_path(self):
+        return os.path.join(self.d, self.LEDGER_REL)
+
+    def hold_path(self):
+        return os.path.join(self.d, self.HOLD_REL)
+
+    def read_hold(self):
+        with open(self.hold_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def ledger_events(self):
+        try:
+            with open(self.ledger_path(), encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    def clear_ledger(self):
+        try:
+            os.remove(self.ledger_path())
+        except FileNotFoundError:
+            pass
+
+    def seed_snapshot(self, *, agent="claude", used=50000, limit=100000,
+                      resets_at=None, captured_at=None, adapter="seeded"):
+        """Append one m8shift.usage.snapshot.v1 event to the ledger (the guard
+        family reads the freshest snapshot per agent from here)."""
+        captured = captured_at or self.fresh_iso()
+        ratio = round(used / limit, 4) if used is not None and limit else None
+        windows = []
+        if resets_at:
+            windows = [{"kind": "session_5h", "resets_at": resets_at,
+                        "used": used, "limit": limit}]
+        snapshot = {
+            "schema": "m8shift.usage.snapshot.v1", "agent": agent,
+            "source": {"adapter": adapter, "kind": "fixture", "provenance": "manual"},
+            "captured_at": captured, "used_tokens": used, "limit_tokens": limit,
+            "decision_ratio": ratio, "windows": windows,
+        }
+        event = {"schema": "m8shift.runtime.event.v1", "type": "usage.snapshot",
+                 "ts": captured, "agent": agent, "payload": {"snapshot": snapshot}}
+        os.makedirs(os.path.dirname(self.ledger_path()), exist_ok=True)
+        with open(self.ledger_path(), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event) + "\n")
+        return snapshot
+
+    def write_fixture_adapter(self, doc, *, agent="claude"):
+        """Enabled fixture adapter for watch ticks (the PR A snapshot path)."""
+        fixture_rel = os.path.join(".m8shift", "usage", "fixtures", "prb.json")
+        fixture = os.path.join(self.d, fixture_rel)
+        os.makedirs(os.path.dirname(fixture), exist_ok=True)
+        with open(fixture, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        adapters = os.path.join(self.d, self.ADAPTERS_REL)
+        os.makedirs(os.path.dirname(adapters), exist_ok=True)
+        with open(adapters, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.usage.adapters.v1", "adapters": [{
+                "name": "prb-fx", "agent": agent, "kind": "fixture",
+                "fixture_path": fixture_rel, "timeout_s": 5, "enabled": True,
+            }]}, fh)
+
+    def ok_fixture_doc(self, *, agent="claude"):
+        return {
+            "schema": "m8shift.usage.fixture.v1", "agent": agent,
+            "provenance": "manual", "captured_at": self.fresh_iso(),
+            "used_tokens": 12500, "limit_tokens": 100000,
+            "windows": [{"kind": "session_5h", "resets_at": self.iso_in(3600),
+                         "used": 12500, "limit": 100000}],
+        }
+
+    def place_cooldown_via_guard(self, resets_at):
+        """init → seeded limit_hit → guard --apply; returns the guard result."""
+        self.init()
+        self.seed_snapshot(used=100000, limit=100000, resets_at=resets_at)
+        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        return r
+
+    # ── guard verdicts (read-only) ──
+
+    def test_guard_verdict_exit_codes_from_seeded_ledger(self):
+        cases = (
+            (dict(used=50000), "ok", 0),
+            (dict(used=85000), "near_limit", 10),
+            (dict(used=100000), "limit_hit", 11),
+            (dict(used=None, limit=None), "unknown", 20),
+            (dict(used=100000, captured_at="2026-01-01T00:00:00Z"), "unknown", 20),  # stale
+        )
+        for seed, expected_verdict, expected_exit in cases:
+            with self.subTest(seed=seed):
+                self.clear_ledger()
+                self.seed_snapshot(**seed)
+                with open(self.ledger_path(), encoding="utf-8") as fh:
+                    before = fh.read()
+                r = self.rt("usage", "guard", "--agent", "claude", "--json")
+                self.assertEqual(r.returncode, expected_exit, r.stdout + r.stderr)
+                payload = json.loads(r.stdout)
+                self.assertEqual(payload["verdict"], expected_verdict)
+                # guard without --apply is fully read-only: no ledger append, no hold
+                with open(self.ledger_path(), encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), before)
+                self.assertFalse(os.path.exists(self.hold_path()))
+        self.clear_ledger()
+        empty = self.rt("usage", "guard", "--json")
+        self.assertEqual(empty.returncode, 20, empty.stdout)  # no data => unknown, fail-open
+
+    # ── guard --apply on limit_hit ──
+
+    def test_guard_apply_limit_hit_places_hold_and_calls_core_cooldown(self):
+        resets = self.iso_in(7200)
+        r = self.place_cooldown_via_guard(resets)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["applied"]["action"], "cooldown_applied")
+        lk = self.lock()
+        self.assertEqual(lk["state"], "PAUSED")           # via the CORE, never inline
+        self.assertEqual(lk["holder"], "none")
+        self.assertTrue(lk["note"].startswith(f"cooldown until {resets} for claude:"),
+                        lk["note"])
+        hold = self.read_hold()
+        self.assertEqual(set(hold), self.HOLD_KEYS)       # exactly the pinned seven keys
+        self.assertEqual(hold["schema"], "m8shift.usage.hold.v1")
+        self.assertEqual(hold["agent"], "claude")
+        self.assertEqual(hold["resets_at"], resets)
+        self.assertEqual(hold["source"], "usage-monitor")
+        self.assertIn(".m8shift/runtime/usage.jsonl#", hold["snapshot_ref"])
+        events = self.ledger_events()
+        placed = [e for e in events if e["type"] == "usage.hold_placed"]
+        self.assertEqual(len(placed), 1)
+        audit = placed[0]["payload"]
+        self.assertEqual(audit["relay_state_before"], "IDLE")
+        self.assertEqual(audit["relay_state_after"], "PAUSED")
+        self.assertEqual(audit["core"]["returncode"], 0)
+        self.assertEqual(audit["core"]["argv"][:3], ["python3", "m8shift.py", "cooldown"])
+        self.assertEqual(audit["snapshot_ref"], hold["snapshot_ref"])
+
+    def test_guard_apply_peer_working_is_advisory_only(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)  # WORKING_CODEX
+        self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
+        before = self.md()
+        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertEqual(self.md(), before)               # relay byte-identical
+        self.assertFalse(os.path.exists(self.hold_path()))  # nothing written
+        holds = [e for e in self.ledger_events() if e["type"].startswith("usage.hold")]
+        self.assertEqual(holds, [])
+        self.assertEqual(json.loads(r.stdout)["applied"]["action"], "peer_working_advisory")
+
+    def test_guard_apply_own_working_posts_advisory_hold_only(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)  # WORKING_CLAUDE
+        self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
+        before = self.md()
+        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertEqual(self.md(), before)               # cooperative: lock untouched
+        hold = self.read_hold()                           # advisory hold IS posted
+        self.assertEqual(hold["agent"], "claude")
+        self.assertEqual(set(hold), self.HOLD_KEYS)
+        advisory = [e for e in self.ledger_events() if e["type"] == "usage.hold_advisory"]
+        self.assertEqual(len(advisory), 1)
+        self.assertIsNone(advisory[0]["payload"]["core"])  # no core call at all
+
+    def test_near_limit_never_applies(self):
+        self.init()
+        self.seed_snapshot(used=85000, limit=100000, resets_at=self.iso_in(3600))
+        before = self.md()
+        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        self.assertEqual(self.md(), before)
+        self.assertFalse(os.path.exists(self.hold_path()))
+        self.assertIsNone(json.loads(r.stdout)["applied"])
+
+    def test_guard_apply_refuses_without_reset_time(self):
+        self.init()
+        self.seed_snapshot(used=100000, limit=100000)      # no window, no resets_at
+        before = self.md()
+        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(r.returncode, 30, r.stdout + r.stderr)  # never invents a reset
+        self.assertEqual(self.md(), before)
+        self.assertFalse(os.path.exists(self.hold_path()))
+        self.assertIn("usage.no_reset",
+                      {f["check"] for f in json.loads(r.stdout)["findings"]})
+
+    def test_hold_idempotency_and_replace_only_on_later_reset(self):
+        r1 = self.iso_in(3600)
+        self.place_cooldown_via_guard(r1)
+        with open(self.hold_path(), encoding="utf-8") as fh:
+            hold_bytes = fh.read()
+        again = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(again.returncode, 11, again.stdout + again.stderr)
+        self.assertEqual(json.loads(again.stdout)["applied"]["action"], "hold_already_active")
+        with open(self.hold_path(), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), hold_bytes)        # byte-identical, placed_at kept
+        self.assertTrue(self.lock()["note"].startswith(f"cooldown until {r1} "))
+        r2 = self.iso_in(7200)                             # reset moved LATER => --replace
+        self.seed_snapshot(used=100000, limit=100000, resets_at=r2)
+        extended = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(extended.returncode, 11, extended.stdout + extended.stderr)
+        self.assertEqual(json.loads(extended.stdout)["applied"]["action"], "cooldown_applied")
+        self.assertTrue(self.lock()["note"].startswith(f"cooldown until {r2} for claude:"))
+        self.assertEqual(self.read_hold()["resets_at"], r2)
+
+    def test_guard_apply_never_converts_operator_pause(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.cw("pause", "claude", "--reason", "operator break").returncode, 0)
+        self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
+        before = self.md()
+        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["applied"]["action"], "operator_pause_left_alone")
+        self.assertEqual(self.md(), before)
+        self.assertFalse(os.path.exists(self.hold_path()))
+
+    # ── watch ──
+
+    def test_watch_max_ticks_and_fractional_interval_seam(self):
+        self.write_fixture_adapter(self.ok_fixture_doc())
+        r = self.rt("usage", "watch", "--interval", "0.01", "--max-ticks", "3", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+        self.assertEqual([row["tick"] for row in lines], [1, 2, 3])
+        self.assertTrue(all(row["verdict"] == "ok" for row in lines))
+        snapshots = [e for e in self.ledger_events() if e["type"] == "usage.snapshot"]
+        self.assertEqual(len(snapshots), 3)                # one re-snapshot per tick
+
+    def test_watch_ok_tick_never_resumes(self):
+        self.init()
+        until = self.iso_in(3600)
+        cd = self.cw("cooldown", "--until", until, "--reason", "claude window limit",
+                     "--source", "usage-monitor", "--for", "claude")
+        self.assertEqual(cd.returncode, 0, cd.stderr)
+        self.assertEqual(self.lock()["state"], "PAUSED")
+        self.write_fixture_adapter(self.ok_fixture_doc())  # usage is OK again…
+        r = self.rt("usage", "watch", "--agent", "claude", "--apply",
+                    "--interval", "0.01", "--max-ticks", "2", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lock()["state"], "PAUSED")   # …but NOTHING auto-resumes
+
+    # ── wait ──
+
+    def test_wait_release_rules_and_still_held_75(self):
+        self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
+        held = self.rt("usage", "wait", "--interval", "0.01", "--max-ticks", "2")
+        self.assertEqual(held.returncode, 75, held.stdout + held.stderr)
+        self.clear_ledger()
+        self.seed_snapshot(used=10000, limit=100000)
+        ok = self.rt("usage", "wait", "--interval", "0.01", "--max-ticks", "2")
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.clear_ledger()                                # empty ledger => unknown
+        fail_open = self.rt("usage", "wait", "--interval", "0.01", "--max-ticks", "2")
+        self.assertEqual(fail_open.returncode, 0)          # unknown releases by default
+        strict = self.rt("usage", "wait", "--until-ok", "--interval", "0.01",
+                         "--max-ticks", "2")
+        self.assertEqual(strict.returncode, 75)            # --until-ok wants a real ok
+
+    def test_wait_until_ok_flips_when_fresher_ok_snapshot_lands(self):
+        self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift-runtime.py", "usage", "wait", "--agent", "claude",
+             "--until-ok", "--interval", "0.1", "--max-ticks", "200"],
+            cwd=self.d, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(0.5)                                # a few held ticks first
+            self.seed_snapshot(used=10000, limit=100000)   # fresher ok snapshot lands
+            out, err = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual(proc.returncode, 0, out + err)
+        self.assertIn("released", out)
+
+    # ── resume ──
+
+    def test_resume_refuses_while_limit_still_hit(self):
+        self.place_cooldown_via_guard(self.iso_in(3600))
+        r = self.rt("usage", "resume", "--agent", "claude", "--json")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["action"], "refused_still_limit_hit")
+        self.assertEqual(self.lock()["state"], "PAUSED")   # relay untouched
+        self.assertTrue(os.path.exists(self.hold_path()))  # hold untouched
+
+    def test_resume_clears_hold_and_calls_core_resume_when_ok(self):
+        self.place_cooldown_via_guard(self.iso_in(3600))
+        self.seed_snapshot(used=10000, limit=100000)       # window recovered
+        r = self.rt("usage", "resume", "--agent", "claude", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["action"], "resumed")
+        lk = self.lock()
+        self.assertEqual(lk["state"], "AWAITING_CLAUDE")   # via CORE resume
+        self.assertEqual(lk["holder"], "claude")
+        self.assertFalse(os.path.exists(self.hold_path()))
+        cleared = [e for e in self.ledger_events() if e["type"] == "usage.hold_cleared"]
+        self.assertEqual(len(cleared), 1)
+        self.assertEqual(cleared[0]["payload"]["core"]["argv"][:3],
+                         ["python3", "m8shift.py", "resume"])
+        self.assertEqual(cleared[0]["payload"]["relay_state_after"], "AWAITING_CLAUDE")
+
+    def test_resume_agent_defaults_to_cooldown_resume_for(self):
+        self.place_cooldown_via_guard(self.iso_in(3600))
+        self.seed_snapshot(used=10000, limit=100000)
+        r = self.rt("usage", "resume", "--json")           # no --agent: note resume_for wins
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["agent"], "claude")
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+
+    def test_resume_never_touches_an_operator_pause(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.cw("pause", "claude", "--reason", "operator break").returncode, 0)
+        os.makedirs(os.path.dirname(self.hold_path()), exist_ok=True)
+        with open(self.hold_path(), "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.usage.hold.v1", "agent": "claude",
+                       "placed_at": self.fresh_iso(), "resets_at": None,
+                       "reason": "stale advisory hold", "source": "usage-monitor",
+                       "snapshot_ref": ".m8shift/runtime/usage.jsonl#x/claude/seeded"},
+                      fh)
+        self.seed_snapshot(used=10000, limit=100000)       # verdict ok
+        r = self.rt("usage", "resume", "--agent", "claude", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["action"], "stale_hold_cleared")
+        self.assertEqual(self.lock()["state"], "PAUSED")   # operator pause NOT resumed
+        self.assertFalse(os.path.exists(self.hold_path()))
+
+    def test_resume_nothing_to_do_and_unknown_refusal(self):
+        self.init()
+        self.seed_snapshot(used=10000, limit=100000)
+        r = self.rt("usage", "resume", "--agent", "claude", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["action"], "nothing_to_do")
+        self.clear_ledger()                                # unknown verdict => refusal 10
+        held = self.rt("usage", "resume", "--agent", "claude", "--json")
+        self.assertEqual(held.returncode, 10, held.stdout + held.stderr)
+        self.assertEqual(json.loads(held.stdout)["action"], "refused_not_ok_yet")
+
+    # ── malformed hold sidecar / CLI usage errors ──
+
+    def test_malformed_hold_sidecar_exits_40(self):
+        os.makedirs(os.path.dirname(self.hold_path()), exist_ok=True)
+        with open(self.hold_path(), "w", encoding="utf-8") as fh:
+            fh.write("{this is not a hold\n")
+        for argv in (("usage", "guard", "--agent", "claude"),
+                     ("usage", "resume", "--agent", "claude"),
+                     ("usage", "wait", "--interval", "0.01", "--max-ticks", "1")):
+            with self.subTest(argv=argv):
+                r = self.rt(*argv)
+                self.assertEqual(r.returncode, 40, r.stdout + r.stderr)
+
+    def test_cli_usage_errors_exit_64(self):
+        cases = (
+            ("usage", "guard", "--apply"),                         # --apply needs --agent
+            ("usage", "guard", "--agent", "Not-Valid!"),
+            ("usage", "watch", "--interval", "0", "--max-ticks", "1"),
+            ("usage", "wait", "--interval", "-1"),
+            ("usage", "watch", "--apply", "--interval", "0.01", "--max-ticks", "1"),
+        )
+        for argv in cases:
+            with self.subTest(argv=argv):
+                r = self.rt(*argv)
+                self.assertEqual(r.returncode, 64, r.stdout + r.stderr)
+
+
 class TestDetailedHelpCoverage(unittest.TestCase):
     """Operator requirement: every CLI parameter documents itself — each argparse
     add_argument carries help= (one line per parameter in --help) and every
