@@ -138,8 +138,8 @@ If an agent crashes holding the pen the lock would stick. Guardrail:
   with `claim <you> --force`, then open a turn noting the takeover;
 - **the tool enforces this**: `--force` is **refused** on a still-valid lock — you
   cannot steal the pen from an active agent (intentional);
-- **refresh your own** lock before expiry: `claim <you>` while you hold it resets
-  `expires` (+30 min). For a long turn, heartbeat **≥5 min before** expiry.
+- **refresh your own** lock before expiry: `claim <you> --refresh` resets `expires`
+  (+30 min); refused unless you already hold it. Heartbeat **≥5 min before** expiry.
 - `release` and `done` are baton-owner admin ops (act if you are the `holder` or nobody
   holds it; do **not** need an active `claim`, unlike `append` — the only *work* write,
   which needs `WORKING_<you>`); `--force --reason TEXT` overrides, recorded in the ledger.

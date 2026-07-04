@@ -85,8 +85,9 @@ same metadata and serializes unavailable values as `null`.
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
 ./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
-./m8shift.py claim <agent> [--force]               # ACQUIRE the pen (exclusive) — from your turn /
-                                                  #   IDLE / your own lock ; --force = stale lock ONLY
+./m8shift.py claim <agent> [--force|--refresh]     # ACQUIRE the pen (exclusive) — from your turn /
+                                                  #   IDLE / your own lock ; --force = stale lock ONLY ;
+                                                  #   --refresh = extend YOUR OWN WORKING lock only (runner heartbeat)
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
 ./m8shift.py guard <agent>        # alias for may-i-write
 ./m8shift.py append <agent> --to <other> \

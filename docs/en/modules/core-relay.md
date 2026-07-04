@@ -78,7 +78,7 @@ touches the network or an external service.
 | `decisions scaffold [--session --target --single --title --status --json]` | repository-code | session turns | `docs/decisions/NNNN-*.md` or `DECISIONS.md` | ADR/Markdown scaffold |
 | `wait A [--once --interval]` | read-only | LOCK | none | blocks until A's turn; `--once` rc 3 if not yet |
 | `next A [--once --interval --force --resume --reason]` | local-state | LOCK, turns | LOCK | wait, then claim + peek |
-| `claim A [--force] [--check --files --turns]` | local-state (`--check` read-only) | LOCK, turns | LOCK | exclusive acquire; `--force` reclaims a **stale** lock only |
+| `claim A [--force|--refresh] [--check --files --turns]` | local-state (`--check` read-only) | LOCK, turns | LOCK | exclusive acquire; `--force` reclaims a **stale** lock only; `--refresh` only **extends A's own `WORKING` lock** (refused otherwise, exclusive with `--force`) — runners must use it for the TTL heartbeat, never a plain `claim` (RFC 047) |
 | `append A --to B [--ask --done --files --body --allow-large-body --wait --field … contract/sugar flags]` | local-state | LOCK | turn in `M8SHIFT.md`, LOCK, `M8SHIFT.sessions.jsonl` | needs `WORKING_A`; closes turn + hands off |
 | `request-turn A --to H --reason` | local-state | LOCK | `M8SHIFT.requests.md` | audit only; no LOCK change |
 | `yield-turn H --request N --to A [--reason]` | local-state | LOCK, requests | LOCK, requests | holder yields to requestor |
