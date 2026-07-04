@@ -3614,34 +3614,37 @@ class TestRFC047PhaseA(CLIBase):
         self.assertNotIn("claim --force", src)
 
 
-class TestRFC047ListenerPR1(CLIBase):
-    """RFC 047 Phases B+C (PR 1) — listener lifecycle companion, local backend only:
-    profile validation (argv arrays, never shell strings), dry-run planning, PID
-    lifecycle (live/stale/repair), process-group stop, the poll/launch decision
-    table, the pure bounded backoff ladder, persisted HALTED honored across
-    restarts, PR-2 backend rejection, and the advisory charter (the listener never
-    mutates the relay and never force-claims)."""
+class ListenerCLIBase(CLIBase):
+    """Shared harness for the RFC 047 listener classes (PR 1 + PR 2): the runtime
+    companion copied beside the core, a recorded stub runner (--runner seam),
+    profile builders, pid/state helpers, and env-injectable subprocess runs for
+    the backend-probe / log-threshold seams. Holds no tests itself."""
 
     RUNTIME = os.path.join(REPO, "m8shift-runtime.py")
+    RUNNER = os.path.join(REPO, "examples", "headless_runner.py")
 
     def setUp(self):
         super().setUp()
         shutil.copy(self.RUNTIME, os.path.join(self.d, "m8shift-runtime.py"))
 
-    def rt(self, *args, timeout=60):
+    def rt(self, *args, env=None, timeout=60):
+        run_env = None
+        if env:
+            run_env = os.environ.copy()
+            run_env.update(env)
         return subprocess.run(
             [sys.executable, "m8shift-runtime.py", *args],
-            cwd=self.d, capture_output=True, text=True, timeout=timeout,
+            cwd=self.d, capture_output=True, text=True, timeout=timeout, env=run_env,
         )
 
     def _load_runtime(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("m8shift_runtime_rfc047_pr1", self.RUNTIME)
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_rfc047", self.RUNTIME)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
 
-    def profile_path(self, drop=(), **overrides):
+    def profile_path(self, drop=(), name="listener-profile.json", **overrides):
         doc = {
             "schema": "m8shift.listener.profile.v1",
             "agent": "claude",
@@ -3653,13 +3656,18 @@ class TestRFC047ListenerPR1(CLIBase):
         doc.update(overrides)
         for key in drop:
             doc.pop(key, None)
-        with open(os.path.join(self.d, "listener-profile.json"), "w", encoding="utf-8") as fh:
+        path = os.path.join(self.d, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(doc, fh)
-        return "listener-profile.json"
+        return name
 
-    def stub_runner(self, *, rc=0, take_turn=False, sleep_s=0, pid_file=""):
+    def stub_runner(self, *, rc=0, take_turn=False, append_as_holder=False,
+                    sleep_s=0, pid_file=""):
         """A recorded runner stand-in (the --runner test seam): appends its argv to
-        launches.txt, optionally writes its own pid, takes one real relay turn, or
+        launches.txt, optionally writes its own pid, takes one real relay turn
+        (claim+append), appends directly as the current pen holder (the
+        resume-working stand-in: the pen is already held, so NO claim), or
         sleeps, then exits with `rc` (the RFC 047 one-shot exit vocabulary)."""
         lines = [
             "import json, os, sys, time",
@@ -3671,11 +3679,11 @@ class TestRFC047ListenerPR1(CLIBase):
                 f"with open({pid_file!r}, 'w', encoding='utf-8') as fh:",
                 "    fh.write(str(os.getpid()))",
             ]
-        if take_turn:
+        if take_turn or append_as_holder:
+            lines += ["import subprocess", "m = [sys.executable, 'm8shift.py']"]
+            if take_turn:
+                lines.append("subprocess.check_call(m + ['claim', 'claude'])")
             lines += [
-                "import subprocess",
-                "m = [sys.executable, 'm8shift.py']",
-                "subprocess.check_call(m + ['claim', 'claude'])",
                 "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',",
                 "                           '--ask', 'review', '--done', 'one turn'])",
             ]
@@ -3693,8 +3701,11 @@ class TestRFC047ListenerPR1(CLIBase):
         with open(path, encoding="utf-8") as fh:
             return [line for line in fh if line.strip()]
 
+    def listeners_dir(self):
+        return os.path.join(self.d, ".m8shift", "runtime", "listeners")
+
     def pid_path(self):
-        return os.path.join(self.d, ".m8shift", "runtime", "listeners", "claude.pid")
+        return os.path.join(self.listeners_dir(), "claude.pid")
 
     def write_pid_file(self, pid):
         os.makedirs(os.path.dirname(self.pid_path()), exist_ok=True)
@@ -3702,9 +3713,35 @@ class TestRFC047ListenerPR1(CLIBase):
             fh.write(f"{pid}\n")
 
     def state_doc(self):
-        path = os.path.join(self.d, ".m8shift", "runtime", "listeners", "claude.json")
+        path = os.path.join(self.listeners_dir(), "claude.json")
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
+
+    def seed_state(self, **overrides):
+        """Persist a synthetic listener state sidecar for claude."""
+        doc = {
+            "schema": "m8shift.listener.state.v1",
+            "agent": "claude",
+            "phase": "polling",
+            "consecutive_failures": 0,
+            "last_run_id": "seeded",
+            "last_classification": "",
+            "updated_at": "2026-07-04T00:00:00Z",
+        }
+        doc.update(overrides)
+        os.makedirs(self.listeners_dir(), exist_ok=True)
+        with open(os.path.join(self.listeners_dir(), f"{doc['agent']}.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return doc
+
+    def working_me_stuck(self, failures=1):
+        """AWAITING_CLAUDE → claim → an own WORKING_CLAUDE lock, with a persisted
+        sidecar recording that the previous run was classified stuck_working."""
+        self.awaiting_me()
+        r = self.cw("claim", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.seed_state(consecutive_failures=failures, last_classification="stuck_working")
 
     def awaiting_me(self):
         """init + one codex turn → AWAITING_CLAUDE (the listener's wake state)."""
@@ -3719,6 +3756,17 @@ class TestRFC047ListenerPR1(CLIBase):
         r = self.turn("claude", "codex")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
+
+class TestRFC047ListenerPR1(ListenerCLIBase):
+    """RFC 047 Phases B+C (PR 1) — listener lifecycle companion, local backend:
+    profile validation (argv arrays, never shell strings), dry-run planning, PID
+    lifecycle (live/stale/repair), process-group stop, the poll/launch decision
+    table, the pure bounded backoff ladder, persisted HALTED honored across
+    restarts, and the advisory charter (the listener never mutates the relay and
+    never force-claims). PR 2 updates folded in here: the own-stuck-WORKING wake
+    path is live again through the runner's --resume-working mode, and service
+    backends resolve through the probe seam instead of being rejected."""
 
     def test_t1_profile_validation_refuses_shell_strings_and_missing_fields(self):
         # RFC 047 PR1 test 1: argv arrays only — validated BEFORE any process work.
@@ -3755,17 +3803,22 @@ class TestRFC047ListenerPR1(CLIBase):
 
     def test_t2_dry_run_prints_plan_and_writes_no_pid_or_log(self):
         # RFC 047 PR1 test 2 (RFC Phase-2 test 1): dry-run is a plan, not a process.
+        # The probe seam pins a host without service backends so `auto` → local
+        # deterministically (PR 2 made auto really select launchd/systemd).
         self.init()
         prof = self.profile_path()
         r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
-                    "--backend", "auto", "--dry-run")
+                    "--backend", "auto", "--dry-run",
+                    env={"M8SHIFT_LISTENER_BACKEND_PROBE":
+                         '{"platform": "other", "launchctl": false, "systemctl": false}'})
         self.assertEqual(r.returncode, 0, r.stderr)
         payload = json.loads(r.stdout)
         self.assertTrue(payload["dry_run"])
         plan = payload["plan"]
         self.assertEqual(plan["schema"], "m8shift.listener.plan.v1")
         self.assertEqual(plan["agent"], "claude")
-        self.assertEqual(plan["backend"], "local")          # auto → local in PR 1
+        self.assertEqual(plan["backend"], "local")          # auto → local on this host
+        self.assertTrue(plan["backend_fallback_reason"])    # ...with a visible reason
         self.assertEqual(plan["profile"]["argv"], ["provider-cli", "one-turn"])
         self.assertIn("--once", plan["runner_argv_preview"])
         self.assertEqual(plan["backoff_ladder_seconds"], [20, 40, 80])
@@ -3817,8 +3870,10 @@ class TestRFC047ListenerPR1(CLIBase):
         self.awaiting_me()
         prof = self.profile_path()
         stub = self.stub_runner(sleep_s=120, pid_file="runner.pid")
+        # --backend local pinned: a detached start is the one path where `auto`
+        # could otherwise install a REAL OS service on a suitable host.
         r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
-                    "--runner", stub, "--poll-interval", "0.2")
+                    "--runner", stub, "--poll-interval", "0.2", "--backend", "local")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         with open(self.pid_path(), encoding="utf-8") as fh:
             listener_pid = int(fh.read().strip())
@@ -3887,37 +3942,51 @@ class TestRFC047ListenerPR1(CLIBase):
         self.assertEqual(doc["consecutive_failures"], 0)
         self.assertTrue(doc["last_run_id"])
 
-    def test_stuck_working_is_visible_neutral_no_retry_in_pr1(self):
-        # Codex review of PR 1 (option B): the reference runner only wakes on
-        # AWAITING_<agent>/IDLE, so a stuck_working retry launch would poll forever.
-        # PR 1 must NOT launch on an own stuck WORKING lock — it sleeps neutrally
-        # and says so visibly; the resume-working runner mode lands in PR 2.
-        self.awaiting_me()
-        r = self.cw("claim", "claude")
-        self.assertEqual(r.returncode, 0, r.stderr)          # WORKING_CLAUDE, holder=claude
-        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
-        os.makedirs(listeners, exist_ok=True)
-        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
-            json.dump({
-                "schema": "m8shift.listener.state.v1",
-                "agent": "claude",
-                "phase": "polling",
-                "consecutive_failures": 1,
-                "last_run_id": "seeded",
-                "last_classification": "stuck_working",
-                "updated_at": "2026-07-04T00:00:00Z",
-            }, fh)
+    def test_stuck_retry_launches_one_resume_working_run_and_resets_counter(self):
+        # RFC 047 PR 2 (replaces the PR 1 no-retry test): an own WORKING lock whose
+        # previous run was classified stuck_working, with budget left, wakes exactly
+        # ONE runner launch — and ONLY through the explicit --resume-working mode.
+        # The stub finishes the held turn (append as holder, NO claim) and exits 0,
+        # so the failure counter resets and the loop goes back to neutral polling.
+        self.working_me_stuck(failures=1)
         prof = self.profile_path()
-        stub = self.stub_runner()
+        stub = self.stub_runner(append_as_holder=True)
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "4",
+                    "--poll-interval", "0.05", "--max-retries", "3")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        launches = self.launches()
+        self.assertEqual(len(launches), 1, launches)
+        argv = json.loads(launches[0])
+        self.assertIn("--resume-working", argv,
+                      "the stuck retry must go through the runner's resume-working mode")
+        self.assertIn("--once", argv)
+        self.assertIn("(resume-working)", r.stdout)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")   # held turn finished
+        doc = self.state_doc()
+        self.assertEqual(doc["consecutive_failures"], 0, "success must reset the counter")
+        self.assertEqual(doc["phase"], "polling")
+        self.assertNotIn("claim --force", r.stdout + r.stderr)
+
+    def test_stuck_retry_not_launched_when_budget_exhausted_halts_instead(self):
+        # RFC 047 PR 2: the stuck-work wake honors the retry budget — with the
+        # consecutive-failure count already at --max-retries the listener persists
+        # phase=halted WITHOUT launching anything, leaving the pen for the operator.
+        self.working_me_stuck(failures=1)
+        prof = self.profile_path()
+        stub = self.stub_runner(append_as_holder=True)
         r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
                     "--runner", stub, "--foreground", "--max-ticks", "3",
-                    "--poll-interval", "0.05")
+                    "--poll-interval", "0.05", "--max-retries", "1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.launches(), [],
-                         "PR 1 must never launch a retry on an own stuck WORKING lock")
-        self.assertIn("does not auto-retry", r.stdout)
-        self.assertIn("PR 2", r.stdout)
-        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")   # untouched
+                         "an exhausted budget must never launch a resume run")
+        doc = self.state_doc()
+        self.assertEqual(doc["phase"], "halted")
+        self.assertIn("max_retries", doc["reason"])
+        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")   # relay untouched
+        st = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(st["status"], "HALTED")
 
     def test_t8_backoff_pure_function_ladder_and_cap(self):
         # RFC 047 PR1 test 8 (RFC Phase-2 tests 7+16): pure, sleep-free, bounded.
@@ -3981,21 +4050,463 @@ class TestRFC047ListenerPR1(CLIBase):
             src = fh.read()
         self.assertNotIn("claim --force", src)
 
-    def test_t11_pr2_backends_rejected_with_clear_message(self):
-        # RFC 047 PR1 test 11: OS service adapters are PR 2 — reject loudly.
+    def test_t11_service_backends_fall_back_to_local_with_visible_reason(self):
+        # RFC 047 PR 2 (was: PR 1 rejection): an explicit service backend that the
+        # host cannot run degrades to local — never silently, always with a reason
+        # in the plan. The probe seam pins a host with NO service managers.
         self.init()
         prof = self.profile_path()
+        probe = {"M8SHIFT_LISTENER_BACKEND_PROBE":
+                 '{"platform": "other", "launchctl": false, "systemctl": false, "schtasks": false}'}
         for backend in ("launchd", "systemd", "windows"):
             with self.subTest(backend=backend):
                 r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
-                            "--backend", backend, "--dry-run")
-                self.assertNotEqual(r.returncode, 0)
-                self.assertIn("PR 2", r.stderr)
-                self.assertIn("not yet shipped", r.stderr)
+                            "--backend", backend, "--dry-run", env=probe)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                plan = json.loads(r.stdout)["plan"]
+                self.assertEqual(plan["backend"], "local")
+                self.assertEqual(plan["backend_requested"], backend)
+                self.assertIn("not available", plan["backend_fallback_reason"])
         ok = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
                      "--backend", "local", "--dry-run")
         self.assertEqual(ok.returncode, 0, ok.stderr)
-        self.assertEqual(json.loads(ok.stdout)["plan"]["backend"], "local")
+        plan = json.loads(ok.stdout)["plan"]
+        self.assertEqual(plan["backend"], "local")
+        self.assertEqual(plan["backend_fallback_reason"], "")   # local never needs one
+
+
+class TestRFC047ListenerPR2(ListenerCLIBase):
+    """RFC 047 Phases D+E (PR 2) — runner resume-working mode, OS backend adapters
+    behind the injectable probe seam (plist/unit GENERATION without any real
+    service manager), macOS protected-folder detection on synthetic paths,
+    writer-side log rotation with runs.jsonl exempt, the doctor listener findings
+    table, at-most-one-starter enforcement, and status/stop backend visibility.
+    Everything is hermetic: no test installs, starts, or queries a real service."""
+
+    DARWIN_PROBE = ('{"platform": "darwin", "launchctl": true, '
+                    '"gui_session": true, "protected_folder": false}')
+    LINUX_PROBE = ('{"platform": "linux", "systemctl": true, "user_session": true}')
+    NO_BACKEND_PROBE = ('{"platform": "other", "launchctl": false, '
+                        '"systemctl": false, "schtasks": false}')
+
+    def runner_once(self, code, *extra, timeout=30):
+        """One-shot REAL runner (`claude`), like TestRFC047PhaseA, plus extra flags."""
+        return subprocess.run(
+            [sys.executable, self.RUNNER, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--once", "--interval", "1",
+             "--max-retries", "3", *extra, "--cmd", sys.executable, "-c", code],
+            cwd=self.d, capture_output=True, text=True, timeout=timeout,
+        )
+
+    def runs_rows(self):
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def working_me(self):
+        """AWAITING_CLAUDE → claim → an own WORKING_CLAUDE lock (turn still 1)."""
+        self.awaiting_me()
+        r = self.cw("claim", "claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lk = self.lock()
+        self.assertEqual((lk["state"], lk["holder"]), ("WORKING_CLAUDE", "claude"))
+
+    def doctor_checks(self, env=None):
+        r = self.rt("doctor", "--json", env=env)
+        payload = json.loads(r.stdout)
+        return [f["check"] for f in payload["findings"]], payload["findings"]
+
+    # ── 1. runner resume-working mode ────────────────────────────────────────
+
+    def test_resume_working_requires_once(self):
+        # The flag is a one-shot recovery launch — explicitly guarded (charter).
+        self.working_me()
+        r = subprocess.run(
+            [sys.executable, self.RUNNER, "claude", "--resume-working",
+             "--cmd", sys.executable, "-c", "pass"],
+            cwd=self.d, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--resume-working requires --once", r.stderr)
+
+    def test_resume_working_finishes_held_turn_with_env_marker(self):
+        # WORKING_<me> + holder==me + --resume-working: eligible WITHOUT a claim.
+        # The child sees M8SHIFT_RESUME_WORKING=1, appends as the holder, and the
+        # Phase A table classifies the authored turn as `advanced` (rc 0).
+        self.working_me()
+        r = self.runner_once(
+            "import json, os, subprocess, sys\n"
+            "with open('childenv.json', 'w', encoding='utf-8') as fh:\n"
+            "    json.dump({'resume': os.environ.get('M8SHIFT_RESUME_WORKING', '')}, fh)\n"
+            "subprocess.check_call([sys.executable, 'm8shift.py', 'append', 'claude',\n"
+            "                       '--to', 'codex', '--ask', 'r', '--done', 'finished'])\n",
+            "--resume-working")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.d, "childenv.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"resume": "1"})
+        ended = [row for row in self.runs_rows() if row["event"] == "run.ended"][-1]
+        self.assertEqual(ended["status"], "advanced")
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        self.assertIn("resume-working", r.stdout)   # the launch says what it is
+
+    def test_resume_working_stuck_again_is_stuck_working(self):
+        # A resumed run that still exits holding the pen on the same turn is
+        # classified stuck_working AGAIN (rc 1) — the Phase A table, unchanged.
+        self.working_me()
+        r = self.runner_once("pass", "--resume-working")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = [row for row in self.runs_rows() if row["event"] == "run.ended"][-1]
+        self.assertEqual(ended["status"], "stuck_working")
+        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")   # left for recovery
+        self.assertNotIn("claim --force", r.stdout + r.stderr)
+
+    def test_resume_marker_not_exported_on_normal_awaiting_launch(self):
+        # --resume-working ADDS eligibility; a launch that actually starts from
+        # AWAITING_<me> is a normal turn and must NOT carry the resume marker
+        # (it would wrongly tell the provider to skip its claim).
+        self.awaiting_me()
+        r = self.runner_once(
+            "import json, os, subprocess, sys\n"
+            "with open('childenv.json', 'w', encoding='utf-8') as fh:\n"
+            "    json.dump({'resume': os.environ.get('M8SHIFT_RESUME_WORKING', '')}, fh)\n"
+            "m = [sys.executable, 'm8shift.py']\n"
+            "subprocess.check_call(m + ['claim', 'claude'])\n"
+            "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',\n"
+            "                           '--ask', 'r', '--done', 'normal turn'])\n",
+            "--resume-working")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.d, "childenv.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"resume": ""})
+
+    # ── 2. OS backend adapters (generation only — never installed) ───────────
+
+    def test_launchd_plan_generates_plist_without_bootstrapping(self):
+        # Dry-run on a probe-pinned macOS host: the plan embeds the rendered plist
+        # (KeepAlive=false — never resurrect a halted listener; payload is the
+        # foreground loop) and the exact launchctl argv steps. NOTHING is written.
+        import plistlib
+        self.init()
+        prof = self.profile_path()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--backend", "launchd", "--dry-run",
+                    env={"M8SHIFT_LISTENER_BACKEND_PROBE": self.DARWIN_PROBE})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        plan = json.loads(r.stdout)["plan"]
+        self.assertEqual(plan["backend"], "launchd")
+        service = plan["service"]
+        self.assertTrue(service["label"].startswith("ai.m8shift."))
+        self.assertTrue(service["service_file"].endswith(".plist"))
+        doc = plistlib.loads(service["content"].encode("utf-8"))
+        self.assertIs(doc["KeepAlive"], False, "launchd must never resurrect a halted listener")
+        self.assertEqual(doc["Label"], service["label"])
+        payload = doc["ProgramArguments"]
+        for token in ("listener", "start", "--foreground", "--service-payload"):
+            self.assertIn(token, payload)
+        self.assertIn(["launchctl", "bootstrap"],
+                      [argv[:2] for argv in service["install_argv"]])
+        self.assertIn(["launchctl", "bootout"],
+                      [argv[:2] for argv in service["uninstall_argv"]])
+        self.assertFalse(os.path.exists(self.listeners_dir()),
+                         "dry-run must not write the service definition")
+
+    def test_systemd_plan_generates_unit_without_systemctl(self):
+        # Same for a probe-pinned Linux host: Restart=no (the sidecar owns the
+        # retry guarantee), payload is the foreground loop, argv steps only.
+        self.init()
+        prof = self.profile_path()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--backend", "systemd", "--dry-run",
+                    env={"M8SHIFT_LISTENER_BACKEND_PROBE": self.LINUX_PROBE})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        plan = json.loads(r.stdout)["plan"]
+        self.assertEqual(plan["backend"], "systemd")
+        service = plan["service"]
+        content = service["content"]
+        self.assertIn("Restart=no", content)
+        self.assertIn("[Service]", content)
+        self.assertIn("--foreground", content)
+        self.assertIn("--service-payload", content)
+        self.assertTrue(service["service_file"].endswith(".service"))
+        self.assertIn(["systemctl", "--user"],
+                      [argv[:2] for argv in service["install_argv"]])
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
+    def test_windows_plan_uses_schtasks_argv(self):
+        # Pure generation of the Windows plan (module-level; install itself is
+        # platform-guarded): schtasks argv arrays, /TR built with list2cmdline.
+        import argparse
+        rt = self._load_runtime()
+        ns = argparse.Namespace(poll_interval=20.0, max_retries=3, max_backoff=300,
+                                cmd_file="profile.json", provider=False, max_ticks=0)
+        plan = rt.backend_install_plan("windows", "claude", ns, "runner.py")
+        create = plan["install"][0]["argv"]
+        self.assertEqual(create[0], "schtasks")
+        self.assertIn("/Create", create)
+        self.assertIn("/TN", create)
+        command = create[create.index("/TR") + 1]
+        self.assertIn("--service-payload", command)
+        self.assertIn("--foreground", command)
+        self.assertTrue(plan["service_file"].endswith(".task.json"))
+        self.assertIn(["schtasks", "/Delete"],
+                      [step["argv"][:2] for step in plan["uninstall"]])
+        # list2cmdline quoting: an embedded space must be double-quoted in /TR.
+        self.assertIn('"a b"', rt.windows_task_command(["x.exe", "a b"]))
+
+    def test_auto_fallback_prints_reason_on_real_start(self):
+        # RFC 047: `auto` falling back to local must be VISIBLE (a printed reason),
+        # not silent — checked on a real (foreground, 1-tick) start, not a dry-run.
+        self.init()
+        prof = self.profile_path()
+        stub = self.stub_runner()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--max-ticks", "1",
+                    "--poll-interval", "0.05", "--backend", "auto",
+                    env={"M8SHIFT_LISTENER_BACKEND_PROBE": self.NO_BACKEND_PROBE})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("backend auto → local:", r.stdout)
+        self.assertIn("no OS service backend", r.stdout)
+        self.assertEqual(self.launches(), [])   # IDLE without starter stays neutral
+
+    def test_select_backend_matrix_is_pure_and_deterministic(self):
+        rt = self._load_runtime()
+        darwin = {"platform": "darwin", "launchctl": True, "gui_session": True,
+                  "user_session": False, "protected_folder": False}
+        self.assertEqual(rt.select_listener_backend("auto", darwin), ("launchd", ""))
+        no_gui = dict(darwin, gui_session=False)
+        backend, reason = rt.select_listener_backend("launchd", no_gui)
+        self.assertEqual(backend, "local")      # explicit launchd degrades too
+        self.assertIn("GUI session", reason)
+        backend, reason = rt.select_listener_backend("auto", no_gui)
+        self.assertEqual(backend, "local")
+        self.assertTrue(reason)
+        linux = {"platform": "linux", "systemctl": True, "user_session": True}
+        self.assertEqual(rt.select_listener_backend("auto", linux), ("systemd", ""))
+        backend, reason = rt.select_listener_backend("systemd", dict(linux, user_session=False))
+        self.assertEqual(backend, "local")
+        self.assertIn("user session", reason)
+        self.assertEqual(rt.select_listener_backend("local", darwin), ("local", ""))
+
+    # ── 3. macOS protected-folder detection (synthetic paths only) ───────────
+
+    def test_protected_folder_heuristic_on_synthetic_paths(self):
+        rt = self._load_runtime()
+        home = os.path.join(self.d, "home-x")           # synthetic, never a real user
+        for sub in ("Documents", "Desktop", "Downloads",
+                    os.path.join("Library", "Mobile Documents", "com~apple~CloudDocs")):
+            project = os.path.join(home, sub, "proj")
+            self.assertTrue(rt.macos_protected_folder(project, home=home), project)
+        for sub in ("Code", "dev", ""):
+            project = os.path.join(home, sub, "proj") if sub else os.path.join(home, "proj")
+            self.assertFalse(rt.macos_protected_folder(project, home=home), project)
+        # iCloud marker matches anywhere, not only under the injected home
+        icloud = os.path.join(self.d, "elsewhere", "com~apple~CloudDocs", "proj")
+        self.assertTrue(rt.macos_protected_folder(icloud, home=home))
+
+    def test_auto_on_protected_folder_falls_back_to_local_with_reason(self):
+        # RFC 047: `--backend auto` + protected folder ⇒ local, visible reason.
+        self.init()
+        prof = self.profile_path()
+        probe = ('{"platform": "darwin", "launchctl": true, "gui_session": true, '
+                 '"protected_folder": true}')
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--backend", "auto", "--dry-run",
+                    env={"M8SHIFT_LISTENER_BACKEND_PROBE": probe})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        plan = json.loads(r.stdout)["plan"]
+        self.assertEqual(plan["backend"], "local")
+        self.assertIn("protected folder", plan["backend_fallback_reason"])
+
+    # ── 4. writer-side log rotation ───────────────────────────────────────────
+
+    def test_rotation_keeps_three_generations_and_exempts_runs_jsonl(self):
+        rt = self._load_runtime()
+        log = os.path.join(self.d, "agentx-listener.log")
+        payloads = []
+        for i in range(5):
+            body = f"generation {i}\n" * 20          # > 64-byte test threshold
+            payloads.append(body)
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            rotated = rt.rotate_listener_log(log, max_bytes=64)
+            self.assertTrue(rotated, f"write {i} should rotate at the tiny threshold")
+        # exactly `keep` generations survive: .1 newest … .3 oldest, none beyond
+        self.assertEqual(sorted(name for name in os.listdir(self.d)
+                                if name.startswith("agentx-listener.log")),
+                         ["agentx-listener.log.1", "agentx-listener.log.2",
+                          "agentx-listener.log.3"])
+        with open(log + ".1", encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), payloads[4])
+        with open(log + ".3", encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), payloads[2])
+        # a small file never rotates
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("tiny\n")
+        self.assertFalse(rt.rotate_listener_log(log, max_bytes=64))
+        # runs.jsonl is EXEMPT even far beyond the threshold (runtime ledger)
+        runs = os.path.join(self.d, "runs.jsonl")
+        with open(runs, "w", encoding="utf-8") as fh:
+            fh.write('{"event": "run.ended"}\n' * 100)
+        before = os.path.getsize(runs)
+        self.assertFalse(rt.rotate_listener_log(runs, max_bytes=1))
+        self.assertEqual(os.path.getsize(runs), before)
+        self.assertFalse(os.path.exists(runs + ".1"))
+
+    def test_owning_listener_rotates_its_log_at_write_time(self):
+        # Wiring check: a service-payload loop owns its log file and rotates it at
+        # its own write, using the injectable threshold seam.
+        self.init()
+        logs = os.path.join(self.d, ".m8shift", "runtime", "logs")
+        os.makedirs(logs, exist_ok=True)
+        seeded = "x" * 500 + "\n"
+        with open(os.path.join(logs, "claude-listener.log"), "w", encoding="utf-8") as fh:
+            fh.write(seeded)
+        prof = self.profile_path()
+        stub = self.stub_runner()
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", prof,
+                    "--runner", stub, "--foreground", "--service-payload",
+                    "--max-ticks", "1", "--poll-interval", "0.05", "--backend", "local",
+                    env={"M8SHIFT_LISTENER_LOG_MAX_BYTES": "200"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(logs, "claude-listener.log.1"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), seeded)     # old content moved to .1
+        with open(os.path.join(logs, "claude-listener.log"), encoding="utf-8") as fh:
+            self.assertIn("max ticks reached", fh.read())   # owner wrote the fresh log
+
+    # ── 5. doctor findings (all synthetic, human + JSON) ─────────────────────
+
+    def test_doctor_not_installed_dead_and_backend_failed(self):
+        self.init()
+        with open(os.path.join(self.d, ".m8shift", "providers.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.providers.v1", "agents": [{
+                "name": "gemini", "provider": "google", "mode": "headless",
+                "anchor": "GEMINI.md", "argv": ["provider-cli", "x"],
+                "capabilities": [], "requires_env": [], "env_allowlist": [],
+            }]}, fh)
+        ghost = subprocess.Popen([sys.executable, "-c", "pass"])
+        ghost.wait()
+        self.write_pid_file(ghost.pid)                       # claude: dead pid
+        with open(os.path.join(self.listeners_dir(), "codex.backend.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.listener.backend.v1", "agent": "codex",
+                       "backend": "systemd", "label": "x", "service_file": "",
+                       "uninstall": [], "last_error": "systemctl --user link → rc=1"}, fh)
+        checks, findings = self.doctor_checks()
+        self.assertIn("listener.not_installed", checks)      # gemini configured, no state
+        self.assertIn("listener.dead", checks)
+        self.assertIn("listener.backend_failed", checks)
+        human = self.rt("doctor")
+        for check in ("listener.not_installed", "listener.dead", "listener.backend_failed"):
+            self.assertIn(check, human.stdout)               # human output too
+
+    def test_doctor_halted_repeated_non_completion_and_version_skew(self):
+        self.init()
+        self.seed_state(phase="halted", consecutive_failures=3,
+                        reason="max_retries_after_non_completion")
+        self.seed_state(agent="codex", consecutive_failures=2,
+                        last_classification="non_completion",
+                        runtime_version="0.0.1")             # skew via state sidecar
+        os.makedirs(os.path.join(self.d, "examples"), exist_ok=True)
+        with open(os.path.join(self.d, "examples", "headless_runner.py"), "w",
+                  encoding="utf-8") as fh:
+            fh.write('VERSION = "0.0.0"\n')                  # skew via runner script
+        runs = os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl")
+        os.makedirs(os.path.dirname(runs), exist_ok=True)
+        with open(runs, "w", encoding="utf-8") as fh:
+            for _ in range(2):                               # trailing ledger streak
+                fh.write(json.dumps({"schema": "m8shift.runtime.event.v1",
+                                     "event": "run.ended", "agent": "gemini",
+                                     "status": "non_completion"}) + "\n")
+        checks, findings = self.doctor_checks()
+        self.assertIn("listener.halted", checks)
+        skew = [f for f in findings if f["check"] == "listener.version_skew"]
+        self.assertGreaterEqual(len(skew), 2, skew)          # sidecar + runner script
+        repeated = [f for f in findings
+                    if f["check"] == "listener.repeated_non_completion"]
+        agents = {f["message"].split(":", 1)[0] for f in repeated}
+        self.assertIn("codex", agents)                       # from the sidecar
+        self.assertIn("gemini", agents)                      # from runs.jsonl
+
+    def test_doctor_protected_folder_multiple_starters_and_log_too_large(self):
+        self.init()
+        self.profile_path(name=os.path.join(".m8shift", "providers", "claude.json"),
+                          start_on_idle=True)
+        self.profile_path(name=os.path.join(".m8shift", "providers", "codex.json"),
+                          agent="codex", start_on_idle=True)
+        logs = os.path.join(self.d, ".m8shift", "runtime", "logs")
+        os.makedirs(logs, exist_ok=True)
+        with open(os.path.join(logs, "claude-listener.log"), "w", encoding="utf-8") as fh:
+            fh.write("y" * 300)
+        checks, findings = self.doctor_checks(env={
+            "M8SHIFT_LISTENER_BACKEND_PROBE": '{"platform": "darwin", "protected_folder": true}',
+            "M8SHIFT_LISTENER_LOG_MAX_BYTES": "200",
+        })
+        self.assertIn("listener.protected_folder", checks)
+        self.assertIn("listener.multiple_starters", checks)
+        self.assertIn("listener.log_too_large", checks)
+        starters = [f for f in findings if f["check"] == "listener.multiple_starters"][0]
+        self.assertIn("claude", starters["message"])
+        self.assertIn("codex", starters["message"])
+        info = [f for f in findings if f["check"] == "listener.log_too_large"][0]
+        self.assertEqual(info["severity"], "info")
+        # without the synthetic conditions the same doctor stays silent
+        clean, _ = self.doctor_checks(env={
+            "M8SHIFT_LISTENER_BACKEND_PROBE": '{"platform": "other"}'})
+        self.assertNotIn("listener.protected_folder", clean)
+        self.assertNotIn("listener.log_too_large", clean)
+
+    # ── 6. at-most-one-starter enforcement at start ───────────────────────────
+
+    def test_listener_start_refuses_second_idle_starter(self):
+        self.init()
+        self.profile_path(name=os.path.join(".m8shift", "providers", "codex.json"),
+                          agent="codex", start_on_idle=True)     # codex is the starter
+        mine = self.profile_path(start_on_idle=True)             # claude wants it too
+        r = self.rt("listener", "start", "--agent", "claude", "--cmd-file", mine,
+                    "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("at most one agent", r.stderr)
+        self.assertIn("codex", r.stderr)
+        # a non-starter profile for the same roster is fine
+        ok = self.rt("listener", "start", "--agent", "claude",
+                     "--cmd-file", self.profile_path(), "--dry-run", "--backend", "local")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    # ── 7. status/stop backend visibility + generated-file cleanup ───────────
+
+    def test_status_shows_backend_and_stop_removes_service_definition(self):
+        self.init()
+        os.makedirs(self.listeners_dir(), exist_ok=True)
+        label = "ai.m8shift.test-0000.claude"
+        service_rel = os.path.join(".m8shift", "runtime", "listeners", f"{label}.plist")
+        with open(os.path.join(self.d, service_rel), "w", encoding="utf-8") as fh:
+            fh.write("<plist/>\n")
+        with open(os.path.join(self.listeners_dir(), "claude.backend.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.listener.backend.v1", "agent": "claude",
+                       "backend": "launchd", "label": label,
+                       "service_file": service_rel, "installed_at": "2026-07-04T00:00:00Z",
+                       # hermetic uninstall step: a no-op python, never launchctl
+                       "uninstall": [{"argv": [sys.executable, "-c", "pass"],
+                                      "required": False}],
+                       "last_error": ""}, fh)
+        env = {"M8SHIFT_LISTENER_BACKEND_PROBE": '{"platform": "other"}'}
+        st = json.loads(self.rt("listener", "status", "--agent", "claude",
+                                "--json", env=env).stdout)
+        self.assertEqual(st["backend"], "launchd")
+        self.assertEqual(st["service_state"], "unknown")   # foreign platform: no query
+        self.assertEqual(st["service_label"], label)
+        human = self.rt("listener", "status", "--agent", "claude", env=env)
+        self.assertIn("backend: launchd", human.stdout)
+        stop = self.rt("listener", "stop", "--agent", "claude", env=env)
+        self.assertEqual(stop.returncode, 0, stop.stdout + stop.stderr)
+        self.assertIn("removed launchd definition", stop.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.d, service_rel)),
+                         "stop must remove the generated service definition")
+        self.assertFalse(os.path.exists(
+            os.path.join(self.listeners_dir(), "claude.backend.json")))
+        after = json.loads(self.rt("listener", "status", "--agent", "claude",
+                                   "--json", env=env).stdout)
+        self.assertEqual(after["backend"], "local")        # back to the default view
 
 
 class TestLoopGuardrails(CLIBase):
