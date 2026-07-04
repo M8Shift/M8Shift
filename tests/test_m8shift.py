@@ -28,7 +28,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -5856,6 +5856,39 @@ class TestRFC046ProjectIdentity(unittest.TestCase):
                 with open(os.path.join(self.d, fn), encoding="utf-8") as f:
                     blob += f.read()
         self.assertIn("Status-guard", blob)
+
+
+class TestDetailedHelpCoverage(unittest.TestCase):
+    """Operator requirement: every CLI parameter documents itself — each argparse
+    add_argument carries help= (one line per parameter in --help) and every
+    add_parser carries its one-line summary. Guards against silent regressions
+    when new flags are added."""
+
+    SCRIPTS = [
+        "m8shift.py", "m8shift-runtime.py", "m8shift-context.py",
+        "m8shift-worktree.py", "m8shift-headroom.py", "m8shift-i18n.py",
+        "m8shift-e2e.py",
+    ]
+    CALL_RE = re.compile(r'add_argument\((?:[^()]|\([^()]*\))*\)')
+    PARSER_RE = re.compile(r'add_parser\((?:[^()]|\([^()]*\))*\)')
+
+    def test_every_argument_has_help(self):
+        for name in self.SCRIPTS:
+            src = open(os.path.join(REPO, name), encoding="utf-8").read()
+            with self.subTest(script=name):
+                missing = [c.splitlines()[0][:80] for c in self.CALL_RE.findall(src)
+                           if "help=" not in c]
+                self.assertEqual(missing, [],
+                                 f"{name}: add_argument calls without help=")
+
+    def test_every_subparser_has_help(self):
+        for name in self.SCRIPTS:
+            src = open(os.path.join(REPO, name), encoding="utf-8").read()
+            with self.subTest(script=name):
+                missing = [c.splitlines()[0][:80] for c in self.PARSER_RE.findall(src)
+                           if "help=" not in c]
+                self.assertEqual(missing, [],
+                                 f"{name}: add_parser calls without help=")
 
 
 if __name__ == "__main__":

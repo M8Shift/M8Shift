@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "3.45.0"
+VERSION = "3.45.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 LIVE_ENV = "M8SHIFT_LIVE_E2E"      # truthy => attempt Tier B
@@ -192,9 +192,12 @@ def run_case(case_path, m8shift_py, keep=False, live=False):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Run M8Shift e2e cases (Tier A hermetic; Tier B opt-in live).")
-    ap.add_argument("--version", action="version", version=f"m8shift-e2e.py {VERSION}")
+    ap.add_argument("--version", action="version", version=f"m8shift-e2e.py {VERSION}",
+                    help="show the runner version and exit")
     ap.add_argument("case", help="Markdown case file under tests/e2e/")
-    ap.add_argument("--m8shift-py", default=os.path.join(HERE, "m8shift.py"))
+    ap.add_argument("--m8shift-py", default=os.path.join(HERE, "m8shift.py"),
+                    help="path to the m8shift.py script under test, copied into the temporary "
+                         "run directory (default: m8shift.py next to this runner)")
     ap.add_argument("--keep", action="store_true", help="keep the temporary run directory")
     ap.add_argument(
         "--live", action="store_true",

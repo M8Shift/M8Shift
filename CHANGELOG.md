@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.45.1 — 2026-07-04
+
+Detailed help release (operator request): every CLI parameter documents itself.
+
+- Every `add_argument` across the 7 shipped scripts now carries a `help=` line
+  (146 previously bare parameters annotated: 54 core, 53 runtime, 25 context,
+  10 worktree, 4 launchers/harness), and every `add_parser` carries its one-line
+  summary — `--help` prints one described line per parameter everywhere.
+- New guard tests (`TestDetailedHelpCoverage`): any future flag added without
+  `help=` fails the suite.
+- No behavior changes: help/description text only. Lockstep bump to `3.45.1`.
+  Full suite green (428).
+
 ## v3.45.0 — 2026-07-03
 
 RFC 046 (part 1) — execution modes and project identity.
