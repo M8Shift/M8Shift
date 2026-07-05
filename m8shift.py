@@ -2885,7 +2885,14 @@ def cmd_update(args):
                                        "target relay became %s — update only while "
                                        "IDLE/PAUSED/DONE/AWAITING (re-run with --allow-working)" % state)
             rows = run_components(guard=guard)
-            wrote = any(r["result"] in ("updated", "staged") for r in rows)
+            # #43: the audit gate must see the per-companion sub-items too — a
+            # companions row folded to `partial` may still have WRITTEN files,
+            # and every real write deserves the audit row + kit-version sync.
+            wrote = any(
+                r["result"] in ("updated", "staged")
+                or any(i["result"] in ("updated", "staged")
+                       for i in r.get("companions", ()))
+                for r in rows)
             version_after = (_parse_script_version(os.path.join(target_root, "m8shift.py"))
                              or version_before)
             if wrote:
@@ -4724,6 +4731,18 @@ def _install_report():
     base = os.path.dirname(os.path.abspath(COWORK))
     core_path = os.path.join(base, "m8shift.py")
     core_present = os.path.isfile(core_path) and not os.path.islink(core_path)
+    kit_sha = {}
+    kit_tracked = set()   # companion scripts owned by kit.json (the finer authority)
+    try:
+        with open(os.path.join(base, KIT_MANIFEST_REL), encoding="utf-8") as fh:
+            data = json.load(fh)
+        for e in (data.get("companions") or []):
+            if isinstance(e, dict) and e.get("name"):
+                kit_sha[e["name"]] = e.get("sha256", "")
+                if COMPANION_REGISTRY.get(e["name"]) == e.get("script"):
+                    kit_tracked.add(e["script"])
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+        pass
     manifest = _source_checksums(base)
     man = {"file": "checksums.sha256", "present": manifest is not None,
            "entries": 0, "invalid": False, "drift": []}
@@ -4732,6 +4751,9 @@ def _install_report():
         if not manifest:
             man["invalid"] = True   # present but unreadable/no parseable entries
         for rel in sorted(manifest):
+            if rel.replace("\\", "/") in kit_tracked:
+                continue            # one-condition-one-ID: kit.json tracking is the
+                                    # finer authority (drift stays under kit.companions)
             p = os.path.join(base, rel)
             if not (os.path.isfile(p) and not os.path.islink(p)):
                 continue            # a manifest may list files not installed here
@@ -4740,15 +4762,6 @@ def _install_report():
                     man["drift"].append(rel)
             except OSError:
                 man["drift"].append(rel)
-    kit_sha = {}
-    try:
-        with open(os.path.join(base, KIT_MANIFEST_REL), encoding="utf-8") as fh:
-            data = json.load(fh)
-        for e in (data.get("companions") or []):
-            if isinstance(e, dict) and e.get("name"):
-                kit_sha[e["name"]] = e.get("sha256", "")
-    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
-        pass
     companions = []
     for name, fname in COMPANION_REGISTRY.items():
         p = os.path.join(base, fname)
@@ -4824,7 +4837,9 @@ def _install_doctor_findings(report):
         out.append(doctor_finding(
             "install.manifest_invalid", "warning",
             "checksums.sha256 is present but carries no parseable sha256 entries.",
-            man["file"]))
+            man["file"],
+            "re-download checksums.sha256 from the matching release (or regenerate "
+            "it); the local manifest is optional, so removing it also clears this"))
     for rel in man["drift"]:
         out.append(doctor_finding(
             "install.manifest_drift", "warning",

@@ -6330,7 +6330,10 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         self.assertIn("transformers==5.12.1", body)
         self.assertIn("chopratejas/kompress-v2-base", body)
 
-    def test_with_headroom_rejects_macos_x86_64_python_clearly(self):
+    def test_with_headroom_rejects_macos_x86_64_python_but_core_continues(self):
+        """#24 ruling: the opted-in Headroom helper still fails closed (clear
+        arm64 refusal, venv removed), but the failure DEGRADES — the core
+        install continues, exits 0, and the summary lists the failed helper."""
         target = tempfile.mkdtemp(prefix="m8shift-headroom-x86-")
         self.addCleanup(shutil.rmtree, target, True)
         bindir = tempfile.mkdtemp(prefix="m8shift-fake-uname-")
@@ -6347,8 +6350,15 @@ class TestInstallerVerifyDefault(unittest.TestCase):
              "--no-verify", "--no-worktree", "--no-runtime", "--no-context", "--no-init", "--with-headroom"],
             capture_output=True, text=True, env=env,
         )
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("requires an arm64-native Python on macOS", result.stderr)
+        self.assertIn("optional headroom install failed", result.stderr)
+        self.assertIn("optional helper install failed for: headroom", result.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(target, "m8shift.py")))
+        # fail-closed helper: no half-built venv survives the refusal
+        self.assertFalse(os.path.isdir(os.path.join(target, ".m8shift", "venvs", "headroom")))
+        # and the success blurb never lies about an install that did not happen
+        self.assertNotIn("Kompress model were installed", result.stdout)
 
     def test_manual_pin_is_self_sufficient_without_manifest(self):
         # A mirror with NO checksums.sha256: a correct --sha256 pin still verifies (manifest
@@ -6451,6 +6461,9 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         return env
 
     def test_rtk_cargo_fallback_requires_explicit_flag(self):
+        # #24 ruling update: the refused source build still never runs cargo, but
+        # the opted-in helper failure now degrades to a warning instead of
+        # aborting the core install (exit stays 0, downloads landed).
         target = tempfile.mkdtemp(prefix="m8shift-cargo-no-flag-")
         self.addCleanup(shutil.rmtree, target, True)
         marker = os.path.join(target, "cargo-called.txt")
@@ -6460,8 +6473,42 @@ class TestInstallerVerifyDefault(unittest.TestCase):
              "--no-verify", "--no-worktree", "--no-init", "--with-rtk"],
             capture_output=True, text=True, env=self._fake_uname_and_cargo_env(marker),
         )
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(os.path.exists(marker), "cargo fallback must not run without --allow-source-build")
+        self.assertIn("optional rtk install failed", result.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(target, "m8shift.py")))
+
+    def test_optin_rtk_failure_never_blocks_core_install_and_init(self):
+        """#24 ruling: an opted-in optional helper that fails must NEVER block
+        the core install — init still runs, the exit code stays 0, and the
+        final summary lists the failed helper prominently."""
+        target = tempfile.mkdtemp(prefix="m8shift-rtk-fail-core-")
+        self.addCleanup(shutil.rmtree, target, True)
+        bindir = tempfile.mkdtemp(prefix="m8shift-rtk-fail-bin-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        uname = os.path.join(bindir, "uname")
+        with open(uname, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\ncase \"$1\" in -m) echo riscv64 ;; *) echo Plan9 ;; esac\n")
+        os.chmod(uname, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + os.pathsep.join(
+            p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        env["PYTHON"] = sys.executable
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src,
+             "--no-verify", "--no-worktree", "--with-rtk"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("optional rtk install failed", result.stderr)
+        self.assertIn("continuing core install", result.stderr)
+        self.assertIn("optional helper install failed for: rtk", result.stderr)
+        self.assertIn("M8Shift installed in", result.stdout)
+        # the core install went ALL the way: downloads AND init
+        self.assertTrue(os.path.isfile(os.path.join(target, "m8shift.py")))
+        self.assertTrue(os.path.isfile(os.path.join(target, "M8SHIFT.md")),
+                        "init must run after an opted-in helper failure")
 
     def test_rtk_cargo_fallback_is_tag_pinned_when_explicitly_allowed(self):
         target = tempfile.mkdtemp(prefix="m8shift-cargo-allowed-")
@@ -6552,6 +6599,73 @@ class TestInstallerMultiOSCore(unittest.TestCase):
         # verification ran (default ON) through the Python hashlib fallback
         self.assertIn("verified m8shift.py", r.stdout)
 
+    def test_dry_run_without_python_prints_plan_and_exits_zero(self):
+        """Lockstep with install.ps1 -DryRun: the plan-only path must not die on
+        a python-less host — it reports an honest python status line, prints the
+        full plan, writes nothing, and exits 0."""
+        bindir = tempfile.mkdtemp(prefix="m8shift-nopy-bin-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        for tool in ("cat", "uname"):
+            path = shutil.which(tool)
+            self.assertIsNotNone(path, "%s not found for the restricted PATH" % tool)
+            os.symlink(path, os.path.join(bindir, tool))
+        bash = shutil.which("bash")
+        parent = tempfile.mkdtemp(prefix="m8shift-nopy-dry-")
+        self.addCleanup(shutil.rmtree, parent, True)
+        target = os.path.join(parent, "target")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHON"}
+        env["PATH"] = bindir                       # no python3 anywhere
+        r = subprocess.run(
+            [bash, os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src, "--dry-run"],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Prerequisites:", r.stdout)
+        self.assertIn("Dry run plan:", r.stdout)
+        self.assertIn("MISSING (required)", r.stdout)   # honest python status line
+        self.assertIn("No files were downloaded or written.", r.stdout)
+        self.assertFalse(os.path.exists(target))
+        # non-dry-run behavior is unchanged: same host, no plan, hard failure
+        r = subprocess.run(
+            [bash, os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src],
+            capture_output=True, text=True, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is required", r.stderr)
+
+    @unittest.skipUnless(hasattr(os, "openpty"), "pty unavailable")
+    def test_ask_mode_capability_line_is_honest_about_prompting(self):
+        """The rtk capability line may not claim 'skipped' when the interactive
+        ask default WILL prompt later in the same run: with a TTY on stdin it
+        reports the prompt; without one it reports the non-interactive skip."""
+        bindir = tempfile.mkdtemp(prefix="m8shift-ask-bin-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        for tool in ("cat", "uname"):
+            os.symlink(shutil.which(tool), os.path.join(bindir, tool))
+        bash = shutil.which("bash")
+        env = dict(os.environ)
+        env["PATH"] = bindir                       # no rtk on PATH
+        env["PYTHON"] = sys.executable
+        master, slave = os.openpty()
+        try:
+            r = subprocess.run(
+                [bash, os.path.join(REPO, "install.sh"),
+                 "--dir", os.path.join(bindir, "t1"),
+                 "--base-url", "file://" + self.src, "--dry-run"],
+                stdin=slave, capture_output=True, text=True, env=env)
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("rtk: ask — will prompt", r.stdout)
+        r = subprocess.run(
+            [bash, os.path.join(REPO, "install.sh"),
+             "--dir", os.path.join(bindir, "t2"),
+             "--base-url", "file://" + self.src, "--dry-run"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("rtk: skipped — explicit opt-in (--with-rtk)", r.stdout)
+
     def test_no_core_path_depends_on_a_package_manager(self):
         """No stale brew-only (or apt/winget-only) language on the CORE path: the
         install surfaces and install docs may cite package managers only as
@@ -6580,25 +6694,26 @@ class TestInstallerPs1Parity(unittest.TestCase):
     fixture assertions on the script text; execution paths are exercised only when
     `pwsh` exists on PATH."""
 
-    # core flag parity matrix: install.sh option -> install.ps1 parameter
+    # core flag parity matrix: install.sh option -> install.ps1 parameter + its
+    # declared param() type (structural: a comment mention can never satisfy it)
     CORE_FLAGS = (
-        ("--dir", "$Dir"),
-        ("--agents", "$Agents"),
-        ("--name", "$Name"),
-        ("--lang", "$Lang"),
-        ("--force", "$Force"),
-        ("--no-init", "$NoInit"),
-        ("--no-worktree", "$NoWorktree"),
-        ("--no-runtime", "$NoRuntime"),
-        ("--no-context", "$NoContext"),
-        ("--dry-run", "$DryRun"),
-        ("--ref", "$Ref"),
-        ("--base-url", "$BaseUrl"),
-        ("--verify", "$Verify"),
-        ("--no-verify", "$NoVerify"),
-        ("--checksums", "$Checksums"),
-        ("--sha256", "$Sha256"),
-        ("--version", "$Version"),
+        ("--dir", "Dir", "string"),
+        ("--agents", "Agents", "string"),
+        ("--name", "Name", "string"),
+        ("--lang", "Lang", "string"),
+        ("--force", "Force", "switch"),
+        ("--no-init", "NoInit", "switch"),
+        ("--no-worktree", "NoWorktree", "switch"),
+        ("--no-runtime", "NoRuntime", "switch"),
+        ("--no-context", "NoContext", "switch"),
+        ("--dry-run", "DryRun", "switch"),
+        ("--ref", "Ref", "string"),
+        ("--base-url", "BaseUrl", "string"),
+        ("--verify", "Verify", "switch"),
+        ("--no-verify", "NoVerify", "switch"),
+        ("--checksums", "Checksums", "string"),
+        ("--sha256", "Sha256", r"string\[\]"),
+        ("--version", "Version", "switch"),
     )
 
     @classmethod
@@ -6608,11 +6723,26 @@ class TestInstallerPs1Parity(unittest.TestCase):
         with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
             cls.sh = fh.read()
 
+    def _ps1_param_block(self):
+        m = re.search(r"\nparam\((.*?)\n\)", self.ps1, re.S)
+        self.assertIsNotNone(m, "install.ps1 param() block not found")
+        return m.group(1)
+
+    def _ps1_function_body(self, name):
+        m = re.search(r"\nfunction %s(?:\([^)]*\))? \{\n(.*?)\n\}" % re.escape(name),
+                      self.ps1, re.S)
+        self.assertIsNotNone(m, "install.ps1 lacks function " + name)
+        return m.group(1)
+
     def test_core_flag_parity_matrix(self):
-        for sh_flag, ps1_param in self.CORE_FLAGS:
+        block = self._ps1_param_block()
+        for sh_flag, ps1_name, ps1_type in self.CORE_FLAGS:
             with self.subTest(flag=sh_flag):
                 self.assertIn("%s)" % sh_flag, self.sh, "install.sh lacks " + sh_flag)
-                self.assertIn(ps1_param, self.ps1, "install.ps1 lacks " + ps1_param)
+                self.assertRegex(
+                    block, r"\[" + ps1_type + r"\]\$" + ps1_name + r"\b",
+                    "install.ps1 param() block does not DECLARE [%s]$%s"
+                    % (ps1_type, ps1_name))
 
     def test_ps1_downloads_all_core_components(self):
         for name in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
@@ -6621,13 +6751,36 @@ class TestInstallerPs1Parity(unittest.TestCase):
         self.assertIn("-not $NoContext", self.ps1)
 
     def test_ps1_verifies_by_default_with_staged_temp_download(self):
-        self.assertIn("function Test-VerifyDefault", self.ps1)
-        self.assertIn("return $true", self.ps1)              # default = verify ON
-        self.assertIn("M8SHIFT_INSTALL_VERIFY", self.ps1)
+        # STRUCTURAL default check: the function's final (fallback) return —
+        # not just any `return $true` somewhere in the file — must be verify-ON.
+        body = self._ps1_function_body("Test-VerifyDefault")
+        returns = re.findall(r"^\s*return\b(.*)$", body, re.M)
+        self.assertTrue(returns, "Test-VerifyDefault has no standalone returns")
+        self.assertEqual(returns[-1].strip(), "$true",
+                         "Test-VerifyDefault's FINAL default must be verify-ON")
+        self.assertIn("$NoVerify", body)
+        self.assertIn("M8SHIFT_INSTALL_VERIFY", body)
         self.assertIn("Get-FileHash -Algorithm SHA256", self.ps1)
         self.assertIn('".$Name.tmp.$PID"', self.ps1)         # staged temp download
         self.assertIn("Move-Item", self.ps1)
         self.assertIn("Test-SafeRef $Ref", self.ps1)         # safe-ref validation kept
+
+    def test_ps1_checksums_flag_implies_verification(self):
+        # Lockstep with install.sh: --checksums/-Checksums is an explicit verify-ON
+        # signal that overrides M8SHIFT_INSTALL_VERIFY; the env-default checksums
+        # URL must NOT count as the explicit flag ($PSBoundParameters gate).
+        self.assertRegex(
+            self.ps1,
+            r"\$ChecksumsExplicit = \$PSBoundParameters\.ContainsKey\(\"Checksums\"\)")
+        body = self._ps1_function_body("Test-VerifyDefault")
+        self.assertRegex(body,
+                         r"if \(\$Verify -or \$ChecksumsExplicit\) \{ return \$true \}")
+        # both help texts say so, and the sh side still sets the explicit flag
+        self.assertIn("(implies verification)", self.ps1)
+        self.assertIn("(implies verification)", self.sh)
+        self.assertRegex(self.sh, r"--checksums\)\n(?:.*\n){1,3}\s*VERIFY_EXPLICIT=1")
+        # the order-dependence caveat (sh: last flag wins; ps1: no order) is documented
+        self.assertIn("carry no order", self.ps1)
 
     def test_ps1_prints_prerequisites_and_capabilities(self):
         self.assertIn("Prerequisites:", self.ps1)
@@ -6635,14 +6788,29 @@ class TestInstallerPs1Parity(unittest.TestCase):
         for status in ("available", "unavailable", "skipped"):
             self.assertIn(status, self.ps1)
 
-    def test_ps1_optional_helpers_skip_with_info_never_source_build(self):
-        # No native-Windows RTK/Headroom path: explicit skip message pointing at
-        # the POSIX installer; no cargo, no pip, no silent source build.
-        self.assertIn("rtk: skipped", self.ps1)
+    def test_ps1_never_installs_rtk_headroom_but_detects_rtk_on_path(self):
+        # No native-Windows RTK/Headroom INSTALL path: headroom stays skip-with-info,
+        # rtk is DETECTED (Get-Command) and reported honestly — available with
+        # telemetry disabled when present (mirroring install.sh's
+        # rtk_disable_telemetry), unavailable/POSIX-only when absent — and is never
+        # downloaded or installed; no cargo, no pip, no silent source build.
+        self.assertIn("Get-Command rtk -ErrorAction SilentlyContinue", self.ps1)
+        self.assertIn("function Disable-RtkTelemetry", self.ps1)
+        self.assertIn("telemetry disable", self.ps1)
+        self.assertIn("rtk: available (telemetry disabled)", self.ps1)
+        self.assertIn("rtk: unavailable - POSIX-only helper, not managed by this installer",
+                      self.ps1)
         self.assertIn("headroom: skipped", self.ps1)
         self.assertIn("Git Bash", self.ps1)
+        self.assertNotIn('Install-File "rtk', self.ps1)
+        self.assertNotIn('Install-File "m8shift-headroom.py"', self.ps1)
         for forbidden in ("cargo", "pip install"):
             self.assertNotIn(forbidden, self.ps1.lower())
+        # -DryRun stays mutation-free: the telemetry disable is DryRun-guarded
+        self.assertRegex(self.ps1,
+                         r"if \(\$DryRun\) \{\s*\n\s*Write-Host \"  rtk: available - ")
+        # the sh side's telemetry-disable counterpart still exists (parity anchor)
+        self.assertIn("rtk_disable_telemetry", self.sh)
 
     def test_ps1_python_floor_is_3_8(self):
         self.assertIn("sys.version_info >= (3, 8)", self.ps1)
@@ -6652,6 +6820,12 @@ class TestInstallerPs1Parity(unittest.TestCase):
                      "m8shift-context.py"):
             self.assertIn('"%s"' % name, self.ps1)
         self.assertIn("[0-9a-fA-F]{64}", self.ps1)
+        # the pinning is WIRED, not merely parsed: every -Sha256 spec flows into
+        # $ExpectedSha256, which Get-ExpectedSha256/Test-DownloadedFile consume
+        self.assertRegex(self.ps1,
+                         r"foreach \(\$spec in \$Sha256\) \{\s*\n\s*Add-ExpectedSha256 \$spec")
+        self.assertIn("$script:ExpectedSha256[$file] = $hex", self.ps1)
+        self.assertIn("return $script:ExpectedSha256[$Name]", self.ps1)
 
     @unittest.skipUnless(shutil.which("pwsh"), "pwsh unavailable")
     def test_ps1_parses_and_dry_runs_under_pwsh(self):
@@ -6736,6 +6910,13 @@ class TestDoctorInstall(CLIBase):
         r, d = self.doctor_install()
         checks = [f["check"] for f in d["findings"]]
         self.assertIn("install.manifest_invalid", checks)
+        # every install.* warning is actionable: manifest_invalid carries a
+        # fix_hint like its siblings
+        inv = next(f for f in d["findings"]
+                   if f["check"] == "install.manifest_invalid")
+        self.assertTrue(inv.get("fix_hint"),
+                        "install.manifest_invalid needs an actionable fix_hint")
+        self.assertIn("release", inv["fix_hint"])
         with open(manifest, "w", encoding="utf-8") as fh:
             fh.write("0" * 64 + "  m8shift.py\n")
             fh.write("1" * 64 + "  tests/not-installed-here.py\n")   # absent: NOT drift
@@ -6786,6 +6967,36 @@ class TestDoctorInstall(CLIBase):
         self.assertTrue(any(f["check"] == "kit.companions" for f in d["findings"]))
         self.assertEqual([f for f in d["findings"]
                           if f["check"].startswith("install.") and f["severity"] != "info"], [])
+
+    def test_manifest_drift_skips_kit_tracked_companions(self):
+        """One-condition-one-ID even with a LOCAL checksums.sha256 present
+        (wholesale kit copy): an edited kit-tracked companion is kit.companions
+        territory; install.manifest_drift stays reserved for manifest entries
+        NOT tracked by kit.json."""
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        runtime = os.path.join(self.d, "m8shift-runtime.py")
+        core = os.path.join(self.d, "m8shift.py")
+        def sha(path):
+            with open(path, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
+        with open(os.path.join(self.d, "checksums.sha256"), "w", encoding="utf-8") as fh:
+            fh.write(sha(runtime) + "  m8shift-runtime.py\n")
+            fh.write(sha(core) + "  m8shift.py\n")
+        with open(runtime, "a", encoding="utf-8") as fh:
+            fh.write("\n# local edit\n")           # drifts BOTH ledgers
+        with open(core, "a", encoding="utf-8") as fh:
+            fh.write("\n# core edit\n")            # manifest-only territory
+        _, d = self.doctor_install("--severity-min", "info")
+        drift = [f["path"] for f in d["findings"]
+                 if f["check"] == "install.manifest_drift"]
+        self.assertEqual(drift, ["m8shift.py"],
+                         "kit-tracked companion drift must not double-report "
+                         "under install.manifest_drift")
+        self.assertEqual(d["install"]["manifest"]["drift"], ["m8shift.py"])
+        # the edited companion still surfaces — once, under kit.companions
+        self.assertTrue(any(f["check"] == "kit.companions"
+                            and f["path"] == "m8shift-runtime.py"
+                            for f in d["findings"]))
 
     def test_no_init_dir_reports_install_alongside_relay_missing(self):
         bare = tempfile.mkdtemp(prefix="m8shift-noinit-")
@@ -8834,6 +9045,48 @@ class TestRFC048PRB(CLIBase):
         per = {i["name"]: i["result"] for i in row["companions"]}
         self.assertEqual(per, {"runtime": "updated", "context": "refused"})
         self.assertEqual(self._snapshot(self.d), before)   # plan only, byte-identical
+
+    def test_partial_companions_only_update_still_audits_and_syncs_kit(self):
+        """#43 regression (adversarial review): a companions-ONLY update whose row
+        folds to `partial` still WROTE a companion file — the audit row must be
+        appended and the kit core version synced even though no component row
+        says `updated` (the write is visible only in the per-companion items)."""
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        self._mixed_companion_manifest()
+        runtime = os.path.join(self.d, "m8shift-runtime.py")
+        with open(runtime, "a", encoding="utf-8") as fh:
+            fh.write("\n# LOCAL DRIFT MARKER\n")            # forces a real refresh
+        kit_path = os.path.join(self.d, ".m8shift", "kit.json")
+        with open(kit_path, encoding="utf-8") as fh:
+            kit = json.load(fh)
+        kit["core"]["version"] = "3.41.0"                   # stale: proves the sync ran
+        with open(kit_path, "w", encoding="utf-8") as fh:
+            json.dump(kit, fh, indent=2)
+        audit = os.path.join(self.d, self.AUDIT_REL)
+        self.assertFalse(os.path.exists(audit))
+        r = self.update("--components", "companions",
+                        "--companions", "runtime,context", "--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)   # partial is not OK
+        d, comps = self._components(r)
+        self.assertEqual(comps["companions"], "partial")
+        self.assertEqual(comps["core"], "skipped")               # companions-only run
+        row = next(row for row in d["components"] if row["component"] == "companions")
+        per = {i["name"]: i["result"] for i in row["companions"]}
+        self.assertEqual(per, {"runtime": "updated", "context": "refused"})
+        with open(runtime, encoding="utf-8") as fh:
+            self.assertNotIn("# LOCAL DRIFT MARKER", fh.read())  # file WAS written
+        # the write is audited …
+        self.assertTrue(os.path.exists(audit),
+                        "a partial companions write must append an audit row")
+        with open(audit, encoding="utf-8") as fh:
+            last = json.loads([ln for ln in fh.read().splitlines() if ln.strip()][-1])
+        self.assertEqual(last["schema"], "m8shift.update.audit.v1")
+        self.assertTrue(last["companions_refreshed"])
+        self.assertEqual({c["component"] for c in last["components"]},
+                         {"core", "protocol", "pack", "anchors", "companions"})
+        # … and the kit core version is honest again
+        with open(kit_path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["core"]["version"], cowork.VERSION)
 
     # ── source ownership / relay-state hygiene ───────────────────────────────
 

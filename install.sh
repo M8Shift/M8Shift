@@ -46,6 +46,7 @@ CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
 CHECKSUMS_TEXT=""
 EXPECTED_SHA256S=""
 PYTHON_BIN="${PYTHON:-python3}"
+HELPER_FAILURES=""   # opt-in helper failures never block the core install (#24)
 
 usage() {
   cat <<'EOF'
@@ -89,8 +90,11 @@ package manager required. It is a bash script (macOS Terminal, Linux, WSL, Git B
 on Windows); native Windows without Git Bash uses install.ps1 instead.
 Verification is enabled by default; --no-verify disables it.
 Optional helpers are advisory: capabilities are detected before any helper setup and
-reported as available / unavailable / skipped / installed; an absent or unsupported
-helper degrades with a clear message and never blocks the core install.
+reported as available / unavailable / skipped / installed (or "ask — will prompt"
+when the interactive RTK default applies); an absent or unsupported helper degrades
+with a clear message and never blocks the core install. An opted-in helper
+(--with-rtk / --with-headroom) that fails prints a prominent warning and the core
+install continues to init; the overall exit stays 0 when the core install succeeded.
 Security note: verification checks integrity against the selected ref's manifest;
 for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
 RTK is optional. When installed or already present on normal PATH, this installer runs
@@ -110,6 +114,16 @@ EOF
 die() {
   printf 'm8shift install: %s\n' "$*" >&2
   exit 1
+}
+
+helper_failed() {
+  # #24 ruling: optional helpers NEVER block the core install. Record the
+  # failure, warn prominently, and let the run continue toward init; the
+  # overall exit stays 0 when the core install itself succeeds.
+  local helper="$1"
+  local hint="$2"
+  HELPER_FAILURES="${HELPER_FAILURES:+$HELPER_FAILURES }$helper"
+  printf '✗ optional %s install failed — continuing core install; %s\n' "$helper" "$hint" >&2
 }
 
 need_value() {
@@ -309,6 +323,9 @@ print_capabilities() {
     *)
       if [ -n "$existing_rtk" ]; then
         printf '  rtk: installed — found at %s\n' "$existing_rtk"
+      elif { [ "$RTK_CHOICE" = "ask" ] || [ -z "$RTK_CHOICE" ]; } && [ -t 0 ]; then
+        # honest ask-mode report: an interactive run WILL prompt later (offer_rtk)
+        printf '  rtk: ask — will prompt for the optional install (--with-rtk / --no-rtk decide up front)\n'
       else
         printf '  rtk: skipped — explicit opt-in (--with-rtk)\n'
       fi
@@ -316,7 +333,7 @@ print_capabilities() {
   esac
   case "$HEADROOM_CHOICE" in
     yes|YES|1|true|True|TRUE)
-      if "$PYTHON_BIN" -c 'import venv' >/dev/null 2>&1; then
+      if [ "${PYTHON_OK:-1}" -eq 1 ] && "$PYTHON_BIN" -c 'import venv' >/dev/null 2>&1; then
         printf '  headroom: available — Python venv module present (experimental, pinned, fail-closed)\n'
       else
         printf '  headroom: unavailable — Python venv module missing (install python3-venv/ensurepip); --with-headroom fails closed\n'
@@ -457,9 +474,26 @@ else
   VERIFY_DOWNLOADS=1
 fi
 
-command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN is required"
-"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1 \
-  || die "Python 3.8+ is required ($PYTHON_BIN reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))"
+# Python status is COMPUTED here but only fatal outside --dry-run: the plan-only
+# path stays lockstep with install.ps1 -DryRun and prints an honest status line
+# instead of dying, so a python-less review/CI host can still read the plan.
+PYTHON_OK=1
+PYTHON_STATUS=""
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  PYTHON_OK=0
+  PYTHON_STATUS="MISSING (required)"
+elif ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+  PYTHON_OK=0
+  PYTHON_STATUS="TOO OLD — 3.8+ required (reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))"
+else
+  PYTHON_STATUS="ok ($("$PYTHON_BIN" --version 2>&1 || printf unknown))"
+fi
+if [ "$DRY_RUN" -ne 1 ] && [ "$PYTHON_OK" -ne 1 ]; then
+  case "$PYTHON_STATUS" in
+    MISSING*) die "$PYTHON_BIN is required" ;;
+    *) die "Python 3.8+ is required ($PYTHON_BIN reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))" ;;
+  esac
+fi
 validate_ref
 validate_rtk_version
 
@@ -482,6 +516,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   cat <<EOF
 
 Dry run plan:
+  python: $PYTHON_BIN — $PYTHON_STATUS
   target: $TARGET_DIR
   ref: $REF
   base URL: $BASE_URL
@@ -722,9 +757,13 @@ install_rtk_portable() {
 }
 
 offer_rtk() {
+  # Opt-in flows run the helper in a SUBSHELL: internal `die`s (broken mirror,
+  # missing checksum, unsupported host) exit only the subshell, degrade to a
+  # helper_failed warning, and the core install continues to init (#24).
   case "$RTK_CHOICE" in
     yes|YES|1|true|True|TRUE)
-      install_rtk_portable || die "optional RTK install failed; install RTK manually or rerun with --no-rtk"
+      ( install_rtk_portable ) \
+        || helper_failed rtk "rerun with --with-rtk after fixing, or use --no-rtk to silence the offer"
       ;;
     no|NO|0|false|False|FALSE)
       rtk_disable_telemetry
@@ -740,7 +779,10 @@ offer_rtk() {
         printf 'Install optional RTK for token-saving shell output filtering from release assets verified against same-tag checksums? [y/N] '
         IFS= read -r answer || answer=""
         case "$answer" in
-          y|Y|yes|YES) install_rtk_portable || die "optional RTK install failed; install RTK manually or rerun with --no-rtk" ;;
+          y|Y|yes|YES)
+            ( install_rtk_portable ) \
+              || helper_failed rtk "rerun with --with-rtk after fixing, or use --no-rtk to silence the offer"
+            ;;
           *) printf '→ skipping optional RTK install\n' ;;
         esac
       else
@@ -906,7 +948,11 @@ install_headroom() {
 offer_headroom() {
   case "$HEADROOM_CHOICE" in
     yes|YES|1|true|True|TRUE)
-      install_headroom
+      # Subshell containment (#24): headroom_fail still cleans the venv and
+      # exits fail-closed, but ONLY out of the helper — the opt-in failure
+      # degrades to a warning and the core install continues to init.
+      ( install_headroom ) \
+        || helper_failed headroom "rerun with --with-headroom after fixing, or use --no-headroom to silence the offer"
       ;;
     no|NO|0|false|False|FALSE|"")
       ;;
@@ -997,11 +1043,19 @@ Optional RTK:
 EOF
 fi
 
-if [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADROOM_CHOICE" = "1" ] || [ "$HEADROOM_CHOICE" = "true" ] || [ "$HEADROOM_CHOICE" = "True" ] || [ "$HEADROOM_CHOICE" = "TRUE" ]; then
+# the success blurb is filesystem-gated: a failed opt-in (venv cleaned by
+# headroom_fail) must not claim an install that did not happen
+if { [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADROOM_CHOICE" = "1" ] || [ "$HEADROOM_CHOICE" = "true" ] || [ "$HEADROOM_CHOICE" = "True" ] || [ "$HEADROOM_CHOICE" = "TRUE" ]; } \
+    && [ -n "$(headroom_python || true)" ]; then
   cat <<EOF
 
 Optional Headroom:
   headroom-ai==0.28.0 and the Kompress model were installed under .m8shift/venvs/headroom.
   Runtime use stays offline through .m8shift/venvs/headroom/bin/m8shift-headroom.
 EOF
+fi
+
+if [ -n "$HELPER_FAILURES" ]; then
+  printf '\nwarning: optional helper install failed for: %s\n' "$HELPER_FAILURES" >&2
+  printf 'warning: the core install above succeeded (exit 0); rerun the failed helper with --with-rtk / --with-headroom after fixing, or use --no-rtk / --no-headroom to silence the offer\n' >&2
 fi

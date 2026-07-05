@@ -104,7 +104,10 @@ claude,codex` through the detected Python 3.8+ interpreter. Both print the
 prerequisites plus one capability line per optional helper (`available` /
 `unavailable` / `skipped` / `installed`) before any helper setup; an absent or
 unsupported helper degrades with a clear message and never blocks the core
-install.
+install, and an opted-in helper that fails prints a prominent warning while the
+core install continues (exit 0 when the core install succeeded). The two
+installers are kept in lockstep for the core components — verified by static
+parity tests, and executed end-to-end where `pwsh` is available.
 
 For a pinned release, fetch the installer from the tag and use the same ref for the
 downloaded files:
@@ -143,9 +146,10 @@ Cargo/Rust source builds are available only with the additional explicit
 `--allow-source-build` flag and are pinned to the selected `--rtk-version` tag.
 The default `ask` mode only prompts in an interactive terminal; non-interactive
 installs skip RTK unless `--with-rtk` is explicit. On native Windows PowerShell,
-`install.ps1` skips RTK and Headroom with an info message (no tested
-native-Windows path — never a silent source build); use Git Bash or WSL with
-`install.sh` for those helpers.
+`install.ps1` never installs RTK or Headroom (no tested native-Windows path —
+never a silent source build) and says so with an info line; an `rtk` already on
+PATH is still detected, reported, and gets its telemetry disabled. Use Git Bash
+or WSL with `install.sh` for those helpers.
 
 Experimental Headroom-compatible context compression stays opt-in:
 
@@ -159,7 +163,8 @@ curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
 the `chopratejas/kompress-v2-base` Kompress model so the runtime wrapper stays
 offline, and identity-pins the `m8shift-headroom` launcher. The helper is
 experimental and fail-closed for the opted-in run (a failed step removes the venv
-and reports clearly); it is never attempted without the explicit flag. On macOS
+and reports clearly, while the core install continues with a warning); it is
+never attempted without the explicit flag. On macOS
 it requires an arm64-native Python (no x86_64 wheel exists). Headroom remains
 behind the RFC 042 measurement gate.
 

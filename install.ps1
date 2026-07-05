@@ -15,9 +15,10 @@
 # context, checksum verification, -NoInit, -Force, -Lang/-Name/-Agents, -DryRun).
 #
 # Optional helpers (#24): git is only needed for worktree features; the core relay
-# installs without it. RTK and Headroom have no tested native-Windows path in this
-# installer: they are SKIPPED with an info message (never a silent source build) —
-# use Git Bash or WSL with `install.sh --with-rtk` / `--with-headroom` instead.
+# installs without it. RTK and Headroom are NEVER installed by this installer (no
+# tested native-Windows path, never a silent source build) — use Git Bash or WSL
+# with `install.sh --with-rtk` / `--with-headroom` instead. An rtk already on PATH
+# is reported honestly and its telemetry is disabled (mirrors install.sh).
 
 [CmdletBinding()]
 param(
@@ -45,6 +46,10 @@ $ErrorActionPreference = "Stop"
 $InstallerVersion = "1.2.0"
 $ChecksumText = ""
 $ExpectedSha256 = @{}
+# -Checksums given on the command line implies verification (lockstep with
+# install.sh --checksums); the env default M8SHIFT_INSTALL_CHECKSUMS_URL does not.
+$ChecksumsExplicit = $PSBoundParameters.ContainsKey("Checksums") -and
+    -not [string]::IsNullOrWhiteSpace($Checksums)
 
 function Show-Usage {
     @"
@@ -70,18 +75,23 @@ Options:
   -BaseUrl URL         Download base URL (default: GitHub raw for -Ref).
   -Verify              Verify downloaded files against checksums.sha256 (already the default).
   -NoVerify            Skip checksum verification.
-  -Checksums URL       Use a custom checksums URL or local path.
+  -Checksums URL       Use a custom checksums URL or local path (implies verification).
   -Sha256 FILE:HEX     Pin one expected SHA-256 manually; repeatable.
   -Help                Show this help.
   -Version             Show installer version.
 
 The installer is local-only: no admin rights, no PATH mutation, no background
 service, no package manager required. Verification is enabled by default;
--NoVerify disables it.
+-NoVerify disables it, -Verify/-Checksums force it on (overriding
+M8SHIFT_INSTALL_VERIFY, like install.sh's explicit flags). install.sh resolves
+conflicting verify flags by command-line order (last wins); PowerShell
+parameters carry no order, so an explicit -Verify/-Checksums wins over
+-NoVerify here (the safe side).
 Optional helpers are advisory and never block the core install: git is only
-needed for worktree features (m8shift-worktree.py); RTK and Headroom are skipped
-by this installer (no tested native-Windows path — use Git Bash or WSL with
-install.sh --with-rtk / --with-headroom).
+needed for worktree features (m8shift-worktree.py); RTK and Headroom are never
+installed by this installer (no tested native-Windows path — use Git Bash or
+WSL with install.sh --with-rtk / --with-headroom). An rtk already on PATH is
+reported and its telemetry is disabled, mirroring install.sh.
 "@
     Show-Prerequisites
 }
@@ -98,22 +108,51 @@ Prerequisites:
     (winget may provide Python but is never the only path).
   optional git: only worktree features (m8shift-worktree.py) and anchor
     case-renaming use Git; the core relay installs and runs without it.
-  optional RTK / Headroom: not installed by install.ps1 (no tested native-Windows
-    path); use Git Bash or WSL with install.sh --with-rtk / --with-headroom.
+  optional RTK / Headroom: never installed by install.ps1 (no tested native-Windows
+    path); use Git Bash or WSL with install.sh --with-rtk / --with-headroom. An rtk
+    already on PATH is detected and its telemetry disabled (mirrors install.sh).
 "@
+}
+
+function Disable-RtkTelemetry([string]$RtkPath) {
+    # Mirrors install.sh's rtk_disable_telemetry: guarded and failure-tolerant —
+    # a broken rtk never blocks or fails the core install. Returns $true when
+    # telemetry was actually disabled.
+    try {
+        & $RtkPath telemetry disable *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "OK rtk telemetry disabled"
+            return $true
+        }
+    } catch { }
+    Write-Warning "could not disable rtk telemetry; run 'rtk telemetry disable' manually"
+    return $false
 }
 
 function Show-Capabilities {
     # #24: detect optional-helper capabilities BEFORE any helper setup and report one
-    # clear line each (available / unavailable / skipped / installed). Advisory only:
-    # nothing here ever blocks or mutates the core install.
+    # clear line each (available / unavailable / skipped / installed). install.ps1
+    # NEVER installs RTK/Headroom (POSIX-only helpers), but an rtk already on PATH is
+    # detected and reported honestly, and its telemetry is disabled (skipped on
+    # -DryRun, which must not mutate anything).
     Write-Host "Optional helper capabilities:"
     if (Get-Command git -ErrorAction SilentlyContinue) {
         Write-Host "  git: available - worktree features (m8shift-worktree.py) can use it"
     } else {
         Write-Host "  git: unavailable - worktree features (m8shift-worktree.py) need Git; the core install is unaffected"
     }
-    Write-Host "  rtk: skipped - no tested native-Windows path in install.ps1; use Git Bash/WSL install.sh --with-rtk"
+    $rtkCmd = Get-Command rtk -ErrorAction SilentlyContinue
+    if ($rtkCmd) {
+        if ($DryRun) {
+            Write-Host "  rtk: available - found at $($rtkCmd.Source); telemetry would be disabled on a real run (install.ps1 never installs RTK - POSIX-only helper)"
+        } elseif (Disable-RtkTelemetry $rtkCmd.Source) {
+            Write-Host "  rtk: available (telemetry disabled) - found at $($rtkCmd.Source); install.ps1 never installs RTK (POSIX-only helper - use Git Bash/WSL install.sh --with-rtk)"
+        } else {
+            Write-Host "  rtk: available - found at $($rtkCmd.Source); telemetry could NOT be disabled (run 'rtk telemetry disable' manually)"
+        }
+    } else {
+        Write-Host "  rtk: unavailable - POSIX-only helper, not managed by this installer; use Git Bash/WSL install.sh --with-rtk"
+    }
     Write-Host "  headroom: skipped - no tested native-Windows path in install.ps1; use WSL install.sh --with-headroom"
 }
 
@@ -123,8 +162,15 @@ function Fail([string]$Message) {
 }
 
 function Test-VerifyDefault {
+    # Mirrors install.sh's resolver: -Verify and -Checksums are explicit ON
+    # signals (--checksums implies verification), -NoVerify is the explicit OFF
+    # signal, and any explicit signal overrides M8SHIFT_INSTALL_VERIFY.
+    # Caveat: install.sh resolves conflicting explicit flags by command-line
+    # order (the last one wins); PowerShell named parameters carry no order, so
+    # a -NoVerify + -Verify/-Checksums conflict resolves to the safe side here:
+    # verification stays ON.
+    if ($Verify -or $ChecksumsExplicit) { return $true }
     if ($NoVerify) { return $false }
-    if ($Verify) { return $true }
     if ($env:M8SHIFT_INSTALL_VERIFY) {
         return $env:M8SHIFT_INSTALL_VERIFY -notin @("0", "false", "False", "FALSE", "no", "No", "NO")
     }
@@ -299,7 +345,7 @@ if ($DryRun) {
     Write-Host "  verify downloads: $VerifyDownloads"
     Write-Host "  download worktree/runtime/context: $(-not $NoWorktree)/$(-not $NoRuntime)/$(-not $NoContext)"
     Write-Host "  run init: $(-not $NoInit)"
-    Write-Host "  RTK/Headroom: skipped (no tested native-Windows path; use Git Bash/WSL install.sh)"
+    Write-Host "  RTK/Headroom: never installed by install.ps1 (POSIX-only helpers; use Git Bash/WSL install.sh --with-rtk / --with-headroom)"
     Write-Host ""
     Write-Host "No files were downloaded or written."
     exit 0
