@@ -11,6 +11,7 @@ import fnmatch
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import plistlib
 import re
@@ -4881,10 +4882,16 @@ def _usage_ratio_or_none(value, field, warnings):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         warnings.append(f"{field} must be a number in [0, 1]; ignored")
         return None
-    if value < 0 or value > 1:
+    ratio = float(value)
+    # NaN/Inf slip past < / > comparisons (all NaN comparisons are False) and would
+    # serialize as non-standard JSON; reject any non-finite value outright.
+    if not math.isfinite(ratio):
+        warnings.append(f"{field} must be a finite number in [0, 1]; ignored")
+        return None
+    if ratio < 0 or ratio > 1:
         warnings.append(f"{field} must be in [0, 1]; ignored")
         return None
-    return float(value)
+    return ratio
 
 
 def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="", include_raw_excerpt=False):

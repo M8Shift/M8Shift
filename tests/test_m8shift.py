@@ -7863,6 +7863,23 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertIsNone(payload["snapshots"][0]["snapshot"]["decision_ratio"])
         self.assertIn("[0, 1]", " ".join(f["message"] for f in payload["findings"]))
 
+    def test_used_ratio_nan_is_rejected_and_output_is_standard_json(self):
+        """Codex review of PR #49: NaN slips past </> bounds (all NaN comparisons
+        are False) and would serialize as non-standard JSON. It must be ignored,
+        never reaching used_ratio or decision_ratio."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z",
+             "used_ratio": float("nan")},
+        ])
+        r = self.snapshot_for(doc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NaN", r.stdout)                 # standard JSON only
+        payload = json.loads(r.stdout)                    # would raise on bare NaN
+        snap = payload["snapshots"][0]["snapshot"]
+        self.assertNotIn("used_ratio", snap["windows"][0])
+        self.assertIsNone(snap["decision_ratio"])
+        self.assertIn("finite", " ".join(f["message"] for f in payload["findings"]))
+
     def test_token_only_window_carries_no_used_ratio_key(self):
         """Byte-identity guard: a token-only window never gains a used_ratio key,
         so pre-Phase-3 snapshots serialize unchanged."""
