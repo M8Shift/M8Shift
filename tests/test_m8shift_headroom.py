@@ -43,7 +43,7 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
     def test_version_surface(self):
         result = subprocess.run([sys.executable, SCRIPT, "--version"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("m8shift-headroom.py 3.51.0", result.stdout)
+        self.assertIn("m8shift-headroom.py 3.52.0", result.stdout)
 
     def test_wrapper_uses_offline_env_socket_block_and_non_user_messages(self):
         env = self._fake_headroom(

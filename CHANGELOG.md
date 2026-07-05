@@ -1,5 +1,44 @@
 # Changelog
 
+## v3.52.0 — 2026-07-05
+
+Multi-OS core install (#24) + update/manifest fixes (#42, #43; PR #44).
+
+- **Multi-OS core install (#24).** `install.sh` (macOS/Linux/WSL/Git Bash;
+  bash requirement explicit) and `install.ps1` (native Windows) are kept in
+  lockstep for the core components — verified by structural static parity
+  tests and executed end-to-end where `pwsh` is available. Core install
+  requires only Python 3.8+, a download path, write permission, and SHA-256
+  support: no sudo, no PATH mutation, no daemon, no package-manager-only
+  path; verification stays ON by default (`--no-verify` / `-NoVerify` is the
+  explicit opt-out). Capability detection prints one honest line per optional
+  helper (available / unavailable / skipped / installed / ask-will-prompt);
+  optional helpers are POSIX-only where no safe Windows path exists and are
+  skipped with an info line on Windows. **Opted-in helper failures no longer
+  abort the core install**: they degrade to a prominent warning, init still
+  runs, exit stays 0, and a summary lists the failed helpers. `--dry-run`
+  prints the plan and prerequisites even without Python on the host.
+- **Read-only post-install verification (#24).** `doctor --install` reports
+  Python floor, script/core presence, checksum-manifest validity and drift,
+  kit companion status, and optional helper states (6 `install.*` findings;
+  optional-absent is `info`, core-unhealthy is distinguished from
+  optional-accelerator-absent; no network, no repair, no mutation).
+- **Manifest covers every shipped companion (#42).** `checksums.sha256`
+  gains the missing `m8shift-e2e.py` entry, with a regression test that
+  every shipped `m8shift-*.py` script is manifested — found live when the
+  MUST-verify-when-present rule correctly refused to update the one
+  unmanifested companion.
+- **Mixed companion outcomes report `partial` (#43).** A companions update
+  where some scripts refresh and some are refused now folds to `partial`
+  (per-companion rows preserved, `--json` carries per-companion outcomes),
+  and the **update-audit gate now sees per-companion writes**: a partial run
+  that wrote files records its audit row and syncs the kit version (this
+  gate miss predated #43 and also affected refused-fold runs).
+- Release shipped solo (standing reviewer unavailable until 2026-07-07,
+  operator-ordered continuation); review of record = 3-lens adversarial
+  workflow with per-finding refutation (2 majors + 8 minors confirmed and
+  fixed pre-merge, 1 finding refuted as pre-existing). Retro-review queued.
+
 ## v3.51.0 — 2026-07-05
 
 Guidance batch — what agents must believe about evidence and shared state

@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 
-VERSION = "3.51.0"
+VERSION = "3.52.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))
