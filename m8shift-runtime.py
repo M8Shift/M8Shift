@@ -532,7 +532,10 @@ def read_json_diagnostic(path, default):
             data = json.load(fh)
     except FileNotFoundError:
         return default, None
-    except (OSError, json.JSONDecodeError) as e:
+    # Mirror read_jsonl_diagnostic: deeply-nested JSON raises RecursionError and a bad
+    # encoding raises UnicodeDecodeError (a ValueError) — a malformed file must return
+    # a diagnostic, never crash the caller.
+    except (OSError, json.JSONDecodeError, RecursionError, ValueError) as e:
         return default, str(e)
     if not isinstance(data, type(default)):
         return default, f"expected {type(default).__name__}, got {type(data).__name__}"
@@ -4619,9 +4622,13 @@ def cmd_listener_logs(args):
 USAGE_DIR = os.path.join(PROJECT_DIR, "usage")
 USAGE_ADAPTERS = os.path.join(USAGE_DIR, "adapters.json")
 USAGE_FIXTURES_DIR = os.path.join(USAGE_DIR, "fixtures")
+USAGE_BUDGET = os.path.join(USAGE_DIR, "budget.json")            # Slice 4: opt-in, absent by default
+USAGE_BUDGET_EXAMPLE = os.path.join(USAGE_DIR, "budget.example.json")
 USAGE_LEDGER = os.path.join(RUNTIME_DIR, "usage.jsonl")
 USAGE_ERRORS = os.path.join(RUNTIME_DIR, "usage-adapter-errors.jsonl")
 USAGE_ADAPTERS_SCHEMA = "m8shift.usage.adapters.v1"
+USAGE_BUDGET_SCHEMA = "m8shift.usage.budget.v1"
+USAGE_BUDGET_MAX_CAP = 10 ** 12             # a trillion tokens: above any real plan, below float-overflow risk
 USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"
 USAGE_FIXTURE_SCHEMA = "m8shift.usage.fixture.v1"
 USAGE_ADAPTER_KINDS = ("cli_json", "fixture", "jsonl_scan")
@@ -4925,6 +4932,41 @@ def load_usage_config():
     return entries, findings, any(f["severity"] == "error" for f in findings)
 
 
+def load_usage_budgets():
+    """RFC 040 Phase 3 Slice 4: read the OPT-IN operator budget. Returns
+    ({agent: {window_kind: positive_int_cap}}, findings). Absent => ({}, []) so
+    nothing changes by default; a malformed budget is IGNORED (fail-safe: a bad
+    budget must never invent a limit), with a warning finding. Only positive
+    integer caps survive; anything else is skipped."""
+    if not os.path.exists(USAGE_BUDGET):
+        return {}, []
+    doc, err = read_json_diagnostic(USAGE_BUDGET, {})
+    rel = os.path.relpath(USAGE_BUDGET, HERE)
+    if err or not isinstance(doc, dict):
+        return {}, [{"severity": "warning", "check": "usage.budget",
+                     "message": f"{rel}: unreadable or not an object; ignored"}]
+    budgets = {}
+    for entry in doc.get("budgets", []) if isinstance(doc.get("budgets"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        agent = entry.get("agent")
+        windows = entry.get("windows")
+        if not isinstance(agent, str) or not AGENT_RE.fullmatch(agent or "") \
+                or not isinstance(windows, dict):
+            continue
+        caps = {}
+        for kind, cap in windows.items():
+            if isinstance(kind, str) and kind and isinstance(cap, int) \
+                    and not isinstance(cap, bool) and 0 < cap <= USAGE_BUDGET_MAX_CAP:
+                caps[kind] = cap
+        if caps:
+            budgets[agent] = caps
+    findings = [] if budgets or not doc.get("budgets") else [{
+        "severity": "warning", "check": "usage.budget",
+        "message": f"{rel}: no usable positive-integer window caps; ignored"}]
+    return budgets, findings
+
+
 def redact_usage_excerpt(text, cap=USAGE_RAW_EXCERPT_MAX_CHARS):
     out = text or ""
     for pattern in USAGE_REDACT_PATTERNS:
@@ -4951,6 +4993,17 @@ def _usage_iso_or_none(value, field, warnings):
     return None
 
 
+def _usage_safe_ratio(used, limit):
+    """`used / limit` as a finite float, or None when the magnitude overflows a
+    float (an implausibly large `used`, e.g. 10**400, must fail open — the ratio
+    math must never crash the snapshot). Callers skip a None ratio."""
+    try:
+        ratio = used / limit
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return ratio if math.isfinite(ratio) else None
+
+
 def _usage_ratio_or_none(value, field, warnings):
     """RFC 040 Phase 3: an optional per-window `used_ratio` — the fraction of the
     window's limit already consumed, for official sources that report a
@@ -4973,10 +5026,18 @@ def _usage_ratio_or_none(value, field, warnings):
     return ratio
 
 
-def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="", include_raw_excerpt=False):
+def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
+                             include_raw_excerpt=False, budget=None):
     """Normalize one m8shift.usage.fixture.v1 document to the pinned
     m8shift.usage.snapshot.v1 shape (RFC 040 "PR A snapshot schema bytes").
-    Returns (snapshot, warnings); snapshot is None only on unusable input."""
+    Returns (snapshot, warnings); snapshot is None only on unusable input.
+
+    RFC 040 Phase 3 Slice 4: `budget` (an optional {window_kind: cap} map from the
+    operator's `.m8shift/usage/budget.json`) lets a spent-only source GATE by
+    supplying the missing `limit` for a window that has `used` but no limit. It is
+    applied ONLY to non-official snapshots (official data wins, rule 9) and never
+    overrides a limit that is already present — a budget cap is always an estimate,
+    never presented as official quota."""
     warnings = []
     if not isinstance(doc, dict):
         return None, ["adapter output is not a JSON object"]
@@ -5031,12 +5092,31 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="", inc
         if w_ratio is not None:
             window["used_ratio"] = w_ratio
         windows.append(window)
-    ratios = [w["used"] / w["limit"] for w in windows
-              if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0]
+    # Slice 4: an operator budget supplies a missing `limit` so a spent-only source
+    # can gate — estimate only, never on an official snapshot, never an override.
+    if budget and provenance != "official":
+        for window in windows:
+            cap = budget.get(window["kind"])
+            if window["used"] is not None and window["limit"] is None \
+                    and "used_ratio" not in window \
+                    and isinstance(cap, int) and not isinstance(cap, bool) \
+                    and 0 < cap <= USAGE_BUDGET_MAX_CAP:
+                window["limit"] = cap
+                # The gate is now driven by an operator guess: downgrade the
+                # structured provenance so the canonical field cannot outrank it.
+                provenance = "local_estimate"
+                warnings.append(f"windows[{window['kind']}].limit filled from the "
+                                "operator budget (local_estimate; not official quota)")
+    ratios = [r for r in
+              (_usage_safe_ratio(w["used"], w["limit"]) for w in windows
+               if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0)
+              if r is not None]
     # Ratio-native windows contribute their used_ratio directly — no token math.
     ratios += [w["used_ratio"] for w in windows if w.get("used_ratio") is not None]
     if not ratios and used_tokens is not None and isinstance(limit_tokens, int) and limit_tokens > 0:
-        ratios = [used_tokens / limit_tokens]
+        top = _usage_safe_ratio(used_tokens, limit_tokens)
+        if top is not None:
+            ratios = [top]
     decision_ratio = round(max(ratios), 4) if ratios else None
     known = {"schema", "agent", "provenance", "captured_at", "used_tokens", "limit_tokens", "windows"}
     for key in sorted(set(doc) - known):
@@ -5497,6 +5577,23 @@ def print_usage_findings(findings):
         print(f"{f['severity']} {f['check']}: {f['message']}")
 
 
+def default_usage_budget_example():
+    """RFC 040 Phase 3 Slice 4 scaffold: an INACTIVE example. Only `budget.json`
+    is loaded — rename this to `budget.json` to activate it. A budget supplies a
+    missing window `limit` so a spent-only source (a jsonl_scan) can gate, always
+    as a local_estimate, never presented as official quota."""
+    return {
+        "schema": USAGE_BUDGET_SCHEMA,
+        "//": ("INACTIVE example. Rename this file to budget.json to activate. Caps "
+               "are your plan's estimated per-window token allowance; they let a "
+               "spent-only scan gate as local_estimate and NEVER override an "
+               "official source's real limit."),
+        "budgets": [
+            {"agent": "claude", "windows": {"session_5h": 100000, "weekly": 500000}},
+        ],
+    }
+
+
 def cmd_usage_init(args):
     os.makedirs(USAGE_FIXTURES_DIR, exist_ok=True)
     created = []
@@ -5505,6 +5602,8 @@ def cmd_usage_init(args):
     codex_fixture = os.path.join(USAGE_FIXTURES_DIR, "codex.json")
     if write_json_if_missing(codex_fixture, sample_usage_fixture("codex")):
         created.append(".m8shift/usage/fixtures/codex.json")
+    if write_json_if_missing(USAGE_BUDGET_EXAMPLE, default_usage_budget_example()):
+        created.append(".m8shift/usage/budget.example.json")
     ensure_runtime_gitignore()
     if args.json:
         print(json.dumps({"created": created, "runtime_version": VERSION},
@@ -5608,6 +5707,8 @@ def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
     entries, findings, config_error = load_usage_config()
     if config_error:
         return [], findings, False, 0, True
+    budgets, budget_findings = load_usage_budgets()      # Slice 4: opt-in, absent => {}
+    findings.extend(budget_findings)
     enabled, skipped_disabled = selected_usage_entries(entries, agent_filter)
     results = []
     had_adapter_error = False
@@ -5623,7 +5724,8 @@ def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
             continue
         snapshot, warnings = normalize_usage_snapshot(
             doc, agent=agent, adapter_name=name, kind=entry.get("kind", ""),
-            raw_text=raw, include_raw_excerpt=include_raw_excerpt)
+            raw_text=raw, include_raw_excerpt=include_raw_excerpt,
+            budget=budgets.get(agent))
         if snapshot is None:
             had_adapter_error = True
             record_usage_adapter_error(name, agent, warnings[0])
