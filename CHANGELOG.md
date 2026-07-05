@@ -1,5 +1,41 @@
 # Changelog
 
+## v3.53.0 — 2026-07-05
+
+RFC 040 Phase 3 — **real, opt-in usage adapters** (#47; PRs #49–#52). The Phase 2
+framework (snapshot/guard/watch/wait/resume, cooldown, the pinned schemas, the
+adapter manifest, the ledger) shipped in v3.48.0 with fixture/stub adapters; this
+release makes the data real. Nothing in the core changes; all four slices are
+opt-in and land in the `m8shift-runtime.py` companion.
+
+- **Slice 1 — `used_ratio` schema extension.** One additive optional per-window
+  field so a source that reports a percent/ratio (a remaining-quota endpoint) is
+  never encoded into token fields. `decision_ratio` derives from `used_ratio`
+  directly; a window carrying both a ratio and token counts is unit-mixed and
+  dropped (never coerced); token-only snapshots stay byte-identical.
+- **Slice 2 — `jsonl_scan` adapter + privacy gate.** A built-in, opt-in
+  (default-off) scan of local agent-session JSONL that sums token integers into
+  rolling windows — **aggregate-only** (never reads message content, never
+  descends into content-bearing keys), bounded (files / candidates / bytes /
+  mtime horizon / wall-clock deadline), version-tolerant (schema-drift
+  diagnostic), symlink-safe. A spent/reporting source: `limit` is null, so it
+  **never gates** (fail-open).
+- **Slice 3 — gating remaining-quota.** A worked, argv-only operator OAuth example
+  (`examples/usage-adapters/claude-oauth-usage.py`) that maps a remaining-percent
+  endpoint to `used_ratio` — M8Shift never opens the socket, fail-open on any bad
+  shape (missing/malformed credential, non-finite percent), credential never
+  printed — plus a disabled `claude-quota` scaffold.
+- **Slice 4 — operator budget bridge.** An opt-in `.m8shift/usage/budget.json`
+  (absent by default; inactive `budget.example.json` scaffold) supplies a missing
+  window `limit` so a spent-only scan can gate — **estimate only**: applied only
+  to non-official snapshots, never overrides a real limit, never on a ratio
+  window, downgrades provenance to `local_estimate`, fail-safe on a malformed
+  budget (never invents a limit, never crashes), bounded caps.
+- Adversarially reviewed at each slice (cross-review, then a solo 3-lens hunt for
+  Slice 4 when the reviewer went offline); each pass caught real bad-shape defects
+  (NaN/non-finite, content-recursion, unbounded scan, malformed credential,
+  malformed-budget crash, ratio overflow) fixed before merge.
+
 ## v3.52.0 — 2026-07-05
 
 Multi-OS core install (#24) + update/manifest fixes (#42, #43; PR #44).
