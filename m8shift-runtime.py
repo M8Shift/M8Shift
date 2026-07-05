@@ -4769,6 +4769,21 @@ def default_usage_adapters():
                 "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
                 "enabled": False,
             },
+            {
+                "//": ("Disabled example: a GATING remaining-quota source. `command` is an "
+                       "OPERATOR-supplied argv script that reads its own Claude Code OAuth "
+                       "credential and prints m8shift.usage.fixture.v1 with per-window "
+                       "`used_ratio` (the endpoint reports a percent, never tokens). See "
+                       "examples/usage-adapters/claude-oauth-usage.py. M8Shift never opens the "
+                       "socket — it only runs the argv you enable. provenance:official."),
+                "name": "claude-quota",
+                "agent": "claude",
+                "provider": "anthropic-claude",
+                "kind": "cli_json",
+                "command": ["python3", "examples/usage-adapters/claude-oauth-usage.py"],
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
         ],
     }
 

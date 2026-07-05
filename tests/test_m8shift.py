@@ -8080,7 +8080,8 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         rows = {a["name"]: a for a in json.loads(r.stdout)["adapters"]}
         self.assertEqual(set(rows), {"claude-usage-cli", "codex-usage-fixture",
-                                     "claude-jsonl-scan", "codex-jsonl-scan"})
+                                     "claude-jsonl-scan", "codex-jsonl-scan",
+                                     "claude-quota"})
         for row in rows.values():
             self.assertFalse(row["enabled"])            # every scaffold example ships disabled
             self.assertFalse(row["identity_pinned"])
@@ -8391,6 +8392,91 @@ class TestRFC040UsageJsonlScanBounds(unittest.TestCase):
         with mock.patch.object(self.rt.time, "monotonic", lambda: next(ticks)):
             _, warnings = self.rt.scan_jsonl_usage([d], "claude", now, timeout_s=1)
         self.assertTrue(any("deadline" in w for w in warnings), warnings)
+
+
+class TestRFC040UsageQuota(CLIBase):
+    """RFC 040 Phase 3 Slice 3 — GATING remaining-quota via a ratio-native source.
+    A quota fixture carrying per-window `used_ratio` (a percent, never tokens)
+    drives decision_ratio directly and gates cooldown; the shipped example OAuth
+    adapter maps the endpoint's remainingPercent to that shape and is fail-open."""
+
+    ADAPTERS_REL = os.path.join(".m8shift", "usage", "adapters.json")
+    FIXTURE_REL = os.path.join(".m8shift", "usage", "fixtures", "quota.json")
+    EXAMPLE_REL = os.path.join("examples", "usage-adapters", "claude-oauth-usage.py")
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(self.d, "m8shift-runtime.py"))
+
+    def rt(self, *args):
+        return subprocess.run([sys.executable, "m8shift-runtime.py", *args],
+                              cwd=self.d, capture_output=True, text=True)
+
+    def ratio_doc(self, *windows):
+        return {"schema": "m8shift.usage.fixture.v1", "agent": "claude",
+                "provenance": "official", "captured_at": "2026-01-01T00:00:00Z",
+                "used_tokens": None, "limit_tokens": None, "windows": list(windows)}
+
+    def snapshot_for(self, doc):
+        for rel, payload in ((self.FIXTURE_REL, doc), (self.ADAPTERS_REL, {
+                "schema": "m8shift.usage.adapters.v1", "adapters": [{
+                    "name": "claude-quota", "agent": "claude", "kind": "fixture",
+                    "fixture_path": self.FIXTURE_REL, "timeout_s": 5, "enabled": True}]})):
+            path = os.path.join(self.d, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+        return self.rt("usage", "snapshot", "--json")
+
+    def test_ratio_quota_fixture_gates_near_and_limit(self):
+        near = self.snapshot_for(self.ratio_doc(
+            {"kind": "session_5h", "used_ratio": 0.9, "resets_at": "2026-01-01T05:00:00Z"}))
+        self.assertEqual(near.returncode, 30, near.stdout + near.stderr)   # 0.9 >= warn 0.80
+        hit = self.snapshot_for(self.ratio_doc(
+            {"kind": "weekly", "used_ratio": 1.0, "resets_at": "2026-01-08T00:00:00Z"}))
+        self.assertEqual(hit.returncode, 40, hit.stdout + hit.stderr)      # 1.0 >= limit 1.0
+        snap = json.loads(hit.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["source"]["provenance"], "official")
+        self.assertIsNone(snap["windows"][0]["used"])                      # tokens stay null
+
+    def _example(self):
+        import importlib.util
+        rp = os.path.join(REPO, self.EXAMPLE_REL)
+        spec = importlib.util.spec_from_file_location("claude_oauth_usage", rp)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_example_build_fixture_maps_percent_to_used_ratio(self):
+        mod = self._example()
+        payload = {"windows": [
+            {"kind": "five_hour", "remainingPercent": 42, "resetsAt": "2026-01-01T05:00:00Z"},
+            {"kind": "seven_day", "remainingPercent": 80},
+            {"kind": "unknown_window", "remainingPercent": 10},   # skipped: unmapped kind
+        ]}
+        fx = mod.build_fixture(payload, "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["provenance"], "official")
+        self.assertIsNone(fx["used_tokens"])                      # never a token count
+        by = {w["kind"]: w for w in fx["windows"]}
+        self.assertEqual(by["session_5h"]["used_ratio"], 0.58)    # 1 - 42/100
+        self.assertEqual(by["weekly"]["used_ratio"], 0.2)         # 1 - 80/100
+        self.assertNotIn("unknown_window", by)
+        for w in fx["windows"]:
+            self.assertNotIn("used", w)                           # ratio window, no token field
+
+    def test_example_is_fail_open_on_missing_credential(self):
+        """No network needed: a missing credential path fails the read first and the
+        script prints an empty official fixture (decision_ratio null → unknown)."""
+        r = subprocess.run(
+            [sys.executable, os.path.join(REPO, self.EXAMPLE_REL)],
+            cwd=self.d, capture_output=True, text=True,
+            env={**os.environ, "M8SHIFT_CLAUDE_CREDENTIALS":
+                 os.path.join(self.d, "does-not-exist.json")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        fx = json.loads(r.stdout)                                 # valid JSON, no NaN
+        self.assertEqual(fx["provenance"], "official")
+        self.assertEqual(fx["windows"], [])                       # fail-open, no gating
 
 
 class TestRFC040UsagePRB(CLIBase):

@@ -1549,9 +1549,12 @@ mandatory) and rule 9 (official data wins over estimates).
   `limit_tokens: null`, `provenance: local_estimate` — so `decision_ratio` is
   `null`, status is `unknown`, and it **never gates** (fail-open; consumption alone
   cannot gate). **Opt-in / default-off** (rule 13): ships disabled with no implicit
-  root. Bounded (`USAGE_SCAN_MAX_FILES` = 2000 files, `USAGE_SCAN_MAX_FILE_BYTES` =
+  root. Bounded (`USAGE_SCAN_MAX_FILES` = 2000 files opened, `USAGE_SCAN_MAX_CANDIDATES`
+  = 50000 files enumerated before any `lstat`, `USAGE_SCAN_MAX_FILE_BYTES` =
   64 MiB/file, `USAGE_SCAN_HORIZON_DAYS` = 8-day mtime cutoff so stale files are
-  never opened) and version-tolerant: unknown fields ignored, unparseable lines
+  never opened, and a wall-clock deadline from the adapter's `timeout_s` — each of
+  the last four stops with a lower-bound `usage.scan` warning) and version-tolerant:
+  unknown fields ignored, unparseable lines
   skipped and counted, an abnormal skip ratio (>50% of a usage-bearing file)
   raising a `usage.scan` schema-drift finding (vendor JSONL is undocumented
   internals and will drift). Pure filesystem read: no network, no subprocess,
@@ -1568,10 +1571,15 @@ mandatory) and rule 9 (official data wins over estimates).
   "Schema extension for ratio-native quota" below). `provenance: official`.
   **M8Shift never opens the socket** — the operator's script performs the
   request; M8Shift runs the argv through the RFC 034 hardened runner and ingests
-  stdout, exactly like every other adapter. Equivalent turnkey source:
-  `claude-monitor --once --output json` (already catalogued above), preferred
-  when the operator does not want to maintain a script — and when it exposes
-  absolute `rate_limits` tokens, the token fields may be filled instead.
+  stdout, exactly like every other adapter. A worked reference lives at
+  `examples/usage-adapters/claude-oauth-usage.py` (fail-open: any error prints an
+  empty official fixture → `unknown`, never a pause), and `usage init` scaffolds a
+  **disabled** `claude-quota` adapter pointing at it. The example is reference
+  material, deliberately not in `checksums.sha256`; review before enabling.
+  Equivalent turnkey source: `claude-monitor --once --output json` (already
+  catalogued above), preferred when the operator does not want to maintain a
+  script — and when it exposes absolute `rate_limits` tokens, the token fields may
+  be filled instead.
 - **`codex-ratelimits`** (remaining; gating). The `account/rateLimits/read` RPC
   (already catalogued) → `primary_window` / `secondary_window` / reset
   timestamps → `windows[]`, `provenance: official`.
