@@ -335,6 +335,8 @@ published site, or use the repository-local docs when working from a clone.
 | 034 | [Companion adapter interface](docs/en/rfc/034-rfc-companion-adapter-interface.md) | Context packs + optional shell-output adapters | shipped · RTK visible | v3.36.0 · 2026-07-01 | `m8shift-context.py status`, RTK ON/OFF, `M8SHIFT_RTK=on/off`, last-pack ratio |
 | 037 | [Agent context compression backends](docs/en/rfc/037-rfc-agent-context-compression-backends.md) | Digest-based context compression + bounded raw references | Phase D follow-up shipped | v3.40.0 · 2026-07-02 | `m8shift-context.py compress/retrieve`, redaction-before-store, builtin + RTK shell/tool dispatch, explicit/manual opt-in `headroom_ext`, reference-only fail-safe |
 | 039 | [Model/task routing](docs/en/rfc/039-rfc-model-task-routing.md) | Capability-first model/task routing | Phase 1 shipped | v3.35.0 · 2026-07-01 | operator manifests, no baked-in vendors/prices, no launch |
+| 049 | [Holder liveness](docs/en/rfc/049-rfc-holder-liveness-stale-claim-hardening.md) | Separate holder liveness from pen TTL; harden stale force-claim and worktree ownership | draft | — | target v3.53.0 candidate |
+| 050 | [Manual multi-agent specialists](docs/en/rfc/050-rfc-manual-multi-agent-specialists.md) | Manual specialist workflow with advisory read-only and isolated worktree lanes | draft | — | reports return to the relay |
 
 ## 🔁 How it works
 
