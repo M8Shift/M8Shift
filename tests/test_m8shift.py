@@ -8588,6 +8588,49 @@ class TestRFC040UsageBudget(CLIBase):
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "usage", "budget.example.json")))
         self.assertFalse(os.path.exists(os.path.join(self.d, self.BUDGET_REL)))
 
+    # ── solo adversarial-hunt regressions (Codex offline; the hunt is authority) ──
+
+    def test_deeply_nested_budget_is_fail_safe_not_crash(self):
+        """Hunt blocker: a deeply-nested budget.json raises RecursionError inside the
+        JSON reader; it must be IGNORED with a warning, never crash the pipeline."""
+        r = self._snapshot(self._spent_doc(),
+                           budget="[" * 20000 + "]" * 20000)   # RecursionError on json.load
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # fail-safe, no traceback
+        payload = json.loads(r.stdout)
+        self.assertIn("usage.budget", {f["check"] for f in payload["findings"]})
+        self.assertIsNone(payload["snapshots"][0]["snapshot"]["decision_ratio"])
+
+    def test_budget_relabels_non_official_source_to_local_estimate(self):
+        """Hunt major: a budget-filled limit downgrades provenance to local_estimate,
+        so a proxy_reported/manual/etc source can't outrank an operator guess."""
+        r = self._snapshot(self._spent_doc(provenance="proxy_reported"), budget={
+            "schema": "m8shift.usage.budget.v1",
+            "budgets": [{"agent": "claude", "windows": {"session_5h": 100000}}]})
+        self.assertEqual(r.returncode, 30, r.stdout + r.stderr)   # 0.9 gates
+        snap = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["source"]["provenance"], "local_estimate")
+
+    def test_huge_used_with_budget_is_fail_open_not_overflow(self):
+        """Hunt major: a budget-filled limit + an implausibly large `used` must not
+        raise OverflowError in used/limit — the ratio fails open to unknown."""
+        doc = {"schema": "m8shift.usage.fixture.v1", "agent": "claude",
+               "provenance": "local_estimate", "captured_at": "2026-01-01T00:00:00Z",
+               "used_tokens": 10 ** 400, "limit_tokens": None,
+               "windows": [{"kind": "session_5h", "used": 10 ** 400, "resets_at": None}]}
+        r = self._snapshot(doc, budget={"schema": "m8shift.usage.budget.v1",
+            "budgets": [{"agent": "claude", "windows": {"session_5h": 100000}}]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)     # no crash, fail-open
+        self.assertIsNone(json.loads(r.stdout)["snapshots"][0]["snapshot"]["decision_ratio"])
+
+    def test_budget_cap_above_max_is_rejected(self):
+        """Hunt minor: a cap above USAGE_BUDGET_MAX_CAP is not usable — no limit filled."""
+        r = self._snapshot(self._spent_doc(), budget={"schema": "m8shift.usage.budget.v1",
+            "budgets": [{"agent": "claude", "windows": {"session_5h": 10 ** 15}}]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)     # cap rejected => ungated
+        snap = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertIsNone(snap["windows"][0]["limit"])
+        self.assertIsNone(snap["decision_ratio"])
+
 
 class TestRFC040UsagePRB(CLIBase):
     """RFC 040 PR B — the guard/watch/wait/resume family. GENERAL-table exit

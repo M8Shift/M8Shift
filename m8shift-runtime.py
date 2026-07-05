@@ -532,7 +532,10 @@ def read_json_diagnostic(path, default):
             data = json.load(fh)
     except FileNotFoundError:
         return default, None
-    except (OSError, json.JSONDecodeError) as e:
+    # Mirror read_jsonl_diagnostic: deeply-nested JSON raises RecursionError and a bad
+    # encoding raises UnicodeDecodeError (a ValueError) — a malformed file must return
+    # a diagnostic, never crash the caller.
+    except (OSError, json.JSONDecodeError, RecursionError, ValueError) as e:
         return default, str(e)
     if not isinstance(data, type(default)):
         return default, f"expected {type(default).__name__}, got {type(data).__name__}"
@@ -4625,6 +4628,7 @@ USAGE_LEDGER = os.path.join(RUNTIME_DIR, "usage.jsonl")
 USAGE_ERRORS = os.path.join(RUNTIME_DIR, "usage-adapter-errors.jsonl")
 USAGE_ADAPTERS_SCHEMA = "m8shift.usage.adapters.v1"
 USAGE_BUDGET_SCHEMA = "m8shift.usage.budget.v1"
+USAGE_BUDGET_MAX_CAP = 10 ** 12             # a trillion tokens: above any real plan, below float-overflow risk
 USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"
 USAGE_FIXTURE_SCHEMA = "m8shift.usage.fixture.v1"
 USAGE_ADAPTER_KINDS = ("cli_json", "fixture", "jsonl_scan")
@@ -4953,7 +4957,7 @@ def load_usage_budgets():
         caps = {}
         for kind, cap in windows.items():
             if isinstance(kind, str) and kind and isinstance(cap, int) \
-                    and not isinstance(cap, bool) and cap > 0:
+                    and not isinstance(cap, bool) and 0 < cap <= USAGE_BUDGET_MAX_CAP:
                 caps[kind] = cap
         if caps:
             budgets[agent] = caps
@@ -4987,6 +4991,17 @@ def _usage_iso_or_none(value, field, warnings):
         return value
     warnings.append(f"{field} must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ); ignored")
     return None
+
+
+def _usage_safe_ratio(used, limit):
+    """`used / limit` as a finite float, or None when the magnitude overflows a
+    float (an implausibly large `used`, e.g. 10**400, must fail open — the ratio
+    math must never crash the snapshot). Callers skip a None ratio."""
+    try:
+        ratio = used / limit
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return ratio if math.isfinite(ratio) else None
 
 
 def _usage_ratio_or_none(value, field, warnings):
@@ -5084,16 +5099,24 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
             cap = budget.get(window["kind"])
             if window["used"] is not None and window["limit"] is None \
                     and "used_ratio" not in window \
-                    and isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+                    and isinstance(cap, int) and not isinstance(cap, bool) \
+                    and 0 < cap <= USAGE_BUDGET_MAX_CAP:
                 window["limit"] = cap
+                # The gate is now driven by an operator guess: downgrade the
+                # structured provenance so the canonical field cannot outrank it.
+                provenance = "local_estimate"
                 warnings.append(f"windows[{window['kind']}].limit filled from the "
                                 "operator budget (local_estimate; not official quota)")
-    ratios = [w["used"] / w["limit"] for w in windows
-              if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0]
+    ratios = [r for r in
+              (_usage_safe_ratio(w["used"], w["limit"]) for w in windows
+               if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0)
+              if r is not None]
     # Ratio-native windows contribute their used_ratio directly — no token math.
     ratios += [w["used_ratio"] for w in windows if w.get("used_ratio") is not None]
     if not ratios and used_tokens is not None and isinstance(limit_tokens, int) and limit_tokens > 0:
-        ratios = [used_tokens / limit_tokens]
+        top = _usage_safe_ratio(used_tokens, limit_tokens)
+        if top is not None:
+            ratios = [top]
     decision_ratio = round(max(ratios), 4) if ratios else None
     known = {"schema", "agent", "provenance", "captured_at", "used_tokens", "limit_tokens", "windows"}
     for key in sorted(set(doc) - known):
