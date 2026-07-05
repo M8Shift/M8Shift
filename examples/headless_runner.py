@@ -58,7 +58,7 @@ import uuid
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.50.1"
+VERSION = "3.51.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
