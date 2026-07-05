@@ -178,6 +178,9 @@ UPDATE_DEFAULT_COMPONENTS = "core,protocol,pack,anchors"
 # (Stamps already come from the source version, so this ordering is defense in
 # depth, not the primary guard against the stamp-ordering bug.)
 UPDATE_ORDER = ("protocol", "pack", "anchors", "companions", "core")
+# "partial" (#43) is deliberately NOT ok: a mixed companion run (some refreshed,
+# some refused) reports the honest component word but keeps the run incomplete
+# and the exit code non-zero, exactly like a blanket refusal.
 UPDATE_OK_RESULTS = frozenset(("updated", "already_current", "skipped"))
 UPDATE_AUDIT_REL = os.path.join(".m8shift", "update-audit.jsonl")
 UPDATE_AUDIT_SCHEMA = "m8shift.update.audit.v1"
@@ -2293,6 +2296,25 @@ def _update_aggregate(results):
     return max(results, key=_update_result_rank)
 
 
+def _update_aggregate_mixed(results):
+    """#43: mixed-aware component fold. When at least one sub-item succeeded
+    (updated/already_current) AND at least one was refused or needs manual review,
+    the component result is `partial` — never a blanket `refused` that hides the
+    successes. `partial` is not in UPDATE_OK_RESULTS, so the overall run still
+    reports incomplete and exits non-zero."""
+    if (any(r in ("updated", "already_current") for r in results)
+            and any(r in ("refused", "manual_review_required") for r in results)):
+        return "partial"
+    return _update_aggregate(results)
+
+
+def _companion_apply_line(lines, sel):
+    """Last apply_companions() note about one companion (its final outcome line)."""
+    prefix = "companion %s:" % sel
+    picked = [ln for ln in lines if ln.startswith(prefix)]
+    return picked[-1] if picked else prefix + " applied"
+
+
 def _update_protocol_component(dry_run, guard=None):
     """Refresh target M8SHIFT.protocol(.md/-reference.md) from the RUNNING (new)
     source's embedded constants — never from the old target interpreter."""
@@ -2487,13 +2509,24 @@ def _update_companions_component(selection, source_dir, checksums, allow_downgra
     """Refresh companions via the RFC 044 plan/apply machinery, rebased onto the
     target (HERE). `selection` is the resolved list of companion names: installed
     ones by default, or the operator's explicit `--companions` names (the only way
-    a companion ABSENT from the target is ever added — never silently)."""
+    a companion ABSENT from the target is ever added — never silently).
+
+    Returns (result, detail, items): `items` carries one structured outcome per
+    companion ({"name", "result", "detail"}) so `--json` reports each companion
+    honestly, and a mixed run folds to `partial` instead of a blanket `refused`
+    (#43)."""
     if not selection:
-        return "skipped", "no companions installed in the target (none refreshed, none added)"
+        return ("skipped",
+                "no companions installed in the target (none refreshed, none added)", [])
     ns = argparse.Namespace(companions=",".join(selection), companion_source=source_dir,
                             force_companions=True, full=False, no_companions=False)
     plan, errors = plan_companions(ns)
-    results, notes = [], []
+    items, notes = [], []
+
+    def record(sel, result, note):
+        items.append({"name": sel, "result": result, "detail": note})
+        notes.append(note)
+
     for err in list(errors):
         if "newer than the core" in err and allow_downgrade:
             # --allow-downgrade extends to version-locked companions: rebuild the
@@ -2510,39 +2543,43 @@ def _update_companions_component(selection, source_dir, checksums, allow_downgra
                 errors.remove(err)
                 notes.append("companion %s: downgraded (--allow-downgrade)" % sel)
     for err in errors:
-        results.append("refused")
-        notes.append(err)
+        m = re.match(r"companion ([a-z0-9]+):", err)
+        record(m.group(1) if m else "?", "refused", err)
     verified = []
     for entry in plan:
         if entry["action"] in ("copy", "replace"):
             ok, note = _verify_source_checksum(checksums, source_dir, entry["fname"])
             if not ok:
-                results.append("refused")
-                notes.append("companion %s: %s" % (entry["sel"], note))
+                record(entry["sel"], "refused",
+                       "companion %s: %s" % (entry["sel"], note))
                 continue
         verified.append(entry)
     if dry_run:
         for entry in verified:
             if entry["action"] in ("copy", "replace"):
-                results.append("updated")
-                notes.append("companion %s: would refresh %s v%s"
-                             % (entry["sel"], entry["fname"], entry["sver"]))
+                record(entry["sel"], "updated",
+                       "companion %s: would refresh %s v%s"
+                       % (entry["sel"], entry["fname"], entry["sver"]))
             else:
-                results.append("already_current")
-                notes.append("companion %s: already up to date" % entry["sel"])
-        return _update_aggregate(results), "; ".join(notes)
+                record(entry["sel"], "already_current",
+                       "companion %s: already up to date" % entry["sel"])
+        return (_update_aggregate_mixed([i["result"] for i in items]),
+                "; ".join(notes), items)
     if guard is not None and verified:
         guard.require_owned()
     lines, apply_errors = apply_companions(verified)
     notes.extend(lines)
     for entry in verified:
         if entry["sel"] in apply_errors:
-            results.append("refused")
+            result = "refused"
         elif entry["action"] in ("copy", "replace"):
-            results.append("updated")
+            result = "updated"
         else:
-            results.append("already_current")
-    return _update_aggregate(results), "; ".join(notes)
+            result = "already_current"
+        items.append({"name": entry["sel"], "result": result,
+                      "detail": _companion_apply_line(lines, entry["sel"])})
+    return (_update_aggregate_mixed([i["result"] for i in items]),
+            "; ".join(notes), items)
 
 
 def _update_core_component(source_dir, target_root, checksums, version_before,
@@ -2817,9 +2854,14 @@ def cmd_update(args):
                 res, detail = _update_anchors_component(roster, args.force_generated,
                                                         dry_run, guard)
             elif comp == "companions":
-                res, detail = _update_companions_component(companion_selection, source_dir,
-                                                           checksums, args.allow_downgrade,
-                                                           dry_run, guard)
+                # #43: per-companion outcomes ride along so JSON/audit consumers
+                # see exactly which companion succeeded and which was refused.
+                res, detail, companion_items = _update_companions_component(
+                    companion_selection, source_dir, checksums, args.allow_downgrade,
+                    dry_run, guard)
+                rows.append({"component": comp, "result": res, "detail": detail,
+                             "companions": companion_items})
+                continue
             else:
                 res, detail = _update_core_component(source_dir, target_root, checksums,
                                                      version_before, dry_run, guard)
@@ -2856,8 +2898,14 @@ def cmd_update(args):
                     "target_version_before": version_before or "-",
                     "target_version_after": version_after or "-",
                     "components": rows,
+                    # #43: a `partial` companions row still refreshed at least one
+                    # companion — the flag reflects the sub-items, not the fold.
                     "companions_refreshed": any(
-                        r["component"] == "companions" and r["result"] == "updated" for r in rows),
+                        r["component"] == "companions"
+                        and (r["result"] == "updated"
+                             or any(i["result"] == "updated"
+                                    for i in r.get("companions", ())))
+                        for r in rows),
                 })
 
     ok = all(r["result"] in UPDATE_OK_RESULTS for r in rows)
@@ -2882,8 +2930,10 @@ def cmd_update(args):
             print("  (dry-run: plan only, nothing written, no lock taken)")
         for r in rows:
             print("  • %-10s %s — %s" % (r["component"], r["result"], r.get("detail", "")))
+            for item in r.get("companions", ()):
+                print("      · %-10s %s — %s" % (item["name"], item["result"], item["detail"]))
         print("✓ update complete." if ok else
-              "✗ update incomplete: see refused/manual_review_required/staged rows above.")
+              "✗ update incomplete: see refused/manual_review_required/staged/partial rows above.")
     return 0 if ok else 1
 
 
@@ -6571,7 +6621,10 @@ def main():
     up.add_argument("--dry-run", action="store_true",
                     help="plan only: report per-component results without writing or taking "
                          "the target's file lock")
-    up.add_argument("--json", action="store_true", help="machine-readable update plan/results")
+    up.add_argument("--json", action="store_true",
+                    help="machine-readable update plan/results; the companions row carries "
+                         "per-companion outcomes, and a mixed run reports `partial` "
+                         "(still a non-zero exit)")
     up.add_argument("--allow-downgrade", action="store_true",
                     help="allow replacing a NEWER target with an older source (refused by default; "
                          "the source version authority decides)")

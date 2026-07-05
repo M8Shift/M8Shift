@@ -6211,6 +6211,35 @@ class TestStage8Core(CLIBase):
                 guard.require_owned()
 
 
+# ───────────────────────── checksums manifest coverage ──────────────────────
+
+class TestChecksumManifestCoverage(unittest.TestCase):
+    """#42: checksums.sha256 must carry an entry for EVERY shipped m8shift-*.py
+    companion script in the repo root (plus the core), so a future companion can
+    never ship unmanifested — a present-but-incomplete manifest fails closed in
+    installers and `update`, bricking that companion's verified path."""
+
+    @staticmethod
+    def _manifest_entries():
+        entries = {}
+        with open(os.path.join(REPO, "checksums.sha256"), encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2:
+                    entries[parts[1].strip()] = parts[0]
+        return entries
+
+    def test_every_root_companion_script_is_manifested(self):
+        entries = self._manifest_entries()
+        shipped = sorted(f for f in os.listdir(REPO)
+                         if f.startswith("m8shift-") and f.endswith(".py"))
+        self.assertTrue(shipped, "no companion scripts found next to m8shift.py?")
+        for name in ["m8shift.py"] + shipped:
+            self.assertIn(name, entries,
+                          "checksums.sha256 has no entry for %s (#42)" % name)
+            self.assertRegex(entries[name], r"^[0-9a-f]{64}$")
+
+
 # ───────────────────────── installer verify default ─────────────────────────
 
 class TestInstallerVerifyDefault(unittest.TestCase):
@@ -8249,7 +8278,7 @@ class TestRFC048PRB(CLIBase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         d, comps = self._components(r)
         allowed = {"updated", "already_current", "skipped", "refused",
-                   "manual_review_required", "staged"}
+                   "manual_review_required", "staged", "partial"}
         self.assertTrue(set(comps.values()) <= allowed, comps)
         self.assertEqual(comps, {
             "protocol": "already_current",
@@ -8394,6 +8423,59 @@ class TestRFC048PRB(CLIBase):
         _, comps = self._components(r)
         self.assertEqual(comps["companions"], "updated")
         self.assertTrue(os.path.exists(os.path.join(self.d, "m8shift-context.py")))
+
+    def _mixed_companion_manifest(self):
+        """Source manifest that verifies m8shift.py + runtime but breaks context:
+        one updatable companion, one unverifiable one (#43)."""
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"), self.src)
+        shutil.copy(os.path.join(REPO, "m8shift-context.py"), self.src)
+
+        def sha(name):
+            with open(os.path.join(self.src, name), "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
+
+        with open(os.path.join(self.src, "checksums.sha256"), "w", encoding="utf-8") as fh:
+            fh.write(sha("m8shift.py") + "  m8shift.py\n")
+            fh.write(sha("m8shift-runtime.py") + "  m8shift-runtime.py\n")
+            fh.write("0" * 64 + "  m8shift-context.py\n")
+
+    def test_mixed_companion_outcomes_report_partial(self):
+        """#43: one refreshed + one refused companion folds to `partial` (never a
+        blanket `refused`), --json carries per-companion outcomes, and the run
+        still exits non-zero (partial is not an OK result)."""
+        self.init()
+        self._mixed_companion_manifest()
+        r = self.update("--companions", "runtime,context", "--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertEqual(comps["companions"], "partial")
+        self.assertFalse(d["ok"])
+        row = next(row for row in d["components"] if row["component"] == "companions")
+        per = {i["name"]: i["result"] for i in row["companions"]}
+        self.assertEqual(per, {"runtime": "updated", "context": "refused"})
+        ctx = next(i for i in row["companions"] if i["name"] == "context")
+        self.assertIn("checksum", ctx["detail"])
+        # the refreshed companion landed; the refused one never did
+        self.assertTrue(os.path.exists(os.path.join(self.d, "m8shift-runtime.py")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "m8shift-context.py")))
+        # the audit flag reflects the sub-items, not the partial fold
+        with open(os.path.join(self.d, self.AUDIT_REL), encoding="utf-8") as fh:
+            last = json.loads([ln for ln in fh.read().splitlines() if ln.strip()][-1])
+        self.assertTrue(last["companions_refreshed"])
+
+    def test_mixed_companion_dry_run_reports_partial_plan_and_writes_nothing(self):
+        self.init()
+        self._mixed_companion_manifest()
+        before = self._snapshot(self.d)
+        r = self.update("--companions", "runtime,context", "--json", "--dry-run")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertTrue(d["dry_run"])
+        self.assertEqual(comps["companions"], "partial")
+        row = next(row for row in d["components"] if row["component"] == "companions")
+        per = {i["name"]: i["result"] for i in row["companions"]}
+        self.assertEqual(per, {"runtime": "updated", "context": "refused"})
+        self.assertEqual(self._snapshot(self.d), before)   # plan only, byte-identical
 
     # ── source ownership / relay-state hygiene ───────────────────────────────
 
