@@ -11,6 +11,7 @@ Tests keep the internal `cowork` alias only to reduce historical noise.
 Each regression test targets a fixed bug (NR-n) or a specification guarantee.
 Standard library only.
 """
+import datetime as dt
 import hashlib
 import json
 import os
@@ -8078,14 +8079,15 @@ class TestRFC040UsagePRA(CLIBase):
         r = self.rt("usage", "adapters", "list", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         rows = {a["name"]: a for a in json.loads(r.stdout)["adapters"]}
-        self.assertEqual(set(rows), {"claude-usage-cli", "codex-usage-fixture"})
+        self.assertEqual(set(rows), {"claude-usage-cli", "codex-usage-fixture",
+                                     "claude-jsonl-scan", "codex-jsonl-scan"})
         for row in rows.values():
-            self.assertFalse(row["enabled"])
+            self.assertFalse(row["enabled"])            # every scaffold example ships disabled
             self.assertFalse(row["identity_pinned"])
         only_codex = json.loads(self.rt("usage", "adapters", "list",
                                         "--agent", "codex", "--json").stdout)
-        self.assertEqual([a["name"] for a in only_codex["adapters"]],
-                         ["codex-usage-fixture"])
+        self.assertEqual(sorted(a["name"] for a in only_codex["adapters"]),
+                         ["codex-jsonl-scan", "codex-usage-fixture"])
 
     def test_snapshot_without_config_is_config_error(self):
         r = self.rt("usage", "snapshot", "--json")
@@ -8093,6 +8095,302 @@ class TestRFC040UsagePRA(CLIBase):
         payload = json.loads(r.stdout)
         self.assertFalse(payload["ok"])
         self.assertIn("usage init", " ".join(f["message"] for f in payload["findings"]))
+
+    def test_scaffold_ships_disabled_jsonl_scan_examples(self):
+        """RFC 040 Phase 3 Slice 2: `usage init` seeds discoverable, DISABLED
+        jsonl_scan examples with ~-style scan_roots (never absolute host paths)."""
+        self.assertEqual(self.rt("usage", "init").returncode, 0)
+        with open(os.path.join(self.d, self.ADAPTERS_REL), encoding="utf-8") as fh:
+            by_name = {a["name"]: a for a in json.load(fh)["adapters"]}
+        for name, provider, root in (("claude-jsonl-scan", "claude", "~/.claude/projects"),
+                                     ("codex-jsonl-scan", "codex", "~/.codex/sessions")):
+            entry = by_name[name]
+            self.assertEqual(entry["kind"], "jsonl_scan")
+            self.assertEqual(entry["provider"], provider)
+            self.assertFalse(entry["enabled"])              # opt-in: ships off
+            self.assertIn(root, entry["scan_roots"])
+            for path in entry["scan_roots"]:
+                self.assertTrue(path.startswith("~"))       # no absolute host paths
+
+
+class TestRFC040UsageJsonlScan(CLIBase):
+    """RFC 040 Phase 3 Slice 2 — the built-in `jsonl_scan` adapter: a SPENT/reporting
+    source that sums an operator's LOCAL agent-session JSONL token integers into
+    rolling windows. It is aggregate-only (never reads message content), opt-in
+    (default-off), bounded (files / bytes / mtime horizon), and version-tolerant —
+    and because it reports `used` with no `limit`, decision_ratio is null → status
+    unknown → it NEVER gates (fail-open)."""
+
+    ADAPTERS_REL = os.path.join(".m8shift", "usage", "adapters.json")
+    LEDGER_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(self.d, "m8shift-runtime.py"))
+
+    def rt(self, *args):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", *args],
+            cwd=self.d, capture_output=True, text=True,
+        )
+
+    def write_adapters(self, adapters):
+        path = os.path.join(self.d, self.ADAPTERS_REL)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.usage.adapters.v1", "adapters": adapters}, fh)
+
+    def ledger_lines(self):
+        try:
+            with open(os.path.join(self.d, self.LEDGER_REL), encoding="utf-8") as fh:
+                return [line for line in fh.read().splitlines() if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    @staticmethod
+    def _iso(when):
+        return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def write_jsonl(self, rows, rel):
+        path = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write((row if isinstance(row, str) else json.dumps(row)) + "\n")
+        return path
+
+    @staticmethod
+    def claude_row(when, tokens, *, content=None, model="claude-opus-4-8", session="s1"):
+        usage = {"input_tokens": tokens, "output_tokens": 0,
+                 "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+        message = {"model": model, "usage": usage}
+        if content is not None:
+            message["content"] = content
+        return {"timestamp": TestRFC040UsageJsonlScan._iso(when),
+                "sessionId": session, "message": message}
+
+    def scan_adapter(self, roots, *, name="claude-scan", agent="claude",
+                     provider="claude", enabled=True, **extra):
+        entry = {"name": name, "agent": agent, "provider": provider,
+                 "kind": "jsonl_scan", "scan_roots": roots, "enabled": enabled}
+        entry.update(extra)
+        return entry
+
+    def scan_dir(self, sub="agent-logs"):
+        path = os.path.join(self.d, sub)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def test_scan_sums_windows_and_never_gates(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        # 5h window: 150 (1 min ago); weekly-only: 1000 (3 days ago); out of window: 8 days ago.
+        self.write_jsonl([
+            self.claude_row(now - dt.timedelta(minutes=1), 150),
+            self.claude_row(now - dt.timedelta(days=3), 1000),
+        ], os.path.join("agent-logs", "one.jsonl"))
+        self.write_jsonl([
+            self.claude_row(now - dt.timedelta(hours=8), 40),  # weekly only (older than 5h)
+            {"type": "user", "message": {"role": "user", "content": "no usage here"}},
+        ], os.path.join("agent-logs", "two.jsonl"))
+        self.write_adapters([self.scan_adapter([root])])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # spent-only => fail-open, never gates
+        snap = json.loads(r.stdout)["snapshots"][0]
+        self.assertEqual(snap["classification"], "unknown")
+        s = snap["snapshot"]
+        self.assertEqual(s["source"],
+                         {"adapter": "claude-scan", "kind": "jsonl_scan",
+                          "provenance": "local_estimate"})
+        self.assertIsNone(s["limit_tokens"])
+        self.assertIsNone(s["decision_ratio"])
+        self.assertEqual(s["used_tokens"], 1190)                # widest (weekly) sum: 150+1000+40
+        windows = {w["kind"]: w for w in s["windows"]}
+        self.assertEqual(windows["session_5h"]["used"], 150)    # only the 1-min-ago row
+        self.assertEqual(windows["weekly"]["used"], 1190)
+        for w in s["windows"]:
+            self.assertIsNone(w["limit"])
+            self.assertNotIn("used_ratio", w)
+        status = self.rt("usage", "status", "--json")
+        self.assertEqual(status.returncode, 0, status.stdout)   # unknown => fail-open
+
+    def test_scan_reads_only_aggregate_integers_never_message_content(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        secret = "TOPSECRET_PAYLOAD_DO_NOT_LEAK_1a2b3c"
+        self.write_jsonl([
+            self.claude_row(now - dt.timedelta(minutes=5), 321,
+                            content=[{"type": "text", "text": secret}]),
+        ], os.path.join("agent-logs", "priv.jsonl"))
+        self.write_adapters([self.scan_adapter([root], name="claude-scan")])
+        r = self.rt("usage", "snapshot", "--json", "--raw-excerpt")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(secret, r.stdout)                      # no message text in the output
+        s = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(s["used_tokens"], 321)                 # only the integer survived
+        self.assertNotIn("raw_excerpt_redacted", s)             # scan has no raw text at all
+        with open(os.path.join(self.d, self.LEDGER_REL), encoding="utf-8") as fh:
+            self.assertNotIn(secret, fh.read())                 # nor in the append-only ledger
+
+    def test_scan_is_version_tolerant_and_flags_schema_drift(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        # One good usage row (unknown extra fields ignored) + majority unparseable lines.
+        good = self.claude_row(now - dt.timedelta(minutes=1), 77)
+        good["message"]["unknown_future_field"] = {"nested": True}
+        good["totally_new_top_level_key"] = 42
+        rows = [good] + ["{ this is not valid json"] * 5
+        self.write_jsonl(rows, os.path.join("agent-logs", "drift.jsonl"))
+        self.write_adapters([self.scan_adapter([root])])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # never crashes on malformed input
+        payload = json.loads(r.stdout)
+        s = payload["snapshots"][0]["snapshot"]
+        self.assertEqual(s["used_tokens"], 77)                  # parseable row still summed
+        scan_findings = [f for f in payload["findings"] if f["check"] == "usage.scan"]
+        self.assertTrue(scan_findings, payload["findings"])
+        self.assertIn("schema drift", " ".join(f["message"] for f in scan_findings))
+
+    def test_scan_skips_files_older_than_mtime_horizon(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        # A file whose ROWS are recent but whose mtime is far in the past must never
+        # be opened (bounded scan: the mtime horizon gates file access).
+        path = self.write_jsonl([self.claude_row(now - dt.timedelta(minutes=1), 999)],
+                                os.path.join("agent-logs", "stale.jsonl"))
+        old = (now - dt.timedelta(days=20)).timestamp()
+        os.utime(path, (old, old))
+        self.write_adapters([self.scan_adapter([root])])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        s = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(s["used_tokens"], 0)                   # stale-mtime file skipped
+        for w in s["windows"]:
+            self.assertEqual(w["used"], 0)
+
+    def test_disabled_scan_adapter_performs_no_scan(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        self.write_jsonl([self.claude_row(now - dt.timedelta(minutes=1), 500)],
+                         os.path.join("agent-logs", "x.jsonl"))
+        self.write_adapters([self.scan_adapter([root], enabled=False)])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["snapshots"], [])              # nothing scanned
+        self.assertEqual(payload["skipped_disabled"], 1)
+        self.assertEqual(self.ledger_lines(), [])
+
+    def test_missing_or_empty_scan_roots_is_config_error(self):
+        for roots in ([], None):
+            with self.subTest(scan_roots=roots):
+                adapter = self.scan_adapter(["placeholder"], enabled=True)
+                if roots is None:
+                    del adapter["scan_roots"]
+                else:
+                    adapter["scan_roots"] = roots
+                self.write_adapters([adapter])
+                r = self.rt("usage", "snapshot", "--json")
+                self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+                messages = " ".join(f["message"] for f in json.loads(r.stdout)["findings"])
+                self.assertIn("scan_roots", messages)
+
+    def test_check_flags_missing_scan_roots_and_bad_provider(self):
+        self.write_adapters([
+            {"name": "no-roots", "agent": "claude", "provider": "claude",
+             "kind": "jsonl_scan", "scan_roots": [], "enabled": False},
+            {"name": "bad-provider", "agent": "codex", "provider": "not-a-provider",
+             "kind": "jsonl_scan", "scan_roots": ["~/.codex/sessions"], "enabled": False},
+        ])
+        r = self.rt("usage", "adapters", "check", "--json")
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        checks = {(f["severity"], f["check"]) for f in json.loads(r.stdout)["findings"]}
+        self.assertIn(("error", "usage.scan_roots"), checks)
+        self.assertIn(("error", "usage.provider"), checks)
+
+    def test_codex_provider_scan_is_version_tolerant(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        # Codex row shape is not pinned: usage nested under an arbitrary key, aliased
+        # token fields, and a `total_tokens` that must win over its components.
+        self.write_jsonl([
+            {"timestamp": self._iso(now - dt.timedelta(minutes=1)),
+             "info": {"token_usage": {"input_tokens": 7, "output_tokens": 3,
+                                      "cached_input_tokens": 2, "reasoning_output_tokens": 1}}},
+            {"ts": self._iso(now - dt.timedelta(hours=2)),
+             "usage": {"total_tokens": 40, "input_tokens": 30, "output_tokens": 10}},
+        ], os.path.join("agent-logs", "codex.jsonl"))
+        self.write_adapters([self.scan_adapter([root], name="codex-scan",
+                                               agent="codex", provider="codex")])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        s = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(s["used_tokens"], 53)                  # 13 (summed) + 40 (total wins)
+        windows = {w["kind"]: w for w in s["windows"]}
+        self.assertEqual(windows["session_5h"]["used"], 53)
+
+    def test_codex_finder_ignores_usage_nested_in_content(self):
+        """Codex PR #50 blocker 1: a usage-like object nested inside a content-bearing
+        key must NOT contribute a content-derived number; real top-level metadata
+        still counts, and no message text or the content-usage figure leaks."""
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        self.write_jsonl([
+            # ONLY usage is nested under `content` (with prompt text) → must be ignored
+            {"timestamp": self._iso(now - dt.timedelta(minutes=1)),
+             "content": {"text": "SECRET_PROMPT", "usage": {"total_tokens": 999}}},
+            # real top-level usage metadata → counts
+            {"timestamp": self._iso(now - dt.timedelta(minutes=2)),
+             "usage": {"total_tokens": 50}},
+        ], os.path.join("agent-logs", "codex.jsonl"))
+        self.write_adapters([self.scan_adapter([root], name="codex-scan",
+                                               agent="codex", provider="codex")])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("999", r.stdout)                       # content-nested usage never counted
+        self.assertNotIn("SECRET_PROMPT", r.stdout)             # message text never read
+        s = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(s["used_tokens"], 50)                  # only the real metadata row
+
+
+class TestRFC040UsageJsonlScanBounds(unittest.TestCase):
+    """RFC 040 Phase 3 Slice 2 (Codex PR #50 blocker 2): the scan bounds candidate
+    enumeration AND wall-clock time, not only opened files. Exercised in-process so
+    tiny constants/clock stubs keep it fast and deterministic."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        rp = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_bounds", rp)
+        cls.rt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.rt)
+
+    def _make_files(self, n):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        now = dt.datetime.now(dt.timezone.utc)
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        for i in range(n):
+            with open(os.path.join(d, f"log{i:03d}.jsonl"), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"timestamp": stamp, "message": {"usage": {
+                    "input_tokens": 1, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}) + "\n")
+        return d, now
+
+    def test_candidate_enumeration_cap_stops_and_warns(self):
+        d, now = self._make_files(6)
+        with mock.patch.object(self.rt, "USAGE_SCAN_MAX_CANDIDATES", 2):
+            _, warnings = self.rt.scan_jsonl_usage([d], "claude", now)
+        self.assertTrue(any("enumeration cap" in w for w in warnings), warnings)
+
+    def test_wall_clock_deadline_stops_and_warns(self):
+        d, now = self._make_files(4)
+        ticks = iter([0.0] + [100.0] * 50)   # deadline set at 0+1=1; next tick jumps past it
+        with mock.patch.object(self.rt.time, "monotonic", lambda: next(ticks)):
+            _, warnings = self.rt.scan_jsonl_usage([d], "claude", now, timeout_s=1)
+        self.assertTrue(any("deadline" in w for w in warnings), warnings)
 
 
 class TestRFC040UsagePRB(CLIBase):

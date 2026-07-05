@@ -4624,19 +4624,45 @@ USAGE_ERRORS = os.path.join(RUNTIME_DIR, "usage-adapter-errors.jsonl")
 USAGE_ADAPTERS_SCHEMA = "m8shift.usage.adapters.v1"
 USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"
 USAGE_FIXTURE_SCHEMA = "m8shift.usage.fixture.v1"
-USAGE_ADAPTER_KINDS = ("cli_json", "fixture")
+USAGE_ADAPTER_KINDS = ("cli_json", "fixture", "jsonl_scan")
 USAGE_PROVENANCE = ("official", "local_estimate", "proxy_reported",
                     "historical_estimate", "manual", "unknown")
 USAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 USAGE_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 USAGE_ADAPTER_KEYS = {"//", "name", "agent", "provider", "kind", "command",
-                      "fixture_path", "timeout_s", "enabled", "sha256"}
+                      "fixture_path", "scan_roots", "timeout_s", "enabled", "sha256"}
 USAGE_TIMEOUT_MIN_S = 1
 USAGE_TIMEOUT_MAX_S = 60
 USAGE_TIMEOUT_DEFAULT_S = 10
 USAGE_MAX_STDOUT_BYTES = 262144
 USAGE_RAW_EXCERPT_MAX_CHARS = 240
 USAGE_ERRORS_KEEP = 200
+# ── RFC 040 Phase 3 Slice 2 — jsonl_scan adapter bounds ──
+# The built-in `jsonl_scan` kind sums an operator's LOCAL agent-session JSONL token
+# integers into rolling windows (a SPENT/reporting source: used only, limit null,
+# so it can never gate — fail-open by design). Aggregate token integers ONLY; the
+# parsers never read message content. These caps are enforced on every scan so a
+# misconfigured root cannot walk an unbounded tree or open stale/huge files.
+USAGE_SCAN_MAX_FILES = 2000                     # hard cap on *.jsonl files opened per run
+USAGE_SCAN_MAX_CANDIDATES = 50000               # hard cap on *.jsonl candidates lstat'd (bounds enumeration)
+USAGE_SCAN_MAX_FILE_BYTES = 64 * 1024 * 1024    # skip any single file larger than this
+USAGE_SCAN_HORIZON_DAYS = 8                      # skip files whose mtime predates the widest window + margin
+USAGE_SCAN_SKIP_RATIO = 0.5                     # >50% unparseable lines in a usage file => schema-drift diagnostic
+USAGE_SCAN_MAX_DEPTH = 4                         # bounded search depth for a version-tolerant usage object
+USAGE_SCAN_PROVIDERS = ("claude", "codex")
+USAGE_SCAN_WINDOWS = (("session_5h", dt.timedelta(hours=5)),
+                      ("weekly", dt.timedelta(days=7)))
+# Recognized non-negative-integer token fields (Claude's four + version-tolerant
+# Codex aliases). Summed per usage object; message content is never touched.
+USAGE_SCAN_TOKEN_FIELDS = ("input_tokens", "output_tokens",
+                           "cache_creation_input_tokens", "cache_read_input_tokens",
+                           "cached_input_tokens", "reasoning_output_tokens")
+USAGE_SCAN_USAGE_KEYS = ("usage", "token_usage", "tokens", "token_count")
+# Content-bearing keys the version-tolerant Codex finder must NEVER recurse into:
+# a usage-like object nested inside prompt/response text would otherwise leak a
+# content-derived number into the aggregate (Codex PR #50 review, blocker 1).
+USAGE_SCAN_CONTENT_KEYS = frozenset((
+    "content", "text", "prompt", "response", "input", "output", "messages", "parts"))
 USAGE_WARN_THRESHOLD_DEFAULT = 0.80
 USAGE_LIMIT_THRESHOLD_DEFAULT = 1.0
 USAGE_STALE_AFTER_MINUTES_DEFAULT = 30
@@ -4718,6 +4744,31 @@ def default_usage_adapters():
                 "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
                 "enabled": False,
             },
+            {
+                "//": ("Disabled example: the built-in aggregate-only `jsonl_scan` of your OWN "
+                       "local Claude Code session logs. Set `scan_roots` to your path(s) and "
+                       "enabled:true. Spent/reporting source (used tokens, no limit) — it reads "
+                       "only integer token counts, never message content, and NEVER gates."),
+                "name": "claude-jsonl-scan",
+                "agent": "claude",
+                "provider": "claude",
+                "kind": "jsonl_scan",
+                "scan_roots": ["~/.claude/projects"],
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
+            {
+                "//": ("Disabled example: the Codex twin of the scan (best-effort, "
+                       "version-tolerant parser). Set `scan_roots` and enabled:true. "
+                       "Spent/reporting only — aggregate integers, never content, NEVER gates."),
+                "name": "codex-jsonl-scan",
+                "agent": "codex",
+                "provider": "codex",
+                "kind": "jsonl_scan",
+                "scan_roots": ["~/.codex/sessions", "~/.codex/archived_sessions"],
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
         ],
     }
 
@@ -4794,6 +4845,19 @@ def usage_adapter_entry_findings(entry, prefix, seen):
         if not isinstance(fixture_path, str) or not fixture_path.strip():
             findings.append({"severity": "error", "check": "usage.fixture_path",
                              "message": f"{label}: fixture kind requires a non-empty fixture_path"})
+    if kind == "jsonl_scan":
+        # RFC 040 Phase 3 Slice 2: opt-in local scan. scan_roots is operator-set with
+        # NO default (nothing scans until an explicit root is given AND enabled:true).
+        scan_roots = entry.get("scan_roots")
+        if not isinstance(scan_roots, list) or not scan_roots \
+                or not all(isinstance(r, str) and r.strip() for r in scan_roots):
+            findings.append({"severity": "error", "check": "usage.scan_roots",
+                             "message": f"{label}: jsonl_scan requires a non-empty "
+                                        "scan_roots list of directory strings"})
+        if provider not in USAGE_SCAN_PROVIDERS:
+            findings.append({"severity": "error", "check": "usage.provider",
+                             "message": f"{label}: jsonl_scan provider must be one of "
+                                        f"{', '.join(USAGE_SCAN_PROVIDERS)}"})
     timeout = entry.get("timeout_s", USAGE_TIMEOUT_DEFAULT_S)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
             or not (USAGE_TIMEOUT_MIN_S <= timeout <= USAGE_TIMEOUT_MAX_S):
@@ -5081,9 +5145,9 @@ def run_usage_adapter_bounded(argv, timeout, cap):
     return proc.returncode, buffers["out"], buffers["err"], overflow.is_set(), timed_out
 
 
-def run_usage_adapter(entry):
-    """Read one ENABLED adapter. Bounded, argv-only, no shell, no network by
-    M8Shift itself. Returns (doc, raw_text, error_message)."""
+def _run_usage_adapter_io(entry):
+    """Read one ENABLED fixture/cli_json adapter. Bounded, argv-only, no shell, no
+    network by M8Shift itself. Returns (doc, raw_text, error_message)."""
     kind = entry.get("kind")
     if kind == "fixture":
         path = entry.get("fixture_path", "")
@@ -5132,6 +5196,268 @@ def run_usage_adapter(entry):
         return json.loads(stdout), stdout, ""
     except json.JSONDecodeError as e:
         return None, stdout, f"adapter stdout is not valid JSON: {e}"
+
+
+# ── RFC 040 Phase 3 Slice 2 — built-in jsonl_scan usage adapter ──
+# A SPENT/reporting source. It sums an operator's LOCAL agent-session JSONL token
+# integers into rolling windows and emits used_tokens with limit_tokens=null, so
+# decision_ratio is null → status unknown → it NEVER gates (fail-open by design;
+# consumption alone cannot gate). The row parsers touch ONLY the integer usage
+# fields and the row timestamp — never prompt/response text, model, or sessionId —
+# which structurally guarantees no message content can reach the snapshot.
+
+def _usage_scan_sum_tokens(obj):
+    """Sum the recognized non-negative-integer token fields of a usage-like object.
+    Prefers an explicit `total_tokens` when present (avoids double-counting a Codex
+    component+total shape). Returns None when no token integer is found. Reads only
+    integer values — never strings."""
+    if not isinstance(obj, dict):
+        return None
+    total = obj.get("total_tokens")
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        return total
+    subtotal = 0
+    found = False
+    for field in USAGE_SCAN_TOKEN_FIELDS:
+        value = obj.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            subtotal += value
+            found = True
+    return subtotal if found else None
+
+
+def _usage_scan_claude_row(row):
+    """Claude Code transcript row → (tokens, timestamp) or None. Reads ONLY
+    message.usage's integer token fields and the top-level `timestamp`; it never
+    reads message.content, message.model, or sessionId."""
+    if not isinstance(row, dict):
+        return None
+    message = row.get("message")
+    if not isinstance(message, dict):
+        return None
+    tokens = _usage_scan_sum_tokens(message.get("usage"))
+    if tokens is None:
+        return None
+    return tokens, row.get("timestamp")
+
+
+def _usage_scan_find_usage(obj, depth=0):
+    """Bounded, version-tolerant search for a usage-like object (the Codex row shape
+    is not pinned here). Inspects only dict keys and integer values — it never reads
+    string content — and recurses at most USAGE_SCAN_MAX_DEPTH levels."""
+    if depth > USAGE_SCAN_MAX_DEPTH or not isinstance(obj, dict):
+        return None
+    for key in USAGE_SCAN_USAGE_KEYS:
+        child = obj.get(key)
+        if isinstance(child, dict) and _usage_scan_sum_tokens(child) is not None:
+            return child
+    if _usage_scan_sum_tokens(obj) is not None:
+        return obj
+    for key, value in obj.items():
+        # Never descend into content-bearing fields: a usage-like object nested in
+        # prompt/response text must not contribute a content-derived number.
+        if key in USAGE_SCAN_CONTENT_KEYS:
+            continue
+        if isinstance(value, dict):
+            found = _usage_scan_find_usage(value, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _usage_scan_codex_row(row):
+    """Codex session row → (tokens, timestamp) or None. Best-effort / version-tolerant:
+    finds a usage-like object near the top of the row and sums its integer token
+    fields; reads only those integers and a top-level timestamp, never content."""
+    if not isinstance(row, dict):
+        return None
+    usage = _usage_scan_find_usage(row)
+    if usage is None:
+        return None
+    tokens = _usage_scan_sum_tokens(usage)
+    if tokens is None:
+        return None
+    return tokens, row.get("timestamp") or row.get("ts") or row.get("time")
+
+
+def _usage_scan_parse_ts(value):
+    """Row timestamp → aware UTC datetime. Uses parse_utc first (strict `...Z`),
+    then tolerates vendor fractional seconds and numeric offsets. None if unusable."""
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = parse_utc(value)
+    if parsed is not None:
+        return parsed
+    text = re.sub(r"\.\d+", "", value.strip())          # drop fractional seconds
+    parsed = parse_utc(text)
+    if parsed is not None:
+        return parsed
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp.astimezone(dt.timezone.utc)
+
+
+def _usage_scan_roots(scan_roots):
+    """Expand `~` and normalize operator scan roots to deduplicated absolute paths."""
+    roots = []
+    for raw in scan_roots:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = os.path.realpath(os.path.expanduser(raw.strip()))
+        if path not in roots:
+            roots.append(path)
+    return roots
+
+
+def scan_jsonl_usage(scan_roots, provider, now_dt, timeout_s=None):
+    """Walk operator scan roots, sum agent-session token integers into rolling
+    windows, and return (m8shift.usage.fixture.v1 doc, warnings). Bounded
+    (files / candidates / bytes / mtime horizon / wall-clock deadline),
+    version-tolerant (unparseable lines skipped and counted; abnormal skip ratio →
+    diagnostic), aggregate-only (never reads message content), pure filesystem read
+    that never follows symlinks and never writes."""
+    parser = _usage_scan_claude_row if provider == "claude" else _usage_scan_codex_row
+    boundaries = [(name, now_dt - delta) for name, delta in USAGE_SCAN_WINDOWS]
+    widest = max(USAGE_SCAN_WINDOWS, key=lambda w: w[1])[0]
+    horizon = now_dt - dt.timedelta(days=USAGE_SCAN_HORIZON_DAYS)
+    deadline = (time.monotonic() + timeout_s) if timeout_s else None
+    sums = {name: 0 for name, _ in USAGE_SCAN_WINDOWS}
+    warnings = []
+    files_scanned = 0
+    candidates = 0
+    stop = False
+    cap_hit = candidate_cap_hit = deadline_hit = False
+    drift_files = 0
+    skipped_total = 0
+    for root in _usage_scan_roots(scan_roots):
+        if stop:
+            break
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            if stop:
+                break
+            dirnames.sort()                              # deterministic traversal
+            for filename in sorted(filenames):
+                if not filename.endswith(".jsonl"):
+                    continue
+                candidates += 1                          # counted BEFORE lstat: bounds enumeration
+                if candidates > USAGE_SCAN_MAX_CANDIDATES:
+                    candidate_cap_hit = stop = True
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    deadline_hit = stop = True
+                    break
+                if files_scanned >= USAGE_SCAN_MAX_FILES:
+                    cap_hit = stop = True
+                    break
+                path = os.path.join(dirpath, filename)
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                    continue                             # only regular files, never symlinks
+                if info.st_size > USAGE_SCAN_MAX_FILE_BYTES:
+                    continue
+                mtime = dt.datetime.fromtimestamp(info.st_mtime, tz=dt.timezone.utc)
+                if mtime < horizon:
+                    continue                             # too old to hold in-window rows; never opened
+                files_scanned += 1
+                lines_total = 0
+                unparseable = 0
+                usage_rows = 0
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            # honor the wall-clock deadline mid-file for large inputs
+                            if deadline is not None and (lines_total & 0x1FFF) == 0 \
+                                    and time.monotonic() > deadline:
+                                deadline_hit = stop = True
+                                break
+                            line = line.strip()
+                            if not line:
+                                continue
+                            lines_total += 1
+                            try:
+                                obj = json.loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                unparseable += 1
+                                continue
+                            if not isinstance(obj, dict):
+                                unparseable += 1
+                                continue
+                            record = parser(obj)
+                            if record is None:
+                                continue                 # not a usage row (normal, not a skip)
+                            tokens, ts_value = record
+                            usage_rows += 1
+                            when = _usage_scan_parse_ts(ts_value)
+                            if when is None:
+                                continue
+                            for name, boundary in boundaries:
+                                if boundary <= when <= now_dt:
+                                    sums[name] += tokens
+                except OSError:
+                    continue
+                if usage_rows and lines_total and unparseable / lines_total > USAGE_SCAN_SKIP_RATIO:
+                    drift_files += 1
+                    skipped_total += unparseable
+    if cap_hit:
+        warnings.append(f"reached the {USAGE_SCAN_MAX_FILES}-file scan cap; "
+                        "usage totals are a lower bound")
+    if candidate_cap_hit:
+        warnings.append(f"reached the {USAGE_SCAN_MAX_CANDIDATES}-file enumeration cap; "
+                        "usage totals are a lower bound")
+    if deadline_hit:
+        warnings.append(f"reached the {timeout_s:g}s scan deadline; "
+                        "usage totals are a lower bound")
+    if drift_files:
+        warnings.append(f"{drift_files} JSONL file(s) had over "
+                        f"{int(USAGE_SCAN_SKIP_RATIO * 100)}% unparseable lines "
+                        f"(possible schema drift); {skipped_total} line(s) skipped")
+    doc = {
+        "schema": USAGE_FIXTURE_SCHEMA,
+        "provenance": "local_estimate",
+        "captured_at": iso(),
+        "used_tokens": sums[widest],
+        "limit_tokens": None,
+        "windows": [{"kind": name, "used": sums[name], "resets_at": None}
+                    for name, _ in USAGE_SCAN_WINDOWS],
+    }
+    return doc, warnings
+
+
+def run_usage_jsonl_scan(entry):
+    """RFC 040 Phase 3 Slice 2 dispatch: validate the jsonl_scan manifest fields, then
+    run the bounded aggregate-only local scan. Returns (doc, "", error, warnings)."""
+    provider = entry.get("provider") or ""
+    provider = provider.strip().lower() if isinstance(provider, str) else ""
+    if provider not in USAGE_SCAN_PROVIDERS:
+        return None, "", ("jsonl_scan requires provider in "
+                          f"{{{', '.join(USAGE_SCAN_PROVIDERS)}}}"), []
+    roots = entry.get("scan_roots")
+    if not isinstance(roots, list) or not roots \
+            or not all(isinstance(r, str) and r.strip() for r in roots):
+        return None, "", "jsonl_scan requires a non-empty scan_roots list of strings", []
+    doc, warnings = scan_jsonl_usage(roots, provider, now(), timeout_s=usage_timeout_s(entry))
+    return doc, "", "", warnings
+
+
+def run_usage_adapter(entry):
+    """Read one ENABLED adapter. Returns (doc, raw_text, error_message, scan_warnings);
+    scan_warnings is non-empty only for the built-in jsonl_scan kind (cap-hit /
+    schema-drift diagnostics), [] for fixture / cli_json."""
+    if entry.get("kind") == "jsonl_scan":
+        return run_usage_jsonl_scan(entry)
+    doc, raw, error = _run_usage_adapter_io(entry)
+    return doc, raw, error, []
 
 
 def usage_agent_filter(raw):
@@ -5223,7 +5549,7 @@ def cmd_usage_adapters_check(args):
         enabled, _skipped = selected_usage_entries(entries, agent_filter)
         for entry in enabled:
             name = entry.get("name", "")
-            doc, _raw, err = run_usage_adapter(entry)
+            doc, _raw, err, scan_warnings = run_usage_adapter(entry)
             if err:
                 record_usage_adapter_error(name, entry.get("agent", ""), err)
                 findings.append({"severity": "error", "check": "usage.probe",
@@ -5241,6 +5567,9 @@ def cmd_usage_adapters_check(args):
                 continue
             for message in warnings:
                 findings.append({"severity": "warning", "check": "usage.normalize",
+                                 "message": f"{name}: {message}"})
+            for message in scan_warnings:
+                findings.append({"severity": "warning", "check": "usage.scan",
                                  "message": f"{name}: {message}"})
             probed.append({"name": name, "ok": True})
     ok = not any(f["severity"] == "error" for f in findings)
@@ -5270,7 +5599,7 @@ def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
     for entry in enabled:
         name = entry.get("name", "")
         agent = entry.get("agent", "")
-        doc, raw, err = run_usage_adapter(entry)
+        doc, raw, err, scan_warnings = run_usage_adapter(entry)
         if err:
             had_adapter_error = True
             record_usage_adapter_error(name, agent, err)
@@ -5295,6 +5624,10 @@ def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
                              "message": f"{name}: usage unknown for {agent}; fail-open (no pause)"})
         for message in warnings:
             findings.append({"severity": "warning", "check": "usage.normalize",
+                             "message": f"{name}: {message}"})
+        # jsonl_scan diagnostics (cap-hit / schema-drift) travel back with the doc.
+        for message in scan_warnings:
+            findings.append({"severity": "warning", "check": "usage.scan",
                              "message": f"{name}: {message}"})
         results.append({"adapter": name, "classification": classification,
                         "snapshot": snapshot})

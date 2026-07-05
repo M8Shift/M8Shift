@@ -1535,15 +1535,27 @@ mandatory) and rule 9 (official data wins over estimates).
 
 ### Phase-1 real adapters (grounded in on-disk shapes)
 
-- **`claude-jsonl-scan`** (spent; reporting). Scans `~/.claude/projects/**/*.jsonl`
-  and sums each assistant row's `message.usage.{input_tokens, output_tokens,
-  cache_creation_input_tokens, cache_read_input_tokens}` into rolling windows
-  keyed by the row `timestamp`, grouped by `message.model` and `sessionId`
-  (verified against real transcripts, 2026-07-05). Emits a fixture with
-  `used_tokens` set, `limit_tokens: null`, `provenance: local_estimate`. Bounded
-  (file-count / size / mtime-cutoff caps) and version-tolerant: unknown fields
-  ignored, unparseable lines skipped and counted, an abnormal skip ratio raising
-  an `info` finding (vendor JSONL is undocumented internals and will drift).
+- **`claude-jsonl-scan`** (spent; reporting). **Shipped in Slice 2 as the built-in
+  `jsonl_scan` adapter kind** (`provider: "claude"`). Scans the operator-configured
+  `scan_roots` (e.g. `~/.claude/projects`, verified against real transcripts
+  2026-07-05) and sums each assistant row's `message.usage.{input_tokens,
+  output_tokens, cache_creation_input_tokens, cache_read_input_tokens}` into two
+  rolling windows keyed by the row `timestamp`: `session_5h` (last 5h) and `weekly`
+  (last 7d). `used_tokens` is the widest (weekly) sum. **Aggregate integers only:**
+  the parser reads *only* those four token integers and the row timestamp — never
+  `message.content`, `message.model`, or `sessionId` — which structurally
+  guarantees no prompt/response text can reach the snapshot (privacy rule 14).
+  Emits a fixture with `used_tokens` set, each window's `limit`/top-level
+  `limit_tokens: null`, `provenance: local_estimate` — so `decision_ratio` is
+  `null`, status is `unknown`, and it **never gates** (fail-open; consumption alone
+  cannot gate). **Opt-in / default-off** (rule 13): ships disabled with no implicit
+  root. Bounded (`USAGE_SCAN_MAX_FILES` = 2000 files, `USAGE_SCAN_MAX_FILE_BYTES` =
+  64 MiB/file, `USAGE_SCAN_HORIZON_DAYS` = 8-day mtime cutoff so stale files are
+  never opened) and version-tolerant: unknown fields ignored, unparseable lines
+  skipped and counted, an abnormal skip ratio (>50% of a usage-bearing file)
+  raising a `usage.scan` schema-drift finding (vendor JSONL is undocumented
+  internals and will drift). Pure filesystem read: no network, no subprocess,
+  never follows symlinks, never writes.
 - **`claude-quota`** (remaining; gating; **ratio-native**). An **operator-supplied
   argv-only script** reuses the Claude Code OAuth credential in
   `~/.claude/.credentials.json` to call the client's own usage endpoint
@@ -1563,8 +1575,15 @@ mandatory) and rule 9 (official data wins over estimates).
 - **`codex-ratelimits`** (remaining; gating). The `account/rateLimits/read` RPC
   (already catalogued) → `primary_window` / `secondary_window` / reset
   timestamps → `windows[]`, `provenance: official`.
-- **`codex-jsonl-scan`** (spent; reporting). The Claude scan's twin over
-  `~/.codex/sessions/**/*.jsonl`.
+- **`codex-jsonl-scan`** (spent; reporting). The Claude scan's twin (same built-in
+  `jsonl_scan` kind, `provider: "codex"`) over operator `scan_roots` such as
+  `~/.codex/sessions` and `~/.codex/archived_sessions`. The Codex per-row shape is
+  **not pinned here**, so its parser is **best-effort / version-tolerant**: it
+  finds a usage-like object near the top of the row (bounded search depth), sums
+  the recognized integer token fields — preferring an explicit `total_tokens` when
+  present to avoid double-counting components — and reads only those integers plus
+  a top-level timestamp. Same bounds, fail-open, and aggregate-only guarantees as
+  the Claude scan; lines it cannot parse are skipped and counted.
 
 ### Two graft topologies (how independence is realized)
 
@@ -1631,8 +1650,10 @@ Phase 3 adds, on top of the existing 12 rules:
     relay's. Scan roots are operator-configurable; a disabled adapter never
     scans.
 14. **Aggregate token counts only — never message content.** The scanner reads
-    the integer `usage` fields and the row `timestamp` / `model` / `sessionId`;
-    it must not read, store, or emit prompt or response text.
+    only the integer `usage` fields and the row `timestamp`; it never reads
+    `model`, `sessionId`, or any prompt/response text, and the version-tolerant
+    parser never descends into content-bearing keys (a usage-like object nested
+    in message content must not contribute a content-derived number).
 15. **Credential reuse stays in the operator's adapter, not in M8Shift.**
     M8Shift never reads `~/.claude/.credentials.json` itself and never stores an
     OAuth or refresh token (reinforces rule 2). If account identity ever
