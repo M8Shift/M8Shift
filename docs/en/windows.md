@@ -92,8 +92,15 @@ python m8shift.py status
 ```
 
 The PowerShell installer downloads `m8shift.py` plus the optional
-`m8shift-worktree.py` toolbox, `m8shift-runtime.py`, and `m8shift-context.py`,
-verifies them against `checksums.sha256` by default, then runs `init`.
+`m8shift-worktree.py` toolbox, `m8shift-runtime.py`, and `m8shift-context.py`
+(each skippable with `-NoWorktree` / `-NoRuntime` / `-NoContext`), verifies them
+against `checksums.sha256` by default, then runs `init`. It is kept in lockstep
+with `install.sh` for the core components; `-DryRun` prints the prerequisites,
+per-helper capability lines, and the plan without writing anything. Optional RTK
+and Headroom are **skipped with an info message** on native PowerShell (no tested
+native-Windows path — never a silent source build); use Git Bash or WSL with
+`install.sh --with-rtk` / `--with-headroom` for those helpers. Git stays
+optional here too: only worktree features and anchor case-renaming use it.
 
 Manual fallback:
 

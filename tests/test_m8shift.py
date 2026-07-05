@@ -6479,6 +6479,203 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         self.assertIn("install --git https://github.com/rtk-ai/rtk --tag v0.43.0 --locked rtk", calls)
 
 
+# ───────────────────────── multi-OS core install (#24) ──────────────────────
+
+class TestInstallerMultiOSCore(unittest.TestCase):
+    """#24: the CORE install path needs only Python 3.8+, one downloader (Python
+    urllib is the floor), write permission in the target dir, and SHA-256 support
+    (Python hashlib is the floor). Optional helpers (git, rtk, cargo, headroom)
+    are detected up front, reported with a clear capability line, and NEVER fail
+    the core install when absent."""
+
+    def setUp(self):
+        self.src = tempfile.mkdtemp(prefix="m8shift-mos-src-")
+        self.addCleanup(shutil.rmtree, self.src, True)
+        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
+                  "m8shift-context.py", "checksums.sha256"):
+            shutil.copy(os.path.join(REPO, f), self.src)
+
+    def test_help_prints_prerequisites_and_writes_nothing(self):
+        cwd = tempfile.mkdtemp(prefix="m8shift-help-")
+        self.addCleanup(shutil.rmtree, cwd, True)
+        r = subprocess.run(["bash", os.path.join(REPO, "install.sh"), "--help"],
+                           cwd=cwd, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Prerequisites:", r.stdout)
+        self.assertIn("core install:", r.stdout)
+        self.assertIn("optional git:", r.stdout)          # git is NOT a core requirement
+        self.assertEqual(os.listdir(cwd), [])
+
+    def test_dry_run_prints_capability_lines_and_writes_nothing(self):
+        parent = tempfile.mkdtemp(prefix="m8shift-mos-dry-")
+        self.addCleanup(shutil.rmtree, parent, True)
+        target = os.path.join(parent, "target")
+        r = subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src, "--dry-run"],
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(target))
+        self.assertIn("Optional helper capabilities:", r.stdout)
+        self.assertRegex(r.stdout, r"git: (available|unavailable)")
+        self.assertRegex(r.stdout, r"rtk: (installed|skipped)")     # default = no opt-in
+        self.assertIn("headroom: skipped", r.stdout)
+
+    def test_core_install_succeeds_without_git_or_optional_helpers(self):
+        """Restricted-PATH end-to-end core install: no git, no rtk, no cargo, no
+        curl/wget, no sha256sum/shasum on PATH — download and hashing fall back to
+        Python, git is reported unavailable, and the FULL core install (downloads
+        + verification + init) still succeeds."""
+        bindir = tempfile.mkdtemp(prefix="m8shift-nopath-bin-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        for tool in ("mkdir", "rm", "mv", "chmod", "cat", "awk", "grep", "uname"):
+            path = shutil.which(tool)
+            self.assertIsNotNone(path, "%s not found for the restricted PATH" % tool)
+            os.symlink(path, os.path.join(bindir, tool))
+        bash = shutil.which("bash")
+        target = tempfile.mkdtemp(prefix="m8shift-nopath-target-")
+        self.addCleanup(shutil.rmtree, target, True)
+        env = dict(os.environ)
+        env["PATH"] = bindir
+        env["PYTHON"] = sys.executable
+        r = subprocess.run(
+            [bash, os.path.join(REPO, "install.sh"),
+             "--dir", target, "--base-url", "file://" + self.src],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("git: unavailable", r.stdout)
+        self.assertIn("rtk: skipped", r.stdout)
+        self.assertIn("headroom: skipped", r.stdout)
+        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
+                  "m8shift-context.py", "M8SHIFT.md"):
+            self.assertTrue(os.path.isfile(os.path.join(target, f)), f)
+        # verification ran (default ON) through the Python hashlib fallback
+        self.assertIn("verified m8shift.py", r.stdout)
+
+    def test_no_core_path_depends_on_a_package_manager(self):
+        """No stale brew-only (or apt/winget-only) language on the CORE path: the
+        install surfaces and install docs may cite package managers only as
+        optional examples. `brew` must not appear at all."""
+        for rel in ("install.sh", "install.ps1", "README.md", "docs/en/windows.md"):
+            with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                self.assertNotIn("brew", fh.read().lower(), rel)
+
+    def test_readme_pipes_installer_to_bash_never_sh(self):
+        """The bash requirement is explicit (#24): one-liners pipe to `bash`, and
+        README/installer both document the bash/Git-Bash requirement."""
+        with open(os.path.join(REPO, "README.md"), encoding="utf-8") as fh:
+            readme = fh.read()
+        self.assertNotRegex(readme, r"install\.sh \| sh\b")
+        self.assertIn("| bash", readme)
+        self.assertIn("Git Bash", readme)
+        with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
+            sh = fh.read()
+        self.assertTrue(sh.startswith("#!/usr/bin/env bash"))
+        self.assertIn("Git Bash", sh)
+
+
+class TestInstallerPs1Parity(unittest.TestCase):
+    """#24: install.ps1 stays in lockstep with install.sh for the CORE components.
+    pwsh is usually unavailable on the CI/dev host, so parity is proven by static
+    fixture assertions on the script text; execution paths are exercised only when
+    `pwsh` exists on PATH."""
+
+    # core flag parity matrix: install.sh option -> install.ps1 parameter
+    CORE_FLAGS = (
+        ("--dir", "$Dir"),
+        ("--agents", "$Agents"),
+        ("--name", "$Name"),
+        ("--lang", "$Lang"),
+        ("--force", "$Force"),
+        ("--no-init", "$NoInit"),
+        ("--no-worktree", "$NoWorktree"),
+        ("--no-runtime", "$NoRuntime"),
+        ("--no-context", "$NoContext"),
+        ("--dry-run", "$DryRun"),
+        ("--ref", "$Ref"),
+        ("--base-url", "$BaseUrl"),
+        ("--verify", "$Verify"),
+        ("--no-verify", "$NoVerify"),
+        ("--checksums", "$Checksums"),
+        ("--sha256", "$Sha256"),
+        ("--version", "$Version"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "install.ps1"), encoding="utf-8") as fh:
+            cls.ps1 = fh.read()
+        with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
+            cls.sh = fh.read()
+
+    def test_core_flag_parity_matrix(self):
+        for sh_flag, ps1_param in self.CORE_FLAGS:
+            with self.subTest(flag=sh_flag):
+                self.assertIn("%s)" % sh_flag, self.sh, "install.sh lacks " + sh_flag)
+                self.assertIn(ps1_param, self.ps1, "install.ps1 lacks " + ps1_param)
+
+    def test_ps1_downloads_all_core_components(self):
+        for name in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
+                     "m8shift-context.py"):
+            self.assertIn('Install-File "%s"' % name, self.ps1, name)
+        self.assertIn("-not $NoContext", self.ps1)
+
+    def test_ps1_verifies_by_default_with_staged_temp_download(self):
+        self.assertIn("function Test-VerifyDefault", self.ps1)
+        self.assertIn("return $true", self.ps1)              # default = verify ON
+        self.assertIn("M8SHIFT_INSTALL_VERIFY", self.ps1)
+        self.assertIn("Get-FileHash -Algorithm SHA256", self.ps1)
+        self.assertIn('".$Name.tmp.$PID"', self.ps1)         # staged temp download
+        self.assertIn("Move-Item", self.ps1)
+        self.assertIn("Test-SafeRef $Ref", self.ps1)         # safe-ref validation kept
+
+    def test_ps1_prints_prerequisites_and_capabilities(self):
+        self.assertIn("Prerequisites:", self.ps1)
+        self.assertIn("Optional helper capabilities:", self.ps1)
+        for status in ("available", "unavailable", "skipped"):
+            self.assertIn(status, self.ps1)
+
+    def test_ps1_optional_helpers_skip_with_info_never_source_build(self):
+        # No native-Windows RTK/Headroom path: explicit skip message pointing at
+        # the POSIX installer; no cargo, no pip, no silent source build.
+        self.assertIn("rtk: skipped", self.ps1)
+        self.assertIn("headroom: skipped", self.ps1)
+        self.assertIn("Git Bash", self.ps1)
+        for forbidden in ("cargo", "pip install"):
+            self.assertNotIn(forbidden, self.ps1.lower())
+
+    def test_ps1_python_floor_is_3_8(self):
+        self.assertIn("sys.version_info >= (3, 8)", self.ps1)
+
+    def test_ps1_sha256_pin_accepts_core_component_files(self):
+        for name in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
+                     "m8shift-context.py"):
+            self.assertIn('"%s"' % name, self.ps1)
+        self.assertIn("[0-9a-fA-F]{64}", self.ps1)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh unavailable")
+    def test_ps1_parses_and_dry_runs_under_pwsh(self):
+        script = os.path.join(REPO, "install.ps1")
+        parse_cmd = (
+            "$t=$null;$e=$null;"
+            "[System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$t,[ref]$e)|Out-Null;"
+            "exit $e.Count" % script.replace("'", "''")
+        )
+        r = subprocess.run(["pwsh", "-NoProfile", "-Command", parse_cmd],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        parent = tempfile.mkdtemp(prefix="m8shift-ps1-dry-")
+        self.addCleanup(shutil.rmtree, parent, True)
+        target = os.path.join(parent, "target")
+        r = subprocess.run(["pwsh", "-NoProfile", "-File", script,
+                            "-Dir", target, "-DryRun"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Prerequisites:", r.stdout)
+        self.assertIn("No files were downloaded or written.", r.stdout)
+        self.assertFalse(os.path.exists(target))
+
+
 class TestContextLocalAdapterResolution(unittest.TestCase):
     def _project(self):
         d = tempfile.mkdtemp(prefix="m8shift-local-adapter-")

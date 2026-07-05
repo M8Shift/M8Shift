@@ -4,13 +4,22 @@
 # Intended one-liner:
 #   curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
 #
+# Supported platforms (#24): macOS (standard Terminal), Linux, WSL, and Git Bash on
+# Windows. This is explicitly a BASH script (arrays, pipefail) — pipe it to `bash`,
+# not `sh`; every listed platform ships or bundles bash. Native Windows without
+# Git Bash: use install.ps1 (kept in lockstep for the core components).
+#
 # This script installs M8Shift into the current project directory by downloading the
-# standalone CLI files, then runs `m8shift.py init`. It does not use sudo, does not
-# modify PATH, and does not create a daemon.
+# standalone CLI files, then runs `m8shift.py init`. Core install requires only
+# Python 3.8+, one downloader (curl/wget/Python urllib), write permission in the
+# target directory, and SHA-256 support. It does not use sudo, does not modify PATH,
+# does not create a daemon, and needs no package manager. Optional helpers (git for
+# worktree features, RTK, Headroom) are advisory: absent or unsupported ones degrade
+# with a clear message and never block the core install.
 
 set -euo pipefail
 
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.2.0"
 REF="${M8SHIFT_INSTALL_REF:-main}"
 BASE_URL="${M8SHIFT_INSTALL_BASE_URL:-}"
 TARGET_DIR="${M8SHIFT_INSTALL_DIR:-$PWD}"
@@ -75,8 +84,13 @@ Options:
   -h, --help          Show this help.
   --version           Show installer version.
 
-The installer is local-only: no sudo, no PATH mutation, no background service.
+The installer is local-only: no sudo, no PATH mutation, no background service, no
+package manager required. It is a bash script (macOS Terminal, Linux, WSL, Git Bash
+on Windows); native Windows without Git Bash uses install.ps1 instead.
 Verification is enabled by default; --no-verify disables it.
+Optional helpers are advisory: capabilities are detected before any helper setup and
+reported as available / unavailable / skipped / installed; an absent or unsupported
+helper degrades with a clear message and never blocks the core install.
 Security note: verification checks integrity against the selected ref's manifest;
 for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
 RTK is optional. When installed or already present on normal PATH, this installer runs
@@ -89,6 +103,8 @@ Headroom is experimental, pinned to headroom-ai==0.28.0 + onnxruntime==1.27.0
 + transformers==5.12.1, downloads the Kompress model at install time, and
 remains explicit opt-in.
 EOF
+  printf '\n'
+  print_prerequisites
 }
 
 die() {
@@ -219,14 +235,97 @@ validate_rtk_version() {
   esac
 }
 
+rtk_host_asset() {
+  local os arch
+  os="$(uname -s 2>/dev/null || printf unknown)"
+  arch="$(uname -m 2>/dev/null || printf unknown)"
+  case "$os" in
+    Darwin)
+      case "$arch" in
+        arm64|aarch64) printf 'rtk-aarch64-apple-darwin.tar.gz\n' ;;
+        x86_64|amd64) printf 'rtk-x86_64-apple-darwin.tar.gz\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    Linux)
+      case "$arch" in
+        arm64|aarch64) printf 'rtk-aarch64-unknown-linux-gnu.tar.gz\n' ;;
+        x86_64|amd64) printf 'rtk-x86_64-unknown-linux-musl.tar.gz\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      case "$arch" in
+        x86_64|amd64) printf 'rtk-x86_64-pc-windows-msvc.zip\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 print_prerequisites() {
   cat <<EOF
 Prerequisites:
-  required: Python 3.8+, git, and one downloader (curl, wget, or Python urllib).
-  required for verification: sha256sum, shasum, or Python hashlib.
+  core install: Python 3.8+ (stdlib only), write permission in the target directory,
+    one downloader (curl, wget, or Python urllib), and SHA-256 support (sha256sum,
+    shasum, or Python hashlib) for the default verification.
+  shell: bash — macOS standard Terminal, Linux, WSL, or Git Bash on Windows; native
+    Windows without Git Bash uses install.ps1 instead.
+  never needed: sudo, PATH changes, daemons/services, or a package manager (package
+    managers may provide the prerequisites, e.g. apt/dnf install python3, but are
+    never the only path).
+  optional git: only worktree features (m8shift-worktree.py) and anchor
+    case-renaming use Git; the core relay installs and runs without it.
   optional RTK (--with-rtk): tar for macOS/Linux .tar.gz assets; unzip or Python zipfile for Git Bash/Windows .zip assets; Cargo/Rust only with --allow-source-build.
   optional Headroom (--with-headroom): Python venv + pip; pinned headroom-ai==0.28.0 + onnxruntime==1.27.0 + transformers==5.12.1, install-time Kompress model download/cache; macOS requires an arm64-native Python because no x86_64 wheel is available.
 EOF
+}
+
+print_capabilities() {
+  # #24: detect optional-helper capabilities BEFORE any helper setup and report one
+  # clear line each (available / unavailable / skipped / installed). Advisory only:
+  # nothing here ever blocks or mutates the core install.
+  printf 'Optional helper capabilities:\n'
+  if command -v git >/dev/null 2>&1; then
+    printf '  git: available — worktree features (m8shift-worktree.py) can use it\n'
+  else
+    printf '  git: unavailable — worktree features (m8shift-worktree.py) need Git; the core install is unaffected\n'
+  fi
+  local existing_rtk asset
+  existing_rtk="$(command -v rtk 2>/dev/null || true)"
+  case "$RTK_CHOICE" in
+    yes|YES|1|true|True|TRUE)
+      if [ -n "$existing_rtk" ]; then
+        printf '  rtk: installed — found at %s (telemetry will be disabled)\n' "$existing_rtk"
+      elif asset="$(rtk_host_asset)"; then
+        printf '  rtk: available — prebuilt release asset %s matches this host\n' "$asset"
+      else
+        printf '  rtk: unavailable — no prebuilt release asset for this host; Cargo/Rust source build requires --allow-source-build\n'
+      fi
+      ;;
+    *)
+      if [ -n "$existing_rtk" ]; then
+        printf '  rtk: installed — found at %s\n' "$existing_rtk"
+      else
+        printf '  rtk: skipped — explicit opt-in (--with-rtk)\n'
+      fi
+      ;;
+  esac
+  case "$HEADROOM_CHOICE" in
+    yes|YES|1|true|True|TRUE)
+      if "$PYTHON_BIN" -c 'import venv' >/dev/null 2>&1; then
+        printf '  headroom: available — Python venv module present (experimental, pinned, fail-closed)\n'
+      else
+        printf '  headroom: unavailable — Python venv module missing (install python3-venv/ensurepip); --with-headroom fails closed\n'
+      fi
+      ;;
+    *)
+      printf '  headroom: skipped — explicit opt-in (--with-headroom)\n'
+      ;;
+  esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -359,6 +458,8 @@ else
 fi
 
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN is required"
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1 \
+  || die "Python 3.8+ is required ($PYTHON_BIN reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))"
 validate_ref
 validate_rtk_version
 
@@ -376,6 +477,8 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   print_prerequisites
+  printf '\n'
+  print_capabilities
   cat <<EOF
 
 Dry run plan:
@@ -401,6 +504,7 @@ fi
 mkdir -p "$TARGET_DIR"
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 print_prerequisites
+print_capabilities
 
 # Manual --sha256 pins are self-sufficient: when they cover every file we will download,
 # skip the manifest so out-of-band pinning works even against a mirror with no manifest.
@@ -449,37 +553,6 @@ rtk_command() {
   if [ "$allow_project_local" = "1" ]; then
     rtk_local_command
   fi
-}
-
-rtk_host_asset() {
-  local os arch
-  os="$(uname -s 2>/dev/null || printf unknown)"
-  arch="$(uname -m 2>/dev/null || printf unknown)"
-  case "$os" in
-    Darwin)
-      case "$arch" in
-        arm64|aarch64) printf 'rtk-aarch64-apple-darwin.tar.gz\n' ;;
-        x86_64|amd64) printf 'rtk-x86_64-apple-darwin.tar.gz\n' ;;
-        *) return 1 ;;
-      esac
-      ;;
-    Linux)
-      case "$arch" in
-        arm64|aarch64) printf 'rtk-aarch64-unknown-linux-gnu.tar.gz\n' ;;
-        x86_64|amd64) printf 'rtk-x86_64-unknown-linux-musl.tar.gz\n' ;;
-        *) return 1 ;;
-      esac
-      ;;
-    MINGW*|MSYS*|CYGWIN*)
-      case "$arch" in
-        x86_64|amd64) printf 'rtk-x86_64-pc-windows-msvc.zip\n' ;;
-        *) return 1 ;;
-      esac
-      ;;
-    *)
-      return 1
-      ;;
-  esac
 }
 
 pin_context_adapters() {

@@ -8,7 +8,16 @@
 #
 # This script installs M8Shift into the current project directory by downloading the
 # standalone CLI files, verifying them against checksums.sha256 by default, then
-# running `m8shift.py init`. It does not modify PATH and does not create a daemon.
+# running `m8shift.py init`. Core install requires only Python 3.8+, Invoke-WebRequest,
+# write permission in the target directory, and Get-FileHash (SHA-256). It does not
+# modify PATH, does not create a daemon, and needs no package manager. It is kept in
+# lockstep with install.sh for the core components (m8shift.py, worktree, runtime,
+# context, checksum verification, -NoInit, -Force, -Lang/-Name/-Agents, -DryRun).
+#
+# Optional helpers (#24): git is only needed for worktree features; the core relay
+# installs without it. RTK and Headroom have no tested native-Windows path in this
+# installer: they are SKIPPED with an info message (never a silent source build) —
+# use Git Bash or WSL with `install.sh --with-rtk` / `--with-headroom` instead.
 
 [CmdletBinding()]
 param(
@@ -20,6 +29,8 @@ param(
     [switch]$NoInit,
     [switch]$NoWorktree,
     [switch]$NoRuntime,
+    [switch]$NoContext,
+    [switch]$DryRun,
     [string]$Ref = $(if ($env:M8SHIFT_INSTALL_REF) { $env:M8SHIFT_INSTALL_REF } else { "main" }),
     [string]$BaseUrl = $(if ($env:M8SHIFT_INSTALL_BASE_URL) { $env:M8SHIFT_INSTALL_BASE_URL } else { "" }),
     [switch]$Verify,
@@ -31,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$InstallerVersion = "1.0.0"
+$InstallerVersion = "1.2.0"
 $ChecksumText = ""
 $ExpectedSha256 = @{}
 
@@ -53,17 +64,57 @@ Options:
   -NoInit              Download files only; do not run init.
   -NoWorktree          Do not download m8shift-worktree.py.
   -NoRuntime           Do not download m8shift-runtime.py.
+  -NoContext           Do not download m8shift-context.py.
+  -DryRun              Print the install plan and prerequisites; do not download or write files.
   -Ref REF             Git ref used for downloads when -BaseUrl is not set (default: main).
   -BaseUrl URL         Download base URL (default: GitHub raw for -Ref).
-  -Verify              Verify downloaded files against checksums.sha256.
+  -Verify              Verify downloaded files against checksums.sha256 (already the default).
   -NoVerify            Skip checksum verification.
   -Checksums URL       Use a custom checksums URL or local path.
   -Sha256 FILE:HEX     Pin one expected SHA-256 manually; repeatable.
   -Help                Show this help.
   -Version             Show installer version.
 
-Verification is enabled by default. -NoVerify disables it.
+The installer is local-only: no admin rights, no PATH mutation, no background
+service, no package manager required. Verification is enabled by default;
+-NoVerify disables it.
+Optional helpers are advisory and never block the core install: git is only
+needed for worktree features (m8shift-worktree.py); RTK and Headroom are skipped
+by this installer (no tested native-Windows path — use Git Bash or WSL with
+install.sh --with-rtk / --with-headroom).
 "@
+    Show-Prerequisites
+}
+
+function Show-Prerequisites {
+    @"
+
+Prerequisites:
+  core install: Python 3.8+ (stdlib only; python.org, winget install Python.Python.3.12,
+    or the Microsoft Store), write permission in the target directory,
+    Invoke-WebRequest for downloads, and Get-FileHash for the default SHA-256
+    verification (both ship with Windows PowerShell 5.1+ and PowerShell 7+).
+  never needed: admin rights, PATH changes, daemons/services, or a package manager
+    (winget may provide Python but is never the only path).
+  optional git: only worktree features (m8shift-worktree.py) and anchor
+    case-renaming use Git; the core relay installs and runs without it.
+  optional RTK / Headroom: not installed by install.ps1 (no tested native-Windows
+    path); use Git Bash or WSL with install.sh --with-rtk / --with-headroom.
+"@
+}
+
+function Show-Capabilities {
+    # #24: detect optional-helper capabilities BEFORE any helper setup and report one
+    # clear line each (available / unavailable / skipped / installed). Advisory only:
+    # nothing here ever blocks or mutates the core install.
+    Write-Host "Optional helper capabilities:"
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Write-Host "  git: available - worktree features (m8shift-worktree.py) can use it"
+    } else {
+        Write-Host "  git: unavailable - worktree features (m8shift-worktree.py) need Git; the core install is unaffected"
+    }
+    Write-Host "  rtk: skipped - no tested native-Windows path in install.ps1; use Git Bash/WSL install.sh --with-rtk"
+    Write-Host "  headroom: skipped - no tested native-Windows path in install.ps1; use WSL install.sh --with-headroom"
 }
 
 function Fail([string]$Message) {
@@ -115,8 +166,8 @@ function Add-ExpectedSha256([string]$Spec) {
     if ($Spec -match "^([^:=]+)[:=]([0-9a-fA-F]{64})$") {
         $file = $Matches[1]
         $hex = $Matches[2].ToLowerInvariant()
-        if ($file -notin @("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py")) {
-            Fail "-Sha256 file must be m8shift.py, m8shift-worktree.py, or m8shift-runtime.py"
+        if ($file -notin @("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py")) {
+            Fail "-Sha256 file must be m8shift.py, m8shift-worktree.py, m8shift-runtime.py, or m8shift-context.py"
         }
         $script:ExpectedSha256[$file] = $hex
         return
@@ -193,6 +244,8 @@ function Format-PythonCommand([hashtable]$Python, [string[]]$Arguments) {
 }
 
 function Install-File([string]$Name, [string]$BaseUrl, [string]$TargetDir, [bool]$VerifyDownloads) {
+    # Staged temporary download: fetch to .<name>.tmp.<pid>, verify, then move into
+    # place — a failed download or checksum never leaves a half-written target file.
     $url = "$BaseUrl/$Name"
     $dest = Join-Path $TargetDir $Name
     $tmp = Join-Path $TargetDir ".$Name.tmp.$PID"
@@ -222,9 +275,6 @@ foreach ($spec in $Sha256) {
     Add-ExpectedSha256 $spec
 }
 
-New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-$TargetDir = (Resolve-Path -LiteralPath $Dir).Path
-
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
     $BaseUrl = "https://raw.githubusercontent.com/M8Shift/M8Shift/$Ref"
 }
@@ -233,6 +283,32 @@ $BaseUrl = $BaseUrl.TrimEnd("/")
 if ([string]::IsNullOrWhiteSpace($Checksums)) {
     $Checksums = "$BaseUrl/checksums.sha256"
 }
+
+if ($DryRun) {
+    # Plan only: no directory creation, no download, no write, no init.
+    Show-Prerequisites
+    Write-Host ""
+    Show-Capabilities
+    Write-Host ""
+    Write-Host "Dry run plan:"
+    Write-Host "  target: $Dir"
+    Write-Host "  ref: $Ref"
+    Write-Host "  base URL: $BaseUrl"
+    Write-Host "  checksums: $Checksums"
+    Write-Host "  agents: $Agents"
+    Write-Host "  verify downloads: $VerifyDownloads"
+    Write-Host "  download worktree/runtime/context: $(-not $NoWorktree)/$(-not $NoRuntime)/$(-not $NoContext)"
+    Write-Host "  run init: $(-not $NoInit)"
+    Write-Host "  RTK/Headroom: skipped (no tested native-Windows path; use Git Bash/WSL install.sh)"
+    Write-Host ""
+    Write-Host "No files were downloaded or written."
+    exit 0
+}
+
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+$TargetDir = (Resolve-Path -LiteralPath $Dir).Path
+Show-Prerequisites
+Show-Capabilities
 
 if ($VerifyDownloads) {
     if (Test-Path -LiteralPath $Checksums) {
@@ -253,6 +329,9 @@ if (-not $NoWorktree) {
 }
 if (-not $NoRuntime) {
     Install-File "m8shift-runtime.py" $BaseUrl $TargetDir $VerifyDownloads
+}
+if (-not $NoContext) {
+    Install-File "m8shift-context.py" $BaseUrl $TargetDir $VerifyDownloads
 }
 
 if (-not $NoInit) {
