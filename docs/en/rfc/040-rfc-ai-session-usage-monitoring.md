@@ -1640,14 +1640,35 @@ existing readers ignore an unknown optional field; the normalizer gains one
 ratio path. The PR no longer claims *all* adapters emit the unchanged fixture —
 only the token-only ones do.
 
-### Operator-declared budget (optional bridge)
+### Operator-declared budget (optional bridge) — shipped Slice 4
 
-To let a spent-only scan gate, an operator may declare
-`.m8shift/usage/budget.json` — a window length and an estimated cap for their
-plan. The scan's `used` is then divided by that cap to yield a `limit` and a
-`decision_ratio`. This is **always** `provenance: local_estimate`; a pause
-driven by it records `confidence=local_estimate` and is never presented as
-official quota.
+To let a spent-only source gate, an operator may declare a
+**`m8shift.usage.budget.v1`** file at `.m8shift/usage/budget.json` with per-agent
+per-window caps:
+
+```json
+{
+  "schema": "m8shift.usage.budget.v1",
+  "budgets": [
+    {"agent": "claude", "windows": {"session_5h": 100000, "weekly": 500000}}
+  ]
+}
+```
+
+When present, a declared cap supplies the **missing `limit`** for a window that
+has `used` but no limit (typical of a `jsonl_scan`), so `decision_ratio` computes
+and the source can gate. Guarantees:
+
+- **Opt-in / absent by default.** `usage init` scaffolds an INACTIVE
+  `budget.example.json`; only `budget.json` is loaded. Nothing changes until the
+  operator creates it.
+- **Estimate only, never official.** A budget cap is applied **only to
+  non-official snapshots** and **never overrides** a limit already present
+  (official data wins, rule 9). A budget-filled limit is `provenance:
+  local_estimate` and emits a `usage.normalize` warning naming the budget.
+- **Fail-safe.** A malformed or unreadable budget is ignored with a
+  `usage.budget` warning — a bad budget never invents a limit. Only positive
+  integer caps survive.
 
 ### Privacy and credential hardening (extends "Security and privacy")
 

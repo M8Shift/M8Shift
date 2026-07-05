@@ -8507,6 +8507,88 @@ class TestRFC040UsageQuota(CLIBase):
         self.assertEqual(fx["windows"], [])
 
 
+class TestRFC040UsageBudget(CLIBase):
+    """RFC 040 Phase 3 Slice 4 — the OPT-IN operator budget bridge. A declared
+    per-window cap supplies a missing `limit` so a SPENT-only source can gate — as
+    a local_estimate, never on an official source, never an override. Absent by
+    default; a malformed budget is ignored (fail-safe, never invents a limit)."""
+
+    ADAPTERS_REL = os.path.join(".m8shift", "usage", "adapters.json")
+    FIXTURE_REL = os.path.join(".m8shift", "usage", "fixtures", "spent.json")
+    BUDGET_REL = os.path.join(".m8shift", "usage", "budget.json")
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(self.d, "m8shift-runtime.py"))
+
+    def rt(self, *args):
+        return subprocess.run([sys.executable, "m8shift-runtime.py", *args],
+                              cwd=self.d, capture_output=True, text=True)
+
+    def _write(self, rel, payload):
+        path = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(payload if isinstance(payload, str) else json.dumps(payload))
+
+    def _spent_doc(self, provenance="local_estimate"):
+        # a spent-only shape: used tokens, NO limit (like a jsonl_scan)
+        return {"schema": "m8shift.usage.fixture.v1", "agent": "claude",
+                "provenance": provenance, "captured_at": "2026-01-01T00:00:00Z",
+                "used_tokens": 90000, "limit_tokens": None,
+                "windows": [{"kind": "session_5h", "used": 90000, "resets_at": None}]}
+
+    def _snapshot(self, doc, budget=None):
+        self._write(self.FIXTURE_REL, doc)
+        self._write(self.ADAPTERS_REL, {"schema": "m8shift.usage.adapters.v1",
+            "adapters": [{"name": "claude-scan", "agent": "claude", "kind": "fixture",
+                          "fixture_path": self.FIXTURE_REL, "timeout_s": 5, "enabled": True}]})
+        if budget is not None:
+            self._write(self.BUDGET_REL, budget)
+        return self.rt("usage", "snapshot", "--json")
+
+    def test_budget_lets_spent_source_gate_as_local_estimate(self):
+        r = self._snapshot(self._spent_doc(), budget={
+            "schema": "m8shift.usage.budget.v1",
+            "budgets": [{"agent": "claude", "windows": {"session_5h": 100000}}]})
+        self.assertEqual(r.returncode, 30, r.stdout + r.stderr)   # 90000/100000 = 0.9 => near_limit
+        payload = json.loads(r.stdout)
+        snap = payload["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["decision_ratio"], 0.9)
+        self.assertEqual(snap["windows"][0]["limit"], 100000)     # filled from the budget
+        self.assertEqual(snap["source"]["provenance"], "local_estimate")
+        self.assertIn("operator budget", " ".join(f["message"] for f in payload["findings"]))
+
+    def test_budget_never_applies_to_official_source(self):
+        r = self._snapshot(self._spent_doc(provenance="official"), budget={
+            "schema": "m8shift.usage.budget.v1",
+            "budgets": [{"agent": "claude", "windows": {"session_5h": 100000}}]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)     # official + no real limit => unknown
+        snap = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertIsNone(snap["windows"][0]["limit"])            # official limit never invented
+        self.assertIsNone(snap["decision_ratio"])
+
+    def test_no_budget_leaves_spent_source_ungated(self):
+        r = self._snapshot(self._spent_doc())                     # no budget file
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)     # spent-only => unknown, fail-open
+        snap = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertIsNone(snap["decision_ratio"])
+
+    def test_malformed_budget_is_ignored_fail_safe(self):
+        r = self._snapshot(self._spent_doc(), budget="{ not valid json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)     # bad budget never invents a limit
+        payload = json.loads(r.stdout)
+        self.assertIsNone(payload["snapshots"][0]["snapshot"]["decision_ratio"])
+        self.assertIn("usage.budget", {f["check"] for f in payload["findings"]})
+
+    def test_init_scaffolds_inactive_budget_example(self):
+        self.assertEqual(self.rt("usage", "init").returncode, 0)
+        # only budget.json is loaded; the example ships under a non-loaded name
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "usage", "budget.example.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, self.BUDGET_REL)))
+
+
 class TestRFC040UsagePRB(CLIBase):
     """RFC 040 PR B — the guard/watch/wait/resume family. GENERAL-table exit
     codes (pinned in the RFC "PR B scope" subsection): 0 ok, 10 near_limit
