@@ -84,14 +84,30 @@ Native Windows PowerShell:
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex
 ```
 
-Prerequisites: **Python 3.8+**, **git**, and one downloader (`curl`, `wget`, or Python
-`urllib`). Verification uses `sha256sum`, `shasum`, or Python `hashlib`.
+Core prerequisites (both installers): **Python 3.8+** (stdlib only), write
+permission in the target directory, one downloader (`curl`, `wget`, or Python
+`urllib` for `install.sh`; `Invoke-WebRequest` for `install.ps1`), and SHA-256
+support for the default verification (`sha256sum`, `shasum`, or Python `hashlib`;
+`Get-FileHash` on PowerShell). `install.sh` is a **bash** script — pipe it to
+`bash`, not `sh` — covering macOS (standard Terminal), Linux, WSL, and Git Bash on
+Windows; native Windows uses `install.ps1`. **Git is optional**: only worktree
+features (`m8shift-worktree.py`) and anchor case-renaming use it — the core relay
+installs and runs without it. No `sudo`/admin rights, no PATH change, no
+background service, and no package manager (package managers may provide Python,
+e.g. `apt install python3` or `winget install Python.Python.3.12`, but are never
+the only path).
 
 These installers download `m8shift.py` plus `m8shift-worktree.py`,
 `m8shift-runtime.py`, and `m8shift-context.py` into the current directory, verify
 the files against `checksums.sha256`, then run `m8shift.py init --agents
-claude,codex` through the detected Python 3.8+ interpreter. No `sudo`, no global
-PATH change, no background service.
+claude,codex` through the detected Python 3.8+ interpreter. Both print the
+prerequisites plus one capability line per optional helper (`available` /
+`unavailable` / `skipped` / `installed`) before any helper setup; an absent or
+unsupported helper degrades with a clear message and never blocks the core
+install, and an opted-in helper that fails prints a prominent warning while the
+core install continues (exit 0 when the core install succeeded). The two
+installers are kept in lockstep for the core components — verified by static
+parity tests, and executed end-to-end where `pwsh` is available.
 
 For a pinned release, fetch the installer from the tag and use the same ref for the
 downloaded files:
@@ -129,7 +145,11 @@ provenance matches its path and SHA-256. If no prebuilt asset matches the host,
 Cargo/Rust source builds are available only with the additional explicit
 `--allow-source-build` flag and are pinned to the selected `--rtk-version` tag.
 The default `ask` mode only prompts in an interactive terminal; non-interactive
-installs skip RTK unless `--with-rtk` is explicit.
+installs skip RTK unless `--with-rtk` is explicit. On native Windows PowerShell,
+`install.ps1` never installs RTK or Headroom (no tested native-Windows path —
+never a silent source build) and says so with an info line; an `rtk` already on
+PATH is still detected, reported, and gets its telemetry disabled. Use Git Bash
+or WSL with `install.sh` for those helpers.
 
 Experimental Headroom-compatible context compression stays opt-in:
 
@@ -138,17 +158,38 @@ curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | \
   bash -s -- --agents claude,codex --with-headroom
 ```
 
-`--with-headroom` creates `.m8shift/venvs/headroom` and attempts an unpinned,
-best-effort `pip install headroom-ai`. Some platforms receive source
-distributions and may need Rust/Cargo for `cryptography`; failures are reported
-clearly and never block the base M8Shift install. Headroom remains behind the RFC
-042 measurement gate.
+`--with-headroom` creates `.m8shift/venvs/headroom`, installs **pinned**
+`headroom-ai==0.28.0` + `onnxruntime==1.27.0` + `transformers==5.12.1`, preloads
+the `chopratejas/kompress-v2-base` Kompress model so the runtime wrapper stays
+offline, and identity-pins the `m8shift-headroom` launcher. The helper is
+experimental and fail-closed for the opted-in run (a failed step removes the venv
+and reports clearly, while the core install continues with a warning); it is
+never attempted without the explicit flag. On macOS
+it requires an arm64-native Python (no x86_64 wheel exists). Headroom remains
+behind the RFC 042 measurement gate.
 
-For CI or review, inspect the install plan without writing files:
+For CI or review, inspect the install plan and prerequisites without writing
+files (`--help` / `-Help` also prints the prerequisites):
 
 ```bash
 bash install.sh --dry-run --with-rtk --with-headroom
 ```
+
+```powershell
+.\install.ps1 -DryRun
+```
+
+Verify a finished install read-only at any time:
+
+```bash
+python3 m8shift.py doctor --install
+```
+
+It reports the Python/script versions, local checksum-manifest state, kit
+companion drift, generated files, and optional helper states — without network,
+repair, or writes. "Core install unhealthy" conditions are warnings; a missing
+optional helper (git for worktree features, RTK, Headroom) is `info`, so
+`doctor --install --lint` stays green on a healthy-but-minimal install.
 
 Manual install:
 

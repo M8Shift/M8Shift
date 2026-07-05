@@ -4,13 +4,22 @@
 # Intended one-liner:
 #   curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
 #
+# Supported platforms (#24): macOS (standard Terminal), Linux, WSL, and Git Bash on
+# Windows. This is explicitly a BASH script (arrays, pipefail) — pipe it to `bash`,
+# not `sh`; every listed platform ships or bundles bash. Native Windows without
+# Git Bash: use install.ps1 (kept in lockstep for the core components).
+#
 # This script installs M8Shift into the current project directory by downloading the
-# standalone CLI files, then runs `m8shift.py init`. It does not use sudo, does not
-# modify PATH, and does not create a daemon.
+# standalone CLI files, then runs `m8shift.py init`. Core install requires only
+# Python 3.8+, one downloader (curl/wget/Python urllib), write permission in the
+# target directory, and SHA-256 support. It does not use sudo, does not modify PATH,
+# does not create a daemon, and needs no package manager. Optional helpers (git for
+# worktree features, RTK, Headroom) are advisory: absent or unsupported ones degrade
+# with a clear message and never block the core install.
 
 set -euo pipefail
 
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.2.0"
 REF="${M8SHIFT_INSTALL_REF:-main}"
 BASE_URL="${M8SHIFT_INSTALL_BASE_URL:-}"
 TARGET_DIR="${M8SHIFT_INSTALL_DIR:-$PWD}"
@@ -37,6 +46,7 @@ CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
 CHECKSUMS_TEXT=""
 EXPECTED_SHA256S=""
 PYTHON_BIN="${PYTHON:-python3}"
+HELPER_FAILURES=""   # opt-in helper failures never block the core install (#24)
 
 usage() {
   cat <<'EOF'
@@ -75,8 +85,16 @@ Options:
   -h, --help          Show this help.
   --version           Show installer version.
 
-The installer is local-only: no sudo, no PATH mutation, no background service.
+The installer is local-only: no sudo, no PATH mutation, no background service, no
+package manager required. It is a bash script (macOS Terminal, Linux, WSL, Git Bash
+on Windows); native Windows without Git Bash uses install.ps1 instead.
 Verification is enabled by default; --no-verify disables it.
+Optional helpers are advisory: capabilities are detected before any helper setup and
+reported as available / unavailable / skipped / installed (or "ask — will prompt"
+when the interactive RTK default applies); an absent or unsupported helper degrades
+with a clear message and never blocks the core install. An opted-in helper
+(--with-rtk / --with-headroom) that fails prints a prominent warning and the core
+install continues to init; the overall exit stays 0 when the core install succeeded.
 Security note: verification checks integrity against the selected ref's manifest;
 for out-of-band trust, pin a reviewed digest with --sha256 or use a signed tag.
 RTK is optional. When installed or already present on normal PATH, this installer runs
@@ -89,11 +107,23 @@ Headroom is experimental, pinned to headroom-ai==0.28.0 + onnxruntime==1.27.0
 + transformers==5.12.1, downloads the Kompress model at install time, and
 remains explicit opt-in.
 EOF
+  printf '\n'
+  print_prerequisites
 }
 
 die() {
   printf 'm8shift install: %s\n' "$*" >&2
   exit 1
+}
+
+helper_failed() {
+  # #24 ruling: optional helpers NEVER block the core install. Record the
+  # failure, warn prominently, and let the run continue toward init; the
+  # overall exit stays 0 when the core install itself succeeds.
+  local helper="$1"
+  local hint="$2"
+  HELPER_FAILURES="${HELPER_FAILURES:+$HELPER_FAILURES }$helper"
+  printf '✗ optional %s install failed — continuing core install; %s\n' "$helper" "$hint" >&2
 }
 
 need_value() {
@@ -219,14 +249,100 @@ validate_rtk_version() {
   esac
 }
 
+rtk_host_asset() {
+  local os arch
+  os="$(uname -s 2>/dev/null || printf unknown)"
+  arch="$(uname -m 2>/dev/null || printf unknown)"
+  case "$os" in
+    Darwin)
+      case "$arch" in
+        arm64|aarch64) printf 'rtk-aarch64-apple-darwin.tar.gz\n' ;;
+        x86_64|amd64) printf 'rtk-x86_64-apple-darwin.tar.gz\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    Linux)
+      case "$arch" in
+        arm64|aarch64) printf 'rtk-aarch64-unknown-linux-gnu.tar.gz\n' ;;
+        x86_64|amd64) printf 'rtk-x86_64-unknown-linux-musl.tar.gz\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      case "$arch" in
+        x86_64|amd64) printf 'rtk-x86_64-pc-windows-msvc.zip\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 print_prerequisites() {
   cat <<EOF
 Prerequisites:
-  required: Python 3.8+, git, and one downloader (curl, wget, or Python urllib).
-  required for verification: sha256sum, shasum, or Python hashlib.
+  core install: Python 3.8+ (stdlib only), write permission in the target directory,
+    one downloader (curl, wget, or Python urllib), and SHA-256 support (sha256sum,
+    shasum, or Python hashlib) for the default verification.
+  shell: bash — macOS standard Terminal, Linux, WSL, or Git Bash on Windows; native
+    Windows without Git Bash uses install.ps1 instead.
+  never needed: sudo, PATH changes, daemons/services, or a package manager (package
+    managers may provide the prerequisites, e.g. apt/dnf install python3, but are
+    never the only path).
+  optional git: only worktree features (m8shift-worktree.py) and anchor
+    case-renaming use Git; the core relay installs and runs without it.
   optional RTK (--with-rtk): tar for macOS/Linux .tar.gz assets; unzip or Python zipfile for Git Bash/Windows .zip assets; Cargo/Rust only with --allow-source-build.
   optional Headroom (--with-headroom): Python venv + pip; pinned headroom-ai==0.28.0 + onnxruntime==1.27.0 + transformers==5.12.1, install-time Kompress model download/cache; macOS requires an arm64-native Python because no x86_64 wheel is available.
 EOF
+}
+
+print_capabilities() {
+  # #24: detect optional-helper capabilities BEFORE any helper setup and report one
+  # clear line each (available / unavailable / skipped / installed). Advisory only:
+  # nothing here ever blocks or mutates the core install.
+  printf 'Optional helper capabilities:\n'
+  if command -v git >/dev/null 2>&1; then
+    printf '  git: available — worktree features (m8shift-worktree.py) can use it\n'
+  else
+    printf '  git: unavailable — worktree features (m8shift-worktree.py) need Git; the core install is unaffected\n'
+  fi
+  local existing_rtk asset
+  existing_rtk="$(command -v rtk 2>/dev/null || true)"
+  case "$RTK_CHOICE" in
+    yes|YES|1|true|True|TRUE)
+      if [ -n "$existing_rtk" ]; then
+        printf '  rtk: installed — found at %s (telemetry will be disabled)\n' "$existing_rtk"
+      elif asset="$(rtk_host_asset)"; then
+        printf '  rtk: available — prebuilt release asset %s matches this host\n' "$asset"
+      else
+        printf '  rtk: unavailable — no prebuilt release asset for this host; Cargo/Rust source build requires --allow-source-build\n'
+      fi
+      ;;
+    *)
+      if [ -n "$existing_rtk" ]; then
+        printf '  rtk: installed — found at %s\n' "$existing_rtk"
+      elif { [ "$RTK_CHOICE" = "ask" ] || [ -z "$RTK_CHOICE" ]; } && [ -t 0 ]; then
+        # honest ask-mode report: an interactive run WILL prompt later (offer_rtk)
+        printf '  rtk: ask — will prompt for the optional install (--with-rtk / --no-rtk decide up front)\n'
+      else
+        printf '  rtk: skipped — explicit opt-in (--with-rtk)\n'
+      fi
+      ;;
+  esac
+  case "$HEADROOM_CHOICE" in
+    yes|YES|1|true|True|TRUE)
+      if [ "${PYTHON_OK:-1}" -eq 1 ] && "$PYTHON_BIN" -c 'import venv' >/dev/null 2>&1; then
+        printf '  headroom: available — Python venv module present (experimental, pinned, fail-closed)\n'
+      else
+        printf '  headroom: unavailable — Python venv module missing (install python3-venv/ensurepip); --with-headroom fails closed\n'
+      fi
+      ;;
+    *)
+      printf '  headroom: skipped — explicit opt-in (--with-headroom)\n'
+      ;;
+  esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -358,7 +474,26 @@ else
   VERIFY_DOWNLOADS=1
 fi
 
-command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN is required"
+# Python status is COMPUTED here but only fatal outside --dry-run: the plan-only
+# path stays lockstep with install.ps1 -DryRun and prints an honest status line
+# instead of dying, so a python-less review/CI host can still read the plan.
+PYTHON_OK=1
+PYTHON_STATUS=""
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  PYTHON_OK=0
+  PYTHON_STATUS="MISSING (required)"
+elif ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+  PYTHON_OK=0
+  PYTHON_STATUS="TOO OLD — 3.8+ required (reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))"
+else
+  PYTHON_STATUS="ok ($("$PYTHON_BIN" --version 2>&1 || printf unknown))"
+fi
+if [ "$DRY_RUN" -ne 1 ] && [ "$PYTHON_OK" -ne 1 ]; then
+  case "$PYTHON_STATUS" in
+    MISSING*) die "$PYTHON_BIN is required" ;;
+    *) die "Python 3.8+ is required ($PYTHON_BIN reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))" ;;
+  esac
+fi
 validate_ref
 validate_rtk_version
 
@@ -376,9 +511,12 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   print_prerequisites
+  printf '\n'
+  print_capabilities
   cat <<EOF
 
 Dry run plan:
+  python: $PYTHON_BIN — $PYTHON_STATUS
   target: $TARGET_DIR
   ref: $REF
   base URL: $BASE_URL
@@ -401,6 +539,7 @@ fi
 mkdir -p "$TARGET_DIR"
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 print_prerequisites
+print_capabilities
 
 # Manual --sha256 pins are self-sufficient: when they cover every file we will download,
 # skip the manifest so out-of-band pinning works even against a mirror with no manifest.
@@ -449,37 +588,6 @@ rtk_command() {
   if [ "$allow_project_local" = "1" ]; then
     rtk_local_command
   fi
-}
-
-rtk_host_asset() {
-  local os arch
-  os="$(uname -s 2>/dev/null || printf unknown)"
-  arch="$(uname -m 2>/dev/null || printf unknown)"
-  case "$os" in
-    Darwin)
-      case "$arch" in
-        arm64|aarch64) printf 'rtk-aarch64-apple-darwin.tar.gz\n' ;;
-        x86_64|amd64) printf 'rtk-x86_64-apple-darwin.tar.gz\n' ;;
-        *) return 1 ;;
-      esac
-      ;;
-    Linux)
-      case "$arch" in
-        arm64|aarch64) printf 'rtk-aarch64-unknown-linux-gnu.tar.gz\n' ;;
-        x86_64|amd64) printf 'rtk-x86_64-unknown-linux-musl.tar.gz\n' ;;
-        *) return 1 ;;
-      esac
-      ;;
-    MINGW*|MSYS*|CYGWIN*)
-      case "$arch" in
-        x86_64|amd64) printf 'rtk-x86_64-pc-windows-msvc.zip\n' ;;
-        *) return 1 ;;
-      esac
-      ;;
-    *)
-      return 1
-      ;;
-  esac
 }
 
 pin_context_adapters() {
@@ -649,9 +757,13 @@ install_rtk_portable() {
 }
 
 offer_rtk() {
+  # Opt-in flows run the helper in a SUBSHELL: internal `die`s (broken mirror,
+  # missing checksum, unsupported host) exit only the subshell, degrade to a
+  # helper_failed warning, and the core install continues to init (#24).
   case "$RTK_CHOICE" in
     yes|YES|1|true|True|TRUE)
-      install_rtk_portable || die "optional RTK install failed; install RTK manually or rerun with --no-rtk"
+      ( install_rtk_portable ) \
+        || helper_failed rtk "rerun with --with-rtk after fixing, or use --no-rtk to silence the offer"
       ;;
     no|NO|0|false|False|FALSE)
       rtk_disable_telemetry
@@ -667,7 +779,10 @@ offer_rtk() {
         printf 'Install optional RTK for token-saving shell output filtering from release assets verified against same-tag checksums? [y/N] '
         IFS= read -r answer || answer=""
         case "$answer" in
-          y|Y|yes|YES) install_rtk_portable || die "optional RTK install failed; install RTK manually or rerun with --no-rtk" ;;
+          y|Y|yes|YES)
+            ( install_rtk_portable ) \
+              || helper_failed rtk "rerun with --with-rtk after fixing, or use --no-rtk to silence the offer"
+            ;;
           *) printf '→ skipping optional RTK install\n' ;;
         esac
       else
@@ -833,7 +948,11 @@ install_headroom() {
 offer_headroom() {
   case "$HEADROOM_CHOICE" in
     yes|YES|1|true|True|TRUE)
-      install_headroom
+      # Subshell containment (#24): headroom_fail still cleans the venv and
+      # exits fail-closed, but ONLY out of the helper — the opt-in failure
+      # degrades to a warning and the core install continues to init.
+      ( install_headroom ) \
+        || helper_failed headroom "rerun with --with-headroom after fixing, or use --no-headroom to silence the offer"
       ;;
     no|NO|0|false|False|FALSE|"")
       ;;
@@ -924,11 +1043,19 @@ Optional RTK:
 EOF
 fi
 
-if [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADROOM_CHOICE" = "1" ] || [ "$HEADROOM_CHOICE" = "true" ] || [ "$HEADROOM_CHOICE" = "True" ] || [ "$HEADROOM_CHOICE" = "TRUE" ]; then
+# the success blurb is filesystem-gated: a failed opt-in (venv cleaned by
+# headroom_fail) must not claim an install that did not happen
+if { [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADROOM_CHOICE" = "1" ] || [ "$HEADROOM_CHOICE" = "true" ] || [ "$HEADROOM_CHOICE" = "True" ] || [ "$HEADROOM_CHOICE" = "TRUE" ]; } \
+    && [ -n "$(headroom_python || true)" ]; then
   cat <<EOF
 
 Optional Headroom:
   headroom-ai==0.28.0 and the Kompress model were installed under .m8shift/venvs/headroom.
   Runtime use stays offline through .m8shift/venvs/headroom/bin/m8shift-headroom.
 EOF
+fi
+
+if [ -n "$HELPER_FAILURES" ]; then
+  printf '\nwarning: optional helper install failed for: %s\n' "$HELPER_FAILURES" >&2
+  printf 'warning: the core install above succeeded (exit 0); rerun the failed helper with --with-rtk / --with-headroom after fixing, or use --no-rtk / --no-headroom to silence the offer\n' >&2
 fi

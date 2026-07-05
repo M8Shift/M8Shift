@@ -178,6 +178,9 @@ UPDATE_DEFAULT_COMPONENTS = "core,protocol,pack,anchors"
 # (Stamps already come from the source version, so this ordering is defense in
 # depth, not the primary guard against the stamp-ordering bug.)
 UPDATE_ORDER = ("protocol", "pack", "anchors", "companions", "core")
+# "partial" (#43) is deliberately NOT ok: a mixed companion run (some refreshed,
+# some refused) reports the honest component word but keeps the run incomplete
+# and the exit code non-zero, exactly like a blanket refusal.
 UPDATE_OK_RESULTS = frozenset(("updated", "already_current", "skipped"))
 UPDATE_AUDIT_REL = os.path.join(".m8shift", "update-audit.jsonl")
 UPDATE_AUDIT_SCHEMA = "m8shift.update.audit.v1"
@@ -2293,6 +2296,25 @@ def _update_aggregate(results):
     return max(results, key=_update_result_rank)
 
 
+def _update_aggregate_mixed(results):
+    """#43: mixed-aware component fold. When at least one sub-item succeeded
+    (updated/already_current) AND at least one was refused or needs manual review,
+    the component result is `partial` — never a blanket `refused` that hides the
+    successes. `partial` is not in UPDATE_OK_RESULTS, so the overall run still
+    reports incomplete and exits non-zero."""
+    if (any(r in ("updated", "already_current") for r in results)
+            and any(r in ("refused", "manual_review_required") for r in results)):
+        return "partial"
+    return _update_aggregate(results)
+
+
+def _companion_apply_line(lines, sel):
+    """Last apply_companions() note about one companion (its final outcome line)."""
+    prefix = "companion %s:" % sel
+    picked = [ln for ln in lines if ln.startswith(prefix)]
+    return picked[-1] if picked else prefix + " applied"
+
+
 def _update_protocol_component(dry_run, guard=None):
     """Refresh target M8SHIFT.protocol(.md/-reference.md) from the RUNNING (new)
     source's embedded constants — never from the old target interpreter."""
@@ -2487,13 +2509,24 @@ def _update_companions_component(selection, source_dir, checksums, allow_downgra
     """Refresh companions via the RFC 044 plan/apply machinery, rebased onto the
     target (HERE). `selection` is the resolved list of companion names: installed
     ones by default, or the operator's explicit `--companions` names (the only way
-    a companion ABSENT from the target is ever added — never silently)."""
+    a companion ABSENT from the target is ever added — never silently).
+
+    Returns (result, detail, items): `items` carries one structured outcome per
+    companion ({"name", "result", "detail"}) so `--json` reports each companion
+    honestly, and a mixed run folds to `partial` instead of a blanket `refused`
+    (#43)."""
     if not selection:
-        return "skipped", "no companions installed in the target (none refreshed, none added)"
+        return ("skipped",
+                "no companions installed in the target (none refreshed, none added)", [])
     ns = argparse.Namespace(companions=",".join(selection), companion_source=source_dir,
                             force_companions=True, full=False, no_companions=False)
     plan, errors = plan_companions(ns)
-    results, notes = [], []
+    items, notes = [], []
+
+    def record(sel, result, note):
+        items.append({"name": sel, "result": result, "detail": note})
+        notes.append(note)
+
     for err in list(errors):
         if "newer than the core" in err and allow_downgrade:
             # --allow-downgrade extends to version-locked companions: rebuild the
@@ -2510,39 +2543,43 @@ def _update_companions_component(selection, source_dir, checksums, allow_downgra
                 errors.remove(err)
                 notes.append("companion %s: downgraded (--allow-downgrade)" % sel)
     for err in errors:
-        results.append("refused")
-        notes.append(err)
+        m = re.match(r"companion ([a-z0-9]+):", err)
+        record(m.group(1) if m else "?", "refused", err)
     verified = []
     for entry in plan:
         if entry["action"] in ("copy", "replace"):
             ok, note = _verify_source_checksum(checksums, source_dir, entry["fname"])
             if not ok:
-                results.append("refused")
-                notes.append("companion %s: %s" % (entry["sel"], note))
+                record(entry["sel"], "refused",
+                       "companion %s: %s" % (entry["sel"], note))
                 continue
         verified.append(entry)
     if dry_run:
         for entry in verified:
             if entry["action"] in ("copy", "replace"):
-                results.append("updated")
-                notes.append("companion %s: would refresh %s v%s"
-                             % (entry["sel"], entry["fname"], entry["sver"]))
+                record(entry["sel"], "updated",
+                       "companion %s: would refresh %s v%s"
+                       % (entry["sel"], entry["fname"], entry["sver"]))
             else:
-                results.append("already_current")
-                notes.append("companion %s: already up to date" % entry["sel"])
-        return _update_aggregate(results), "; ".join(notes)
+                record(entry["sel"], "already_current",
+                       "companion %s: already up to date" % entry["sel"])
+        return (_update_aggregate_mixed([i["result"] for i in items]),
+                "; ".join(notes), items)
     if guard is not None and verified:
         guard.require_owned()
     lines, apply_errors = apply_companions(verified)
     notes.extend(lines)
     for entry in verified:
         if entry["sel"] in apply_errors:
-            results.append("refused")
+            result = "refused"
         elif entry["action"] in ("copy", "replace"):
-            results.append("updated")
+            result = "updated"
         else:
-            results.append("already_current")
-    return _update_aggregate(results), "; ".join(notes)
+            result = "already_current"
+        items.append({"name": entry["sel"], "result": result,
+                      "detail": _companion_apply_line(lines, entry["sel"])})
+    return (_update_aggregate_mixed([i["result"] for i in items]),
+            "; ".join(notes), items)
 
 
 def _update_core_component(source_dir, target_root, checksums, version_before,
@@ -2817,9 +2854,14 @@ def cmd_update(args):
                 res, detail = _update_anchors_component(roster, args.force_generated,
                                                         dry_run, guard)
             elif comp == "companions":
-                res, detail = _update_companions_component(companion_selection, source_dir,
-                                                           checksums, args.allow_downgrade,
-                                                           dry_run, guard)
+                # #43: per-companion outcomes ride along so JSON/audit consumers
+                # see exactly which companion succeeded and which was refused.
+                res, detail, companion_items = _update_companions_component(
+                    companion_selection, source_dir, checksums, args.allow_downgrade,
+                    dry_run, guard)
+                rows.append({"component": comp, "result": res, "detail": detail,
+                             "companions": companion_items})
+                continue
             else:
                 res, detail = _update_core_component(source_dir, target_root, checksums,
                                                      version_before, dry_run, guard)
@@ -2843,7 +2885,14 @@ def cmd_update(args):
                                        "target relay became %s — update only while "
                                        "IDLE/PAUSED/DONE/AWAITING (re-run with --allow-working)" % state)
             rows = run_components(guard=guard)
-            wrote = any(r["result"] in ("updated", "staged") for r in rows)
+            # #43: the audit gate must see the per-companion sub-items too — a
+            # companions row folded to `partial` may still have WRITTEN files,
+            # and every real write deserves the audit row + kit-version sync.
+            wrote = any(
+                r["result"] in ("updated", "staged")
+                or any(i["result"] in ("updated", "staged")
+                       for i in r.get("companions", ()))
+                for r in rows)
             version_after = (_parse_script_version(os.path.join(target_root, "m8shift.py"))
                              or version_before)
             if wrote:
@@ -2856,8 +2905,14 @@ def cmd_update(args):
                     "target_version_before": version_before or "-",
                     "target_version_after": version_after or "-",
                     "components": rows,
+                    # #43: a `partial` companions row still refreshed at least one
+                    # companion — the flag reflects the sub-items, not the fold.
                     "companions_refreshed": any(
-                        r["component"] == "companions" and r["result"] == "updated" for r in rows),
+                        r["component"] == "companions"
+                        and (r["result"] == "updated"
+                             or any(i["result"] == "updated"
+                                    for i in r.get("companions", ())))
+                        for r in rows),
                 })
 
     ok = all(r["result"] in UPDATE_OK_RESULTS for r in rows)
@@ -2882,8 +2937,10 @@ def cmd_update(args):
             print("  (dry-run: plan only, nothing written, no lock taken)")
         for r in rows:
             print("  • %-10s %s — %s" % (r["component"], r["result"], r.get("detail", "")))
+            for item in r.get("companions", ()):
+                print("      · %-10s %s — %s" % (item["name"], item["result"], item["detail"]))
         print("✓ update complete." if ok else
-              "✗ update incomplete: see refused/manual_review_required/staged rows above.")
+              "✗ update incomplete: see refused/manual_review_required/staged/partial rows above.")
     return 0 if ok else 1
 
 
@@ -4659,6 +4716,201 @@ def _doctor_update_source_findings(source_dir):
     return findings
 
 
+def _install_report():
+    """#24: read-only post-install snapshot for `doctor --install`. Reports the
+    interpreter, the on-disk core script, the LOCAL checksum manifest (present only
+    when the kit was copied wholesale — installers verify at download time and keep
+    none), kit companion state, generated files, and optional helper states. Never
+    networks, never repairs, never mutates; an absent optional helper is state to
+    report, not an error.
+
+    All artifact paths are anchored on the RELAY project root (the dir of COWORK,
+    like the runtime-sidecar doctor checks), so a `$M8SHIFT_ROOT` rebase verifies
+    the coordinated project, not the kit copy that happens to be running."""
+    import shutil
+    base = os.path.dirname(os.path.abspath(COWORK))
+    core_path = os.path.join(base, "m8shift.py")
+    core_present = os.path.isfile(core_path) and not os.path.islink(core_path)
+    kit_sha = {}
+    kit_tracked = set()   # companion scripts owned by kit.json (the finer authority)
+    try:
+        with open(os.path.join(base, KIT_MANIFEST_REL), encoding="utf-8") as fh:
+            data = json.load(fh)
+        for e in (data.get("companions") or []):
+            if isinstance(e, dict) and e.get("name"):
+                kit_sha[e["name"]] = e.get("sha256", "")
+                if COMPANION_REGISTRY.get(e["name"]) == e.get("script"):
+                    kit_tracked.add(e["script"])
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+        pass
+    manifest = _source_checksums(base)
+    man = {"file": "checksums.sha256", "present": manifest is not None,
+           "entries": 0, "invalid": False, "drift": []}
+    if manifest is not None:
+        man["entries"] = len(manifest)
+        if not manifest:
+            man["invalid"] = True   # present but unreadable/no parseable entries
+        for rel in sorted(manifest):
+            if rel.replace("\\", "/") in kit_tracked:
+                continue            # one-condition-one-ID: kit.json tracking is the
+                                    # finer authority (drift stays under kit.companions)
+            p = os.path.join(base, rel)
+            if not (os.path.isfile(p) and not os.path.islink(p)):
+                continue            # a manifest may list files not installed here
+            try:
+                if _sha256_file(p) != manifest[rel]:
+                    man["drift"].append(rel)
+            except OSError:
+                man["drift"].append(rel)
+    companions = []
+    for name, fname in COMPANION_REGISTRY.items():
+        p = os.path.join(base, fname)
+        present = os.path.isfile(p) and not os.path.islink(p)
+        if not present and name not in kit_sha:
+            continue                # never installed and never recorded: not part of this kit
+        entry = {"name": name, "script": fname, "present": present}
+        if present:
+            entry["version"] = _parse_script_version(p) or "?"
+            entry["core_match"] = entry["version"] == VERSION
+            if kit_sha.get(name):
+                try:
+                    entry["kit_hash_match"] = _sha256_file(p) == kit_sha[name]
+                except OSError:
+                    entry["kit_hash_match"] = False
+        companions.append(entry)
+    roster = tuple(AGENTS)
+    try:
+        lk = get_lock(read(COWORK))
+        rv, ri = roster_tokens(lk.get("agents", ""))
+        if rv and not ri and len(rv) >= 2:
+            roster = tuple(rv)
+    except (OSError, ValueError, IndexError):
+        pass
+    anchors = {}
+    for ag in roster:
+        anchor = ANCHORS.get(ag)
+        if anchor:
+            anchors[anchor] = os.path.isfile(os.path.join(base, anchor))
+    rtk_bin = os.path.join(base, ".m8shift", "bin")
+    rtk_local = any(os.path.isfile(os.path.join(rtk_bin, n)) for n in ("rtk", "rtk.exe"))
+    hr_venv = os.path.join(base, ".m8shift", "venvs", "headroom")
+    helpers = {
+        "git": "available" if shutil.which("git") else "unavailable",
+        "rtk": ("installed (project-local .m8shift/bin)" if rtk_local
+                else "installed (on PATH)" if shutil.which("rtk") else "absent"),
+        "headroom": ("installed (.m8shift/venvs/headroom)" if os.path.isdir(hr_venv)
+                     else "absent"),
+    }
+    return {
+        "python": {"version": "%d.%d.%d" % sys.version_info[:3], "floor": "3.8",
+                   "ok": sys.version_info >= (3, 8)},
+        "core": {"script": "m8shift.py", "present": core_present,
+                 "version": (_parse_script_version(core_path) if core_present else None),
+                 "engine_version": VERSION},
+        "manifest": man,
+        "companions": companions,
+        "generated": {"relay": os.path.isfile(COWORK), "protocol": os.path.isfile(PROTO),
+                      "pack": os.path.isfile(PACK), "anchors": anchors},
+        "helpers": helpers,
+    }
+
+
+def _install_doctor_findings(report):
+    """#24: `doctor --install` findings — NEW conditions only (one-condition-one-ID:
+    kit companion drift/skew stays under kit.companions, relay/protocol/pack/anchor
+    presence under their existing IDs). "Core install unhealthy" conditions are
+    warnings; an absent OPTIONAL helper is info, so `doctor --lint` stays green on a
+    healthy-but-minimal install."""
+    out = []
+    if not report["python"]["ok"]:
+        out.append(doctor_finding(
+            "install.python_floor", "warning",
+            "Python %s is below the supported floor 3.8." % report["python"]["version"],
+            "", "install Python 3.8+ and run m8shift.py through that interpreter"))
+    if not report["core"]["present"]:
+        out.append(doctor_finding(
+            "install.core_missing", "warning",
+            "m8shift.py is not present in the project root.", "m8shift.py",
+            "re-run the installer (install.sh / install.ps1) or copy m8shift.py here"))
+    man = report["manifest"]
+    if man["present"] and man["invalid"]:
+        out.append(doctor_finding(
+            "install.manifest_invalid", "warning",
+            "checksums.sha256 is present but carries no parseable sha256 entries.",
+            man["file"],
+            "re-download checksums.sha256 from the matching release (or regenerate "
+            "it); the local manifest is optional, so removing it also clears this"))
+    for rel in man["drift"]:
+        out.append(doctor_finding(
+            "install.manifest_drift", "warning",
+            "%s does not match its checksums.sha256 entry." % rel, rel,
+            "re-download the file from the release, or refresh the local manifest "
+            "if the edit was intentional"))
+    if report["helpers"]["git"] == "unavailable":
+        out.append(doctor_finding(
+            "install.git_absent", "info",
+            "git is not on PATH: worktree features (m8shift-worktree.py) and anchor "
+            "case-renaming need Git; the core relay does not.", "",
+            "install Git only if you want worktree operations (optional)"))
+    for helper in ("rtk", "headroom"):
+        if report["helpers"][helper] == "absent":
+            out.append(doctor_finding(
+                "install.helper_absent", "info",
+                "optional accelerator %s is not installed; built-in behavior applies."
+                % helper, "",
+                "opt in via install.sh --with-%s if wanted (never required)" % helper))
+    return out
+
+
+def _print_install_report(rep):
+    """Human rendering of the `doctor --install` snapshot (report, not findings)."""
+    print("── install (read-only) ────────────────")
+    py = rep["python"]
+    print("  python     %s (floor %s: %s)"
+          % (py["version"], py["floor"], "ok" if py["ok"] else "BELOW FLOOR"))
+    core = rep["core"]
+    if core["present"]:
+        print("  core       %s v%s (engine v%s)"
+              % (core["script"], core["version"] or "?", core["engine_version"]))
+    else:
+        print("  core       %s MISSING from the project root" % core["script"])
+    man = rep["manifest"]
+    if not man["present"]:
+        print("  manifest   %s absent (optional — installers verify at download time)"
+              % man["file"])
+    elif man["invalid"]:
+        print("  manifest   %s present but has no parseable entries" % man["file"])
+    else:
+        drift = (", drift: " + ", ".join(man["drift"])) if man["drift"] else ", no drift"
+        print("  manifest   %s: %d entr%s checked against installed files%s"
+              % (man["file"], man["entries"], "y" if man["entries"] == 1 else "ies", drift))
+    if rep["companions"]:
+        parts = []
+        for c in rep["companions"]:
+            if not c["present"]:
+                parts.append("%s MISSING (listed in kit.json)" % c["name"])
+                continue
+            note = "v%s" % c["version"]
+            if not c.get("core_match", True):
+                note += " (core is v%s)" % rep["core"]["engine_version"]
+            if c.get("kit_hash_match") is False:
+                note += ", edited since install"
+            parts.append("%s %s" % (c["name"], note))
+        print("  companions " + "; ".join(parts))
+    else:
+        print("  companions none installed (a core-only install is valid)")
+    gen = rep["generated"]
+    anchor_bits = ["%s %s" % (a, "ok" if ok else "missing")
+                   for a, ok in sorted(gen["anchors"].items())]
+    print("  generated  relay %s; protocol %s; pack %s; anchors: %s"
+          % ("ok" if gen["relay"] else "missing",
+             "ok" if gen["protocol"] else "missing",
+             "ok" if gen["pack"] else "missing",
+             "; ".join(anchor_bits) if anchor_bits else "-"))
+    print("  helpers    git %s; rtk %s (optional); headroom %s (optional)"
+          % (rep["helpers"]["git"], rep["helpers"]["rtk"], rep["helpers"]["headroom"]))
+
+
 def _doctor_file_lock_findings():
     """Inspect the internal .m8shift.lock without taking or removing it."""
     findings = []
@@ -4850,21 +5102,30 @@ def _security_doctor_findings(lk):
     return findings
 
 
-def collect_doctor_findings(security=False, contracts=False, update_source=""):
+def collect_doctor_findings(security=False, contracts=False, update_source="",
+                            install_report=None):
     """Read-only health checks. No file_lock, no write, no force recovery."""
     findings = []
     turns = []
     if not os.path.exists(COWORK):
-        return [doctor_finding(
+        # #24: a --no-init install has no relay yet but still deserves post-install
+        # verification, so install.* findings ride along with relay.missing.
+        out = [doctor_finding(
             "relay.missing", "error",
             "M8SHIFT.md is missing.",
             os.path.basename(COWORK),
             "run `./m8shift.py init` from the project root",
         )]
+        if install_report is not None:
+            out.extend(_install_doctor_findings(install_report))
+        return out
     try:
         text = read()
     except OSError as e:
-        return [doctor_finding("relay.unreadable", "error", f"M8SHIFT.md cannot be read: {e}", os.path.basename(COWORK))]
+        out = [doctor_finding("relay.unreadable", "error", f"M8SHIFT.md cannot be read: {e}", os.path.basename(COWORK))]
+        if install_report is not None:
+            out.extend(_install_doctor_findings(install_report))
+        return out
 
     lk = {}
     roster = tuple(AGENTS)
@@ -5146,6 +5407,10 @@ def collect_doctor_findings(security=False, contracts=False, update_source=""):
                             rel,
                         ))
     findings.extend(_kit_doctor_findings())
+    if install_report is not None:
+        # #24: post-install verification findings — NEW install.* conditions only;
+        # kit companion drift/skew stays under kit.companions (one-condition-one-ID).
+        findings.extend(_install_doctor_findings(install_report))
     if update_source:
         # RFC 048 PR B: source-comparison findings only when the operator names a
         # source dir — doctor stays read-only and never touches the network.
@@ -5163,15 +5428,18 @@ def collect_doctor_findings(security=False, contracts=False, update_source=""):
 
 def cmd_doctor(args):
     threshold = SEVERITY_RANK[args.severity_min]
+    # #24: --install computes the read-only snapshot ONCE; findings derive from it.
+    install_report = _install_report() if getattr(args, "install", False) else None
     findings = collect_doctor_findings(
         security=getattr(args, "security", False),
         contracts=getattr(args, "contracts", False),
         update_source=getattr(args, "source", "") or "",
+        install_report=install_report,
     )
     visible = [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
     ok = not visible
     if args.json:
-        print(json.dumps({
+        payload = {
             "ok": ok,
             "m8shift_version": VERSION,
             "severity_min": args.severity_min,
@@ -5179,10 +5447,16 @@ def cmd_doctor(args):
             # RFC 048 (#20): live adoption snapshot (pack + anchor mapping),
             # derived from current files — diagnostic only, never a lint gate.
             "adoption": adoption_report(),
-        }, ensure_ascii=False, sort_keys=True))
+        }
+        if install_report is not None:
+            # #24: post-install snapshot (report data, distinct from findings).
+            payload["install"] = install_report
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
         print(f"m8shift.py v{VERSION}")
         print("── doctor ─────────────────────────────")
+        if install_report is not None:
+            _print_install_report(install_report)
         if not visible:
             print("✓ no findings.")
         else:
@@ -6571,7 +6845,10 @@ def main():
     up.add_argument("--dry-run", action="store_true",
                     help="plan only: report per-component results without writing or taking "
                          "the target's file lock")
-    up.add_argument("--json", action="store_true", help="machine-readable update plan/results")
+    up.add_argument("--json", action="store_true",
+                    help="machine-readable update plan/results; the companions row carries "
+                         "per-companion outcomes, and a mixed run reports `partial` "
+                         "(still a non-zero exit)")
     up.add_argument("--allow-downgrade", action="store_true",
                     help="allow replacing a NEWER target with an older source (refused by default; "
                          "the source version authority decides)")
@@ -6622,6 +6899,11 @@ def main():
                     help="include additional security-oriented checks (root, sizes, force events, lock file)")
     dr.add_argument("--contracts", action="store_true",
                     help="include Stage-4 contract validation findings")
+    dr.add_argument("--install", action="store_true",
+                    help="include read-only post-install verification (#24): python/script "
+                         "versions, local checksum-manifest state, kit companions, generated "
+                         "files, and optional helper states, plus install.* findings — absent "
+                         "optional helpers are info (never warning/error), no network, no repair")
     dr.add_argument("--severity-min", choices=tuple(SEVERITY_RANK), default="warning",
                     help="threshold for ok/lint (default: warning)")
     dr.add_argument("--source", default="",
