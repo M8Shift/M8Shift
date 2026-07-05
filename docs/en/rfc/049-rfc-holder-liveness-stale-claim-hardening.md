@@ -1,8 +1,8 @@
 # RFC 049 — Holder liveness and stale-claim hardening
 
-Status: draft  
-Target: v3.53.0 candidate  
-Related issue: #6  
+Status: draft
+Target: v3.53.0 candidate
+Related issue: #6
 Owner: core relay + runtime/worktree companions
 
 ## Summary

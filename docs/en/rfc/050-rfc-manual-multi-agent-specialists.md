@@ -1,8 +1,8 @@
 # RFC 050 — Manual multi-agent specialists
 
-Status: draft  
-Target: post-v3.53 design block  
-Related RFCs: 008, 018, 032, 039, 041, 047, 049  
+Status: draft
+Target: post-v3.53 design block
+Related RFCs: 008, 018, 032, 039, 041, 047, 049
 Owner: runtime/worktree companions; core relay remains the authority
 
 ## Summary
