@@ -6676,6 +6676,167 @@ class TestInstallerPs1Parity(unittest.TestCase):
         self.assertFalse(os.path.exists(target))
 
 
+class TestDoctorInstall(CLIBase):
+    """#24: `doctor --install` — read-only post-install verification. Adds a
+    snapshot report (JSON `install` key / text section) plus install.* findings
+    covering only NEW conditions; "core install unhealthy" is warning, an absent
+    OPTIONAL helper is info, so `doctor --lint` stays green on a
+    healthy-but-minimal install. Never networks, never repairs, never writes."""
+
+    INSTALL_IDS = {"install.python_floor", "install.core_missing",
+                   "install.manifest_invalid", "install.manifest_drift",
+                   "install.git_absent", "install.helper_absent"}
+
+    def doctor_install(self, *extra):
+        r = self.cw("doctor", "--install", "--json", *extra)
+        return r, json.loads(r.stdout)
+
+    @staticmethod
+    def _snapshot(root):
+        out = {}
+        for dirpath, _, files in os.walk(root):
+            for f in files:
+                p = os.path.join(dirpath, f)
+                with open(p, "rb") as fh:
+                    out[os.path.relpath(p, root)] = fh.read()
+        return out
+
+    def test_minimal_install_is_lint_green_with_full_report(self):
+        self.init()
+        r = self.cw("doctor", "--install", "--lint")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # healthy-but-minimal
+        _, d = self.doctor_install("--severity-min", "info")
+        rep = d["install"]
+        self.assertTrue(rep["python"]["ok"])
+        self.assertTrue(rep["core"]["present"])
+        self.assertEqual(rep["core"]["version"], cowork.VERSION)
+        self.assertFalse(rep["manifest"]["present"])   # installers keep no local manifest
+        self.assertEqual(rep["companions"], [])        # core-only install is valid
+        self.assertTrue(rep["generated"]["relay"])
+        self.assertTrue(rep["generated"]["pack"])
+        self.assertIn(rep["helpers"]["headroom"], ("absent",))
+        # optional-absent shows up only as info, with the stable helper ID
+        for f in d["findings"]:
+            if f["check"].startswith("install."):
+                self.assertEqual(f["severity"], "info", f)
+                self.assertIn(f["check"], ("install.helper_absent", "install.git_absent"))
+
+    def test_without_flag_no_install_key_and_no_install_findings(self):
+        self.init()
+        r = self.cw("doctor", "--json", "--severity-min", "info")
+        d = json.loads(r.stdout)
+        self.assertNotIn("install", d)
+        self.assertEqual([f for f in d["findings"] if f["check"].startswith("install.")], [])
+
+    def test_manifest_invalid_then_drift_then_clean(self):
+        self.init()
+        manifest = os.path.join(self.d, "checksums.sha256")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write("not a manifest\n")
+        r, d = self.doctor_install()
+        checks = [f["check"] for f in d["findings"]]
+        self.assertIn("install.manifest_invalid", checks)
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write("0" * 64 + "  m8shift.py\n")
+            fh.write("1" * 64 + "  tests/not-installed-here.py\n")   # absent: NOT drift
+        r, d = self.doctor_install()
+        drift = [f for f in d["findings"] if f["check"] == "install.manifest_drift"]
+        self.assertEqual([f["path"] for f in drift], ["m8shift.py"])
+        self.assertEqual(drift[0]["severity"], "warning")
+        r = self.cw("doctor", "--install", "--lint")
+        self.assertEqual(r.returncode, 1)              # core-install-unhealthy trips lint
+        with open(os.path.join(self.d, "m8shift.py"), "rb") as fh:
+            good = hashlib.sha256(fh.read()).hexdigest()
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write(good + "  m8shift.py\n")
+        r, d = self.doctor_install()
+        self.assertEqual([f for f in d["findings"]
+                          if f["check"].startswith("install.manifest")], [])
+        self.assertEqual(d["install"]["manifest"]["drift"], [])
+
+    def test_git_absent_is_info_and_stays_lint_green(self):
+        self.init()
+        env = dict(os.environ)
+        env["PATH"] = ""                                # no git, no rtk anywhere
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--install", "--json",
+             "--severity-min", "info"],
+            cwd=self.d, capture_output=True, text=True, env=env)
+        d = json.loads(r.stdout)
+        self.assertEqual(d["install"]["helpers"]["git"], "unavailable")
+        git_f = [f for f in d["findings"] if f["check"] == "install.git_absent"]
+        self.assertEqual(len(git_f), 1)
+        self.assertEqual(git_f[0]["severity"], "info")
+        self.assertIn("worktree", git_f[0]["message"])  # doctor states the worktree need
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--install", "--lint"],
+            cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # info never trips lint
+
+    def test_companion_state_reported_without_duplicating_kit_ids(self):
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        with open(os.path.join(self.d, "m8shift-runtime.py"), "a", encoding="utf-8") as fh:
+            fh.write("\n# local edit\n")
+        _, d = self.doctor_install("--severity-min", "info")
+        comp = {c["name"]: c for c in d["install"]["companions"]}
+        self.assertIn("runtime", comp)
+        self.assertTrue(comp["runtime"]["present"])
+        self.assertIs(comp["runtime"]["kit_hash_match"], False)
+        # the edited-companion CONDITION stays under kit.companions (one ID each)
+        self.assertTrue(any(f["check"] == "kit.companions" for f in d["findings"]))
+        self.assertEqual([f for f in d["findings"]
+                          if f["check"].startswith("install.") and f["severity"] != "info"], [])
+
+    def test_no_init_dir_reports_install_alongside_relay_missing(self):
+        bare = tempfile.mkdtemp(prefix="m8shift-noinit-")
+        self.addCleanup(shutil.rmtree, bare, True)
+        shutil.copy(SCRIPT, os.path.join(bare, "m8shift.py"))
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--install", "--json",
+             "--severity-min", "info"],
+            cwd=bare, capture_output=True, text=True)
+        d = json.loads(r.stdout)
+        self.assertIn("relay.missing", [f["check"] for f in d["findings"]])
+        self.assertIn("install", d)
+        self.assertTrue(d["install"]["core"]["present"])
+        self.assertFalse(d["install"]["generated"]["relay"])
+
+    def test_rebased_root_without_core_reports_core_missing(self):
+        empty = tempfile.mkdtemp(prefix="m8shift-empty-root-")
+        self.addCleanup(shutil.rmtree, empty, True)
+        env = dict(os.environ)
+        env["M8SHIFT_ROOT"] = empty
+        r = subprocess.run(
+            [sys.executable, os.path.join(self.d, "m8shift.py"),
+             "doctor", "--install", "--json", "--severity-min", "info"],
+            cwd=self.d, capture_output=True, text=True, env=env)
+        d = json.loads(r.stdout)
+        core_f = [f for f in d["findings"] if f["check"] == "install.core_missing"]
+        self.assertEqual(len(core_f), 1)
+        self.assertEqual(core_f[0]["severity"], "warning")
+
+    def test_doctor_install_is_read_only(self):
+        self.init()
+        before = self._snapshot(self.d)
+        self.assertEqual(self.cw("doctor", "--install").returncode, 0)
+        self.assertEqual(self.cw("doctor", "--install", "--json",
+                                 "--severity-min", "info").returncode, 0)
+        self.assertEqual(self._snapshot(self.d), before)
+
+    def test_install_finding_ids_are_exactly_the_documented_set(self):
+        with open(SCRIPT, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        ids = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "doctor_finding" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                    and node.args[0].value.startswith("install.")):
+                ids.add(node.args[0].value)
+        self.assertEqual(ids, self.INSTALL_IDS)
+
+
 class TestContextLocalAdapterResolution(unittest.TestCase):
     def _project(self):
         d = tempfile.mkdtemp(prefix="m8shift-local-adapter-")

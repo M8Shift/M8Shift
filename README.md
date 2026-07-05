@@ -174,6 +174,18 @@ bash install.sh --dry-run --with-rtk --with-headroom
 .\install.ps1 -DryRun
 ```
 
+Verify a finished install read-only at any time:
+
+```bash
+python3 m8shift.py doctor --install
+```
+
+It reports the Python/script versions, local checksum-manifest state, kit
+companion drift, generated files, and optional helper states — without network,
+repair, or writes. "Core install unhealthy" conditions are warnings; a missing
+optional helper (git for worktree features, RTK, Headroom) is `info`, so
+`doctor --install --lint` stays green on a healthy-but-minimal install.
+
 Manual install:
 
 ```bash

@@ -114,6 +114,16 @@ If you do not use the installer, download or copy `m8shift.py` into the project
 first; copy [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md) next to it only if
 you need isolated parallel worktrees.
 
+After any install (all three options), verify the result read-only:
+
+```powershell
+python m8shift.py doctor --install
+```
+
+It reports Python/script versions, checksum-manifest state, kit companion drift,
+generated files, and optional helper states; a missing optional helper (git for
+worktree features, RTK, Headroom) is `info`, never an error.
+
 `claude` and `codex` are example roster names. Replace them with `gemini`, `vibe`,
 or any cooperative agent that follows the relay protocol.
 
