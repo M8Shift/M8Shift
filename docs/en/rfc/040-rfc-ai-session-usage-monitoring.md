@@ -1650,8 +1650,10 @@ Phase 3 adds, on top of the existing 12 rules:
     relay's. Scan roots are operator-configurable; a disabled adapter never
     scans.
 14. **Aggregate token counts only — never message content.** The scanner reads
-    the integer `usage` fields and the row `timestamp` / `model` / `sessionId`;
-    it must not read, store, or emit prompt or response text.
+    only the integer `usage` fields and the row `timestamp`; it never reads
+    `model`, `sessionId`, or any prompt/response text, and the version-tolerant
+    parser never descends into content-bearing keys (a usage-like object nested
+    in message content must not contribute a content-derived number).
 15. **Credential reuse stays in the operator's adapter, not in M8Shift.**
     M8Shift never reads `~/.claude/.credentials.json` itself and never stores an
     OAuth or refresh token (reinforces rule 2). If account identity ever

@@ -4644,6 +4644,7 @@ USAGE_ERRORS_KEEP = 200
 # parsers never read message content. These caps are enforced on every scan so a
 # misconfigured root cannot walk an unbounded tree or open stale/huge files.
 USAGE_SCAN_MAX_FILES = 2000                     # hard cap on *.jsonl files opened per run
+USAGE_SCAN_MAX_CANDIDATES = 50000               # hard cap on *.jsonl candidates lstat'd (bounds enumeration)
 USAGE_SCAN_MAX_FILE_BYTES = 64 * 1024 * 1024    # skip any single file larger than this
 USAGE_SCAN_HORIZON_DAYS = 8                      # skip files whose mtime predates the widest window + margin
 USAGE_SCAN_SKIP_RATIO = 0.5                     # >50% unparseable lines in a usage file => schema-drift diagnostic
@@ -4657,6 +4658,11 @@ USAGE_SCAN_TOKEN_FIELDS = ("input_tokens", "output_tokens",
                            "cache_creation_input_tokens", "cache_read_input_tokens",
                            "cached_input_tokens", "reasoning_output_tokens")
 USAGE_SCAN_USAGE_KEYS = ("usage", "token_usage", "tokens", "token_count")
+# Content-bearing keys the version-tolerant Codex finder must NEVER recurse into:
+# a usage-like object nested inside prompt/response text would otherwise leak a
+# content-derived number into the aggregate (Codex PR #50 review, blocker 1).
+USAGE_SCAN_CONTENT_KEYS = frozenset((
+    "content", "text", "prompt", "response", "input", "output", "messages", "parts"))
 USAGE_WARN_THRESHOLD_DEFAULT = 0.80
 USAGE_LIMIT_THRESHOLD_DEFAULT = 1.0
 USAGE_STALE_AFTER_MINUTES_DEFAULT = 30
@@ -5247,7 +5253,11 @@ def _usage_scan_find_usage(obj, depth=0):
             return child
     if _usage_scan_sum_tokens(obj) is not None:
         return obj
-    for value in obj.values():
+    for key, value in obj.items():
+        # Never descend into content-bearing fields: a usage-like object nested in
+        # prompt/response text must not contribute a content-derived number.
+        if key in USAGE_SCAN_CONTENT_KEYS:
+            continue
         if isinstance(value, dict):
             found = _usage_scan_find_usage(value, depth + 1)
             if found is not None:
@@ -5305,37 +5315,47 @@ def _usage_scan_roots(scan_roots):
     return roots
 
 
-def scan_jsonl_usage(scan_roots, provider, now_dt):
+def scan_jsonl_usage(scan_roots, provider, now_dt, timeout_s=None):
     """Walk operator scan roots, sum agent-session token integers into rolling
     windows, and return (m8shift.usage.fixture.v1 doc, warnings). Bounded
-    (files / bytes / mtime horizon), version-tolerant (unparseable lines skipped
-    and counted; abnormal skip ratio → diagnostic), aggregate-only (never reads
-    message content), pure filesystem read that never follows symlinks and never
-    writes."""
+    (files / candidates / bytes / mtime horizon / wall-clock deadline),
+    version-tolerant (unparseable lines skipped and counted; abnormal skip ratio →
+    diagnostic), aggregate-only (never reads message content), pure filesystem read
+    that never follows symlinks and never writes."""
     parser = _usage_scan_claude_row if provider == "claude" else _usage_scan_codex_row
     boundaries = [(name, now_dt - delta) for name, delta in USAGE_SCAN_WINDOWS]
     widest = max(USAGE_SCAN_WINDOWS, key=lambda w: w[1])[0]
     horizon = now_dt - dt.timedelta(days=USAGE_SCAN_HORIZON_DAYS)
+    deadline = (time.monotonic() + timeout_s) if timeout_s else None
     sums = {name: 0 for name, _ in USAGE_SCAN_WINDOWS}
     warnings = []
     files_scanned = 0
-    cap_hit = False
+    candidates = 0
+    stop = False
+    cap_hit = candidate_cap_hit = deadline_hit = False
     drift_files = 0
     skipped_total = 0
     for root in _usage_scan_roots(scan_roots):
-        if cap_hit:
+        if stop:
             break
         if not os.path.isdir(root):
             continue
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            if cap_hit:
+            if stop:
                 break
             dirnames.sort()                              # deterministic traversal
             for filename in sorted(filenames):
                 if not filename.endswith(".jsonl"):
                     continue
+                candidates += 1                          # counted BEFORE lstat: bounds enumeration
+                if candidates > USAGE_SCAN_MAX_CANDIDATES:
+                    candidate_cap_hit = stop = True
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    deadline_hit = stop = True
+                    break
                 if files_scanned >= USAGE_SCAN_MAX_FILES:
-                    cap_hit = True
+                    cap_hit = stop = True
                     break
                 path = os.path.join(dirpath, filename)
                 try:
@@ -5356,6 +5376,11 @@ def scan_jsonl_usage(scan_roots, provider, now_dt):
                 try:
                     with open(path, encoding="utf-8", errors="replace") as fh:
                         for line in fh:
+                            # honor the wall-clock deadline mid-file for large inputs
+                            if deadline is not None and (lines_total & 0x1FFF) == 0 \
+                                    and time.monotonic() > deadline:
+                                deadline_hit = stop = True
+                                break
                             line = line.strip()
                             if not line:
                                 continue
@@ -5387,6 +5412,12 @@ def scan_jsonl_usage(scan_roots, provider, now_dt):
     if cap_hit:
         warnings.append(f"reached the {USAGE_SCAN_MAX_FILES}-file scan cap; "
                         "usage totals are a lower bound")
+    if candidate_cap_hit:
+        warnings.append(f"reached the {USAGE_SCAN_MAX_CANDIDATES}-file enumeration cap; "
+                        "usage totals are a lower bound")
+    if deadline_hit:
+        warnings.append(f"reached the {timeout_s:g}s scan deadline; "
+                        "usage totals are a lower bound")
     if drift_files:
         warnings.append(f"{drift_files} JSONL file(s) had over "
                         f"{int(USAGE_SCAN_SKIP_RATIO * 100)}% unparseable lines "
@@ -5415,7 +5446,7 @@ def run_usage_jsonl_scan(entry):
     if not isinstance(roots, list) or not roots \
             or not all(isinstance(r, str) and r.strip() for r in roots):
         return None, "", "jsonl_scan requires a non-empty scan_roots list of strings", []
-    doc, warnings = scan_jsonl_usage(roots, provider, now())
+    doc, warnings = scan_jsonl_usage(roots, provider, now(), timeout_s=usage_timeout_s(entry))
     return doc, "", "", warnings
 
 

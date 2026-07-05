@@ -8330,6 +8330,68 @@ class TestRFC040UsageJsonlScan(CLIBase):
         windows = {w["kind"]: w for w in s["windows"]}
         self.assertEqual(windows["session_5h"]["used"], 53)
 
+    def test_codex_finder_ignores_usage_nested_in_content(self):
+        """Codex PR #50 blocker 1: a usage-like object nested inside a content-bearing
+        key must NOT contribute a content-derived number; real top-level metadata
+        still counts, and no message text or the content-usage figure leaks."""
+        now = dt.datetime.now(dt.timezone.utc)
+        root = self.scan_dir()
+        self.write_jsonl([
+            # ONLY usage is nested under `content` (with prompt text) → must be ignored
+            {"timestamp": self._iso(now - dt.timedelta(minutes=1)),
+             "content": {"text": "SECRET_PROMPT", "usage": {"total_tokens": 999}}},
+            # real top-level usage metadata → counts
+            {"timestamp": self._iso(now - dt.timedelta(minutes=2)),
+             "usage": {"total_tokens": 50}},
+        ], os.path.join("agent-logs", "codex.jsonl"))
+        self.write_adapters([self.scan_adapter([root], name="codex-scan",
+                                               agent="codex", provider="codex")])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("999", r.stdout)                       # content-nested usage never counted
+        self.assertNotIn("SECRET_PROMPT", r.stdout)             # message text never read
+        s = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(s["used_tokens"], 50)                  # only the real metadata row
+
+
+class TestRFC040UsageJsonlScanBounds(unittest.TestCase):
+    """RFC 040 Phase 3 Slice 2 (Codex PR #50 blocker 2): the scan bounds candidate
+    enumeration AND wall-clock time, not only opened files. Exercised in-process so
+    tiny constants/clock stubs keep it fast and deterministic."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        rp = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_bounds", rp)
+        cls.rt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.rt)
+
+    def _make_files(self, n):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        now = dt.datetime.now(dt.timezone.utc)
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        for i in range(n):
+            with open(os.path.join(d, f"log{i:03d}.jsonl"), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"timestamp": stamp, "message": {"usage": {
+                    "input_tokens": 1, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}) + "\n")
+        return d, now
+
+    def test_candidate_enumeration_cap_stops_and_warns(self):
+        d, now = self._make_files(6)
+        with mock.patch.object(self.rt, "USAGE_SCAN_MAX_CANDIDATES", 2):
+            _, warnings = self.rt.scan_jsonl_usage([d], "claude", now)
+        self.assertTrue(any("enumeration cap" in w for w in warnings), warnings)
+
+    def test_wall_clock_deadline_stops_and_warns(self):
+        d, now = self._make_files(4)
+        ticks = iter([0.0] + [100.0] * 50)   # deadline set at 0+1=1; next tick jumps past it
+        with mock.patch.object(self.rt.time, "monotonic", lambda: next(ticks)):
+            _, warnings = self.rt.scan_jsonl_usage([d], "claude", now, timeout_s=1)
+        self.assertTrue(any("deadline" in w for w in warnings), warnings)
+
 
 class TestRFC040UsagePRB(CLIBase):
     """RFC 040 PR B — the guard/watch/wait/resume family. GENERAL-table exit
