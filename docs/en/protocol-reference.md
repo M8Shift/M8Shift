@@ -69,6 +69,62 @@ same metadata and serializes unavailable values as `null`.
 
 ---
 
+## Evidence & workspace discipline (detail)
+
+### Compression / raw-proof contract
+
+Compressed or filtered context is **orientation, not proof**. Any lossy or
+summarizing layer — a digest, a context pack, RTK/adapter output, a stored
+compact record, a model-written summary — helps you *find* and *frame*, but a
+claim built on it must retain or reference the raw evidence it came from.
+
+**Proof-bearing content that must be verified raw** (never through a
+compressed/filtered view):
+
+- **diffs** you review for correctness (hunk-lossy filters are forbidden for
+  code review);
+- **checksums / hashes** and any byte-level assertion;
+- **legal or verbatim text** (quotes, licenses, contracts, cited wording);
+- **logs used as evidence** (incident forensics, audit trails, test output
+  backing a pass/fail verdict).
+
+Honest adapter roles (consistent with RFC 023 and the shipped adapters): RTK
+is a **lossy semantic filter** — it selects and truncates, it does not
+guarantee any fixed ratio and is not reversible; Kompress/Headroom-style
+compression reaches roughly 45–55% on prose only and errors on shell output;
+a stored compact record is an **excerpt with a reference to the raw
+original**, not a substitute for it. When a handoff asserts something a peer
+will rely on, cite the raw source (file + location, command output, checksum)
+so the peer can re-verify without trusting the digest.
+
+### Shared checkouts and destructive git operations
+
+A checkout that another agent or a human also works in is **shared state**,
+not your scratch space. Discipline:
+
+- **Destructive git operations require explicit human authorization** in a
+  shared checkout: `git reset --hard`, `git checkout -f`, `git clean -fd`,
+  forced branch switches, history rewrites. "The command was refused" is
+  never that authorization.
+- **A refused checkout is a signal, not an obstacle.** Git refuses to switch
+  precisely because uncommitted work (possibly a peer's) would be destroyed.
+  Escalating to a forced variant bypasses the safety, not the problem.
+- **Inspect non-destructively first**: `git status`, `git stash list`,
+  `git log`, `git diff` tell you whose work is in flight without touching it.
+- **Prefer isolation over force**: a separate worktree
+  (`m8shift-worktree.py claim`) or a copy gives you a clean tree without
+  destroying anyone's state; `git stash` is the lighter alternative when the
+  work is your own.
+- **Never manipulate a peer's checkout outside relay coordination** — ask via
+  `append` and let the pen order the work instead.
+
+This discipline is **advisory guidance**: M8Shift does not (and cannot)
+sandbox shell commands. The read-only `doctor --source DIR` update preflight
+surfaces a `workspace.dirty_worktree` advisory when the project checkout has
+uncommitted changes, as a reminder to coordinate before generated writes land.
+
+---
+
 ## 7. The `m8shift.py` tool
 
 ```
@@ -154,7 +210,10 @@ same metadata and serializes unavailable values as `null`.
   It never repairs files, prompts, contacts the network, or changes legal
   `LOCK` transitions. With `--source DIR` it also compares this core against a
   candidate source copy and reports `adoption.update_recommended` when the
-  source is newer.
+  source is newer, plus an advisory `workspace.dirty_worktree` finding when the
+  project's git checkout carries uncommitted changes (coordinate/stash before
+  an update lands generated writes in a shared checkout — never clear the
+  state with destructive git operations without explicit human authorization).
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
