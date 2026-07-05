@@ -159,10 +159,54 @@ class TestPureFunctions(unittest.TestCase):
             "HTML comments",           # turn-marker safety
             "advisory",                # the lock is advisory
             "No network, no daemon",   # no authority escalation
+            "orientation, not proof",  # #22 compression/raw-proof contract
+            "explicit human authorization",  # #23 shared-checkout destructive git
         ]
         for needle in required:
             self.assertIn(needle, core,
                           f"protocol core dropped the safety invariant: {needle!r}")
+
+    def test_pack_carries_raw_proof_and_shared_checkout_disciplines(self):
+        """#22 + #23: the delivered agent pack states both disciplines verbatim, so
+        the generated agent-facing text cannot regress silently."""
+        pack = cowork.AGENT_PACK["en"]
+        for needle in (
+            "## Compression is not proof",
+            "are orientation, not proof",
+            "verify it against\nthe raw original",
+            "## Shared checkouts and destructive git",
+            "`reset --hard`",
+            "`clean -fd`",
+            "A refused checkout is a signal, not an obstacle",
+            "isolated worktree (`m8shift-worktree.py`)",
+            "outside relay coordination",
+        ):
+            self.assertIn(needle, pack,
+                          f"agent pack dropped the discipline text: {needle!r}")
+
+    def test_reference_details_raw_proof_and_shared_checkout(self):
+        """#22 + #23: the protocol reference carries the detailed subsections —
+        proof-bearing raw content, honest adapter roles (RFC 023), and the
+        shared-checkout discipline with its advisory-only enforcement."""
+        ref = cowork.PROTOCOL_REFERENCE["en"]
+        for needle in (
+            "### Compression / raw-proof contract",
+            "**orientation, not proof**",
+            "**diffs**",
+            "**checksums / hashes**",
+            "**legal or verbatim text**",
+            "**logs used as evidence**",
+            "lossy semantic filter",
+            "45–55% on prose",
+            "excerpt with a reference to the raw",
+            "### Shared checkouts and destructive git operations",
+            "explicit human authorization",
+            "A refused checkout is a signal, not an obstacle.",
+            "Never manipulate a peer's checkout outside relay coordination",
+            "workspace.dirty_worktree",
+        ):
+            self.assertIn(needle, ref,
+                          f"protocol reference dropped the detail: {needle!r}")
 
     def test_i18n_packs_remain_whole(self):
         """Phase 1 splits EN only; localized packs stay single whole files."""
@@ -7828,6 +7872,8 @@ class TestRFC048PRA(CLIBase):
             "never stop listening merely because you predict",  # keep-listening
             "`IDLE` means no turn is opened, not that the task is complete",
             "untrusted coordination data",                # prompt-security boundary
+            "are orientation, not proof",                 # #22 raw-proof contract
+            "A refused checkout is a signal, not an obstacle",  # #23 shared checkout
             "Never force or steal a valid lock",          # stale-lock recovery
             "advisory",                                   # companion boundaries
             'An issue, branch, PR, or MR being opened is not "done"; done requires\n'
@@ -8473,6 +8519,64 @@ class TestRFC048PRB(CLIBase):
         r = self.cw("doctor", "--json", "--severity-min", "info")
         checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
         self.assertNotIn("adoption.update_recommended", checks)
+
+    # ── doctor --source: #23 shared-checkout advisory (workspace.dirty_worktree) ──
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.d, *args],
+                              capture_output=True, text=True)
+
+    def test_doctor_source_dirty_worktree_advisory_is_info_and_read_only(self):
+        if not shutil.which("git"):
+            self.skipTest("git missing")
+        self.init()
+        self.assertEqual(self._git("init", "-q").returncode, 0)
+        # synthetic dirty condition: an untracked (non-ignored) file
+        with open(os.path.join(self.d, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("peer work in flight\n")
+        relay_before = self.read_target("M8SHIFT.md")
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        findings = {f["check"]: f for f in json.loads(r.stdout)["findings"]}
+        self.assertIn("workspace.dirty_worktree", findings)
+        self.assertEqual(findings["workspace.dirty_worktree"]["severity"], "info")
+        self.assertIn("explicit human authorization",
+                      findings["workspace.dirty_worktree"]["fix_hint"])
+        # advisory only: default-threshold lint stays green (info < warning)
+        r = self.cw("doctor", "--json", "--lint", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        # read-only: the relay is untouched and the workspace stays dirty (no
+        # repair, no stash, no reset)
+        self.assertEqual(self.read_target("M8SHIFT.md"), relay_before)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "wip.txt")))
+        status = self._git("--no-optional-locks", "status", "--porcelain")
+        self.assertIn("wip.txt", status.stdout)
+
+    def test_doctor_source_clean_or_non_git_has_no_dirty_worktree_finding(self):
+        if not shutil.which("git"):
+            self.skipTest("git missing")
+        self.init()
+        # not a git repo → no finding (the advisory needs a worktree to inspect)
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertNotIn("workspace.dirty_worktree", checks)
+        # clean committed repo → no finding (generated relay files are gitignored)
+        self.assertEqual(self._git("init", "-q").returncode, 0)
+        self._git("config", "user.email", "test@example.invalid")
+        self._git("config", "user.name", "Test")
+        self._git("add", "-A")
+        self.assertEqual(self._git("commit", "-q", "-m", "baseline").returncode, 0)
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertNotIn("workspace.dirty_worktree", checks)
+        # and without --source the advisory can never fire (preflight-only surface)
+        with open(os.path.join(self.d, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("dirty\n")
+        r = self.cw("doctor", "--json", "--severity-min", "info")
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertNotIn("workspace.dirty_worktree", checks)
 
 
 class TestDetailedHelpCoverage(unittest.TestCase):
