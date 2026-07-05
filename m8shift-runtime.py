@@ -11,6 +11,7 @@ import fnmatch
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import plistlib
 import re
@@ -4871,6 +4872,28 @@ def _usage_iso_or_none(value, field, warnings):
     return None
 
 
+def _usage_ratio_or_none(value, field, warnings):
+    """RFC 040 Phase 3: an optional per-window `used_ratio` — the fraction of the
+    window's limit already consumed, for official sources that report a
+    percent/ratio rather than absolute token counts. A float in [0, 1]; anything
+    else is ignored (never coerced) with a warning. Booleans are not ratios."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        warnings.append(f"{field} must be a number in [0, 1]; ignored")
+        return None
+    ratio = float(value)
+    # NaN/Inf slip past < / > comparisons (all NaN comparisons are False) and would
+    # serialize as non-standard JSON; reject any non-finite value outright.
+    if not math.isfinite(ratio):
+        warnings.append(f"{field} must be a finite number in [0, 1]; ignored")
+        return None
+    if ratio < 0 or ratio > 1:
+        warnings.append(f"{field} must be in [0, 1]; ignored")
+        return None
+    return ratio
+
+
 def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="", include_raw_excerpt=False):
     """Normalize one m8shift.usage.fixture.v1 document to the pinned
     m8shift.usage.snapshot.v1 shape (RFC 040 "PR A snapshot schema bytes").
@@ -4908,14 +4931,31 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="", inc
         if not isinstance(wkind, str) or not wkind:
             warnings.append(f"windows[{idx}].kind must be a non-empty string; window dropped")
             continue
-        windows.append({
+        w_used = _usage_int_or_none(win.get("used"), f"windows[{idx}].used", warnings)
+        w_limit = _usage_int_or_none(win.get("limit"), f"windows[{idx}].limit", warnings)
+        w_ratio = _usage_ratio_or_none(win.get("used_ratio"), f"windows[{idx}].used_ratio", warnings)
+        # RFC 040 Phase 3 honesty rule: a percent/ratio is never a token count.
+        # A window carrying BOTH used_ratio and a non-null used/limit is unit-mixed
+        # and is REJECTED (dropped, never coerced) so neither value can be misread.
+        if w_ratio is not None and (w_used is not None or w_limit is not None):
+            warnings.append(f"windows[{idx}] carries both used_ratio and used/limit "
+                            "tokens (unit-mixed); window dropped")
+            continue
+        window = {
             "kind": wkind,
             "resets_at": _usage_iso_or_none(win.get("resets_at"), f"windows[{idx}].resets_at", warnings),
-            "used": _usage_int_or_none(win.get("used"), f"windows[{idx}].used", warnings),
-            "limit": _usage_int_or_none(win.get("limit"), f"windows[{idx}].limit", warnings),
-        })
+            "used": w_used,
+            "limit": w_limit,
+        }
+        # Additive: `used_ratio` appears ONLY on ratio-native windows, so token-only
+        # snapshots stay byte-identical to the shipped v1 output.
+        if w_ratio is not None:
+            window["used_ratio"] = w_ratio
+        windows.append(window)
     ratios = [w["used"] / w["limit"] for w in windows
               if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0]
+    # Ratio-native windows contribute their used_ratio directly — no token math.
+    ratios += [w["used_ratio"] for w in windows if w.get("used_ratio") is not None]
     if not ratios and used_tokens is not None and isinstance(limit_tokens, int) and limit_tokens > 0:
         ratios = [used_tokens / limit_tokens]
     decision_ratio = round(max(ratios), 4) if ratios else None

@@ -7813,6 +7813,84 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(json.dumps(event["payload"]["snapshot"], sort_keys=True),
                          json.dumps(expected, sort_keys=True))
 
+    # ── RFC 040 Phase 3, Slice 1: ratio-native windows (used_ratio) ──────────
+
+    def test_ratio_native_window_drives_decision_ratio_from_used_ratio(self):
+        """A ratio-native official source (e.g. the Claude OAuth usage endpoint,
+        58% consumed) sets used_ratio; decision_ratio is that ratio directly, with
+        used/limit null — a percent is never rendered as tokens."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z", "used_ratio": 0.58},
+        ])
+        r = self.snapshot_for(doc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # 0.58 < warn => ok
+        snap = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["decision_ratio"], 0.58)
+        self.assertIsNone(snap["used_tokens"])
+        self.assertIsNone(snap["limit_tokens"])
+        win = snap["windows"][0]
+        self.assertEqual(win["used_ratio"], 0.58)
+        self.assertIsNone(win["used"])
+        self.assertIsNone(win["limit"])
+
+    def test_unit_mixed_window_is_rejected_never_coerced(self):
+        """A window carrying BOTH used_ratio and token counts is unit-mixed: it is
+        dropped (never coerced), contributes nothing, and the run fails open."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z",
+             "used_ratio": 0.5, "used": 50, "limit": 100},
+        ])
+        r = self.snapshot_for(doc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # dropped => unknown => fail-open
+        payload = json.loads(r.stdout)
+        snap = payload["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["windows"], [])            # unit-mixed window dropped
+        self.assertIsNone(snap["decision_ratio"])         # nothing to gate on
+        messages = " ".join(f["message"] for f in payload["findings"])
+        self.assertIn("unit-mixed", messages)
+
+    def test_used_ratio_out_of_range_is_ignored_with_warning(self):
+        """used_ratio must be in [0, 1]; anything else is ignored (never coerced)
+        and the window keeps its plain shape with no used_ratio key."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z", "used_ratio": 1.5},
+        ])
+        r = self.snapshot_for(doc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        win = payload["snapshots"][0]["snapshot"]["windows"][0]
+        self.assertNotIn("used_ratio", win)
+        self.assertIsNone(payload["snapshots"][0]["snapshot"]["decision_ratio"])
+        self.assertIn("[0, 1]", " ".join(f["message"] for f in payload["findings"]))
+
+    def test_used_ratio_nan_is_rejected_and_output_is_standard_json(self):
+        """Codex review of PR #49: NaN slips past </> bounds (all NaN comparisons
+        are False) and would serialize as non-standard JSON. It must be ignored,
+        never reaching used_ratio or decision_ratio."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z",
+             "used_ratio": float("nan")},
+        ])
+        r = self.snapshot_for(doc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NaN", r.stdout)                 # standard JSON only
+        payload = json.loads(r.stdout)                    # would raise on bare NaN
+        snap = payload["snapshots"][0]["snapshot"]
+        self.assertNotIn("used_ratio", snap["windows"][0])
+        self.assertIsNone(snap["decision_ratio"])
+        self.assertIn("finite", " ".join(f["message"] for f in payload["findings"]))
+
+    def test_token_only_window_carries_no_used_ratio_key(self):
+        """Byte-identity guard: a token-only window never gains a used_ratio key,
+        so pre-Phase-3 snapshots serialize unchanged."""
+        r = self.snapshot_for(self.usage_doc(windows=[
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z",
+             "used": 42000, "limit": 100000},
+        ]))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for win in json.loads(r.stdout)["snapshots"][0]["snapshot"]["windows"]:
+            self.assertNotIn("used_ratio", win)
+
     def test_snapshot_appends_and_never_edits_prior_ledger_lines(self):
         rel = self.write_fixture(self.usage_doc())
         self.write_adapters([self.fixture_adapter(path=rel)])
