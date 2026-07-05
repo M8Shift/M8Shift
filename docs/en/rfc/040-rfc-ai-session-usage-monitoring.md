@@ -1498,6 +1498,192 @@ Recommendation:
 
 ---
 
+## Phase 3 — real provider adapters (implementation scope)
+
+PR A and PR B (both shipped in `v3.48.0`) delivered the whole **framework**: the
+`usage snapshot/status/guard/watch/wait/resume` surface, the core `cooldown`
+transition, the `m8shift.usage.snapshot.v1` / `m8shift.usage.fixture.v1`
+schemas, the adapter manifest, the sidecar ledger, the exit-code contract, and
+fail-open unknown handling. What still ships as a **fixture/stub** is the data
+itself: the bundled `claude-usage-cli` adapter is disabled and the Codex adapter
+is a fixture path. **Phase 3 is the real, opt-in adapters that emit
+`m8shift.usage.fixture.v1` from live local sources** — nothing in the core or
+the command surface changes.
+
+### The load-bearing distinction: spent vs quota
+
+Two adapter classes normalize to the same schema but behave differently at the
+gate:
+
+- **Quota adapters** yield a real `decision_ratio` per window — either from
+  absolute `used` + `limit` tokens, or, for sources that report a percent/ratio
+  rather than tokens, from a `used_ratio` (see the ratio-native schema extension
+  below). They are **gating-capable**: `guard`/`cooldown` can act on them.
+  Sources: the Claude usage endpoint (ratio-native), a `claude-monitor` rollup,
+  the Codex `account/rateLimits/read` RPC.
+- **Consumption (spent) adapters** return `used` only, with `limit_tokens: null`
+  and each `windows[].limit: null`. By construction `decision_ratio` is `null`,
+  the status is `unknown`, and the fail-open rule means **a spent-only source
+  never pauses anything**. It is a reporting/timeline source, not a gate.
+  Sources: a local JSONL scan, `ccusage`, `codex-stats`, a `token-meter` export.
+
+This is the honest core of Phase 3: **you cannot gate on consumption alone.**
+Gating requires either a source that returns the limit, or an operator-declared
+budget (below) that supplies one. Presenting a spent-only estimate as if it were
+a remaining-quota gate would violate design principle 3 (provenance is
+mandatory) and rule 9 (official data wins over estimates).
+
+### Phase-1 real adapters (grounded in on-disk shapes)
+
+- **`claude-jsonl-scan`** (spent; reporting). Scans `~/.claude/projects/**/*.jsonl`
+  and sums each assistant row's `message.usage.{input_tokens, output_tokens,
+  cache_creation_input_tokens, cache_read_input_tokens}` into rolling windows
+  keyed by the row `timestamp`, grouped by `message.model` and `sessionId`
+  (verified against real transcripts, 2026-07-05). Emits a fixture with
+  `used_tokens` set, `limit_tokens: null`, `provenance: local_estimate`. Bounded
+  (file-count / size / mtime-cutoff caps) and version-tolerant: unknown fields
+  ignored, unparseable lines skipped and counted, an abnormal skip ratio raising
+  an `info` finding (vendor JSONL is undocumented internals and will drift).
+- **`claude-quota`** (remaining; gating; **ratio-native**). An **operator-supplied
+  argv-only script** reuses the Claude Code OAuth credential in
+  `~/.claude/.credentials.json` to call the client's own usage endpoint
+  (`GET https://api.anthropic.com/api/oauth/usage`), which returns a
+  **`remainingPercent`** (a ratio, not an absolute token count) and `resetsAt`
+  for the session (5h) and weekly windows. This is a **ratio-native** source: it
+  maps onto `windows[]` with `used_ratio = 1 - remainingPercent/100` and
+  `resets_at`, leaving `used`/`limit` **`null`** — the token counts are genuinely
+  unknown, and a percent must never be written into a token-named field (see
+  "Schema extension for ratio-native quota" below). `provenance: official`.
+  **M8Shift never opens the socket** — the operator's script performs the
+  request; M8Shift runs the argv through the RFC 034 hardened runner and ingests
+  stdout, exactly like every other adapter. Equivalent turnkey source:
+  `claude-monitor --once --output json` (already catalogued above), preferred
+  when the operator does not want to maintain a script — and when it exposes
+  absolute `rate_limits` tokens, the token fields may be filled instead.
+- **`codex-ratelimits`** (remaining; gating). The `account/rateLimits/read` RPC
+  (already catalogued) → `primary_window` / `secondary_window` / reset
+  timestamps → `windows[]`, `provenance: official`.
+- **`codex-jsonl-scan`** (spent; reporting). The Claude scan's twin over
+  `~/.codex/sessions/**/*.jsonl`.
+
+### Two graft topologies (how independence is realized)
+
+The measurement is an **independent module M8Shift grafts onto**, never code in
+the core:
+
+- **(A) Graft onto an external monitor.** `claude-monitor`, `ccusage`,
+  `codex-stats`, a `token-meter` CSV/JSON export, or a `token-monitor` normalized
+  feed run independently; a `cli_json` or `fixture` adapter reads their output.
+  This is also the only charter-compatible way to get **continuous** monitoring:
+  an external daemon polls, M8Shift reads its result on demand and stays passive.
+- **(B) Minimal built-in scan adapter.** The `*-jsonl-scan` adapters above, for
+  operators who run no external monitor. **On-demand only** — M8Shift never runs
+  a loop.
+
+The shipped adapter manifest (`name` / `agent` / `provider` / `kind` /
+`command`) is the seam. Token-only adapters (`*-jsonl-scan`, absolute-token
+quota sources) produce the **unchanged** shipped `m8shift.usage.fixture.v1`;
+ratio-native official sources use one additive optional field (below) — this is
+the one place Phase 3 touches the schema.
+
+### Schema extension for ratio-native quota (additive)
+
+The blocker this resolves: the Claude OAuth usage endpoint (and any provider
+that reports a **percent/ratio** rather than absolute token counts) cannot be
+mapped into the shipped fixture's integer `used`/`limit` token fields without
+encoding a percent in a token-named field — a schema/provenance-honesty
+violation. Fix: **one additive, optional per-window field**.
+
+- Add `used_ratio` to a `windows[]` entry: a float in `[0, 1]`, the fraction of
+  that window's limit already consumed. Present **only** for sources that report
+  a ratio; `used` and `limit` for such a window stay `null` (tokens genuinely
+  unknown).
+- `decision_ratio` is redefined as the `max` over: (a) windows with `used` and a
+  positive `limit` → `used/limit`; **(b) windows with `used_ratio` → `used_ratio`
+  directly** (no token arithmetic); falling back to top-level
+  `used_tokens/limit_tokens`, else `null`.
+- Token-only snapshots are **byte-identical** to today — `used_ratio` is absent,
+  nothing changes. Only ratio-native adapters emit it.
+- **Honesty rule (hard):** a percent/ratio is **never** written into `used`,
+  `limit`, `used_tokens`, or `limit_tokens`. Unit confusion is a schema error the
+  normalizer must reject, not coerce.
+
+This is an additive extension of `m8shift.usage.snapshot.v1` (and its fixture):
+existing readers ignore an unknown optional field; the normalizer gains one
+ratio path. The PR no longer claims *all* adapters emit the unchanged fixture —
+only the token-only ones do.
+
+### Operator-declared budget (optional bridge)
+
+To let a spent-only scan gate, an operator may declare
+`.m8shift/usage/budget.json` — a window length and an estimated cap for their
+plan. The scan's `used` is then divided by that cap to yield a `limit` and a
+`decision_ratio`. This is **always** `provenance: local_estimate`; a pause
+driven by it records `confidence=local_estimate` and is never presented as
+official quota.
+
+### Privacy and credential hardening (extends "Security and privacy")
+
+Phase 3 adds, on top of the existing 12 rules:
+
+13. **JSONL scan is opt-in and default-off.** A scan of `~/.claude/projects`
+    reads metadata across **all** of an operator's projects, not just the
+    relay's. Scan roots are operator-configurable; a disabled adapter never
+    scans.
+14. **Aggregate token counts only — never message content.** The scanner reads
+    the integer `usage` fields and the row `timestamp` / `model` / `sessionId`;
+    it must not read, store, or emit prompt or response text.
+15. **Credential reuse stays in the operator's adapter, not in M8Shift.**
+    M8Shift never reads `~/.claude/.credentials.json` itself and never stores an
+    OAuth or refresh token (reinforces rule 2). If account identity ever
+    surfaces, it is hashed (`sha256:…`) and raw tokens / response bodies are
+    never logged (pattern borrowed from `token-monitor`).
+
+### Provenance binding
+
+Each Phase-1 adapter declares `official` (endpoint / RPC / fresh statusline
+`rate_limits`) or `local_estimate` (scan / budget / stale data). Official wins
+(rule 9); a gating pause on an estimate carries `confidence=local_estimate`
+(design principle 3, and the `claude-monitor` implementation note above).
+
+### Acceptance criteria (Phase 3)
+
+- Each real adapter emits a valid `m8shift.usage.fixture.v1` that normalizes to
+  `m8shift.usage.snapshot.v1` and round-trips the append-only ledger.
+- A spent-only adapter yields `decision_ratio: null` → status `unknown` → never
+  pauses (fail-open regression test).
+- A token-only quota adapter (absolute `used`/`limit`) with fresh official data
+  yields a positive `decision_ratio` and drives `cooldown` at the threshold.
+- A **ratio-native** quota adapter emitting `used_ratio` (e.g. `0.58`) yields
+  `decision_ratio = 0.58` from the ratio directly and drives `cooldown` at the
+  threshold, with `used`/`limit` recorded as `null` for that window.
+- **Never percent-as-tokens** (regression): the normalizer rejects, and never
+  coerces, a window that carries both `used_ratio` and a non-null `used`/`limit`;
+  no adapter ever writes a percent into a token-named field.
+- Token-only snapshots remain **byte-identical** to the shipped v1 output when no
+  adapter emits `used_ratio`.
+- The JSONL scan is bounded and fail-open on malformed input: unknown fields
+  ignored, unparseable lines skipped and counted, abnormal skip ratio → `info`
+  finding (negative tests required).
+- Opt-in default-off proven: a disabled adapter performs no scan; a privacy test
+  asserts the scanner reads only integer usage fields, never message content.
+- No socket is opened by M8Shift itself — the operator's OAuth script is the only
+  network actor (adapter argv-only, RFC 034 runner).
+- `official` vs `local_estimate` provenance is recorded on every snapshot; a
+  pause on an estimate carries `confidence=local_estimate`.
+
+### Non-goals (Phase 3)
+
+- No bundled vendor scraper maintained inside M8Shift — adapters stay thin and
+  operator-authorized; prefer grafting onto `claude-monitor` / `ccusage` over
+  reimplementing them.
+- No credential storage, no `.credentials.json` reads by the core or companions.
+- No continuous daemon in M8Shift — continuous monitoring is topology (A), an
+  external producer M8Shift reads on demand.
+- No auto-resume and no automatic provider launch (unchanged from PR B).
+
+---
+
 ## References
 
 - Claude Code Usage Monitor / `claude-monitor`: https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor
@@ -1507,3 +1693,5 @@ Recommendation:
 - `codex-stats`: https://pypi.org/project/codex-stats/
 - `ccusage`: https://github.com/ccusage/ccusage
 - LiteLLM budgets/rate limits: https://docs.litellm.ai/docs/proxy/users
+- `token-meter` (local JSONL consumption + CSV/JSON export; README-stated MIT core): https://github.com/whdrnr2583-cmd/token-meter
+- `token-monitor` (OAuth usage-endpoint remaining-quota detection + privacy patterns): https://github.com/Javis603/token-monitor
