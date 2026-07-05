@@ -8465,6 +8465,26 @@ class TestRFC040UsageQuota(CLIBase):
         for w in fx["windows"]:
             self.assertNotIn("used", w)                           # ratio window, no token field
 
+    def test_example_build_fixture_skips_non_finite_percent(self):
+        """Codex PR #51 blocker 2: json accepts NaN/Infinity; a non-finite
+        remainingPercent must be skipped (never clamped into a bogus used_ratio),
+        so a bad endpoint shape can't fake ok or limit_hit."""
+        mod = self._example()
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            fx = mod.build_fixture(
+                {"windows": [{"kind": "five_hour", "remainingPercent": bad}]},
+                "2026-01-01T00:00:00Z")
+            self.assertEqual(fx["windows"], [], bad)             # window dropped, stays fail-open
+
+    def _run_example(self, creds_text):
+        cred = os.path.join(self.d, "creds.json")
+        with open(cred, "w", encoding="utf-8") as fh:
+            fh.write(creds_text)
+        return subprocess.run(
+            [sys.executable, os.path.join(REPO, self.EXAMPLE_REL)],
+            cwd=self.d, capture_output=True, text=True,
+            env={**os.environ, "M8SHIFT_CLAUDE_CREDENTIALS": cred})
+
     def test_example_is_fail_open_on_missing_credential(self):
         """No network needed: a missing credential path fails the read first and the
         script prints an empty official fixture (decision_ratio null → unknown)."""
@@ -8477,6 +8497,14 @@ class TestRFC040UsageQuota(CLIBase):
         fx = json.loads(r.stdout)                                 # valid JSON, no NaN
         self.assertEqual(fx["provenance"], "official")
         self.assertEqual(fx["windows"], [])                       # fail-open, no gating
+
+    def test_example_is_fail_open_on_malformed_credential_shape(self):
+        """Codex PR #51 blocker 1: a valid-JSON-but-wrong-shape credentials file
+        (a list) must not crash the script — it stays fail-open."""
+        r = self._run_example("[]")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        fx = json.loads(r.stdout)
+        self.assertEqual(fx["windows"], [])
 
 
 class TestRFC040UsagePRB(CLIBase):

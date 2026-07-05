@@ -31,6 +31,7 @@ copy and adapt, not a verified shipped component. Review it before enabling it.
 
 import datetime as dt
 import json
+import math
 import os
 import sys
 import urllib.error
@@ -46,12 +47,17 @@ WINDOW_KINDS = {"five_hour": "session_5h", "session": "session_5h",
 
 
 def _iso(value):
-    """Pass through a UTC ISO string, or convert an epoch-seconds number to one."""
+    """Pass through a UTC ISO string, or convert an epoch-seconds number to one.
+    Never raises: a non-finite or out-of-range numeric timestamp returns None."""
     if isinstance(value, str) and value:
         return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and math.isfinite(value):
+        try:
+            return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, OverflowError, OSError):
+            return None
     return None
 
 
@@ -71,7 +77,10 @@ def build_fixture(payload, now_iso):
         if kind is None or isinstance(remaining, bool) \
                 or not isinstance(remaining, (int, float)):
             continue
-        used_ratio = 1.0 - max(0.0, min(100.0, float(remaining))) / 100.0
+        percent = float(remaining)
+        if not math.isfinite(percent):        # NaN/Inf (json accepts them) → skip, stay fail-open
+            continue
+        used_ratio = 1.0 - max(0.0, min(100.0, percent)) / 100.0
         windows.append({"kind": kind, "used_ratio": round(used_ratio, 4),
                         "resets_at": _iso(win.get("resetsAt") or win.get("resets_at"))})
     return {
@@ -96,6 +105,8 @@ def _empty_fixture(now_iso):
 def _read_token(path):
     with open(path, encoding="utf-8") as fh:
         creds = json.load(fh)
+    if not isinstance(creds, dict):                 # valid JSON but wrong shape (e.g. a list)
+        raise ValueError("credentials file is not a JSON object")
     # Claude Code stores the OAuth material under a provider key; accept a few shapes.
     for holder in (creds, creds.get("claudeAiOauth"), creds.get("oauth")):
         if isinstance(holder, dict):
@@ -118,8 +129,9 @@ def main():
     try:
         payload = _fetch(_read_token(CREDENTIALS))
         fixture = build_fixture(payload, now_iso)
-    except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
-        fixture = _empty_fixture(now_iso)               # fail-open, never raise
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError,
+            urllib.error.URLError, json.JSONDecodeError):
+        fixture = _empty_fixture(now_iso)               # fail-open on ANY bad shape, never raise
     json.dump(fixture, sys.stdout)
     sys.stdout.write("\n")
     return 0
