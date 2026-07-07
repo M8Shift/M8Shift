@@ -127,9 +127,16 @@ stdlib-only, independently unit-tested unit to `m8shift.py`:
 ### Rendered line
 
 ```text
-  claude   90% session_5h (local_estimate) · resets 20:00 · 2m ago
-  codex    —  (unknown)                     · 41m ago · stale
+  claude   87% session_5h (official) · used 80M/5h · resets 20:00 · 2m ago
+  codex    —  (local_estimate)       · used 80M/5h · 1.5B/wk · 0s ago
 ```
+
+The `used …` fragment (issue #59) shows the actual token **consumption** — not
+only the gating ratio — humanized per window (`used <count>/<window>`), so a
+spent-only source (a `jsonl_scan`, whose ratio is `—`) still surfaces something
+useful. It prefers `windows[].used`, falls back to the top-level `used_tokens`,
+and — like every other field — is echo-only, bounded (`USAGE_TOKEN_DISPLAY_MAX`),
+and sanitized; an implausible/invalid count is simply omitted.
 
 A `── usage ──` block after the LOCK block in both `status` and `watch` (one
 shared render helper). **Absent entirely** when the sidecar is absent **or holds
