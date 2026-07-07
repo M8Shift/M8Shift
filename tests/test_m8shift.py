@@ -7797,6 +7797,9 @@ class TestRFC040UsagePRA(CLIBase):
             "used_tokens": 42000,
             "limit_tokens": 100000,
             "decision_ratio": 0.42,
+            # RFC 051 Part A: additive attribution of the argmax window (updated ONCE
+            # and kept pinned). session_5h (0.42) beats weekly (0.26), so it drives.
+            "decision_window": {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z"},
             "windows": [
                 {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z",
                  "used": 42000, "limit": 100000},
@@ -7813,6 +7816,59 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(event["type"], "usage.snapshot")
         self.assertEqual(json.dumps(event["payload"]["snapshot"], sort_keys=True),
                          json.dumps(expected, sort_keys=True))
+
+    # ── RFC 051 Part A: additive `decision_window` attribution of the argmax ─────
+
+    def test_decision_window_records_driving_window_with_resets_at(self):
+        """RFC 051 Part A: the window that produced decision_ratio is recorded (kind +
+        resets_at) so the core echoes 'which window / when it resets' WITHOUT
+        recomputing the argmax."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z", "used": 90, "limit": 100},
+            {"kind": "weekly", "resets_at": "2026-01-08T00:00:00Z", "used": 10, "limit": 100},
+        ])
+        # 0.9 trips the near_limit advisory exit (30); the snapshot is still emitted.
+        snap = json.loads(self.snapshot_for(doc).stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["decision_ratio"], 0.9)
+        self.assertEqual(snap["decision_window"],
+                         {"kind": "session_5h", "resets_at": "2026-01-01T05:00:00Z"})
+
+    def test_decision_window_null_on_top_level_fallback(self):
+        """When decision_ratio comes from the top-level used/limit (no window ratios),
+        decision_window is null — there is no window to attribute."""
+        doc = self.usage_doc(used=42000, limit=100000, windows=[])
+        snap = json.loads(self.snapshot_for(doc).stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["decision_ratio"], 0.42)
+        self.assertIsNone(snap["decision_window"])
+
+    def test_decision_window_null_on_unknown_ratio(self):
+        """No usable ratio at all → decision_ratio null AND decision_window null."""
+        doc = self.usage_doc(used=None, limit=None, windows=[])
+        snap = json.loads(self.snapshot_for(doc).stdout)["snapshots"][0]["snapshot"]
+        self.assertIsNone(snap["decision_ratio"])
+        self.assertIsNone(snap["decision_window"])
+
+    def test_decision_window_tie_picks_first_max_in_ratio_order(self):
+        """Amendment E: two windows sharing the max ratio → the FIRST in
+        ratio-computation order wins (deterministic). Pinned here."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "first_5h", "resets_at": "2026-01-01T05:00:00Z", "used": 50, "limit": 100},
+            {"kind": "second_5h", "resets_at": "2026-01-02T05:00:00Z", "used": 5, "limit": 10},
+        ])
+        snap = json.loads(self.snapshot_for(doc).stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["decision_ratio"], 0.5)
+        self.assertEqual(snap["decision_window"]["kind"], "first_5h")   # first max wins
+
+    def test_decision_window_tie_ratio_native_after_token_in_order(self):
+        """Amendment E ordering: token windows precede ratio-native windows in the
+        computation order, so on an equal max the token window wins the tie."""
+        doc = self.usage_doc(used=None, limit=None, windows=[
+            {"kind": "ratio_win", "resets_at": "2026-01-03T05:00:00Z", "used_ratio": 0.5},
+            {"kind": "token_win", "resets_at": "2026-01-01T05:00:00Z", "used": 50, "limit": 100},
+        ])
+        snap = json.loads(self.snapshot_for(doc).stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["decision_ratio"], 0.5)
+        self.assertEqual(snap["decision_window"]["kind"], "token_win")
 
     # ── RFC 040 Phase 3, Slice 1: ratio-native windows (used_ratio) ──────────
 
@@ -9928,6 +9984,474 @@ class TestDetailedHelpCoverage(unittest.TestCase):
                     os.path.join(REPO, name), "add_parser")
                 self.assertEqual(missing, [],
                                  f"{name}: add_parser calls without help=")
+
+
+# ───────────────── RFC 051: read-only usage advisory in core status/watch ────
+
+class TestRFC051UsageAdvisory(CLIBase):
+    """RFC 051 Part B — a READ-ONLY usage advisory line in the core `status`/`watch`
+    displays (and thus `scripts/watch-status.sh`), fed by the companion's local sidecar
+    `.m8shift/runtime/usage.jsonl`. The core echoes recorded scalars — never computes —
+    and any absent/hostile input fails open to a BYTE-IDENTICAL no-usage display."""
+
+    SIDECAR_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
+
+    def setUp(self):
+        super().setUp()
+        self.init()                      # roster: claude, codex
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def fresh_iso(offset=0):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset))
+
+    def sidecar_path(self):
+        return os.path.join(self.d, self.SIDECAR_REL)
+
+    def snapshot(self, *, agent="claude", decision_ratio=0.9, kind="session_5h",
+                 resets_at="2026-01-01T05:00:00Z", provenance="local_estimate",
+                 captured_at=None, decision_window="auto", **extra):
+        dw = ({"kind": kind, "resets_at": resets_at} if decision_window == "auto"
+              else decision_window)
+        snap = {
+            "schema": "m8shift.usage.snapshot.v1",
+            "agent": agent,
+            "source": {"adapter": "a", "kind": "fixture", "provenance": provenance},
+            "captured_at": captured_at if captured_at is not None else self.fresh_iso(),
+            "used_tokens": None,
+            "limit_tokens": None,
+            "decision_ratio": decision_ratio,
+            "decision_window": dw,
+            "windows": [],
+        }
+        snap.update(extra)
+        return snap
+
+    def event(self, snap, *, agent="auto"):
+        agent = snap.get("agent") if agent == "auto" else agent
+        ev = {"schema": "m8shift.runtime.event.v1", "type": "usage.snapshot",
+              "ts": self.fresh_iso(), "payload": {"snapshot": snap}}
+        if agent is not None:
+            ev["agent"] = agent
+        return ev
+
+    def write_sidecar(self, rows):
+        """rows: bytes (written raw), or a list of dict-events / raw JSON strings."""
+        path = self.sidecar_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if isinstance(rows, (bytes, bytearray)):
+            with open(path, "wb") as fh:
+                fh.write(rows)
+            return path
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(row if isinstance(row, str) else json.dumps(row))
+                fh.write("\n")
+        return path
+
+    def status_out(self, *extra):
+        r = self.cw("status", *extra)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        return r.stdout
+
+    def watch_out(self, *extra):
+        r = self.cw("watch", "--once", *extra)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        return r.stdout
+
+    @staticmethod
+    def _mask_human(out):
+        # The only volatile human line is the pre-existing session `duration`; mask it
+        # so a byte-identity comparison isolates the RFC 051 surface.
+        return "\n".join(l for l in out.splitlines() if not l.startswith("  duration "))
+
+    @staticmethod
+    def _mask_json(js_str):
+        d = json.loads(js_str)
+        d.pop("session_duration", None)          # pre-existing volatile fields
+        d.pop("session_duration_seconds", None)
+        return d
+
+    def _runtime_tree(self):
+        runtime = os.path.join(self.d, ".m8shift", "runtime")
+        out = {}
+        for root, _, files in os.walk(runtime):
+            for f in files:
+                p = os.path.join(root, f)
+                out[p] = os.path.getsize(p)
+        return out
+
+    # ── render (status + watch) ───────────────────────────────────────────────
+    def test_status_renders_usage_line_per_agent(self):
+        self.write_sidecar([
+            self.event(self.snapshot(agent="claude", decision_ratio=0.9,
+                                     provenance="local_estimate")),
+            self.event(self.snapshot(agent="codex", decision_ratio=0.4,
+                                     kind="weekly", provenance="official")),
+        ])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("90%", out)
+        self.assertIn("session_5h", out)
+        self.assertIn("(local_estimate)", out)
+        self.assertIn("resets", out)
+        self.assertIn("40%", out)
+        self.assertIn("weekly", out)
+        self.assertIn("(official)", out)
+
+    def test_watch_renders_usage_block(self):
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
+        out = self.watch_out()
+        self.assertIn("── usage", out)
+        self.assertIn("90%", out)
+
+    def test_status_json_includes_usage_array(self):
+        self.write_sidecar([
+            self.event(self.snapshot(agent="claude", decision_ratio=0.9)),
+            self.event(self.snapshot(agent="codex", decision_ratio=0.4,
+                                     kind="weekly", provenance="official")),
+        ])
+        d = json.loads(self.status_out("--json"))
+        self.assertIn("usage", d)
+        by = {u["agent"]: u for u in d["usage"]}
+        self.assertEqual(by["claude"]["decision_ratio"], 0.9)
+        self.assertFalse(by["claude"]["stale"])
+        self.assertIn("age_seconds", by["claude"])
+        self.assertEqual(by["codex"]["decision_window"]["kind"], "weekly")
+
+    # ── byte-identity when off (the load-bearing invariant) ───────────────────
+    def test_no_sidecar_has_no_usage_surface(self):
+        human = self.status_out()
+        self.assertNotIn("── usage", human)
+        self.assertNotIn("usage", json.loads(self.status_out("--json")))
+        self.assertNotIn("── usage", self.watch_out())
+
+    def test_off_states_are_byte_identical_to_no_sidecar(self):
+        base_human = self.status_out()
+        base_json = self.status_out("--json")
+        cases = {
+            "empty": [],
+            "blank_lines": ["", "   ", ""],
+            "malformed_json": ["{not json", "]["],
+            "non_dict_lines": ["123", "\"string\"", "[1,2,3]", "null", "true"],
+            "other_schema": [self.event(dict(self.snapshot(), schema="other.v1"))],
+            "missing_snapshot": [{"schema": "m8shift.runtime.event.v1",
+                                  "type": "usage.snapshot", "agent": "claude",
+                                  "payload": {}}],
+        }
+        for name, rows in cases.items():
+            with self.subTest(case=name):
+                self.write_sidecar(rows)
+                human = self.status_out()
+                self.assertNotIn("── usage", human)
+                self.assertEqual(self._mask_human(human), self._mask_human(base_human))
+                js = self.status_out("--json")
+                self.assertNotIn("usage", json.loads(js))
+                self.assertEqual(self._mask_json(js), self._mask_json(base_json))
+
+    # ── path safety (amendment A) ─────────────────────────────────────────────
+    def test_symlink_sidecar_not_followed(self):
+        target = os.path.join(self.d, "real_usage.jsonl")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(self.event(self.snapshot(decision_ratio=0.9))) + "\n")
+        path = self.sidecar_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.symlink(target, path)
+        out = self.status_out()
+        self.assertNotIn("── usage", out)      # symlink not followed → no block
+        self.assertNotIn("90%", out)
+
+    def test_sidecar_directory_fails_open(self):
+        os.makedirs(self.sidecar_path(), exist_ok=True)   # the sidecar path IS a directory
+        self.assertNotIn("── usage", self.status_out())
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no os.mkfifo on this platform")
+    def test_sidecar_fifo_is_not_opened(self):
+        path = self.sidecar_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.mkfifo(path)
+        # O_NONBLOCK means opening the FIFO does not hang (no writer); fstat on the fd
+        # then rejects the non-regular file. status must NOT block and NOT render.
+        self.assertNotIn("── usage", self.status_out())
+
+    @unittest.skipIf(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "needs a non-root POSIX host")
+    def test_sidecar_unreadable_fails_open(self):
+        path = self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
+        os.chmod(path, 0)   # tearDown uses rmtree(ignore_errors=True); no restore needed
+        self.assertNotIn("── usage", self.status_out())
+
+    def _inproc_sidecar(self):
+        """Write a valid one-agent sidecar to a temp path and return (path, lk-stub).
+        In-process tests monkeypatch usage_sidecar_path + active_agents onto it, so
+        they exercise the real open/fold without the HERE/subprocess boundary."""
+        path = os.path.join(self.d, "inproc_usage.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(self.event(self.snapshot(agent="claude", decision_ratio=0.9))) + "\n")
+        return path
+
+    def test_open_surface_is_os_open_with_nofollow(self):
+        """Codex review: the OPENED fd is the proof (TOCTOU-safe), so os.open — not
+        builtins.open — is the read surface, and it carries O_NOFOLLOW where available."""
+        path = self._inproc_sidecar()
+        seen = {}
+        real_open = os.open
+        def spy(p, flags, *a, **k):
+            if p == path:
+                seen["flags"] = flags
+            return real_open(p, flags, *a, **k)
+        with mock.patch.object(cowork, "usage_sidecar_path", lambda: path), \
+             mock.patch.object(cowork, "active_agents", lambda lk: ("claude", "codex")), \
+             mock.patch.object(os, "open", spy):
+            snaps = cowork._usage_read_snapshots({})
+        self.assertIn("claude", snaps)                       # read succeeded via os.open
+        self.assertIn("flags", seen)                         # os.open WAS the read surface
+        if hasattr(os, "O_NOFOLLOW"):
+            self.assertTrue(seen["flags"] & os.O_NOFOLLOW)   # symlink refused at open
+
+    def test_toctou_open_failure_fails_open(self):
+        """Codex review: even if a pre-open check saw a regular file, the open itself can
+        fail (a swapped symlink → ELOOP, a device → ENXIO, or generic OSError). The
+        reader must fail open ({} → no usage block), never crash."""
+        import errno as errno_mod
+        path = self._inproc_sidecar()
+        for errno_name in ("ELOOP", "ENXIO", "EACCES"):
+            with self.subTest(errno=errno_name):
+                err = OSError(getattr(errno_mod, errno_name), "boom")
+                def boom(p, flags, *a, **k):
+                    raise err
+                with mock.patch.object(cowork, "usage_sidecar_path", lambda: path), \
+                     mock.patch.object(cowork, "active_agents", lambda lk: ("claude", "codex")), \
+                     mock.patch.object(os, "open", boom):
+                    self.assertEqual(cowork._usage_read_snapshots({}), {})   # fail-open
+
+    # ── agent validation / spoofing (amendment B) ────────────────────────────
+    def test_invalid_agent_id_skipped(self):
+        snap = self.snapshot(agent="Bad Agent!", decision_ratio=0.9)
+        self.write_sidecar([self.event(snap, agent="Bad Agent!")])
+        self.assertNotIn("── usage", self.status_out())
+
+    def test_non_roster_agent_skipped(self):
+        snap = self.snapshot(agent="mallory", decision_ratio=0.9)   # valid id, not in roster
+        self.write_sidecar([self.event(snap, agent="mallory")])
+        self.assertNotIn("── usage", self.status_out())
+
+    def test_event_agent_mismatch_skipped(self):
+        snap = self.snapshot(agent="codex", decision_ratio=0.9)
+        self.write_sidecar([self.event(snap, agent="claude")])       # event.agent != snapshot.agent
+        self.assertNotIn("── usage", self.status_out())
+
+    # ── validate-before-render / bad-shape fail-open ──────────────────────────
+    def test_snapshot_missing_fields_fail_open(self):
+        snap = {"schema": "m8shift.usage.snapshot.v1", "agent": "claude"}   # only the gate fields
+        self.write_sidecar([self.event(snap, agent="claude")])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("—", out)              # unknown ratio
+        self.assertIn("(unknown)", out)      # provenance defaulted
+        self.assertIn("stale", out)          # missing captured_at → stale
+
+    def test_decision_ratio_bad_shapes_render_dash(self):
+        one_e_999 = ('{"schema":"m8shift.runtime.event.v1","type":"usage.snapshot",'
+                     '"agent":"claude","payload":{"snapshot":{'
+                     '"schema":"m8shift.usage.snapshot.v1","agent":"claude",'
+                     '"source":{"provenance":"local_estimate"},'
+                     '"captured_at":"%s","decision_ratio":1e999,"decision_window":null,'
+                     '"windows":[]}}}' % self.fresh_iso())
+        cases = {
+            "nan": [self.event(self.snapshot(decision_ratio=float("nan")))],
+            "infinity": [self.event(self.snapshot(decision_ratio=float("inf")))],
+            "one_e_999": [one_e_999],
+            "string": [self.event(self.snapshot(decision_ratio="high"))],
+            "bool": [self.event(self.snapshot(decision_ratio=True))],
+            # finite but huge: passes isfinite yet dr*100 overflows int() — must not crash.
+            "huge_finite": [self.event(self.snapshot(decision_ratio=1e308))],
+        }
+        for name, rows in cases.items():
+            with self.subTest(case=name):
+                self.write_sidecar(rows)
+                out = self.status_out()
+                self.assertIn("── usage", out)
+                self.assertIn("—", out)                 # unknown percentage
+                for bad in ("nan", "inf", "NaN", "Infinity", "1e999", "%", "high", "True"):
+                    self.assertNotIn(bad + "%", out)    # never rendered as a percentage
+
+    def test_unparseable_captured_at_is_stale(self):
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9, captured_at="garbage"))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("stale", out)
+
+    def test_unparseable_resets_at_is_omitted(self):
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9, resets_at="not-a-date"))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertNotIn("resets", out)          # unparseable reset omitted, never raw
+        self.assertNotIn("not-a-date", out)
+
+    def test_non_string_captured_at_or_resets_at_is_fail_open(self):
+        """Adversarial-hunt regression: a NON-STRING captured_at/resets_at (int/float/
+        bool/list/dict) reached parse_iso's `.strip()` and crashed status AND watch
+        (AttributeError). Must degrade to stale/omitted, never crash, across surfaces."""
+        for bad in (123, 1.5, True, [1, 2], {"x": 1}):
+            with self.subTest(field="captured_at", value=bad):
+                self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9, captured_at=bad))])
+                out = self.status_out()                          # rc 0 + no Traceback
+                self.assertIn("stale", out)                      # unknown age → stale
+                self.watch_out()                                 # watch --once also fail-open
+                self.watch_out("--changes-only")
+                r = self.cw("status", "--json")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                json.loads(r.stdout)                             # valid JSON, no crash
+            with self.subTest(field="resets_at", value=bad):
+                self.write_sidecar([self.event(self.snapshot(
+                    decision_ratio=0.9, decision_window={"kind": "session_5h", "resets_at": bad}))])
+                out = self.status_out()
+                self.assertIn("── usage", out)
+                self.assertNotIn("resets", out)                  # non-string reset omitted
+
+    def test_huge_integer_decision_ratio_is_fail_open(self):
+        """Adversarial-hunt regression: a bare huge-INTEGER decision_ratio (~400 digits)
+        made math.isfinite() raise OverflowError (int→float) and crashed status AND
+        watch. Must render — and never crash (the float 1e308 case already passed;
+        the bare int is the one that overflows isfinite)."""
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=10 ** 400))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("—", out)
+        self.watch_out()
+        r = self.cw("status", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NaN", r.stdout)
+        entry = json.loads(r.stdout)["usage"][0]
+        self.assertIsNone(entry["decision_ratio"])               # non-usable → null, echoed as null
+
+    def test_finite_but_absurd_ratio_is_dash_not_giant_percent(self):
+        """Codex non-blocking note: a finite-but-absurd decision_ratio (10**300 parses to
+        a float under the isfinite-overflow bound) must render — rather than a 300-digit
+        percentage string. The echoed --json value is still the raw finite number."""
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=10 ** 300))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("—", out)
+        self.assertNotIn("0000000%", out)                        # no absurd giant percentage
+
+    def test_non_dict_lines_skipped(self):
+        self.write_sidecar(["123", "\"a string\"", "[1, 2, 3]", "null", "true",
+                            json.dumps(self.event(self.snapshot(decision_ratio=0.9)))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("90%", out)
+
+    def test_invalid_utf8_bytes_fail_open(self):
+        valid = json.dumps(self.event(self.snapshot(decision_ratio=0.9))).encode("utf-8")
+        self.write_sidecar(b"\xff\xfe not utf8 bytes\n" + valid + b"\n")
+        out = self.status_out()                  # bad byte → replace, that line skipped
+        self.assertIn("90%", out)                # the valid line still renders
+
+    def test_deeply_nested_json_fails_open(self):
+        bomb = "[" * 60000 + "]" * 60000          # json.loads → RecursionError, tolerated
+        self.write_sidecar([bomb, json.dumps(self.event(self.snapshot(decision_ratio=0.9)))])
+        out = self.status_out()
+        self.assertIn("90%", out)
+
+    # ── terminal / JSON output safety (amendment C) ───────────────────────────
+    def test_provenance_and_kind_sanitized_no_raw_escape(self):
+        self.write_sidecar([self.event(self.snapshot(
+            decision_ratio=0.9,
+            provenance="\x1b[31mred\x1b[0m\x07",
+            kind="\x1b]0;pwn\x07" + "A" * 100))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertNotIn("\x1b", out)            # no raw ANSI escape reaches the terminal
+        self.assertNotIn("\x07", out)            # no raw BEL
+        self.assertNotIn("A" * 41, out)          # over-long kind capped
+
+    def test_json_never_emits_nan_or_infinity(self):
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=float("nan")))])
+        out = self.status_out("--json")
+        self.assertNotIn("NaN", out)
+        self.assertNotIn("Infinity", out)
+        d = json.loads(out)                       # would raise on a bare NaN
+        self.assertEqual(len(d["usage"]), 1)
+        self.assertIsNone(d["usage"][0]["decision_ratio"])
+
+    # ── tail cap / partial first line (amendment D) ───────────────────────────
+    def test_large_sidecar_tail_discards_partial_first_line_and_last_wins(self):
+        filler = "x" * (cowork.USAGE_TAIL_BYTES + 50000)      # first line exceeds the tail cap
+        oldest = self.event(self.snapshot(decision_ratio=0.10,
+                                          provenance="oldest_prov", filler=filler))
+        lines = [json.dumps(oldest)]
+        for _ in range(3):
+            lines.append(json.dumps(self.event(self.snapshot(decision_ratio=0.5, provenance="mid"))))
+        lines.append(json.dumps(self.event(self.snapshot(decision_ratio=0.9,
+                                                         provenance="newest_prov"))))
+        self.write_sidecar(lines)
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("90%", out)                # last valid snapshot wins
+        self.assertIn("(newest_prov)", out)
+        self.assertNotIn("oldest_prov", out)     # partial huge first line discarded / beyond cap
+        self.assertNotIn("10%", out)
+
+    # ── read-only (opens only the sidecar; no write / network / subprocess) ────
+    def test_status_render_is_read_only(self):
+        path = self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
+        with open(path, "rb") as fh:
+            before_bytes = fh.read()
+        before_mtime = os.stat(path).st_mtime
+        tree_before = self._runtime_tree()
+        self.assertIn("90%", self.status_out())
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), before_bytes)          # sidecar untouched
+        self.assertEqual(os.stat(path).st_mtime, before_mtime)
+        self.assertEqual(self._runtime_tree(), tree_before)    # no new runtime files
+
+    def test_usage_reader_opens_only_the_sidecar_path(self):
+        # os.open (not builtins.open) is the read surface now (TOCTOU-safe fd proof).
+        cowork.configure_root(self.d)
+        self.addCleanup(cowork.configure_root, REPO)
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
+        lk = {"agents": "claude,codex"}
+        real_os_open = os.open
+        opened = []
+
+        def rec(path, flags, *a, **k):
+            opened.append((path, flags))
+            return real_os_open(path, flags, *a, **k)
+
+        with mock.patch.object(os, "open", side_effect=rec):
+            snaps = cowork._usage_read_snapshots(lk)
+        self.assertIn("claude", snaps)
+        self.assertEqual([o[0] for o in opened], [cowork.usage_sidecar_path()])   # only the sidecar
+        for _, flags in opened:                                # read-only: no write/create bits
+            self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT), 0)
+
+    # ── watch --changes-only: reprint on a usage-line delta, not on the clock ──
+    def test_usage_signature_reprints_on_snapshot_delta_not_on_age(self):
+        cowork.configure_root(self.d)
+        self.addCleanup(cowork.configure_root, REPO)
+        lk = {"agents": "claude,codex"}
+        cap = self.fresh_iso()
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9, captured_at=cap))])
+        sig1 = cowork._usage_signature(lk)
+        self.assertEqual(sig1, cowork._usage_signature(lk))     # same snapshot, later clock → no churn
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=0.5, captured_at=cap))])
+        self.assertNotEqual(cowork._usage_signature(lk), sig1)  # a NEW ratio → a delta worth reprinting
+
+    # ── watch-status.sh forwards to core watch (no script change) ─────────────
+    def test_watch_status_sh_shows_usage_block(self):
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
+        r = subprocess.run(
+            ["bash", os.path.join(REPO, "scripts", "watch-status.sh"), "--once"],
+            cwd=self.d, capture_output=True, text=True,
+            env={**os.environ, "M8SHIFT_ROOT": self.d},
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("── usage", r.stdout)
+        self.assertIn("90%", r.stdout)
 
 
 if __name__ == "__main__":
