@@ -5811,7 +5811,8 @@ USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"    # pinned; a companion dri
 USAGE_TAIL_BYTES = 256 * 1024                          # bounded tail read (multi-MB sidecar safe)
 USAGE_STALE_AFTER_SECONDS = 30 * 60                    # companion --stale-after-minutes default
 USAGE_RATIO_DISPLAY_MAX = 1000                         # ratio above 100000% is not plausible → "—"
-USAGE_TOKEN_DISPLAY_MAX = 10 ** 15                     # a used count above ~1e15 is not plausible → omitted (#59)
+USAGE_TOKEN_DISPLAY_MAX = 10 ** 18                     # a used count above ~1e18 is not plausible → omitted (#59)
+USAGE_CONSUMPTION_MAX_WINDOWS = 6                      # cap rendered per-window fragments; excess → "+N" (Codex review)
 USAGE_WINDOW_ALIASES = {"session_5h": "5h", "weekly": "wk", "daily": "day", "monthly": "mo"}
 _USAGE_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 _.:%()/+-]")  # display whitelist (amendment C)
 
@@ -5997,7 +5998,8 @@ def _humanize_tokens(n):
     USAGE_TOKEN_DISPLAY_MAX. Only FORMATS a recorded scalar (#59) — never a crash."""
     if isinstance(n, bool) or not isinstance(n, int) or n < 0 or n > USAGE_TOKEN_DISPLAY_MAX:
         return None
-    for div, suf in ((10 ** 9, "B"), (10 ** 6, "M"), (10 ** 3, "k")):
+    for div, suf in ((10 ** 15, "P"), (10 ** 12, "T"), (10 ** 9, "B"),
+                     (10 ** 6, "M"), (10 ** 3, "k")):
         if n >= div:
             s = f"{n / div:.1f}"
             if s.endswith(".0"):
@@ -6024,7 +6026,11 @@ def _usage_consumption(snap):
             label = USAGE_WINDOW_ALIASES.get(kind) or _usage_sanitize(kind, cap=8, fallback="")
             frags.append(f"{used}/{label}" if label else used)
     if frags:
-        return "used " + " · ".join(frags)
+        # Cap the rendered fragments (Codex review): a snapshot with hundreds of
+        # tiny valid windows must not blow up the status/watch line.
+        shown = frags[:USAGE_CONSUMPTION_MAX_WINDOWS]
+        extra = len(frags) - len(shown)
+        return "used " + " · ".join(shown) + (f" +{extra}" if extra > 0 else "")
     top = _humanize_tokens(snap.get("used_tokens"))
     return f"used {top}" if top is not None else ""
 

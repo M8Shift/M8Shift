@@ -10369,7 +10369,7 @@ class TestRFC051UsageAdvisory(CLIBase):
     def test_consumption_bad_values_omitted_no_crash(self):
         """bool / negative / non-integer / string / absurdly-huge used → no consumption
         fragment, no crash, across status, --json, watch."""
-        for bad in (True, -5, "lots", 1.5, 10 ** 16):
+        for bad in (True, -5, "lots", 1.5, 10 ** 19):    # 10**19 is above the ~1e18 cap
             with self.subTest(used=bad):
                 self.write_sidecar([self.event(self.snapshot(
                     decision_ratio=None, decision_window=None, used_tokens=bad,
@@ -10389,6 +10389,30 @@ class TestRFC051UsageAdvisory(CLIBase):
         out = self.status_out()
         self.assertIn("used 500", out)
         self.assertNotIn("\x1b", out)                         # no raw escape reaches the terminal
+
+    def test_humanize_tokens_unit_ladder_and_bounds(self):
+        """Codex review: units P, T, B, M, k with one decimal, .0 stripped; a count
+        above USAGE_TOKEN_DISPLAY_MAX (~1e18) is omitted, and non-int/bool/negative too."""
+        h = cowork._humanize_tokens
+        self.assertEqual(h(10 ** 12), "1T")
+        self.assertEqual(h(2 * 10 ** 12), "2T")
+        self.assertEqual(h(10 ** 15), "1P")
+        self.assertEqual(h(1517060421), "1.5B")
+        self.assertEqual(h(80046129), "80M")
+        self.assertIsNone(h(10 ** 18 + 1))                    # above cap → omitted
+        for bad in (True, -1, 1.5, "big"):
+            self.assertIsNone(h(bad))
+
+    def test_consumption_caps_number_of_windows(self):
+        """Codex review: a snapshot with many valid windows must not blow up the line —
+        cap at USAGE_CONSUMPTION_MAX_WINDOWS with a bounded `+N` indicator."""
+        wins = [{"kind": f"w{i}", "used": (i + 1) * 1000, "resets_at": None} for i in range(10)]
+        self.write_sidecar([self.event(self.snapshot(
+            decision_ratio=None, decision_window=None, windows=wins))])
+        out = self.status_out()
+        self.assertIn("/w0", out)                             # first fragment shown
+        self.assertIn("+4", out)                              # 10 valid → 6 shown + "+4"
+        self.assertNotIn("/w9", out)                          # a late fragment is omitted
 
     def test_non_dict_lines_skipped(self):
         self.write_sidecar(["123", "\"a string\"", "[1, 2, 3]", "null", "true",
