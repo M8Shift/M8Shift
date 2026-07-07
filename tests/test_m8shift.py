@@ -10338,6 +10338,82 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertIn("—", out)
         self.assertNotIn("0000000%", out)                        # no absurd giant percentage
 
+    # ── #59: token CONSUMPTION display (co-designed with Codex) ────────────────
+    def test_consumption_renders_for_spent_only_scan(self):
+        """A spent-only scan (decision_ratio null → pct dash) still shows the actual
+        token consumption per window — the operator's original need."""
+        self.write_sidecar([self.event(self.snapshot(
+            decision_ratio=None, decision_window=None, provenance="local_estimate",
+            windows=[{"kind": "session_5h", "used": 80046129, "resets_at": None},
+                     {"kind": "weekly", "used": 1517060421, "resets_at": None}]))])
+        out = self.status_out()
+        self.assertIn("— ", out)                              # no ratio
+        self.assertIn("used 80M/5h", out)
+        self.assertIn("1.5B/wk", out)
+        self.watch_out()                                      # watch renders it too
+
+    def test_consumption_renders_alongside_ratio(self):
+        self.write_sidecar([self.event(self.snapshot(
+            decision_ratio=0.87, kind="session_5h", provenance="official",
+            windows=[{"kind": "session_5h", "used": 80046129, "resets_at": None}]))])
+        out = self.status_out()
+        self.assertIn("87%", out)
+        self.assertIn("used 80M/5h", out)
+
+    def test_consumption_top_level_fallback(self):
+        """No per-window used → fall back to top-level used_tokens."""
+        self.write_sidecar([self.event(self.snapshot(
+            decision_ratio=None, decision_window=None, windows=[], used_tokens=42000))])
+        self.assertIn("used 42k", self.status_out())
+
+    def test_consumption_bad_values_omitted_no_crash(self):
+        """bool / negative / non-integer / string / absurdly-huge used → no consumption
+        fragment, no crash, across status, --json, watch."""
+        for bad in (True, -5, "lots", 1.5, 10 ** 19):    # 10**19 is above the ~1e18 cap
+            with self.subTest(used=bad):
+                self.write_sidecar([self.event(self.snapshot(
+                    decision_ratio=None, decision_window=None, used_tokens=bad,
+                    windows=[{"kind": "session_5h", "used": bad, "resets_at": None}]))])
+                out = self.status_out()
+                self.assertNotIn("used ", out)                # nothing plausible → no fragment
+                self.watch_out()
+                r = self.cw("status", "--json")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                json.loads(r.stdout)                          # valid JSON
+
+    def test_consumption_window_label_is_sanitized(self):
+        """A hostile window kind (ANSI/control) is sanitized before the terminal."""
+        self.write_sidecar([self.event(self.snapshot(
+            decision_ratio=None, decision_window=None,
+            windows=[{"kind": "5h\x1b[31mX", "used": 500, "resets_at": None}]))])
+        out = self.status_out()
+        self.assertIn("used 500", out)
+        self.assertNotIn("\x1b", out)                         # no raw escape reaches the terminal
+
+    def test_humanize_tokens_unit_ladder_and_bounds(self):
+        """Codex review: units P, T, B, M, k with one decimal, .0 stripped; a count
+        above USAGE_TOKEN_DISPLAY_MAX (~1e18) is omitted, and non-int/bool/negative too."""
+        h = cowork._humanize_tokens
+        self.assertEqual(h(10 ** 12), "1T")
+        self.assertEqual(h(2 * 10 ** 12), "2T")
+        self.assertEqual(h(10 ** 15), "1P")
+        self.assertEqual(h(1517060421), "1.5B")
+        self.assertEqual(h(80046129), "80M")
+        self.assertIsNone(h(10 ** 18 + 1))                    # above cap → omitted
+        for bad in (True, -1, 1.5, "big"):
+            self.assertIsNone(h(bad))
+
+    def test_consumption_caps_number_of_windows(self):
+        """Codex review: a snapshot with many valid windows must not blow up the line —
+        cap at USAGE_CONSUMPTION_MAX_WINDOWS with a bounded `+N` indicator."""
+        wins = [{"kind": f"w{i}", "used": (i + 1) * 1000, "resets_at": None} for i in range(10)]
+        self.write_sidecar([self.event(self.snapshot(
+            decision_ratio=None, decision_window=None, windows=wins))])
+        out = self.status_out()
+        self.assertIn("/w0", out)                             # first fragment shown
+        self.assertIn("+4", out)                              # 10 valid → 6 shown + "+4"
+        self.assertNotIn("/w9", out)                          # a late fragment is omitted
+
     def test_non_dict_lines_skipped(self):
         self.write_sidecar(["123", "\"a string\"", "[1, 2, 3]", "null", "true",
                             json.dumps(self.event(self.snapshot(decision_ratio=0.9)))])
