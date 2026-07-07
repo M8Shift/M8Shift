@@ -10172,7 +10172,8 @@ class TestRFC051UsageAdvisory(CLIBase):
         path = self.sidecar_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         os.mkfifo(path)
-        # lstat rejects the FIFO before any open, so status must NOT block and NOT render.
+        # O_NONBLOCK means opening the FIFO does not hang (no writer); fstat on the fd
+        # then rejects the non-regular file. status must NOT block and NOT render.
         self.assertNotIn("── usage", self.status_out())
 
     @unittest.skipIf(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
@@ -10181,6 +10182,50 @@ class TestRFC051UsageAdvisory(CLIBase):
         path = self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
         os.chmod(path, 0)   # tearDown uses rmtree(ignore_errors=True); no restore needed
         self.assertNotIn("── usage", self.status_out())
+
+    def _inproc_sidecar(self):
+        """Write a valid one-agent sidecar to a temp path and return (path, lk-stub).
+        In-process tests monkeypatch usage_sidecar_path + active_agents onto it, so
+        they exercise the real open/fold without the HERE/subprocess boundary."""
+        path = os.path.join(self.d, "inproc_usage.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(self.event(self.snapshot(agent="claude", decision_ratio=0.9))) + "\n")
+        return path
+
+    def test_open_surface_is_os_open_with_nofollow(self):
+        """Codex review: the OPENED fd is the proof (TOCTOU-safe), so os.open — not
+        builtins.open — is the read surface, and it carries O_NOFOLLOW where available."""
+        path = self._inproc_sidecar()
+        seen = {}
+        real_open = os.open
+        def spy(p, flags, *a, **k):
+            if p == path:
+                seen["flags"] = flags
+            return real_open(p, flags, *a, **k)
+        with mock.patch.object(cowork, "usage_sidecar_path", lambda: path), \
+             mock.patch.object(cowork, "active_agents", lambda lk: ("claude", "codex")), \
+             mock.patch.object(os, "open", spy):
+            snaps = cowork._usage_read_snapshots({})
+        self.assertIn("claude", snaps)                       # read succeeded via os.open
+        self.assertIn("flags", seen)                         # os.open WAS the read surface
+        if hasattr(os, "O_NOFOLLOW"):
+            self.assertTrue(seen["flags"] & os.O_NOFOLLOW)   # symlink refused at open
+
+    def test_toctou_open_failure_fails_open(self):
+        """Codex review: even if a pre-open check saw a regular file, the open itself can
+        fail (a swapped symlink → ELOOP, a device → ENXIO, or generic OSError). The
+        reader must fail open ({} → no usage block), never crash."""
+        import errno as errno_mod
+        path = self._inproc_sidecar()
+        for errno_name in ("ELOOP", "ENXIO", "EACCES"):
+            with self.subTest(errno=errno_name):
+                err = OSError(getattr(errno_mod, errno_name), "boom")
+                def boom(p, flags, *a, **k):
+                    raise err
+                with mock.patch.object(cowork, "usage_sidecar_path", lambda: path), \
+                     mock.patch.object(cowork, "active_agents", lambda lk: ("claude", "codex")), \
+                     mock.patch.object(os, "open", boom):
+                    self.assertEqual(cowork._usage_read_snapshots({}), {})   # fail-open
 
     # ── agent validation / spoofing (amendment B) ────────────────────────────
     def test_invalid_agent_id_skipped(self):
@@ -10283,6 +10328,16 @@ class TestRFC051UsageAdvisory(CLIBase):
         entry = json.loads(r.stdout)["usage"][0]
         self.assertIsNone(entry["decision_ratio"])               # non-usable → null, echoed as null
 
+    def test_finite_but_absurd_ratio_is_dash_not_giant_percent(self):
+        """Codex non-blocking note: a finite-but-absurd decision_ratio (10**300 parses to
+        a float under the isfinite-overflow bound) must render — rather than a 300-digit
+        percentage string. The echoed --json value is still the raw finite number."""
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=10 ** 300))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("—", out)
+        self.assertNotIn("0000000%", out)                        # no absurd giant percentage
+
     def test_non_dict_lines_skipped(self):
         self.write_sidecar(["123", "\"a string\"", "[1, 2, 3]", "null", "true",
                             json.dumps(self.event(self.snapshot(decision_ratio=0.9)))])
@@ -10355,25 +10410,24 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertEqual(self._runtime_tree(), tree_before)    # no new runtime files
 
     def test_usage_reader_opens_only_the_sidecar_path(self):
+        # os.open (not builtins.open) is the read surface now (TOCTOU-safe fd proof).
         cowork.configure_root(self.d)
         self.addCleanup(cowork.configure_root, REPO)
         self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
         lk = {"agents": "claude,codex"}
-        real_open = open
+        real_os_open = os.open
         opened = []
 
-        def rec(file, *a, **k):
-            opened.append((file, a, k))
-            return real_open(file, *a, **k)
+        def rec(path, flags, *a, **k):
+            opened.append((path, flags))
+            return real_os_open(path, flags, *a, **k)
 
-        with mock.patch("builtins.open", side_effect=rec):
+        with mock.patch.object(os, "open", side_effect=rec):
             snaps = cowork._usage_read_snapshots(lk)
         self.assertIn("claude", snaps)
-        self.assertEqual([o[0] for o in opened], [cowork.usage_sidecar_path()])
-        for _, a, k in opened:                                  # never opened for writing
-            mode = a[0] if a else k.get("mode", "r")
-            for bad in ("w", "a", "+", "x"):
-                self.assertNotIn(bad, mode)
+        self.assertEqual([o[0] for o in opened], [cowork.usage_sidecar_path()])   # only the sidecar
+        for _, flags in opened:                                # read-only: no write/create bits
+            self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT), 0)
 
     # ── watch --changes-only: reprint on a usage-line delta, not on the clock ──
     def test_usage_signature_reprints_on_snapshot_delta_not_on_age(self):

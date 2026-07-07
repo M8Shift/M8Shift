@@ -5810,6 +5810,7 @@ USAGE_SIDECAR_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
 USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"    # pinned; a companion drift is skipped
 USAGE_TAIL_BYTES = 256 * 1024                          # bounded tail read (multi-MB sidecar safe)
 USAGE_STALE_AFTER_SECONDS = 30 * 60                    # companion --stale-after-minutes default
+USAGE_RATIO_DISPLAY_MAX = 1000                         # ratio above 100000% is not plausible → "—"
 _USAGE_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 _.:%()/+-]")  # display whitelist (amendment C)
 
 
@@ -5845,21 +5846,33 @@ def _usage_read_snapshots(lk):
     roster before keeping a row (defeats a spoofed/mislabelled snapshot)."""
     try:
         path = usage_sidecar_path()
+        # A (TOCTOU-safe): the OPENED fd is the proof, never a pre-open lstat (a
+        # sidecar can be swapped between check and open). O_NOFOLLOW refuses a symlink
+        # at open; O_NONBLOCK means opening a FIFO/device does NOT block waiting for a
+        # writer (a plain O_RDONLY open of a FIFO would hang status/watch); then fstat
+        # on the fd requires a regular file, rejecting the FIFO/device we opened.
+        flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         try:
-            st = os.lstat(path)                     # A: do NOT follow a symlink
+            fd = os.open(path, flags)
         except OSError:
             return {}
-        if not stat.S_ISREG(st.st_mode):            # A: a regular file only
-            return {}
-        # Byte-offset tail read (binary) + tolerant decode: a text-mode seek to a
-        # non-tell() offset is undefined, and `for line in fh` can raise on a bad byte;
-        # binary seek + decode(errors="replace") is the defined, never-raising equivalent.
-        with open(path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            offset = max(0, size - USAGE_TAIL_BYTES)
-            fh.seek(offset)
-            raw = fh.read(USAGE_TAIL_BYTES + 1)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return {}                           # finally closes fd
+            # Byte-offset tail read (binary) + tolerant decode: a text-mode seek to a
+            # non-tell() offset is undefined and `for line in fh` can raise on a bad
+            # byte; binary seek + decode(errors="replace") is the never-raising form.
+            with os.fdopen(fd, "rb") as fh:
+                fd = None                           # fdopen owns the fd now
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                offset = max(0, size - USAGE_TAIL_BYTES)
+                fh.seek(offset)
+                raw = fh.read(USAGE_TAIL_BYTES + 1)
+        finally:
+            if fd is not None:
+                os.close(fd)
         lines = raw.decode("utf-8", errors="replace").split("\n")
         if offset > 0 and lines:
             lines = lines[1:]                       # D: drop the partial first line
@@ -5912,10 +5925,13 @@ def _usage_ratio_valid(dr):
 
 def _usage_pct(dr):
     """The recorded decision_ratio as an integer-percent string, or "—" when it is not a
-    finite real number OR when formatting it would overflow (a hostile large-but-finite
-    ratio: dr * 100 → inf → int() raises). This only FORMATS a recorded scalar — the core
-    never computes a ratio — and must never crash the display."""
+    finite real number, is an implausibly large ratio, OR when formatting it would
+    overflow (a hostile large-but-finite ratio: dr * 100 → inf → int() raises). This
+    only FORMATS a recorded scalar — the core never computes a ratio — and must never
+    crash or print an absurd multi-hundred-digit percentage."""
     if not _usage_ratio_valid(dr):
+        return "—"
+    if abs(dr) > USAGE_RATIO_DISPLAY_MAX:       # not a plausible usage ratio (e.g. 10**300)
         return "—"
     try:
         return f"{int(round(dr * 100))}%"
