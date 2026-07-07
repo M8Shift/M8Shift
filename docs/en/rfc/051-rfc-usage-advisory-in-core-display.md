@@ -72,6 +72,11 @@ or `null` when the ratio came from the top-level `used_tokens/limit_tokens` or i
 are unaffected. The core then **echoes** `decision_window` verbatim and computes
 nothing.
 
+**Tie rule (amendment E).** When two windows share the max ratio, the companion
+picks the **first max in ratio-computation order** (deterministic), and a test
+pins that behavior. A missing `decision_window` still renders **percentage-only**
+in the core, with **no** core recomputation.
+
 ## Model — what the CORE adds (it owns none of this today)
 
 The core has **no** usage stack: no `read_jsonl_diagnostic`, no snapshot fold, no
@@ -79,26 +84,42 @@ staleness helper — all of that lives only in `m8shift-runtime.py`, and the cor
 must **not** import the companion. So Part B adds a small, self-contained,
 stdlib-only, independently unit-tested unit to `m8shift.py`:
 
-1. **Bounded tolerant reader.** Open `.m8shift/runtime/usage.jsonl` with
+1. **Path safety before opening (amendment A).** `lstat` the sidecar first and
+   read **only a regular file**: a symlink (not followed), directory, device,
+   FIFO, or unreadable path yields the no-usage display (byte-identical), never an
+   open/read of a non-regular target.
+2. **Bounded tolerant reader.** Open `.m8shift/runtime/usage.jsonl` with
    `encoding="utf-8", errors="replace"` (a bad byte must never raise mid-iteration
    — the companion's lazy `for line in fh` reader does **not** satisfy this) and
    **tail-read** at most the last `USAGE_TAIL_BYTES` (e.g. 256 KiB) / last N lines,
    folding backward until every roster agent is covered or the cap is hit — so a
-   multi-MB sidecar is read in bounded time. Each line: tolerate
-   `json.JSONDecodeError` / `RecursionError` / `ValueError`; skip non-dict lines;
-   skip rows whose `schema` (of `payload.snapshot`) is not
-   `m8shift.usage.snapshot.v1` (pin the dependency; a companion schema drift is
-   skipped, not misrendered).
-2. **Fold.** Keep the **file-order last** `usage.snapshot` per agent (last write
-   wins, matching the companion).
-3. **Validate before render (no computation).**
+   multi-MB sidecar is read in bounded time. **When the seek offset is > 0, discard
+   the first (partial) line** (amendment D) so a tail that starts mid-line never
+   mis-parses. Each line: tolerate `json.JSONDecodeError` / `RecursionError` /
+   `ValueError`; skip non-dict lines; skip rows whose `schema` (of
+   `payload.snapshot`) is not `m8shift.usage.snapshot.v1` (pin the dependency; a
+   companion schema drift is skipped, not misrendered).
+3. **Fold + agent validation (amendment B).** Render **only roster agents**;
+   validate agent ids with `AGENT_RE`; require the event `agent` and
+   `payload.snapshot.agent` to be present, valid, and **consistent** — skip a row
+   on any mismatch (defeats a spoofed/mislabelled snapshot). Then keep the
+   **file-order last** valid `usage.snapshot` per agent (last write wins, matching
+   the companion).
+4. **Validate before render (no computation).**
    - `decision_ratio`: rendered as a percentage only when
      `isinstance(dr, (int, float)) and not isinstance(dr, bool) and
      math.isfinite(dr)`; otherwise `—` (unknown). NaN / Infinity / string / bool →
      `—`, never a crash.
-   - `provenance`: shown verbatim.
-   - `decision_window.kind` and `.resets_at`: echoed; a missing / null / present-
-     but-unparseable `resets_at` is **omitted** (never formatted raw).
+   - **Terminal/output safety (amendment C):** `provenance` and
+     `decision_window.kind` are **not** arbitrary verbatim terminal output — a
+     corrupt/hostile sidecar could carry ANSI escapes or control characters.
+     Before human output they are sanitized to a short, safe, printable
+     token-ish value: strip/refuse control characters and ANSI escapes, cap
+     length, and fall back to `unknown`/omit on anything left unsafe. (This is
+     display hardening only — the value still never feeds a decision.)
+   - `decision_window.kind` and `.resets_at`: echoed (after the sanitization
+     above); a missing / null / present-but-unparseable `resets_at` is **omitted**
+     (never formatted raw).
    - staleness: `captured_at` age; missing or non-strict-`Z`-parseable → treated as
      stale/unknown (never a crash); past the fixed default (30 min, the companion's
      `--stale-after-minutes` default) the line is marked `stale`.
@@ -120,7 +141,9 @@ no usable snapshot** — byte-identical to today.
 agent, plus computed `stale` boolean and `age_seconds`). The `usage` key is
 **omitted entirely** whenever there is no usable snapshot (not `[]`), so a
 present-but-empty/all-malformed sidecar is byte-identical to no sidecar. The array
-echoes recorded values; it invents nothing.
+echoes recorded values; it invents nothing. **JSON must never emit a non-finite
+number (amendment C):** an invalid/NaN/Inf `decision_ratio` is serialized as
+`null` (unknown), never `NaN`/`Infinity` (which is non-standard JSON).
 
 ## Charter and safety
 
@@ -161,6 +184,21 @@ echoes recorded values; it invents nothing.
   snapshot missing `decision_ratio`/`decision_window`/`provenance`/`captured_at`;
   `decision_ratio` = NaN / Infinity / `1e999` / string / bool → `—`; unparseable
   `captured_at`/`resets_at`; sidecar path is a directory or unreadable.
+- **Path safety (A)**: a **symlink** sidecar is not followed, and a directory /
+  device / FIFO / unreadable path produces byte-identical no-usage output — named
+  tests for symlink-not-followed and non-regular/unreadable path.
+- **Agent validation / spoofing (B)**: invalid agent id, non-roster agent, and an
+  event `agent` ≠ `snapshot.agent` mismatch are each skipped — named tests.
+- **Terminal/JSON safety (C)**: a `provenance` / `decision_window.kind` carrying
+  ANSI escapes, control characters, or an over-long value is sanitized (no raw
+  escape reaches the terminal); `--json` never emits `NaN`/`Infinity` (invalid
+  `decision_ratio` → `null`) — named tests.
+- **Tail partial line (D)**: a large sidecar whose tail window starts mid-line
+  discards that partial first line and the last valid snapshot still wins — named
+  test.
+- **decision_window tie (E)**: two windows sharing the max → the companion records
+  the deterministic first-max-in-ratio-order; a missing `decision_window` still
+  renders percentage-only — named tests.
 - **Bounded**: a multi-MB sidecar is read in bounded time (tail cap) and the
   file-order last snapshot still wins.
 - **Read-only assertion**: rendering opens only the sidecar path and performs no
