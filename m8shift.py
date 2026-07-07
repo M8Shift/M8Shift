@@ -17,6 +17,7 @@ import ast
 import contextlib
 import datetime as dt
 import json
+import math
 import os
 import re
 import stat
@@ -5794,6 +5795,271 @@ def cmd_may_i_write(args):
     return 3
 
 
+# ───────────────────────── RFC 051: usage advisory (read-only) ──────────────
+# The core owns NO usage stack (no reader, no fold, no staleness helper — those live
+# only in m8shift-runtime.py, which the core MUST NOT import). This small, self-contained,
+# stdlib-only unit is a READ-ONLY reader of the companion-authored local sidecar
+# `.m8shift/runtime/usage.jsonl` (event `m8shift.runtime.event.v1`, payload.snapshot =
+# `m8shift.usage.snapshot.v1`). It NEVER computes a ratio/argmax, opens a socket, spawns a
+# process, or writes — it echoes recorded scalars and marks staleness. Any absent/hostile
+# input fails open to a BYTE-IDENTICAL no-usage display. See docs/en/rfc/051-*.
+
+USAGE_SIDECAR_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
+USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"    # pinned; a companion drift is skipped
+USAGE_TAIL_BYTES = 256 * 1024                          # bounded tail read (multi-MB sidecar safe)
+USAGE_STALE_AFTER_SECONDS = 30 * 60                    # companion --stale-after-minutes default
+_USAGE_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 _.:%()/+-]")  # display whitelist (amendment C)
+
+
+def usage_sidecar_path():
+    """Absolute path to the local usage sidecar (reading it is a plain filesystem read,
+    inside the charter — the core opens exactly one local file it did not create)."""
+    return os.path.join(project_root(), USAGE_SIDECAR_REL)
+
+
+def _usage_sanitize(value, *, cap=40, fallback="unknown"):
+    """Amendment C: `provenance` / `decision_window.kind` are NOT trusted verbatim
+    terminal output — a corrupt/hostile sidecar could carry ANSI escapes or control
+    characters. Reduce to a short, safe, printable token (whitelist strip + length cap);
+    fall back to `fallback` (which may be None to omit) when nothing safe survives."""
+    if not isinstance(value, str):
+        return fallback
+    cleaned = _USAGE_SAFE_CHARS.sub("", value).strip()
+    if not cleaned:
+        return fallback
+    return cleaned[:cap]
+
+
+def _usage_read_snapshots(lk):
+    """Read the sidecar and fold to the file-order LAST valid snapshot per ROSTER agent.
+    Returns {agent: snapshot} (possibly empty). Fails open to {} on ANY error or
+    non-regular/unreadable path, so the no-usage display stays byte-identical.
+
+    Path safety (amendment A): lstat first; read ONLY a regular file — never follow a
+    symlink, never open a directory / device / FIFO. Bounded tolerant reader (amendments
+    B/D): tail at most USAGE_TAIL_BYTES; when the seek offset > 0 discard the partial
+    first line; tolerate bad bytes / bad JSON / deep nesting; require the event `agent`
+    and `payload.snapshot.agent` to be present, valid (AGENT_RE), CONSISTENT, and in the
+    roster before keeping a row (defeats a spoofed/mislabelled snapshot)."""
+    try:
+        path = usage_sidecar_path()
+        try:
+            st = os.lstat(path)                     # A: do NOT follow a symlink
+        except OSError:
+            return {}
+        if not stat.S_ISREG(st.st_mode):            # A: a regular file only
+            return {}
+        # Byte-offset tail read (binary) + tolerant decode: a text-mode seek to a
+        # non-tell() offset is undefined, and `for line in fh` can raise on a bad byte;
+        # binary seek + decode(errors="replace") is the defined, never-raising equivalent.
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            offset = max(0, size - USAGE_TAIL_BYTES)
+            fh.seek(offset)
+            raw = fh.read(USAGE_TAIL_BYTES + 1)
+        lines = raw.decode("utf-8", errors="replace").split("\n")
+        if offset > 0 and lines:
+            lines = lines[1:]                       # D: drop the partial first line
+        roster = set(active_agents(lk))
+        found = {}
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                continue                            # bad JSON / deep nesting → skip
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            snap = payload.get("snapshot")
+            if not isinstance(snap, dict):
+                continue
+            if snap.get("schema") != USAGE_SNAPSHOT_SCHEMA:   # pin the dependency
+                continue
+            ev_agent = row.get("agent")
+            snap_agent = snap.get("agent")
+            if not (isinstance(ev_agent, str) and isinstance(snap_agent, str)):
+                continue                            # B: both must be present strings
+            if ev_agent != snap_agent:
+                continue                            # B: … and consistent
+            if not re.fullmatch(AGENT_RE, ev_agent):
+                continue                            # B: … and a valid agent id
+            if ev_agent not in roster:
+                continue                            # B: render only roster agents
+            found[ev_agent] = snap                  # file-order last wins
+        return found
+    except Exception:
+        return {}                                   # fail-open: never crash status/watch
+
+
+def _usage_ratio_valid(dr):
+    """A finite real ratio — never a bool / string / NaN / Infinity (amendment C)."""
+    return isinstance(dr, (int, float)) and not isinstance(dr, bool) and math.isfinite(dr)
+
+
+def _usage_pct(dr):
+    """The recorded decision_ratio as an integer-percent string, or "—" when it is not a
+    finite real number OR when formatting it would overflow (a hostile large-but-finite
+    ratio: dr * 100 → inf → int() raises). This only FORMATS a recorded scalar — the core
+    never computes a ratio — and must never crash the display."""
+    if not _usage_ratio_valid(dr):
+        return "—"
+    try:
+        return f"{int(round(dr * 100))}%"
+    except (OverflowError, ValueError):
+        return "—"
+
+
+def _usage_json_safe(obj):
+    """Deep copy `obj`, replacing any non-finite float (NaN/Infinity) with None so the
+    result is standard JSON (amendment C). json.loads() parses bare NaN/Infinity into
+    Python floats by default, so a hostile sidecar can smuggle them into an echoed
+    snapshot; this guarantees json.dumps() emits only finite numbers."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _usage_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_usage_json_safe(v) for v in obj]
+    return obj
+
+
+def _usage_age_seconds(snap, ref):
+    """Age in seconds of `captured_at` vs `ref`, or None when missing / non-strict-Z
+    (parse_iso is strict `...Z`); unparseable never crashes — it reads as unknown."""
+    cap = parse_iso(snap.get("captured_at"))
+    if cap is None:
+        return None
+    return int((ref - cap).total_seconds())
+
+
+def _usage_age_display(age):
+    """Compact "Xs/Xm/Xh/Xd ago" fragment, or "" when the age is unknown."""
+    if age is None:
+        return ""
+    age = max(0, int(age))
+    if age < 60:
+        return f"{age}s ago"
+    if age < 3600:
+        return f"{age // 60}m ago"
+    if age < 86400:
+        return f"{age // 3600}h ago"
+    return f"{age // 86400}d ago"
+
+
+def _usage_reset_display(snap):
+    """Local HH:MM for the decision window's `resets_at`, or None when the window is
+    absent / null or its `resets_at` is missing / non-strict-Z-parseable (never format a
+    raw reset)."""
+    dw = snap.get("decision_window")
+    if not isinstance(dw, dict):
+        return None
+    reset = parse_iso(dw.get("resets_at"))
+    if reset is None:
+        return None
+    return reset.astimezone().strftime("%H:%M")
+
+
+def _usage_rows(lk, ref=None):
+    """Ordered (roster order) list of display-ready usage rows — one per roster agent
+    with a usable snapshot. EMPTY when there is no usable snapshot, so callers then
+    render nothing / omit the JSON key (the byte-identical no-usage display).
+
+    Validate-before-render, no computation: a non-finite/non-numeric `decision_ratio`
+    renders `—` (echoed percentage otherwise); provenance and window kind are sanitized
+    (amendment C); a null/unparseable reset or captured_at degrades to omitted/stale."""
+    snaps = _usage_read_snapshots(lk)
+    if not snaps:
+        return []
+    ref = ref or now()
+    rows = []
+    for agent in active_agents(lk):
+        snap = snaps.get(agent)
+        if snap is None:
+            continue
+        dr = snap.get("decision_ratio")
+        pct = _usage_pct(dr)
+        source = snap.get("source")
+        provenance = _usage_sanitize(source.get("provenance") if isinstance(source, dict) else None,
+                                     fallback="unknown")
+        dw = snap.get("decision_window")
+        kind = _usage_sanitize(dw.get("kind"), fallback=None) if isinstance(dw, dict) else None
+        age = _usage_age_seconds(snap, ref)
+        rows.append({
+            "agent": agent,
+            "snapshot": snap,
+            "pct": pct,
+            "provenance": provenance,
+            "kind": kind,
+            "reset": _usage_reset_display(snap),
+            "age_seconds": age,
+            "age_display": _usage_age_display(age),
+            "stale": age is None or age > USAGE_STALE_AFTER_SECONDS,
+        })
+    return rows
+
+
+def _print_usage_block(lk, rows=None):
+    """RFC 051: the read-only `── usage ──` advisory rendered after the LOCK block in
+    both status and watch. ABSENT ENTIRELY (byte-identical) when there is no usable
+    snapshot. Echoes recorded scalars — the core computes nothing — and marks staleness
+    so a human never trusts an old number."""
+    rows = _usage_rows(lk) if rows is None else rows
+    if not rows:
+        return
+    print("── usage " + "─" * 30)
+    for row in rows:
+        window = f"{row['kind']} ({row['provenance']})" if row["kind"] else f"({row['provenance']})"
+        segs = []
+        if row["reset"]:
+            segs.append(f"resets {row['reset']}")
+        if row["age_display"]:
+            segs.append(row["age_display"])
+        if row["stale"]:
+            segs.append("stale")
+        tail = " · " + " · ".join(segs) if segs else ""
+        print(f"  {row['agent']:<8} {row['pct']:<3} {window}{tail}")
+
+
+def _usage_json(lk, ref=None):
+    """Optional `usage` array for status --json: the last snapshot per roster agent
+    (echoed) plus computed `stale` and `age_seconds`. Returns None when there is no
+    usable snapshot so the key is OMITTED ENTIRELY (never []) — a present-but-empty /
+    all-malformed / all-other-schema sidecar stays byte-identical to no sidecar.
+    Amendment C: a non-finite number is never emitted (invalid decision_ratio → null)."""
+    rows = _usage_rows(lk, ref)
+    if not rows:
+        return None
+    out = []
+    for row in rows:
+        try:
+            entry = _usage_json_safe(row["snapshot"])   # echo recorded values, non-finite → null
+            dr = row["snapshot"].get("decision_ratio")
+            entry["decision_ratio"] = dr if _usage_ratio_valid(dr) else None
+            entry["stale"] = row["stale"]
+            entry["age_seconds"] = row["age_seconds"]
+            out.append(entry)
+        except Exception:
+            continue                                    # fail-open per row (never crash --json)
+    return out or None                                  # all rows dropped → omit the key entirely
+
+
+def _usage_signature(lk):
+    """Stable per-agent signature of the usage lines for watch --changes-only: reflects
+    the recorded snapshot fields + staleness (a NEW snapshot or a stale flip is a delta
+    worth reprinting) but NOT the ticking age, so a steady relay is not reprinted every
+    poll."""
+    return [
+        [r["agent"], r["pct"], r["kind"], r["provenance"], r["reset"],
+         r["snapshot"].get("captured_at"), r["stale"]]
+        for r in _usage_rows(lk)
+    ]
+
+
 def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False):
     session_info = session_info or current_session_info(lk)
     print(f"m8shift.py v{VERSION}")
@@ -5833,6 +6099,7 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
         print(tr("status_next", action=next_action_for(lk, stale=stale)))
     if last:
         print(tr("last_turn", n=last["n"], who=last["agent"]))
+    _print_usage_block(lk)   # RFC 051: after the LOCK block; absent when no usable snapshot
 
 
 def _status_signature(lk, stale, last, for_agent=""):
@@ -5848,6 +6115,7 @@ def _status_signature(lk, stale, last, for_agent=""):
         "integrating": lk.get("integrating", ""),
         "stale": bool(stale),
         "last_turn": last or {},
+        "usage": _usage_signature(lk),   # RFC 051: reprint on a usage-line delta (--changes-only)
     }
     if for_agent:
         agent = need_agent(for_agent)
@@ -5878,6 +6146,9 @@ def cmd_status(args):
             agent = need_agent(args.for_agent)
             out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
             out["turn_requests"] = turn_requests_for_agent(agent)
+        usage = _usage_json(lk)              # RFC 051: OMIT the key entirely when no usable snapshot
+        if usage is not None:
+            out["usage"] = usage
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""),

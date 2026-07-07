@@ -5107,16 +5107,36 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
                 provenance = "local_estimate"
                 warnings.append(f"windows[{window['kind']}].limit filled from the "
                                 "operator budget (local_estimate; not official quota)")
-    ratios = [r for r in
-              (_usage_safe_ratio(w["used"], w["limit"]) for w in windows
-               if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0)
-              if r is not None]
+    # RFC 051 Part A: record WHICH window produced `decision_ratio` (the argmax), so a
+    # read-only display (the core) can echo "which window / when it resets" WITHOUT
+    # recomputing every ratio and re-deriving the argmax. `attributions` mirrors the
+    # ratio-computation order EXACTLY — token windows first (file order), then
+    # ratio-native windows (file order) — so `[r for r, _ in attributions]` is
+    # byte-identical to the previously-shipped `ratios`, and the tie rule (amendment E)
+    # is the deterministic FIRST max in that order. A token window's ratio is used/limit
+    # via the safe-ratio helper; a ratio-native window's is its used_ratio directly.
+    attributions = []  # (ratio, window) pairs, in ratio-computation order
+    for w in windows:
+        if w["used"] is not None and isinstance(w["limit"], int) and w["limit"] > 0:
+            r = _usage_safe_ratio(w["used"], w["limit"])
+            if r is not None:
+                attributions.append((r, w))
     # Ratio-native windows contribute their used_ratio directly — no token math.
-    ratios += [w["used_ratio"] for w in windows if w.get("used_ratio") is not None]
-    if not ratios and used_tokens is not None and isinstance(limit_tokens, int) and limit_tokens > 0:
+    for w in windows:
+        if w.get("used_ratio") is not None:
+            attributions.append((w["used_ratio"], w))
+    ratios = [r for r, _ in attributions]
+    decision_window = None
+    if attributions:
+        peak = max(ratios)
+        for r, w in attributions:
+            if r == peak:            # first max in computation order wins (amendment E)
+                decision_window = {"kind": w["kind"], "resets_at": w["resets_at"]}
+                break
+    elif used_tokens is not None and isinstance(limit_tokens, int) and limit_tokens > 0:
         top = _usage_safe_ratio(used_tokens, limit_tokens)
         if top is not None:
-            ratios = [top]
+            ratios = [top]           # top-level fallback → decision_window stays null
     decision_ratio = round(max(ratios), 4) if ratios else None
     known = {"schema", "agent", "provenance", "captured_at", "used_tokens", "limit_tokens", "windows"}
     for key in sorted(set(doc) - known):
@@ -5129,6 +5149,9 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
         "used_tokens": used_tokens,
         "limit_tokens": limit_tokens,
         "decision_ratio": decision_ratio,
+        # Additive/optional (RFC 051 Part A): the window that produced decision_ratio,
+        # or null on top-level/unknown fallback. Existing readers ignore this field.
+        "decision_window": decision_window,
         "windows": windows,
     }
     if include_raw_excerpt and raw_text:
