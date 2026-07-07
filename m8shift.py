@@ -1295,7 +1295,9 @@ def iso(t):
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def parse_iso(s):
-    s = (s or "").strip()
+    if not isinstance(s, str):          # a non-string ISO is unparseable, not a crash
+        return None
+    s = s.strip()
     if not s or s == "-":
         return None
     try:
@@ -5897,8 +5899,15 @@ def _usage_read_snapshots(lk):
 
 
 def _usage_ratio_valid(dr):
-    """A finite real ratio — never a bool / string / NaN / Infinity (amendment C)."""
-    return isinstance(dr, (int, float)) and not isinstance(dr, bool) and math.isfinite(dr)
+    """A finite real ratio — never a bool / string / NaN / Infinity (amendment C).
+    A bare huge integer (>= ~1.8e308) makes `math.isfinite` itself raise
+    OverflowError converting to float; that is not a usable ratio → False."""
+    if isinstance(dr, bool) or not isinstance(dr, (int, float)):
+        return False
+    try:
+        return math.isfinite(dr)
+    except OverflowError:
+        return False
 
 
 def _usage_pct(dr):
@@ -5981,25 +5990,30 @@ def _usage_rows(lk, ref=None):
         snap = snaps.get(agent)
         if snap is None:
             continue
-        dr = snap.get("decision_ratio")
-        pct = _usage_pct(dr)
-        source = snap.get("source")
-        provenance = _usage_sanitize(source.get("provenance") if isinstance(source, dict) else None,
-                                     fallback="unknown")
-        dw = snap.get("decision_window")
-        kind = _usage_sanitize(dw.get("kind"), fallback=None) if isinstance(dw, dict) else None
-        age = _usage_age_seconds(snap, ref)
-        rows.append({
-            "agent": agent,
-            "snapshot": snap,
-            "pct": pct,
-            "provenance": provenance,
-            "kind": kind,
-            "reset": _usage_reset_display(snap),
-            "age_seconds": age,
-            "age_display": _usage_age_display(age),
-            "stale": age is None or age > USAGE_STALE_AFTER_SECONDS,
-        })
+        # Belt-and-suspenders: known bad shapes degrade at field level (below), but an
+        # UNFORESEEN one must never crash status/watch — drop just that row, fail-open.
+        try:
+            dr = snap.get("decision_ratio")
+            pct = _usage_pct(dr)
+            source = snap.get("source")
+            provenance = _usage_sanitize(source.get("provenance") if isinstance(source, dict) else None,
+                                         fallback="unknown")
+            dw = snap.get("decision_window")
+            kind = _usage_sanitize(dw.get("kind"), fallback=None) if isinstance(dw, dict) else None
+            age = _usage_age_seconds(snap, ref)
+            rows.append({
+                "agent": agent,
+                "snapshot": snap,
+                "pct": pct,
+                "provenance": provenance,
+                "kind": kind,
+                "reset": _usage_reset_display(snap),
+                "age_seconds": age,
+                "age_display": _usage_age_display(age),
+                "stale": age is None or age > USAGE_STALE_AFTER_SECONDS,
+            })
+        except Exception:
+            continue
     return rows
 
 

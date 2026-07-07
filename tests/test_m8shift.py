@@ -10246,6 +10246,43 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertNotIn("resets", out)          # unparseable reset omitted, never raw
         self.assertNotIn("not-a-date", out)
 
+    def test_non_string_captured_at_or_resets_at_is_fail_open(self):
+        """Adversarial-hunt regression: a NON-STRING captured_at/resets_at (int/float/
+        bool/list/dict) reached parse_iso's `.strip()` and crashed status AND watch
+        (AttributeError). Must degrade to stale/omitted, never crash, across surfaces."""
+        for bad in (123, 1.5, True, [1, 2], {"x": 1}):
+            with self.subTest(field="captured_at", value=bad):
+                self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9, captured_at=bad))])
+                out = self.status_out()                          # rc 0 + no Traceback
+                self.assertIn("stale", out)                      # unknown age → stale
+                self.watch_out()                                 # watch --once also fail-open
+                self.watch_out("--changes-only")
+                r = self.cw("status", "--json")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                json.loads(r.stdout)                             # valid JSON, no crash
+            with self.subTest(field="resets_at", value=bad):
+                self.write_sidecar([self.event(self.snapshot(
+                    decision_ratio=0.9, decision_window={"kind": "session_5h", "resets_at": bad}))])
+                out = self.status_out()
+                self.assertIn("── usage", out)
+                self.assertNotIn("resets", out)                  # non-string reset omitted
+
+    def test_huge_integer_decision_ratio_is_fail_open(self):
+        """Adversarial-hunt regression: a bare huge-INTEGER decision_ratio (~400 digits)
+        made math.isfinite() raise OverflowError (int→float) and crashed status AND
+        watch. Must render — and never crash (the float 1e308 case already passed;
+        the bare int is the one that overflows isfinite)."""
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=10 ** 400))])
+        out = self.status_out()
+        self.assertIn("── usage", out)
+        self.assertIn("—", out)
+        self.watch_out()
+        r = self.cw("status", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NaN", r.stdout)
+        entry = json.loads(r.stdout)["usage"][0]
+        self.assertIsNone(entry["decision_ratio"])               # non-usable → null, echoed as null
+
     def test_non_dict_lines_skipped(self):
         self.write_sidecar(["123", "\"a string\"", "[1, 2, 3]", "null", "true",
                             json.dumps(self.event(self.snapshot(decision_ratio=0.9)))])
