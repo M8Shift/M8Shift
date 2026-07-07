@@ -9450,6 +9450,71 @@ class TestRFC048PRB(CLIBase):
         d = json.loads(r.stdout)
         return d, {row["component"]: row["result"] for row in d["components"]}
 
+    def _runner_rels(self):
+        return [cowork.RUNNER_REGISTRY[name] for name in cowork.RUNNER_REGISTRY]
+
+    def _copy_runner_sources(self, rels=None):
+        rels = rels or self._runner_rels()
+        for rel in rels:
+            dst = os.path.join(self.src, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy(os.path.join(REPO, rel), dst)
+
+    def _source_manifest(self, rels):
+        rels = ["m8shift.py", *rels]
+        with open(os.path.join(self.src, "checksums.sha256"), "w", encoding="utf-8") as fh:
+            for rel in rels:
+                with open(os.path.join(self.src, rel), "rb") as rf:
+                    fh.write(hashlib.sha256(rf.read()).hexdigest() + "  " + rel + "\n")
+
+    @staticmethod
+    def _stale_runner_body(rel, body, version="0.1.0"):
+        if rel.endswith(".py"):
+            return re.sub(r'^VERSION = "\d+\.\d+\.\d+"', 'VERSION = "%s"' % version,
+                          body, count=1, flags=re.M)
+        return re.sub(r'^M8SHIFT_RUNNER_VERSION="\d+\.\d+\.\d+"',
+                      'M8SHIFT_RUNNER_VERSION="%s"' % version,
+                      body, count=1, flags=re.M)
+
+    def _install_runner_targets(self, rels=None, stale=True, edit=False, with_metadata=True):
+        rels = rels or self._runner_rels()
+        runners = []
+        for rel in rels:
+            src = os.path.join(REPO, rel)
+            with open(src, encoding="utf-8") as fh:
+                body = fh.read()
+            if stale:
+                body = self._stale_runner_body(rel, body)
+            if edit:
+                body += "\n# LOCAL RUNNER EDIT\n"
+            dst = os.path.join(self.d, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            if os.name != "nt" and rel.endswith(".sh"):
+                os.chmod(dst, 0o755)
+            if with_metadata:
+                with open(dst, "rb") as fh:
+                    sha = hashlib.sha256(fh.read()).hexdigest()
+                name = next(n for n, r in cowork.RUNNER_REGISTRY.items() if r == rel)
+                runners.append({
+                    "name": name,
+                    "path": rel,
+                    "version": "0.1.0" if stale else cowork.VERSION,
+                    "sha256": sha,
+                    "copied_at": "2026-01-01T00:00:00Z",
+                    "source": "test",
+                })
+        if with_metadata:
+            os.makedirs(os.path.join(self.d, ".m8shift"), exist_ok=True)
+            with open(os.path.join(self.d, ".m8shift", "kit.json"), "w", encoding="utf-8") as fh:
+                json.dump({
+                    "schema": "m8shift.kit.v1",
+                    "core": {"script": "m8shift.py", "version": cowork.VERSION},
+                    "companions": [],
+                    "runners": runners,
+                }, fh, indent=2)
+
     # ── first hop + rebase ───────────────────────────────────────────────────
 
     def test_first_hop_old_target_updated_by_source_copy_from_outside(self):
@@ -9506,8 +9571,9 @@ class TestRFC048PRB(CLIBase):
         self.assertTrue(d["dry_run"])
         self.assertEqual(d["driver"], "source")
         self.assertEqual(set(comps),
-                         {"core", "protocol", "pack", "anchors", "companions"})
+                         {"core", "protocol", "pack", "anchors", "companions", "runner"})
         self.assertEqual(comps["companions"], "skipped")   # not selected by default
+        self.assertEqual(comps["runner"], "skipped")       # absent runners are not created
         self.assertEqual(comps["pack"], "updated")         # init→update source stamp
         self.assertEqual(self._snapshot(self.d), before)   # byte-for-byte read-only
         self.assertEqual(os.listdir(self.src), ["m8shift.py"])
@@ -9525,6 +9591,7 @@ class TestRFC048PRB(CLIBase):
             "pack": "updated",              # header source: init → update
             "anchors": "already_current",
             "companions": "skipped",
+            "runner": "skipped",
             "core": "already_current",
         })
         self.assertTrue(d["ok"])
@@ -9754,10 +9821,130 @@ class TestRFC048PRB(CLIBase):
         self.assertEqual(last["schema"], "m8shift.update.audit.v1")
         self.assertTrue(last["companions_refreshed"])
         self.assertEqual({c["component"] for c in last["components"]},
-                         {"core", "protocol", "pack", "anchors", "companions"})
+                         {"core", "protocol", "pack", "anchors", "companions", "runner"})
         # … and the kit core version is honest again
         with open(kit_path, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["core"]["version"], cowork.VERSION)
+
+    # ── runner artifacts (#60) ───────────────────────────────────────────────
+
+    def test_default_update_refreshes_installed_runner_artifacts(self):
+        self.init()
+        rels = self._runner_rels()
+        self._copy_runner_sources(rels)
+        self._source_manifest(rels)
+        self._install_runner_targets(rels, stale=True, with_metadata=True)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertEqual(comps["runner"], "updated")
+        row = next(row for row in d["components"] if row["component"] == "runner")
+        self.assertEqual({i["name"]: i["result"] for i in row["runners"]},
+                         {"watch-status": "updated", "headless-runner": "updated"})
+        self.assertIn('M8SHIFT_RUNNER_VERSION="%s"' % cowork.VERSION,
+                      self.read_target(os.path.join("scripts", "watch-status.sh")))
+        self.assertIn('VERSION = "%s"' % cowork.VERSION,
+                      self.read_target(os.path.join("examples", "headless_runner.py")))
+        with open(os.path.join(self.d, ".m8shift", "kit.json"), encoding="utf-8") as fh:
+            kit = json.load(fh)
+        self.assertEqual(sorted(r["name"] for r in kit["runners"]),
+                         ["headless-runner", "watch-status"])
+        self.assertTrue(all(r["version"] == cowork.VERSION for r in kit["runners"]))
+        with open(os.path.join(self.d, self.AUDIT_REL), encoding="utf-8") as fh:
+            last = json.loads([ln for ln in fh.read().splitlines() if ln.strip()][-1])
+        self.assertTrue(last["runners_refreshed"])
+        self.assertTrue(any(c["component"] == "runner" and c.get("runners")
+                            for c in last["components"]))
+        before_second = self._snapshot(self.d)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "already_current")
+        self.assertEqual(self._snapshot(self.d), before_second)
+
+    def test_default_update_does_not_create_absent_runner_artifacts(self):
+        self.init()
+        rels = self._runner_rels()
+        self._copy_runner_sources(rels)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "skipped")
+        for rel in rels:
+            self.assertFalse(os.path.exists(os.path.join(self.d, rel)), rel)
+
+    def test_runner_dry_run_reports_plan_and_writes_nothing(self):
+        self.init()
+        rels = self._runner_rels()
+        self._copy_runner_sources(rels)
+        self._source_manifest(rels)
+        self._install_runner_targets(rels, stale=True, with_metadata=True)
+        before = self._snapshot(self.d)
+        r = self.update("--json", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertTrue(d["dry_run"])
+        self.assertEqual(comps["runner"], "updated")
+        row = next(row for row in d["components"] if row["component"] == "runner")
+        self.assertEqual({i["name"]: i["result"] for i in row["runners"]},
+                         {"watch-status": "updated", "headless-runner": "updated"})
+        self.assertEqual(self._snapshot(self.d), before)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_runner_symlink_target_refused(self):
+        self.init()
+        rel = os.path.join("scripts", "watch-status.sh")
+        self._copy_runner_sources([rel])
+        self._source_manifest([rel])
+        outside = os.path.join(self.out, "outside-watch-status.sh")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("OUTSIDE\n")
+        self._install_runner_targets([rel], stale=True, with_metadata=True)
+        os.remove(os.path.join(self.d, rel))
+        os.symlink(outside, os.path.join(self.d, rel))
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "refused")
+        with open(outside, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "OUTSIDE\n")
+
+    def test_locally_edited_runner_requires_manual_review_without_force(self):
+        self.init()
+        rel = os.path.join("examples", "headless_runner.py")
+        self._copy_runner_sources([rel])
+        self._source_manifest([rel])
+        self._install_runner_targets([rel], stale=True, with_metadata=True)
+        target = os.path.join(self.d, rel)
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write("\n# LOCAL EDIT AFTER KIT METADATA\n")
+        before = self.read_target(rel)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertEqual(comps["runner"], "manual_review_required")
+        item = next(i for i in next(row for row in d["components"]
+                                   if row["component"] == "runner")["runners"]
+                    if i["name"] == "headless-runner")
+        self.assertIn("differs from", item["detail"])
+        self.assertEqual(self.read_target(rel), before)
+
+    def test_doctor_source_reports_runner_stale_and_manual_review_read_only(self):
+        self.init()
+        rels = self._runner_rels()
+        self._copy_runner_sources(rels)
+        self._source_manifest(rels)
+        self._install_runner_targets(rels, stale=True, with_metadata=True)
+        with open(os.path.join(self.d, "examples", "headless_runner.py"), "a",
+                  encoding="utf-8") as fh:
+            fh.write("\n# LOCAL EDIT AFTER KIT METADATA\n")
+        before = self._snapshot(self.d)
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._snapshot(self.d), before)
+        checks = [f["check"] for f in json.loads(r.stdout)["findings"]]
+        self.assertIn("runner.stale", checks)
+        self.assertIn("runner.manual_review_required", checks)
 
     # ── source ownership / relay-state hygiene ───────────────────────────────
 
@@ -9851,8 +10038,9 @@ class TestRFC048PRB(CLIBase):
         self.assertEqual(row["target_version_before"], cowork.VERSION)
         self.assertRegex(row["at"], r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
         self.assertEqual({c["component"] for c in row["components"]},
-                         {"core", "protocol", "pack", "anchors", "companions"})
+                         {"core", "protocol", "pack", "anchors", "companions", "runner"})
         self.assertIn("companions_refreshed", row)
+        self.assertIn("runners_refreshed", row)
         # a run with zero real writes appends no row
         with open(audit, encoding="utf-8") as fh:
             before = fh.read()

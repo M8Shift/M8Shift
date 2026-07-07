@@ -165,6 +165,11 @@ COMPANION_REGISTRY = {
 COMPANION_FULL = ("runtime", "context", "worktree", "headroom", "i18n")
 KIT_MANIFEST_REL = os.path.join(".m8shift", "kit.json")
 _SCRIPT_VERSION_RE = re.compile(r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
+RUNNER_REGISTRY = {
+    "watch-status": os.path.join("scripts", "watch-status.sh"),
+    "headless-runner": os.path.join("examples", "headless_runner.py"),
+}
+_RUNNER_VERSION_RE = re.compile(r'^M8SHIFT_RUNNER_VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
 
 # --- RFC 048 (#19): source-driven local update --------------------------------
 # The update DRIVER is the NEW source script (`python3 SOURCE/m8shift.py update
@@ -172,13 +177,13 @@ _SCRIPT_VERSION_RE = re.compile(r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
 # content and may not even know the command. Every generated write is rebased
 # onto the target, and every generated version stamp uses the SOURCE version.
 UPDATE_BASELINE = (3, 41, 0)     # oldest init-era project `update` supports (RFC 048)
-UPDATE_COMPONENTS = ("core", "protocol", "pack", "anchors", "companions")
-UPDATE_DEFAULT_COMPONENTS = "core,protocol,pack,anchors"
+UPDATE_COMPONENTS = ("core", "protocol", "pack", "anchors", "companions", "runner")
+UPDATE_DEFAULT_COMPONENTS = "core,protocol,pack,anchors,runner"
 # Execution/report order: docs components FIRST, core LAST — a failed core
 # replace never leaves refreshed docs claiming a core that was not delivered.
 # (Stamps already come from the source version, so this ordering is defense in
 # depth, not the primary guard against the stamp-ordering bug.)
-UPDATE_ORDER = ("protocol", "pack", "anchors", "companions", "core")
+UPDATE_ORDER = ("protocol", "pack", "anchors", "companions", "runner", "core")
 # "partial" (#43) is deliberately NOT ok: a mixed companion run (some refreshed,
 # some refused) reports the honest component word but keeps the run incomplete
 # and the exit code non-zero, exactly like a blanket refusal.
@@ -553,7 +558,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
-./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
+./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
 ./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
@@ -634,10 +639,14 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   It never repairs files, prompts, contacts the network, or changes legal
   `LOCK` transitions. With `--source DIR` it also compares this core against a
   candidate source copy and reports `adoption.update_recommended` when the
-  source is newer, plus an advisory `workspace.dirty_worktree` finding when the
-  project's git checkout carries uncommitted changes (coordinate/stash before
-  an update lands generated writes in a shared checkout — never clear the
-  state with destructive git operations without explicit human authorization).
+  source is newer. It also reports installed-runner preflight findings:
+  `runner.stale` when `.m8shift/kit.json` proves a safe refresh is available,
+  and `runner.manual_review_required` when a runner is edited/untracked,
+  symlinked, missing source verification, or otherwise unsafe to overwrite.
+  The same preflight adds an advisory `workspace.dirty_worktree` finding when
+  the project's git checkout carries uncommitted changes (coordinate/stash
+  before an update lands generated writes in a shared checkout — never clear
+  the state with destructive git operations without explicit human authorization).
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
@@ -649,7 +658,12 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   `--force-generated` override — the latter never resets relay state). Update
   never claims, appends, forces, or resets: `M8SHIFT.md`, sessions, requests,
   tasks, and memory stay byte-identical, and nothing is ever copied from a
-  source dir that happens to be an initialized project. Each real run appends a
+  source dir that happens to be an initialized project. The default component
+  set includes `runner`: it refreshes only already-installed
+  `scripts/watch-status.sh` / `examples/headless_runner.py` artifacts whose
+  current checksum is proven by `.m8shift/kit.json`; absent runners are not
+  created, and locally edited/untracked runners require manual review unless
+  the operator deliberately uses `--force-generated`. Each real run appends a
   bounded audit row (`m8shift.update.audit.v1`) to `.m8shift/update-audit.jsonl`.
 
 ---
@@ -1967,6 +1981,24 @@ def _parse_script_version(path):
     return m.group(1) if m else None
 
 
+def _parse_runner_version(path, rel):
+    """Static version parse for registered runner artifacts.
+
+    Python runners use the regular top-level VERSION constant. Shell wrappers use
+    an explicit M8SHIFT_RUNNER_VERSION marker so they can be safely compared and
+    tracked without executing them.
+    """
+    if rel.replace("\\", "/").endswith(".py"):
+        return _parse_script_version(path)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return None
+    m = _RUNNER_VERSION_RE.search(head)
+    return m.group(1) if m else None
+
+
 def _version_tuple(v):
     try:
         return tuple(int(x) for x in str(v).split("."))
@@ -2018,12 +2050,32 @@ def _kit_entry(name, script, version, sha256, source):
             "sha256": sha256, "copied_at": iso(now()), "source": source}
 
 
-def _write_kit_manifest(installed):
+def _kit_runner_entry(name, path, version, sha256, source):
+    return {"name": name, "path": path.replace(os.sep, "/"), "version": version,
+            "sha256": sha256, "copied_at": iso(now()), "source": source}
+
+
+def _read_kit_manifest(root=None):
+    path = os.path.join(root or HERE, KIT_MANIFEST_REL)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+        return {}
+
+
+def _write_kit_manifest(installed, runners=None):
     path = os.path.join(HERE, KIT_MANIFEST_REL)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    previous = _read_kit_manifest(HERE)
+    if runners is None:
+        runners = previous.get("runners") if isinstance(previous.get("runners"), list) else []
     data = {"schema": "m8shift.kit.v1",
             "core": {"script": "m8shift.py", "version": VERSION},
             "companions": installed}
+    if runners:
+        data["runners"] = runners
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
@@ -2137,6 +2189,18 @@ def _merge_kit_companions(installed):
                 by_name[e["name"]] = e
     except (OSError, json.JSONDecodeError, ValueError, AttributeError):
         pass
+    for e in installed:
+        by_name[e["name"]] = e
+    return [by_name[k] for k in sorted(by_name)]
+
+
+def _merge_kit_runners(installed):
+    """Merge refreshed runner metadata into kit.json (by runner name)."""
+    by_name = {}
+    prev = _read_kit_manifest(HERE)
+    for e in (prev.get("runners") or []):
+        if isinstance(e, dict) and e.get("name"):
+            by_name[e["name"]] = e
     for e in installed:
         by_name[e["name"]] = e
     return [by_name[k] for k in sorted(by_name)]
@@ -2585,6 +2649,140 @@ def _update_companions_component(selection, source_dir, checksums, allow_downgra
             "; ".join(notes), items)
 
 
+def _kit_runners_by_name(target_root):
+    out = {}
+    data = _read_kit_manifest(target_root)
+    for entry in (data.get("runners") or []):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        rel = (entry.get("path") or "").replace("\\", "/")
+        if name in RUNNER_REGISTRY and RUNNER_REGISTRY[name].replace("\\", "/") == rel:
+            out[name] = entry
+    return out
+
+
+def _installed_runners(target_root):
+    """Runner artifacts already present in the target.
+
+    Presence on disk counts as installed so an untracked runner is surfaced as
+    manual_review_required rather than ignored. Absence never triggers creation:
+    a missing runner is not silently added by default update.
+    """
+    names = set(_kit_runners_by_name(target_root))
+    for name, rel in RUNNER_REGISTRY.items():
+        p = os.path.join(target_root, rel)
+        if os.path.lexists(p):
+            names.add(name)
+    return [n for n in RUNNER_REGISTRY if n in names]
+
+
+def _copy_regular_file_atomic(src, dest):
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), prefix=".m8shift-", suffix=".tmp")
+    try:
+        with open(src, "rb") as rf, os.fdopen(fd, "wb") as wf:
+            for chunk in iter(lambda: rf.read(65536), b""):
+                wf.write(chunk)
+        try:
+            os.chmod(tmp, os.stat(dest).st_mode if os.path.exists(dest) else os.stat(src).st_mode)
+        except OSError:
+            pass
+        os.replace(tmp, dest)
+        tmp = None
+    finally:
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def _update_runners_component(source_dir, checksums, force_generated, dry_run, guard=None):
+    """Refresh installed runner artifacts.
+
+    Runners are not companions: they live under scripts/ and examples/. The
+    update component never creates absent runners and never blind-overwrites a
+    present file. A target file is refreshable only when `.m8shift/kit.json`
+    records the same runner name/path and the target's current sha256 matches
+    that recorded sha. Otherwise the result is manual_review_required.
+    """
+    selection = _installed_runners(HERE)
+    if not selection:
+        return ("skipped",
+                "no runner artifacts installed in the target (none refreshed, none added)", [])
+    kit = _kit_runners_by_name(HERE)
+    items, notes, refreshed = [], [], []
+
+    def record(name, result, note):
+        items.append({"name": name, "path": RUNNER_REGISTRY.get(name, ""), "result": result,
+                      "detail": note})
+        notes.append(note)
+
+    for name in selection:
+        rel = RUNNER_REGISTRY[name]
+        target = os.path.join(HERE, rel)
+        source_link = os.path.join(source_dir, rel)
+        source = os.path.realpath(source_link)
+        if os.path.islink(target) or (os.path.lexists(target) and not os.path.isfile(target)):
+            record(name, "refused", "runner %s: target %s is not a regular file" % (name, rel))
+            continue
+        if not os.path.exists(target):
+            record(name, "skipped", "runner %s: listed in kit.json but missing; not created by update" % name)
+            continue
+        if (os.path.islink(source_link) or not os.path.isfile(source)
+                or not _physically_under(source_dir, source)):
+            record(name, "refused", "runner %s: source %s missing, symlinked, or escapes source dir" % (name, rel))
+            continue
+        ok, note = _verify_source_checksum(checksums, source_dir, rel)
+        if not ok:
+            record(name, "refused", "runner %s: %s" % (name, note))
+            continue
+        source_version = _parse_runner_version(source, rel)
+        if not _version_tuple(source_version):
+            record(name, "manual_review_required",
+                   "runner %s: source %s has no parseable runner VERSION marker" % (name, rel))
+            continue
+        try:
+            source_sha = _sha256_file(source)
+            target_sha = _sha256_file(target)
+        except OSError as e:
+            record(name, "refused", "runner %s: cannot hash %s: %s" % (name, rel, e))
+            continue
+        meta = kit.get(name)
+        meta_sha = (meta or {}).get("sha256")
+        if not meta:
+            record(name, "manual_review_required",
+                   "runner %s: installed but untracked in %s; refusing blind overwrite" % (name, KIT_MANIFEST_REL))
+            continue
+        if meta_sha != target_sha and not force_generated:
+            record(name, "manual_review_required",
+                   "runner %s: local file differs from %s metadata; refusing without --force-generated" % (name, KIT_MANIFEST_REL))
+            continue
+        if target_sha == source_sha:
+            record(name, "already_current", "runner %s: already up to date" % name)
+            continue
+        if dry_run:
+            record(name, "updated", "runner %s: would refresh %s v%s" % (name, rel, source_version))
+            continue
+        if guard is not None:
+            guard.require_owned()
+        if meta_sha != target_sha and force_generated:
+            with contextlib.suppress(OSError):
+                write(read(target), target + ".m8shift.bak")
+        try:
+            _copy_regular_file_atomic(source, target)
+        except OSError as e:
+            record(name, "refused", "runner %s: copy failed: %s" % (name, e))
+            continue
+        record(name, "updated", "runner %s: refreshed %s v%s" % (name, rel, source_version))
+        refreshed.append(_kit_runner_entry(name, rel, source_version, source_sha, source))
+    if refreshed and not dry_run:
+        companions = _merge_kit_companions([])
+        runners = _merge_kit_runners(refreshed)
+        _write_kit_manifest(companions, runners=runners)
+    return (_update_aggregate_mixed([i["result"] for i in items]),
+            "; ".join(notes), items)
+
+
 def _update_core_component(source_dir, target_root, checksums, version_before,
                            dry_run, guard=None):
     """Replace the target's m8shift.py with the source copy after path-confinement,
@@ -2865,6 +3063,12 @@ def cmd_update(args):
                 rows.append({"component": comp, "result": res, "detail": detail,
                              "companions": companion_items})
                 continue
+            elif comp == "runner":
+                res, detail, runner_items = _update_runners_component(
+                    source_dir, checksums, args.force_generated, dry_run, guard)
+                rows.append({"component": comp, "result": res, "detail": detail,
+                             "runners": runner_items})
+                continue
             else:
                 res, detail = _update_core_component(source_dir, target_root, checksums,
                                                      version_before, dry_run, guard)
@@ -2895,6 +3099,8 @@ def cmd_update(args):
                 r["result"] in ("updated", "staged")
                 or any(i["result"] in ("updated", "staged")
                        for i in r.get("companions", ()))
+                or any(i["result"] in ("updated", "staged")
+                       for i in r.get("runners", ()))
                 for r in rows)
             version_after = (_parse_script_version(os.path.join(target_root, "m8shift.py"))
                              or version_before)
@@ -2915,6 +3121,12 @@ def cmd_update(args):
                         and (r["result"] == "updated"
                              or any(i["result"] == "updated"
                                     for i in r.get("companions", ())))
+                        for r in rows),
+                    "runners_refreshed": any(
+                        r["component"] == "runner"
+                        and (r["result"] == "updated"
+                             or any(i["result"] == "updated"
+                                    for i in r.get("runners", ())))
                         for r in rows),
                 })
 
@@ -2941,6 +3153,8 @@ def cmd_update(args):
         for r in rows:
             print("  • %-10s %s — %s" % (r["component"], r["result"], r.get("detail", "")))
             for item in r.get("companions", ()):
+                print("      · %-10s %s — %s" % (item["name"], item["result"], item["detail"]))
+            for item in r.get("runners", ()):
                 print("      · %-10s %s — %s" % (item["name"], item["result"], item["detail"]))
         print("✓ update complete." if ok else
               "✗ update incomplete: see refused/manual_review_required/staged/partial rows above.")
@@ -4716,7 +4930,96 @@ def _doctor_update_source_findings(source_dir):
             "worktree); destructive git ops (`reset --hard`, `checkout -f`, `clean -fd`) "
             "require explicit human authorization in a shared checkout",
         ))
+    findings.extend(_doctor_runner_source_findings(project_root, src_dir))
     return findings
+
+
+def _doctor_runner_source_findings(target_root, source_dir):
+    """Read-only runner refresh preflight for `doctor --source`.
+
+    Emits only the runner-specific conditions that update would act on:
+    runner.stale when metadata proves a safe refresh is available, and
+    runner.manual_review_required when a present runner cannot be safely
+    overwritten automatically.
+    """
+    out = []
+    checksums = _source_checksums(source_dir)
+    kit = _kit_runners_by_name(target_root)
+    for name in _installed_runners(target_root):
+        rel = RUNNER_REGISTRY[name]
+        target = os.path.join(target_root, rel)
+        source_link = os.path.join(source_dir, rel)
+        source = os.path.realpath(source_link)
+        if os.path.islink(target) or (os.path.lexists(target) and not os.path.isfile(target)):
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s target %s is not a regular file; update will refuse it." % (name, rel),
+                rel,
+                "replace it manually with the matching release artifact, then rerun update",
+            ))
+            continue
+        if not os.path.exists(target):
+            continue
+        if (os.path.islink(source_link) or not os.path.isfile(source)
+                or not _physically_under(source_dir, source)):
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s source %s is missing, symlinked, or outside --source." % (name, rel),
+                rel,
+            ))
+            continue
+        ok, note = _verify_source_checksum(checksums, source_dir, rel)
+        if not ok:
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s cannot be verified against --source: %s." % (name, note),
+                rel,
+            ))
+            continue
+        source_version = _parse_runner_version(source, rel)
+        if not _version_tuple(source_version):
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s source %s has no parseable runner VERSION marker." % (name, rel),
+                rel,
+            ))
+            continue
+        meta = kit.get(name)
+        if not meta:
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s is installed but not tracked in %s." % (name, KIT_MANIFEST_REL),
+                rel,
+                "refresh manually once, or run update after kit metadata exists",
+            ))
+            continue
+        try:
+            target_sha = _sha256_file(target)
+            source_sha = _sha256_file(source)
+        except OSError as e:
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s cannot be hashed: %s." % (name, e),
+                rel,
+            ))
+            continue
+        if meta.get("sha256") != target_sha:
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s differs from %s metadata; update will not overwrite it automatically."
+                % (name, KIT_MANIFEST_REL),
+                rel,
+                "inspect local edits; rerun update with --force-generated only if replacing them is intended",
+            ))
+        elif target_sha != source_sha:
+            out.append(doctor_finding(
+                "runner.stale", "info",
+                "runner %s is installed and can be refreshed from --source to v%s."
+                % (name, source_version),
+                rel,
+                "run `python3 %s update --target .`" % os.path.join(source_dir, "m8shift.py"),
+            ))
+    return out
 
 
 def _install_report():
@@ -4736,6 +5039,7 @@ def _install_report():
     core_present = os.path.isfile(core_path) and not os.path.islink(core_path)
     kit_sha = {}
     kit_tracked = set()   # companion scripts owned by kit.json (the finer authority)
+    kit_runner_sha = {}
     try:
         with open(os.path.join(base, KIT_MANIFEST_REL), encoding="utf-8") as fh:
             data = json.load(fh)
@@ -4744,6 +5048,9 @@ def _install_report():
                 kit_sha[e["name"]] = e.get("sha256", "")
                 if COMPANION_REGISTRY.get(e["name"]) == e.get("script"):
                     kit_tracked.add(e["script"])
+        for e in (data.get("runners") or []):
+            if isinstance(e, dict) and e.get("name"):
+                kit_runner_sha[e["name"]] = e.get("sha256", "")
     except (OSError, json.JSONDecodeError, ValueError, AttributeError):
         pass
     manifest = _source_checksums(base)
@@ -4781,6 +5088,22 @@ def _install_report():
                 except OSError:
                     entry["kit_hash_match"] = False
         companions.append(entry)
+    runners = []
+    for name, rel in RUNNER_REGISTRY.items():
+        p = os.path.join(base, rel)
+        present = os.path.isfile(p) and not os.path.islink(p)
+        if not present and name not in kit_runner_sha:
+            continue
+        entry = {"name": name, "path": rel.replace(os.sep, "/"), "present": present}
+        if present:
+            entry["version"] = _parse_runner_version(p, rel) or "?"
+            entry["core_match"] = entry["version"] == VERSION
+            if kit_runner_sha.get(name):
+                try:
+                    entry["kit_hash_match"] = _sha256_file(p) == kit_runner_sha[name]
+                except OSError:
+                    entry["kit_hash_match"] = False
+        runners.append(entry)
     roster = tuple(AGENTS)
     try:
         lk = get_lock(read(COWORK))
@@ -4812,6 +5135,7 @@ def _install_report():
                  "engine_version": VERSION},
         "manifest": man,
         "companions": companions,
+        "runners": runners,
         "generated": {"relay": os.path.isfile(COWORK), "protocol": os.path.isfile(PROTO),
                       "pack": os.path.isfile(PACK), "anchors": anchors},
         "helpers": helpers,
@@ -4902,6 +5226,21 @@ def _print_install_report(rep):
         print("  companions " + "; ".join(parts))
     else:
         print("  companions none installed (a core-only install is valid)")
+    if rep["runners"]:
+        parts = []
+        for r in rep["runners"]:
+            if not r["present"]:
+                parts.append("%s MISSING (listed in kit.json)" % r["name"])
+                continue
+            note = "v%s" % r["version"]
+            if not r.get("core_match", True):
+                note += " (core is v%s)" % rep["core"]["engine_version"]
+            if r.get("kit_hash_match") is False:
+                note += ", edited since install"
+            parts.append("%s %s" % (r["name"], note))
+        print("  runners    " + "; ".join(parts))
+    else:
+        print("  runners    none installed")
     gen = rep["generated"]
     anchor_bits = ["%s %s" % (a, "ok" if ok else "missing")
                    for a, ok in sorted(gen["anchors"].items())]
@@ -7185,8 +7524,9 @@ def main():
                          "(default: the running script's own directory)")
     up.add_argument("--components", default=UPDATE_DEFAULT_COMPONENTS,
                     help="comma-separated components to update: core,protocol,pack,anchors,"
-                         "companions (default: %s; `companions` refreshes companions ALREADY "
-                         "installed in the target and never silently adds absent ones)"
+                         "runner,companions (default: %s; `runner` refreshes installed runner "
+                         "artifacts, `companions` refreshes companions ALREADY installed in the "
+                         "target; neither silently adds absent files)"
                          % UPDATE_DEFAULT_COMPONENTS)
     up.add_argument("--companions", default="",
                     help="explicit companion names to refresh/install from the source "
@@ -7196,8 +7536,8 @@ def main():
                     help="plan only: report per-component results without writing or taking "
                          "the target's file lock")
     up.add_argument("--json", action="store_true",
-                    help="machine-readable update plan/results; the companions row carries "
-                         "per-companion outcomes, and a mixed run reports `partial` "
+                    help="machine-readable update plan/results; companions/runner rows carry "
+                         "per-file outcomes, and a mixed run reports `partial` "
                          "(still a non-zero exit)")
     up.add_argument("--allow-downgrade", action="store_true",
                     help="allow replacing a NEWER target with an older source (refused by default; "
@@ -7251,16 +7591,17 @@ def main():
                     help="include Stage-4 contract validation findings")
     dr.add_argument("--install", action="store_true",
                     help="include read-only post-install verification (#24): python/script "
-                         "versions, local checksum-manifest state, kit companions, generated "
+                         "versions, local checksum-manifest state, kit companions/runners, generated "
                          "files, and optional helper states, plus install.* findings — absent "
                          "optional helpers are info (never warning/error), no network, no repair")
     dr.add_argument("--severity-min", choices=tuple(SEVERITY_RANK), default="warning",
                     help="threshold for ok/lint (default: warning)")
     dr.add_argument("--source", default="",
                     help="RFC 048: compare this project's core against a source dir's m8shift.py "
-                         "and report adoption.update_recommended when the source is newer, plus "
-                         "an advisory workspace.dirty_worktree finding when the project checkout "
-                         "has uncommitted changes (read-only; no network)")
+                         "and report adoption.update_recommended plus runner.stale / "
+                         "runner.manual_review_required preflight findings, and an advisory "
+                         "workspace.dirty_worktree finding when the project checkout has "
+                         "uncommitted changes (read-only; no network)")
     dr.set_defaults(fn=cmd_doctor)
 
     co = sub.add_parser("contract", help="read-only Stage-4 contract tools")

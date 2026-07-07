@@ -129,7 +129,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
-./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
+./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
 ./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
@@ -210,10 +210,14 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   It never repairs files, prompts, contacts the network, or changes legal
   `LOCK` transitions. With `--source DIR` it also compares this core against a
   candidate source copy and reports `adoption.update_recommended` when the
-  source is newer, plus an advisory `workspace.dirty_worktree` finding when the
-  project's git checkout carries uncommitted changes (coordinate/stash before
-  an update lands generated writes in a shared checkout — never clear the
-  state with destructive git operations without explicit human authorization).
+  source is newer. It also reports installed-runner preflight findings:
+  `runner.stale` when `.m8shift/kit.json` proves a safe refresh is available,
+  and `runner.manual_review_required` when a runner is edited/untracked,
+  symlinked, missing source verification, or otherwise unsafe to overwrite.
+  The same preflight adds an advisory `workspace.dirty_worktree` finding when
+  the project's git checkout carries uncommitted changes (coordinate/stash
+  before an update lands generated writes in a shared checkout — never clear
+  the state with destructive git operations without explicit human authorization).
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
@@ -225,7 +229,12 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   `--force-generated` override — the latter never resets relay state). Update
   never claims, appends, forces, or resets: `M8SHIFT.md`, sessions, requests,
   tasks, and memory stay byte-identical, and nothing is ever copied from a
-  source dir that happens to be an initialized project. Each real run appends a
+  source dir that happens to be an initialized project. The default component
+  set includes `runner`: it refreshes only already-installed
+  `scripts/watch-status.sh` / `examples/headless_runner.py` artifacts whose
+  current checksum is proven by `.m8shift/kit.json`; absent runners are not
+  created, and locally edited/untracked runners require manual review unless
+  the operator deliberately uses `--force-generated`. Each real run appends a
   bounded audit row (`m8shift.update.audit.v1`) to `.m8shift/update-audit.jsonl`.
 
 ---
