@@ -1,5 +1,35 @@
 # Changelog
 
+## v3.54.0 — 2026-07-07
+
+RFC 051 — **usage advisory in the core display** (#55; PR #57). A read-only
+usage line now renders in the core `status` and `watch` output (and therefore in
+`scripts/watch-status.sh`, which forwards to core `watch`), fed by the companion's
+local usage sidecar. The core **computes nothing** — it echoes the last recorded
+snapshot per agent — so the remaining-quota picture is visible where a human
+watches without the core running an adapter, opening a socket, or spawning the
+companion.
+
+- **Companion (`m8shift-runtime.py`)**: `normalize_usage_snapshot` additively
+  records `decision_window: {kind, resets_at}` (the window that drove
+  `decision_ratio`, or `null` on the top-level/unknown case; ties resolve to the
+  first max), so the core can echo the driving window and its reset time without
+  recomputation.
+- **Core (`m8shift.py`)**: a small stdlib-only reader (no companion import) reads
+  `.m8shift/runtime/usage.jsonl` and renders a `── usage ──` block after the LOCK
+  in `status`/`watch`, **absent entirely** (byte-identical) when there is no usable
+  snapshot; `--json` gains an optional `usage` array (the `usage` key is omitted,
+  not `[]`, when empty). Hardened per an adversarial design + implementation
+  review: TOCTOU-safe open (`os.open` with `O_NOFOLLOW | O_NONBLOCK` + `fstat` on
+  the fd — the opened fd is the proof, and a FIFO/device never blocks the read),
+  bounded binary tail-read with partial-line discard, roster/`AGENT_RE`/consistent
+  agent validation, terminal + JSON output sanitized (no ANSI/control escapes;
+  never a non-finite number or an absurd percentage), strict staleness, and
+  fail-open on every sidecar shape — nothing can crash `status`/`watch`.
+- Reviewed at design and implementation (cross-review + solo adversarial hunts);
+  each pass caught real bad-shape/security defects — non-string timestamps,
+  huge-integer ratio overflow, and a sidecar-swap TOCTOU — all fixed before merge.
+
 ## v3.53.0 — 2026-07-05
 
 RFC 040 Phase 3 — **real, opt-in usage adapters** (#47; PRs #49–#52). The Phase 2
