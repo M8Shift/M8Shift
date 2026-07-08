@@ -1,5 +1,26 @@
 # Changelog
 
+## v3.55.0 — 2026-07-08
+
+Two features land together.
+
+**#59 — token consumption in the RFC 051 usage line.** The core `status`/`watch`
+usage advisory now shows raw consumption (`used <count>/<window>`, humanized
+P/T/B/M/k, bounded window count) alongside or in place of the ratio — still
+read-only, and byte-identical when no usage sidecar is present.
+
+**#60 — `update` refreshes installed runner artifacts.** A new default `runner`
+component refreshes already-installed `scripts/watch-status.sh` and
+`examples/headless_runner.py` from a newer source, gated by `.m8shift/kit.json`
+runner metadata (sha256-proven): it never creates absent runners, never blind-
+overwrites edited/untracked ones, and refuses symlinked/non-regular targets or
+targets whose real path escapes the project root. `doctor --source` emits
+read-only `runner.stale` / `runner.manual_review_required` preflight findings;
+`.m8shift/kit.json` gains a `runners[]` block, and `watch-status.sh` carries a
+lockstep-tested `M8SHIFT_RUNNER_VERSION` marker. Implemented by Codex,
+adversarially reviewed by Claude — five findings (HIGH target path-confinement,
+MEDIUM non-UTF-8 backup crash, three LOW) were all fixed before merge.
+
 ## v3.54.0 — 2026-07-07
 
 RFC 051 — **usage advisory in the core display** (#55; PR #57). A read-only
