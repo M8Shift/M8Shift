@@ -32,13 +32,13 @@ copy and adapt, not a verified shipped component. Review it before enabling it.
 """
 
 import datetime as dt
+import contextlib
 import json
 import math
 import os
 import platform
 import subprocess
 import sys
-import urllib.error
 import urllib.request
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -55,12 +55,13 @@ def _iso(value):
     Never raises: a non-finite or out-of-range numeric timestamp returns None."""
     if isinstance(value, str) and value:
         return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool) \
-            and math.isfinite(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
+            if not math.isfinite(float(value)):
+                return None
             return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ")
-        except (ValueError, OverflowError, OSError):
+        except (ValueError, OverflowError, OSError, TypeError):
             return None
     return None
 
@@ -75,22 +76,31 @@ def build_fixture(payload, now_iso):
     are skipped; a percent is NEVER written into a token field."""
     windows = []
     raw_windows = payload.get("windows") if isinstance(payload, dict) else None
-    for win in raw_windows or []:
-        if not isinstance(win, dict):
+    if not isinstance(raw_windows, list):
+        raw_windows = []
+    for win in raw_windows:
+        try:
+            if not isinstance(win, dict):
+                continue
+            kind = WINDOW_KINDS.get(win.get("kind") or win.get("window"))
+            remaining = win.get("remainingPercent")
+            if remaining is None:
+                remaining = win.get("remaining_percent")
+            if kind is None or isinstance(remaining, bool) \
+                    or not isinstance(remaining, (int, float)):
+                continue
+            percent = float(remaining)
+            if not math.isfinite(percent):    # NaN/Inf (json accepts them) → skip, stay fail-open
+                continue
+            reset_raw = win.get("resetsAt") if "resetsAt" in win else win.get("resets_at")
+            resets_at = _iso(reset_raw)
+            if reset_raw is not None and resets_at is None:
+                continue
+            used_ratio = 1.0 - max(0.0, min(100.0, percent)) / 100.0
+            windows.append({"kind": kind, "used_ratio": round(used_ratio, 4),
+                            "resets_at": resets_at})
+        except Exception:
             continue
-        kind = WINDOW_KINDS.get(win.get("kind") or win.get("window"))
-        remaining = win.get("remainingPercent")
-        if remaining is None:
-            remaining = win.get("remaining_percent")
-        if kind is None or isinstance(remaining, bool) \
-                or not isinstance(remaining, (int, float)):
-            continue
-        percent = float(remaining)
-        if not math.isfinite(percent):        # NaN/Inf (json accepts them) → skip, stay fail-open
-            continue
-        used_ratio = 1.0 - max(0.0, min(100.0, percent)) / 100.0
-        windows.append({"kind": kind, "used_ratio": round(used_ratio, 4),
-                        "resets_at": _iso(win.get("resetsAt") or win.get("resets_at"))})
     return {
         "schema": "m8shift.usage.fixture.v1",
         "agent": "claude",
@@ -122,13 +132,15 @@ def _parse_credentials_blob(text, now_ms):
     if not isinstance(holder, dict):
         return None
     expires_at = holder.get("expiresAt")
-    if isinstance(expires_at, str):
-        try:
+    try:
+        if isinstance(expires_at, str):
             expires_at = int(expires_at)
-        except ValueError:
+        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
             return None
-    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) \
-            or not math.isfinite(float(expires_at)) or float(expires_at) <= now_ms:
+        expires_value = float(expires_at)
+        if not math.isfinite(expires_value) or expires_value <= now_ms:
+            return None
+    except (OverflowError, TypeError, ValueError):
         return None
     token = holder.get("accessToken")
     if not isinstance(token, str) or not token:
@@ -188,8 +200,9 @@ def main(env=None, fetch=_fetch, token_loader=_load_access_token, out=None):
             fixture = build_fixture(fetch(token), now_iso)
     except Exception:
         fixture = _empty_fixture(now_iso)               # fail-open, never raise
-    json.dump(fixture, out)
-    out.write("\n")
+    with contextlib.suppress(BrokenPipeError, OSError):
+        json.dump(fixture, out)
+        out.write("\n")
     return 0
 
 

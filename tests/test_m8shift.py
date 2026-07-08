@@ -8551,6 +8551,20 @@ class TestRFC040UsageQuota(CLIBase):
                 "2026-01-01T00:00:00Z")
             self.assertEqual(fx["windows"], [], bad)             # window dropped, stays fail-open
 
+    def test_example_build_fixture_keeps_good_window_when_one_window_is_bad(self):
+        mod = self._example()
+        fx = mod.build_fixture({"windows": [
+            {"kind": "five_hour", "remainingPercent": 25,
+             "resetsAt": "2026-01-01T05:00:00Z"},
+            {"kind": "five_hour", "remainingPercent": 50, "resetsAt": 10 ** 400},
+        ]}, "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["windows"], [{
+            "kind": "session_5h",
+            "used_ratio": 0.75,
+            "resets_at": "2026-01-01T05:00:00Z",
+        }])
+        self.assertEqual(mod.build_fixture({"windows": 5}, "2026-01-01T00:00:00Z")["windows"], [])
+
     def _run_example(self, creds_text):
         cred = os.path.join(self.d, "creds.json")
         with open(cred, "w", encoding="utf-8") as fh:
@@ -8628,6 +8642,21 @@ class TestRFC040UsageQuota(CLIBase):
 
         self.assertIsNone(token_for(timeout_run))
 
+    def test_example_keychain_expiry_overflow_returns_none(self):
+        mod = self._example()
+        blob = json.dumps({"claudeAiOauth": {
+            "accessToken": "SECRET_ACCESS_TOKEN",
+            "expiresAt": 10 ** 400,
+        }})
+        self.assertIsNone(mod._parse_credentials_blob(blob, now_ms=1_000))
+
+        class Result:
+            returncode = 0
+            stdout = blob
+
+        self.assertIsNone(mod._load_access_token(
+            env={}, system="Darwin", run=lambda *a, **k: Result(), now_ms=1_000))
+
     def test_example_has_no_plaintext_default_on_non_macos(self):
         mod = self._example()
         called = []
@@ -8683,6 +8712,17 @@ class TestRFC040UsageQuota(CLIBase):
             fx = json.loads(text)
             self.assertEqual(fx["provenance"], "official")
             self.assertEqual(fx["windows"], [])
+
+    def test_example_main_suppresses_broken_stdout_and_returns_zero(self):
+        mod = self._example()
+
+        class BrokenOut:
+            def write(self, _text):
+                raise BrokenPipeError()
+
+        rc = mod.main(env={}, fetch=lambda _token: {}, token_loader=lambda **kwargs: None,
+                      out=BrokenOut())
+        self.assertEqual(rc, 0)
 
 
 class TestRFC040UsageBudget(CLIBase):
