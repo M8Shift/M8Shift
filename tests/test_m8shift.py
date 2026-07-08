@@ -7744,14 +7744,26 @@ class TestRFC040UsagePRA(CLIBase):
             doc = json.load(fh)
         self.assertEqual(doc["schema"], "m8shift.usage.adapters.v1")
         by_name = {a["name"]: a for a in doc["adapters"]}
-        claude = by_name["claude-usage-cli"]
-        codex = by_name["codex-usage-fixture"]
-        for entry in (claude, codex):
+        self.assertEqual(set(by_name), {
+            "claude-jsonl-scan", "claude-quota-keychain",
+            "codex-jsonl-scan", "codex-ratelimits",
+        })
+        for entry in by_name.values():
             self.assertFalse(entry["enabled"])          # DISABLED examples
             self.assertEqual(entry["timeout_s"], 10)    # bounded default
-        self.assertEqual(claude["kind"], "cli_json")
-        self.assertIsInstance(claude["command"], list)  # argv array, not shell string
-        self.assertEqual(codex["kind"], "fixture")
+        self.assertEqual(by_name["claude-jsonl-scan"]["kind"], "jsonl_scan")
+        self.assertIn("~/.claude/projects", by_name["claude-jsonl-scan"]["scan_roots"])
+        self.assertEqual(by_name["claude-quota-keychain"]["kind"], "cli_json")
+        self.assertIsInstance(by_name["claude-quota-keychain"]["command"], list)
+        self.assertEqual(by_name["codex-jsonl-scan"]["kind"], "jsonl_scan")
+        self.assertIn("~/.codex/sessions", by_name["codex-jsonl-scan"]["scan_roots"])
+        self.assertEqual(by_name["codex-ratelimits"]["kind"], "cli_json")
+        self.assertIsInstance(by_name["codex-ratelimits"]["command"], list)
+        # Disabled means inert: snapshot performs no adapter runs/scans and writes no usage ledger.
+        snap = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(snap.returncode, 0, snap.stdout + snap.stderr)
+        self.assertEqual(json.loads(snap.stdout)["snapshots"], [])
+        self.assertEqual(self.ledger_lines(), [])
         doc["marker"] = "operator-edited"
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(doc, fh)
@@ -8139,16 +8151,15 @@ class TestRFC040UsagePRA(CLIBase):
         r = self.rt("usage", "adapters", "list", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         rows = {a["name"]: a for a in json.loads(r.stdout)["adapters"]}
-        self.assertEqual(set(rows), {"claude-usage-cli", "codex-usage-fixture",
-                                     "claude-jsonl-scan", "codex-jsonl-scan",
-                                     "claude-quota"})
+        self.assertEqual(set(rows), {"claude-jsonl-scan", "claude-quota-keychain",
+                                     "codex-jsonl-scan", "codex-ratelimits"})
         for row in rows.values():
             self.assertFalse(row["enabled"])            # every scaffold example ships disabled
             self.assertFalse(row["identity_pinned"])
         only_codex = json.loads(self.rt("usage", "adapters", "list",
                                         "--agent", "codex", "--json").stdout)
         self.assertEqual(sorted(a["name"] for a in only_codex["adapters"]),
-                         ["codex-jsonl-scan", "codex-usage-fixture"])
+                         ["codex-jsonl-scan", "codex-ratelimits"])
 
     def test_snapshot_without_config_is_config_error(self):
         r = self.rt("usage", "snapshot", "--json")

@@ -4729,33 +4729,10 @@ def default_usage_adapters():
         "generated_by": f"m8shift-runtime.py {VERSION}",
         "adapters": [
             {
-                "//": ("Disabled example: point `command` at a local `claude usage`-style CLI "
-                       "that prints m8shift.usage.fixture.v1 JSON on stdout "
-                       "(see examples/usage-fixtures/claude.json), then set enabled:true."),
-                "name": "claude-usage-cli",
-                "agent": "claude",
-                "provider": "anthropic-claude",
-                "kind": "cli_json",
-                "command": ["claude-usage-example", "--json"],
-                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
-                "enabled": False,
-            },
-            {
-                "//": ("Disabled example: point `fixture_path` at a local status file with the "
-                       "same m8shift.usage.fixture.v1 shape, then set enabled:true."),
-                "name": "codex-usage-fixture",
-                "agent": "codex",
-                "provider": "openai-codex",
-                "kind": "fixture",
-                "fixture_path": ".m8shift/usage/fixtures/codex.json",
-                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
-                "enabled": False,
-            },
-            {
-                "//": ("Disabled example: the built-in aggregate-only `jsonl_scan` of your OWN "
-                       "local Claude Code session logs. Set `scan_roots` to your path(s) and "
-                       "enabled:true. Spent/reporting source (used tokens, no limit) — it reads "
-                       "only integer token counts, never message content, and NEVER gates."),
+                "//": ("Disabled by default: built-in aggregate-only scan of local Claude Code "
+                       "session logs. Set `scan_roots` to your paths and enabled:true. "
+                       "Spent/reporting source only (used tokens, no limit): local_estimate, "
+                       "never message content, never an official quota gate."),
                 "name": "claude-jsonl-scan",
                 "agent": "claude",
                 "provider": "claude",
@@ -4765,9 +4742,23 @@ def default_usage_adapters():
                 "enabled": False,
             },
             {
-                "//": ("Disabled example: the Codex twin of the scan (best-effort, "
-                       "version-tolerant parser). Set `scan_roots` and enabled:true. "
-                       "Spent/reporting only — aggregate integers, never content, NEVER gates."),
+                "//": ("Disabled by default: Claude OAuth/subscription quota adapter. When "
+                       "enabled, the referenced script reads its own Keychain credential in "
+                       "memory and emits m8shift.usage.fixture.v1 with per-window used_ratio. "
+                       "M8Shift never reads the Keychain and never opens the socket itself."),
+                "name": "claude-quota-keychain",
+                "agent": "claude",
+                "provider": "anthropic-claude",
+                "kind": "cli_json",
+                "command": ["python3", "examples/usage-adapters/claude-oauth-usage.py"],
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
+            {
+                "//": ("Disabled by default: built-in aggregate-only scan of local Codex session "
+                       "logs. Set `scan_roots` to your paths and enabled:true. Spent/reporting "
+                       "source only: local_estimate, never message content, never an official "
+                       "quota gate."),
                 "name": "codex-jsonl-scan",
                 "agent": "codex",
                 "provider": "codex",
@@ -4777,17 +4768,14 @@ def default_usage_adapters():
                 "enabled": False,
             },
             {
-                "//": ("Disabled example: a GATING remaining-quota source. `command` is an "
-                       "OPERATOR-supplied argv script that reads its own Claude Code OAuth "
-                       "credential and prints m8shift.usage.fixture.v1 with per-window "
-                       "`used_ratio` (the endpoint reports a percent, never tokens). See "
-                       "examples/usage-adapters/claude-oauth-usage.py. M8Shift never opens the "
-                       "socket — it only runs the argv you enable. provenance:official."),
-                "name": "claude-quota",
-                "agent": "claude",
-                "provider": "anthropic-claude",
+                "//": ("Disabled TODO scaffold: official Codex rate-limit RPC shape is "
+                       "unverified. Verify against a live Codex before enabling or replacing "
+                       "this placeholder command. Fail-open adapter planned for a later slice."),
+                "name": "codex-ratelimits",
+                "agent": "codex",
+                "provider": "openai-codex",
                 "kind": "cli_json",
-                "command": ["python3", "examples/usage-adapters/claude-oauth-usage.py"],
+                "command": ["python3", "examples/usage-adapters/codex-ratelimits.py"],
                 "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
                 "enabled": False,
             },
