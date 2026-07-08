@@ -188,9 +188,9 @@ def _fetch(token):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def main(env=None, fetch=_fetch, token_loader=_load_access_token, out=None):
+def main(env=None, fetch=_fetch, token_loader=_load_access_token, out=None, now=None):
     out = sys.stdout if out is None else out
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc) if now is None else now
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         token = token_loader(env=env, now_ms=int(now.timestamp() * 1000))

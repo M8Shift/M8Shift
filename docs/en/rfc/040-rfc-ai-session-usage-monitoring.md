@@ -1984,10 +1984,16 @@ Recommended test surface:
      `m8shift.usage.fixture.v1`.
    - Ratio-native fixtures use `windows[].used_ratio` and keep `used`,
      `limit`, `used_tokens`, and `limit_tokens` null/absent as appropriate.
+   - `used_ratio` is always in `[0, 1]`: remaining percent below `0` clamps to a
+     fully-used ratio (`1.0`), above `100` clamps to `0.0`, and NaN/Infinity
+     windows are skipped rather than emitted.
    - Percent values are never encoded in token-named fields; unit-mixed windows
      are rejected or skipped, never coerced.
    - Malformed windows are isolated per entry: one bad window cannot discard
      already-valid windows.
+   - Arbitrary-precision numeric values that can overflow float conversion are
+     explicit malformed cases: huge `resetsAt` values skip only that window and
+     huge `expiresAt` values fail open to no token.
 
 4. **Claude Keychain example contract**
    - The example reads the macOS Keychain via the exact argv
@@ -1996,9 +2002,16 @@ Recommended test surface:
    - Missing, expired, malformed, denied, timed out, non-JSON, bad HTTP, broken
      stdout, and generic provider failures all fail open to an empty official
      fixture and return `0` where `main()` owns the boundary.
+   - The fail-open boundary must catch any `Exception` subtype, not an enumerated
+     list of known provider or HTTP errors. Tests should inject a custom
+     `Exception` subclass to guard against accidental re-narrowing.
    - No access token, refresh token, raw credential JSON, account identity, or raw
      provider response body appears in stdout, stderr, fixture JSON, ledgers, or
      relay text. Tests should include secrets in failing inputs to prove absence.
+   - At least one enabled end-to-end snapshot must include a secret-bearing
+     synthetic provider payload and then assert the secret is absent from the
+     normalized snapshot, stdout/stderr, and the append-only usage ledger. Disabled
+     adapters producing no ledger lines are a separate invariant, not a leak proof.
    - Non-macOS has no plaintext credential-file default; any file path is an
      explicit operator/test override.
 
@@ -2014,6 +2027,20 @@ Recommended test surface:
    - Provider responses, credential blobs, and JSONL logs are fabricated fixtures.
    - Any test that exercises network-capable code must inject a fake fetcher or
      fake subprocess runner; it must not call the real provider endpoint.
+   - Tests use fixed clocks for `captured_at` / reset assertions; no wall-clock
+     or `Date` value is part of the oracle.
+   - Fabricated fixtures use synthetic placeholders only and must pass
+     `doctor --hygiene-only --lint` before merge because these files land in the
+     public repository.
+
+Coverage note for `codex-jsonl-scan`:
+
+- The active Codex source is already pinned by Phase-3 tests rather than
+  duplicated in Slice 4: version-tolerant Codex token extraction, content-nested
+  `usage` ignored, raw prompt content absent from stdout and ledger, stale-mtime
+  skip, disabled scan inertness, candidate-enumeration cap, and wall-clock
+  deadline cap. Slice 4 should cite and keep those tests green; add only missing
+  assertions if a future review identifies a gap.
 
 ### Acceptance criteria (Phase 4)
 
