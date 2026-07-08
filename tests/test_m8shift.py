@@ -13,6 +13,7 @@ Standard library only.
 """
 import datetime as dt
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -8661,6 +8662,27 @@ class TestRFC040UsageQuota(CLIBase):
         fx = json.loads(text)
         self.assertEqual(fx["windows"][0]["used_ratio"], 0.5)
         self.assertNotIn("account", fx)
+
+    def test_example_main_fail_opens_on_http_and_generic_exceptions(self):
+        mod = self._example()
+        secret = "SECRET_ACCESS_TOKEN_SHOULD_NOT_LEAK"
+
+        def token_loader(**kwargs):
+            return secret
+
+        for exc in (http.client.IncompleteRead(b"partial"), Exception("boom " + secret)):
+            out = io.StringIO()
+
+            def fetch(_token, exc=exc):
+                raise exc
+
+            rc = mod.main(env={}, fetch=fetch, token_loader=token_loader, out=out)
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertNotIn(secret, text)
+            fx = json.loads(text)
+            self.assertEqual(fx["provenance"], "official")
+            self.assertEqual(fx["windows"], [])
 
 
 class TestRFC040UsageBudget(CLIBase):

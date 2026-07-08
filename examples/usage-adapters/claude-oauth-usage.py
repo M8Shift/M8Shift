@@ -186,8 +186,7 @@ def main(env=None, fetch=_fetch, token_loader=_load_access_token, out=None):
             fixture = _empty_fixture(now_iso)
         else:
             fixture = build_fixture(fetch(token), now_iso)
-    except (OSError, ValueError, TypeError, AttributeError, OverflowError,
-            urllib.error.URLError, json.JSONDecodeError, subprocess.SubprocessError):
+    except Exception:
         fixture = _empty_fixture(now_iso)               # fail-open, never raise
     json.dump(fixture, out)
     out.write("\n")
