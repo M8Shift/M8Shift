@@ -1563,10 +1563,10 @@ mandatory) and rule 9 (official data wins over estimates).
   raising a `usage.scan` schema-drift finding (vendor JSONL is undocumented
   internals and will drift). Pure filesystem read: no network, no subprocess,
   never follows symlinks, never writes.
-- **`claude-quota`** (remaining; gating; **ratio-native**). An **operator-supplied
-  argv-only script** reuses the Claude Code OAuth credential in
-  `~/.claude/.credentials.json` to call the client's own usage endpoint
-  (`GET https://api.anthropic.com/api/oauth/usage`), which returns a
+- **`claude-quota-keychain`** (remaining; gating; **ratio-native**). A disabled
+  argv-only reference script reuses the Claude Code OAuth access token from the
+  macOS Keychain service `Claude Code-credentials` to call the client's own usage
+  endpoint (`GET https://api.anthropic.com/api/oauth/usage`), which returns a
   **`remainingPercent`** (a ratio, not an absolute token count) and `resetsAt`
   for the session (5h) and weekly windows. This is a **ratio-native** source: it
   maps onto `windows[]` with `used_ratio = 1 - remainingPercent/100` and
@@ -1578,8 +1578,9 @@ mandatory) and rule 9 (official data wins over estimates).
   stdout, exactly like every other adapter. A worked reference lives at
   `examples/usage-adapters/claude-oauth-usage.py` (fail-open: any error prints an
   empty official fixture → `unknown`, never a pause), and `usage init` scaffolds a
-  **disabled** `claude-quota` adapter pointing at it. The example is reference
-  material, deliberately not in `checksums.sha256`; review before enabling.
+  **disabled** `claude-quota-keychain` adapter pointing at it. The example is
+  reference material, deliberately not in `checksums.sha256`; review before
+  enabling.
   Equivalent turnkey source: `claude-monitor --once --output json` (already
   catalogued above), preferred when the operator does not want to maintain a
   script — and when it exposes absolute `rate_limits` tokens, the token fields may
@@ -1688,10 +1689,12 @@ Phase 3 adds, on top of the existing 12 rules:
     parser never descends into content-bearing keys (a usage-like object nested
     in message content must not contribute a content-derived number).
 15. **Credential reuse stays in the operator's adapter, not in M8Shift.**
-    M8Shift never reads `~/.claude/.credentials.json` itself and never stores an
-    OAuth or refresh token (reinforces rule 2). If account identity ever
-    surfaces, it is hashed (`sha256:…`) and raw tokens / response bodies are
-    never logged (pattern borrowed from `token-monitor`).
+    M8Shift never reads OAuth material itself and never stores an OAuth or
+    refresh token (reinforces rule 2). The shipped Claude reference adapter uses
+    the macOS Keychain by default after opt-in, with no plaintext-file default;
+    an explicit credential file remains only an operator/test override. If
+    account identity ever surfaces, it is hashed (`sha256:…`) and raw tokens /
+    response bodies are never logged (pattern borrowed from `token-monitor`).
 
 ### Provenance binding
 
@@ -1862,8 +1865,9 @@ Claude Code. Phase 4 updates the adapter contract:
 - Official Claude quota applies only to OAuth/subscription Claude Code sessions
   with a usable Keychain token. API-key-only users should expect this adapter to
   fail open unless a separate explicit adapter is provided.
-- Non-macOS systems may support an explicit operator-provided credential command
-  or file path later, but there is no plaintext credential-file default.
+- Non-macOS systems may use an explicit operator-provided credential file-path
+  override (or a custom downstream adapter command), but there is no plaintext
+  credential-file default.
 
 The reference script should keep the Phase 3 behavior that maps provider
 remaining-percent data to `windows[].used_ratio` and leaves token-named fields
