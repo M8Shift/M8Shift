@@ -8,7 +8,7 @@ Co-analysis: Claude (4-lens incident analysis) + Codex (adversarial scoping + RF
 
 ## Summary
 
-An operator and an agent routinely work across **several projects/shifts** on one machine. Incident **INC-2026-0708** showed a private project's **identifier** ("Project B") and a **real absolute home path** crossing from one shift into the M8Shift-tool repo — pasted verbatim from a live session capture into `docs/en/rfc/046-…md` — reaching a (private) GitHub repo's content, history, and immutable `refs/pull/*`. It was the **second** such leak (an earlier "internal-book-workspace" / `/Users/<op>` leak lives in history): a prose feedback note did not become a product invariant.
+An operator and an agent routinely work across **several projects/shifts** on one machine (call them Project A = this M8Shift-tool repo, Project B = a private client-facing web project, Project C = an earlier project). Incident **INC-2026-0708** showed Project B's **identifier** and a **real absolute home path** (`/Users/<operator>/…/Project B`) crossing into Project A's repo — pasted verbatim from a live session capture into `docs/en/rfc/046-…md` — reaching a (private) GitHub repo's content, history, and immutable `refs/pull/*`. It was the **second** such leak (Project C's name + a real home path already live in Project A's history): a prose feedback note did not become a product invariant. *(This RFC deliberately uses placeholders for the foreign projects — naming them here would be the very violation it defines.)*
 
 Root cause: **no compartmentalization norm existed anywhere, and no mechanical outbound-hygiene gate existed.** Every existing guard governs the pen/turn or prompt-security; none governs cross-project data boundaries.
 
@@ -58,7 +58,7 @@ Read-only lint flagging **real absolute home roots** in **tracked, publishable**
 
 ### C3 — Operator denylist (`hygiene.denylist`) — confidential
 
-Covers foreign proper nouns the path lint can't know ("Project B", "internal-web-workspace").
+Covers foreign proper nouns the path lint can't know (a private project name like `PrivateProjectName`, an internal program name like `InternalProgramName`, a client code name like `ClientCodeName`).
 
 - **Out-of-repo only**, never committed. **Precedence** (Codex #5): `$M8SHIFT_DENYLIST` if set → else a documented config path (`~/.config/m8shift/denylist.txt`) → else empty/missing = **no-op**.
 - **Empty by default** → advisory no-op until populated (charter-clean).
