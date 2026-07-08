@@ -5505,22 +5505,29 @@ HYGIENE_HIGH_CONF_RE = re.compile(
 # lower-confidence / advisory → info (non-gating): external drives, UNC, env-home.
 HYGIENE_ADVISORY_RE = re.compile(
     rb"(?:/Volumes/([^/\s]+)/)|\\\\[^\\\s/]+\\[^\\\s/]+|%USERPROFILE%|%HOMEDRIVE%%HOMEPATH%")
-# a captured segment that is a placeholder / doc token, not a real username/volume
+# A captured `/Users/<seg>/` segment is a PLACEHOLDER (not a real leak) only when
+# structurally synthetic: an angle/regex token (`<name>`, `[^/\s]+`), an ellipsis
+# (`...`), or a clearly-synthetic UPPERCASE token. Common lowercase words (user,
+# me, home, name, operator) are NOT exempt — they are plausible real usernames and
+# exempting them would mask a real leak (Codex review MEDIUM 4).
 _HYGIENE_META_BYTES = b"<>[]^*?(){}|$"
-_HYGIENE_PLACEHOLDER_SEGS = frozenset((
-    b"USERNAME", b"USER", b"user", b"you", b"name", b"NAME", b"operator",
-    b"me", b"someone", b"home", b"yourname", b"your-name", b"USERPROFILE"))
+_HYGIENE_PLACEHOLDER_SEGS = frozenset((b"USERNAME", b"USER", b"NAME", b"HOME"))
+_HYGIENE_STRIP_BYTES = b"`.,;:!?'\")]}>*_ "   # trailing markdown/punctuation
 
 
 def _hygiene_is_placeholder(seg):
     """True if a captured `/Users/<seg>/`-style segment is a documentation
-    placeholder rather than a real username (so the lint never flags its own
-    examples/patterns)."""
+    placeholder, not a real username — so the lint never flags its own examples.
+    Trailing markdown/punctuation is stripped first so `` `/Users/...`, `` and
+    `/Users/<operator>/…` are recognized (Codex review BLOCKER 3)."""
     if not seg:
         return True
-    if any(bytes((c,)) in _HYGIENE_META_BYTES for c in seg):   # regex/angle tokens
+    seg = seg.rstrip(_HYGIENE_STRIP_BYTES)                     # drop backtick/comma/dots
+    if not seg:                                                # was all punctuation (e.g. `...`)
         return True
-    if seg in _HYGIENE_PLACEHOLDER_SEGS:
+    if any(bytes((c,)) in _HYGIENE_META_BYTES for c in seg):   # <name>, regex tokens
+        return True
+    if seg in _HYGIENE_PLACEHOLDER_SEGS:                       # UPPERCASE synthetic
         return True
     if set(seg) <= {ord(".")}:                                 # `.` / `...`
         return True
@@ -5554,7 +5561,9 @@ def _hygiene_findings(root=None):
     High-confidence home roots are `warning` (fail `doctor --lint --hygiene`);
     advisory forms are `info` (shown only at `--severity-min info`, never gate).
     Binary/oversize files are skipped with an info finding, never a crash."""
-    root = root or HERE
+    # Scan the effective COORDINATED project root (honors M8SHIFT_ROOT / an
+    # external relay dir), not the script's own directory (Codex review BLOCKER 2).
+    root = root or project_root()
     findings = []
     for rel in _hygiene_tracked_publishable(root):
         path = os.path.join(root, rel)
@@ -5928,15 +5937,22 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
 
 def cmd_doctor(args):
     threshold = SEVERITY_RANK[args.severity_min]
-    # #24: --install computes the read-only snapshot ONCE; findings derive from it.
-    install_report = _install_report() if getattr(args, "install", False) else None
-    findings = collect_doctor_findings(
-        security=getattr(args, "security", False),
-        contracts=getattr(args, "contracts", False),
-        update_source=getattr(args, "source", "") or "",
-        install_report=install_report,
-        hygiene=getattr(args, "hygiene", False),
-    )
+    hygiene_only = getattr(args, "hygiene_only", False)
+    if hygiene_only:
+        # RFC 052: hygiene-only run — the exit code reflects ONLY the data-hygiene
+        # findings, so a pre-push hook is never dominated by relay.missing/adoption.
+        install_report = None
+        findings = _hygiene_findings()
+    else:
+        # #24: --install computes the read-only snapshot ONCE; findings derive from it.
+        install_report = _install_report() if getattr(args, "install", False) else None
+        findings = collect_doctor_findings(
+            security=getattr(args, "security", False),
+            contracts=getattr(args, "contracts", False),
+            update_source=getattr(args, "source", "") or "",
+            install_report=install_report,
+            hygiene=getattr(args, "hygiene", False),
+        )
     visible = [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
     ok = not visible
     if args.json:
@@ -5947,7 +5963,8 @@ def cmd_doctor(args):
             "findings": visible,
             # RFC 048 (#20): live adoption snapshot (pack + anchor mapping),
             # derived from current files — diagnostic only, never a lint gate.
-            "adoption": adoption_report(),
+            # Skipped for a hygiene-only run (repo-scoped, may have no relay).
+            "adoption": {} if hygiene_only else adoption_report(),
         }
         if install_report is not None:
             # #24: post-install snapshot (report data, distinct from findings).
@@ -7753,7 +7770,12 @@ def main():
                          "(/Users/<name>/, /home/<name>/, C:\\Users\\, WSL) in tracked publishable "
                          "files (docs/**, examples/**, top-level *.md; anchors excluded). Raw stdlib "
                          "read (never grep/rtk), read-only. High-confidence paths are warning and fail "
-                         "`--lint`; advisory forms (/Volumes, UNC, %USERPROFILE%) are info")
+                         "`--lint`; advisory forms (external drives, UNC, env-var home) are info")
+    dr.add_argument("--hygiene-only", action="store_true",
+                    help="RFC 052: run ONLY the data-hygiene lint (implies --hygiene) and base the "
+                         "exit code on hygiene findings alone — no relay/adoption findings. Intended "
+                         "for a pre-push/pre-commit hook (with --lint --json) so relay.missing never "
+                         "dominates the gate")
     dr.add_argument("--install", action="store_true",
                     help="include read-only post-install verification (#24): python/script "
                          "versions, local checksum-manifest state, kit companions/runners, generated "

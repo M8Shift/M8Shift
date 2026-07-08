@@ -10833,6 +10833,8 @@ class TestRFC052Hygiene(CLIBase):
         for a in (["init", "-q"], ["config", "user.email", "t@t"],
                   ["config", "user.name", "t"]):
             subprocess.run(["git", *a], cwd=self.d, capture_output=True)
+        self.ext = tempfile.mkdtemp(prefix="m8-hyg-ext-")
+        self.addCleanup(shutil.rmtree, self.ext, True)
 
     def _track(self, rel, body):
         p = os.path.join(self.d, rel)
@@ -10889,6 +10891,69 @@ class TestRFC052Hygiene(CLIBase):
         self.assertFalse(any(f["check"] == "hygiene.foreign_path"
                              and f["severity"] == "warning" and f["path"] == "docs/logo.md"
                              for f in findings))
+
+    def test_cli_version_and_doctor_help_do_not_crash(self):
+        # Regression: %-literals in argparse help crashed the CLI on strict Python
+        # (Codex review BLOCKER 1). A trivial invocation must always exit 0.
+        for args in (["--version"], ["doctor", "--help"]):
+            r = self.cw(*args)
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+
+    def test_c1_lowercase_usernames_still_warn(self):
+        # Codex review MEDIUM 4: common lowercase words are NOT exempt.
+        self._track("docs/a.md", "cwd /Users/operator/x and /Users/me/y and /Users/name/z\n")
+        r = self.cw("doctor", "--lint", "--hygiene", "--json")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(any(f["check"] == "hygiene.foreign_path" and f["severity"] == "warning"
+                            for f in json.loads(r.stdout)["findings"]))
+
+    def test_c1_placeholder_punctuation_forms_pass(self):
+        # Codex review BLOCKER 3: `/Users/...` (backticked/comma), `<operator>/…`.
+        self._track("docs/p.md",
+                    "no `/Users/...`, `~/...`, /Users/<operator>/… and /Users/[^/s]+/ ok\n")
+        r = self.cw("doctor", "--lint", "--hygiene", "--json")
+        fp = [f for f in json.loads(r.stdout)["findings"]
+              if f["check"] == "hygiene.foreign_path" and f["severity"] == "warning"]
+        self.assertEqual(fp, [], r.stdout)
+
+    def test_hygiene_only_rc_isolated_from_relay(self):
+        # Codex design answer: --hygiene-only bases rc on hygiene alone, even with
+        # NO relay (relay.missing must not dominate a pre-push gate).
+        def _bare(name, body):
+            d = os.path.join(self.ext, name)
+            os.makedirs(os.path.join(d, "docs"))
+            shutil.copy(SCRIPT, os.path.join(d, "m8shift.py"))
+            subprocess.run(["git", "init", "-q"], cwd=d, capture_output=True)
+            with open(os.path.join(d, "docs", "x.md"), "w", encoding="utf-8") as fh:
+                fh.write(body)
+            subprocess.run(["git", "add", "-A"], cwd=d, capture_output=True)
+            return subprocess.run([sys.executable, "m8shift.py", "doctor",
+                                   "--hygiene-only", "--lint", "--json"],
+                                  cwd=d, capture_output=True, text=True)
+        dirty = _bare("bare_dirty", "cwd /Users/realleak/secret\n")
+        self.assertEqual(dirty.returncode, 1, dirty.stdout)
+        checks = [f["check"] for f in json.loads(dirty.stdout)["findings"]]
+        self.assertIn("hygiene.foreign_path", checks)
+        self.assertNotIn("relay.missing", checks)   # relay noise isolated out
+        clean = _bare("bare_clean", "cwd /Users/<name>/proj and ~/code\n")
+        self.assertEqual(clean.returncode, 0, clean.stdout)
+
+    def test_c1_scans_configured_root_not_script_dir(self):
+        # Codex review BLOCKER 2: the scan follows M8SHIFT_ROOT / project_root(),
+        # not the script's own directory.
+        proj = os.path.join(self.ext, "rooted")
+        os.makedirs(os.path.join(proj, "docs"))
+        subprocess.run(["git", "init", "-q"], cwd=proj, capture_output=True)
+        with open(os.path.join(proj, "docs", "leak.md"), "w", encoding="utf-8") as fh:
+            fh.write("cwd /Users/realleak/x\n")
+        subprocess.run(["git", "add", "-A"], cwd=proj, capture_output=True)
+        env = dict(os.environ, M8SHIFT_ROOT=proj)
+        r = subprocess.run([sys.executable, "m8shift.py", "doctor",
+                            "--hygiene-only", "--json"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        hits = {f["path"] for f in json.loads(r.stdout)["findings"]
+                if f["check"] == "hygiene.foreign_path"}
+        self.assertIn("docs/leak.md", hits)
 
 
 if __name__ == "__main__":

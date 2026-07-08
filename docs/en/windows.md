@@ -54,7 +54,7 @@ behavior is identical to Linux.
 Install **Git for Windows** (ships Git Bash + git). In Git Bash:
 
 ```bash
-cd /c/Users/you/project
+cd /c/Users/USERNAME/project
 curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
 python m8shift.py status
 ```
