@@ -230,7 +230,7 @@ target script:
 python3 /path/to/source/m8shift.py update \
   --target /path/to/project \
   --source /path/to/source \
-  [--components core,protocol,pack,anchors,companions] \
+  [--components core,protocol,pack,anchors,runner,companions] \
   [--dry-run] [--json] [--allow-downgrade] [--force-generated]
 ```
 
@@ -277,12 +277,13 @@ Downgrade detection MUST use the source version authority, not filename guesses.
 | `protocol` | Refresh target `M8SHIFT.protocol.md` from source embedded content. |
 | `pack` | Refresh target `M8SHIFT.agent-pack.md` from source embedded content. |
 | `anchors` | Refresh only generated stanza blocks in target anchors. |
+| `runner` | Refresh already-installed runner artifacts (`scripts/watch-status.sh`, `examples/headless_runner.py`) only when `kit.json` proves the target checksum; absent runners are never created. In the default update path, present-but-untracked regular runners are skipped so a full checkout/dogfood tree does not fail. Explicit `--components runner` escalates untracked runners to `manual_review_required`; symlinked, non-regular, or target-root-escaping runner paths are refused. |
 | `companions` | Refresh installed companions by default when already present, via RFC 044 plan/apply machinery; never silently add absent companions. |
 
 Default components for PR B:
 
 ```text
-core,protocol,pack,anchors,companions-if-installed
+core,protocol,pack,anchors,runner-if-installed
 ```
 
 ### Safety rules
@@ -301,6 +302,9 @@ core,protocol,pack,anchors,companions-if-installed
 - validate replacement Python files with `ast.parse`;
 - verify `checksums.sha256` when the source provides it. This is MUST-verify when
   present, matching installer behavior;
+- for runner artifacts, require `.m8shift/kit.json` metadata (`runners[]`
+  name/path/version/sha256/source) to prove the currently installed checksum
+  before automatic refresh; otherwise report `manual_review_required`;
 - refuse downgrade unless `--allow-downgrade`;
 - refuse malformed generated markers unless `--force-generated`;
 - keep `--force-generated` distinct from `init --force` because `init --force`
@@ -319,7 +323,7 @@ PR B MUST either:
   `m8shift.update.event.v1`.
 
 The row must include source version, target previous version, target new version,
-component results, refused/skipped reasons, and whether companions were refreshed.
+component results, refused/skipped reasons, and whether companions/runners were refreshed.
 
 ### Result vocabulary
 
@@ -399,4 +403,3 @@ component results, refused/skipped reasons, and whether companions were refreshe
   are the only auto-loaded channel M8Shift can rely on.
 - Checksum verification is mandatory when source checksums exist.
 - Path confinement and symlink refusal are mandatory for both source and target.
-

@@ -64,6 +64,7 @@ touches the network or an external service.
 | Command | Mutates | Reads | Writes | Notes |
 |---------|---------|-------|--------|-------|
 | `init [--name --agents --lang --force --gitignore/--no-gitignore --companions/--full/--with-* --companion-source --force-companions]` | local-state + repository-code | folder contents, existing anchors | `M8SHIFT.md`, `M8SHIFT.protocol*.md`, anchor stanza in `CLAUDE.md`/`AGENTS.md`, `.gitignore` block, `.m8shift/` hooks + `kit.json`, copied companions | idempotent re-inject; `M8SHIFT.md` preserved unless `--force` |
+| `update --target DIR [--source DIR --components ...]` | local-state + repository-code | target relay, source kit, checksums, installed artifacts | generated protocol/pack/anchors, installed runners/companions, core, `.m8shift/update-audit.jsonl`, `.m8shift/kit.json` metadata | source-driven; never copies relay/session state; default runner refresh covers only already-installed verified runner artifacts |
 | `status [--json --brief --for A]` | read-only | LOCK, `M8SHIFT.sessions.jsonl` | none | prints UTC + local time; `--for` adds next-action hint |
 | `may-i-write A` / `guard A` | read-only | LOCK | none | rc 0 only while A holds a valid `WORKING` pen (point-in-time, TOCTOU) |
 | `watch [--for --interval --clear --changes-only --once]` | read-only | LOCK | none | passive live monitor; no claim/force/daemon |
