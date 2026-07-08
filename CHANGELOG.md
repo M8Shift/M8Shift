@@ -1,5 +1,39 @@
 # Changelog
 
+## v3.56.0 — 2026-07-08
+
+Usage-provider adapters and project compartmentalization.
+
+**RFC 040 Phase 4 — real default usage adapters (#100).** `usage init` now
+scaffolds four disabled-by-default provider adapters (`claude-jsonl-scan`,
+`claude-quota-keychain`, `codex-jsonl-scan`, `codex-ratelimits`) — inert until
+explicitly enabled, no-clobber, identity-pinned. A reference Claude adapter
+(`examples/usage-adapters/claude-oauth-usage.py`) reads the Claude Code OAuth
+access token from the macOS Keychain (or an explicit file override) entirely in
+memory and emits only an official usage fixture (`used_ratio`/`resets_at`) — never
+the access/refresh token, account identity, or raw response body; non-macOS has no
+plaintext credential default. It is fail-open on every error path — a malformed
+response, broken stdout, arbitrary-precision overflow, or ANY exception yields an
+empty official fixture, never a crash or a leak — and per-window resilient, so one
+malformed window never discards good readings. A validation-and-contract test slice
+pins the Phase-4 privacy / fail-open / disabled-by-default guarantees against
+regression. Codex implemented, Claude reviewed: each slice cleared an adversarial
+merge gate — empirical crash/leak matrices across stdout *and* stderr, plus mutation
+testing that confirmed every contract test fails when its behavior is broken. The
+`codex-ratelimits` adapter stays a disabled TODO scaffold until its RPC shape is
+verified live.
+
+**RFC 052 PR1 — project compartmentalization and data hygiene (#101).** A new
+`doctor --hygiene` / `--hygiene-only` lint raw-reads tracked docs and examples for
+real home paths (`/Users/…`, `/home/…`, `C:\Users\…`) and flags them —
+placeholder-aware, so it never trips on its own `<name>` / `.../` examples.
+High-confidence hits gate under `--lint`; advisory hits are informational; it runs
+without a relay. The agent-guidance floor gains a Compartmentalization rule: a fact
+learned in one shift keeps its identity there, and cross-project reference is
+deny-by-default. Claude drafted, Codex reviewed — a code review caught five real
+defects (including a CLI crash on Python 3.14 from an argparse `%`-literal) that the
+test suite missed; all were fixed before merge.
+
 ## v3.55.0 — 2026-07-08
 
 Two features land together.
