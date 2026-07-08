@@ -1,6 +1,6 @@
 # RFC 040 — AI Session Usage Monitoring and Usage-Limit Cooldowns
 
-Status: draft; Phase 2/3 refined toward implementation on 2026-07-03
+Status: draft; Phase 2/3 refined toward implementation on 2026-07-03; Phase 4 amendment drafted for review on 2026-07-08
 Target stage: optional runtime companion  
 Authors: M8Shift maintainers  
 Date: 2026-06-30  
@@ -815,16 +815,20 @@ lands with PR B): `--warn-threshold` (default `0.80`), `--limit-threshold`
 `status` reads that ledger and writes nothing.
 
 `usage init` scaffolds `.m8shift/usage/adapters.json`
-(schema `m8shift.usage.adapters.v1`) with **disabled** example entries for
-`claude` (`kind: cli_json`, argv-array `command`) and `codex` (`kind: fixture`,
-`fixture_path`), plus a synthetic sample fixture under
-`.m8shift/usage/fixtures/codex.json`. It is idempotent and never clobbers
-existing files. PR A adapter entries carry exactly: `name`, `agent`,
-optional `provider`, `kind` (`cli_json` | `fixture`), `command` (argv array of
-strings — a shell string is a config **error**), `fixture_path` (fixture kind),
-`timeout_s` (number, bounded `1..60`, default `10`), `enabled` (bool, default
-`false`), optional `sha256` (identity pin for `command[0]`; mismatch fails
-closed), and optional `//` comments. Unknown keys are **warnings**.
+(schema `m8shift.usage.adapters.v1`) with **disabled** example entries for the
+four Phase-4 sources: `claude-jsonl-scan`, `claude-quota-keychain`,
+`codex-jsonl-scan`, and `codex-ratelimits`. The JSONL scans are local
+aggregate-only spent sources; the quota/rate-limit entries are disabled
+`cli_json` placeholders that must be edited by the operator before use.
+`usage init` also writes `.m8shift/usage/budget.example.json`; it does not write
+orphan fixture files. It is idempotent and never clobbers existing files. PR A
+adapter entries carry exactly: `name`, `agent`, optional `provider`, `kind`
+(`cli_json` | `fixture` | `jsonl_scan`), `command` (argv array of strings — a
+shell string is a config **error**), `fixture_path` (fixture kind), `scan_roots`
+(`jsonl_scan` kind), `timeout_s` (number, bounded `1..60`, default `10`),
+`enabled` (bool, default `false`), optional `sha256` (identity pin for
+`command[0]`; mismatch fails closed), and optional `//` comments. Unknown keys
+are **warnings**.
 `adapters check` probes only **enabled** adapters, with a bounded argv-only
 subprocess run (never a shell string, never network access by M8Shift itself);
 adapter failures are appended to `.m8shift/runtime/usage-adapter-errors.jsonl`,
@@ -1731,6 +1735,248 @@ Each Phase-1 adapter declares `official` (endpoint / RPC / fresh statusline
 - No continuous daemon in M8Shift — continuous monitoring is topology (A), an
   external producer M8Shift reads on demand.
 - No auto-resume and no automatic provider launch (unchanged from PR B).
+
+---
+
+## Phase 4 — first-class Claude + Codex usage adapters (#100 draft)
+
+Status: **draft for review**. This is an amendment to RFC 040, not a new RFC:
+the normalized snapshot schema, runtime sidecars, adapter manifest, hardened
+runner, and cooldown semantics already exist here. Phase 4 changes the shipped
+adapter catalog and credential policy; it does **not** add provider/network
+behavior to core `m8shift.py`.
+
+### Goal
+
+Most operators run at least Claude and Codex in the same shift. Usage monitoring
+therefore needs usable, reusable adapters for both agents out of the box:
+
+- `m8shift-runtime.py usage init` scaffolds disabled entries for Claude **and**
+  Codex by default;
+- `examples/usage-adapters/` ships a reference adapter for Claude's official
+  OAuth/subscription quota endpoint; Codex starts with the real local scan and a
+  disabled rate-limit TODO scaffold until the official RPC shape is verified;
+- local JSONL scans remain reporting/estimate sources, never authoritative
+  quota gates unless paired with an explicit operator budget.
+
+All scaffolds stay **disabled by default**. Enabling any provider adapter is an
+explicit operator action.
+
+### Amendment vs. new RFC decision
+
+This belongs in RFC 040 Phase 4 because it does not change the relay model. It
+only fills the provider-specific adapter seam that Phase 2/3 deliberately left
+as disabled scaffolds and examples. A separate RFC would be warranted only if we
+added a credential manager, a hosted control plane, a daemon owned by M8Shift, or
+core relay mutations beyond the existing `cooldown`/runtime contract.
+
+### Phase 4 adapter catalog
+
+`usage init` should scaffold these disabled entries:
+
+```json
+{
+  "schema": "m8shift.usage.adapters.v1",
+  "adapters": [
+    {
+      "name": "claude-jsonl-scan",
+      "agent": "claude",
+      "provider": "anthropic-claude",
+      "kind": "jsonl_scan",
+      "enabled": false,
+      "scan_roots": ["~/.claude/projects"],
+      "timeout_s": 10,
+      "provenance": "local_estimate",
+      "role": "reporting"
+    },
+    {
+      "name": "claude-quota-keychain",
+      "agent": "claude",
+      "provider": "anthropic-claude",
+      "kind": "cli_json",
+      "enabled": false,
+      "command": ["python3", "examples/usage-adapters/claude-oauth-usage.py"],
+      "timeout_s": 10,
+      "failure_policy": "warn_open",
+      "provenance_preference": ["official"]
+    },
+    {
+      "name": "codex-jsonl-scan",
+      "agent": "codex",
+      "provider": "openai-codex",
+      "kind": "jsonl_scan",
+      "enabled": false,
+      "scan_roots": ["~/.codex/sessions", "~/.codex/archived_sessions"],
+      "timeout_s": 10,
+      "provenance": "local_estimate",
+      "role": "reporting"
+    },
+    {
+      "name": "codex-ratelimits",
+      "agent": "codex",
+      "provider": "openai-codex",
+      "kind": "cli_json",
+      "enabled": false,
+      "//": "TODO: official Codex rate-limit RPC shape is unverified; verify before enabling",
+      "command": ["python3", "examples/usage-adapters/codex-ratelimits.py"],
+      "timeout_s": 15,
+      "failure_policy": "warn_open",
+      "provenance_preference": ["official"]
+    }
+  ]
+}
+```
+
+The exact manifest may include additional fields already supported by the
+runtime companion, but these entries define the expected default catalog:
+disabled, explicit, provider-neutral, and fail-open.
+
+### Claude quota adapter — macOS Keychain, not plaintext credentials
+
+The Phase 3 text assumed a plaintext credentials file. On macOS, Claude Code's
+OAuth material is held in the user's Keychain under a service entry managed by
+Claude Code. Phase 4 updates the adapter contract:
+
+- The example adapter reads the access token from the macOS Keychain **only when
+  the operator enables the adapter**.
+- The current macOS lookup is the login Keychain generic-password item whose
+  service is `Claude Code-credentials`; the adapter may invoke
+  `/usr/bin/security find-generic-password -s "Claude Code-credentials" -w` and
+  parse the returned JSON in memory.
+- The access token lives at `claudeAiOauth.accessToken`; expiry lives at
+  `claudeAiOauth.expiresAt` (epoch milliseconds). Other fields such as refresh
+  token, subscription type, and rate-limit tier may be present but must not be
+  emitted.
+- The Keychain read is in-memory only. The adapter never writes the access token,
+  refresh token, raw credential JSON, account identity, or endpoint response body
+  to disk, stdout, stderr, M8Shift ledgers, or relay turns.
+- The adapter uses the access token only for the provider usage request, then
+  discards it.
+- The adapter does not refresh tokens. If the access token is missing or expired,
+  it emits an empty official fixture so the runtime records `unknown` and
+  remains fail-open.
+- Keychain ACLs may prompt the operator or deny access because the adapter is a
+  separate subprocess from the app that created the item. Prompt timeout, denial,
+  or non-interactive failure is treated exactly like a missing token: empty
+  official fixture, `unknown`, no pause.
+- Official Claude quota applies only to OAuth/subscription Claude Code sessions
+  with a usable Keychain token. API-key-only users should expect this adapter to
+  fail open unless a separate explicit adapter is provided.
+- Non-macOS systems may support an explicit operator-provided credential command
+  or file path later, but there is no plaintext credential-file default.
+
+The reference script should keep the Phase 3 behavior that maps provider
+remaining-percent data to `windows[].used_ratio` and leaves token-named fields
+`null`. A percent is never written into `used`, `limit`, `used_tokens`, or
+`limit_tokens`.
+
+### Codex usage adapters — local scan first, official rate-limit TODO
+
+The Codex official rate-limit surface is not verified yet. Phase 4 therefore
+starts Codex with a real `codex-jsonl-scan` reporting adapter and scaffolds
+`codex-ratelimits` only as a disabled TODO entry. It must not be documented as a
+working official quota gate until the local Codex RPC shape is confirmed against
+a live Codex install.
+
+When verified, the expected `codex-ratelimits` adapter is a reference script
+such as `examples/usage-adapters/codex-ratelimits.py` that:
+
+1. launches the local Codex CLI in its read-only app-server/RPC mode using an
+   argv array, never a shell string;
+2. performs the minimal account/rate-limit read sequence;
+3. maps primary/secondary reset windows to `m8shift.usage.fixture.v1`;
+4. emits `provenance: official` only when the source is the provider/Codex
+   account rate-limit surface;
+5. emits an empty official fixture on any unsupported CLI, malformed response,
+   timeout, or missing account state.
+
+Until then, local Codex transcript/log scans remain the supported Codex source:
+`local_estimate` consumption, useful for reporting and budget-backed estimates,
+but not an official quota gate by itself.
+
+### Credential and subprocess policy
+
+Phase 4 reuses the existing hardened adapter runner contract:
+
+- argv arrays only; no shell strings;
+- bounded timeout;
+- stdout size cap;
+- stderr diagnostic-only, never credential-bearing;
+- fail-open to `unknown` on adapter failure;
+- no raw provider tokens, raw credential JSON, or raw provider responses in
+  output, ledgers, exceptions, reports, or relay turns;
+- provider/network behavior stays in `m8shift-runtime.py` adapters and example
+  scripts, never in core `m8shift.py`;
+- disabled adapters perform no Keychain, filesystem-log, CLI, or network access.
+
+If an adapter wants to expose an account identifier, it must expose only a stable
+hash or redact it entirely. The default examples should omit identity.
+
+### Compartmentalization policy
+
+RFC 052 applies to this phase:
+
+- examples and tests use synthetic fixtures only;
+- no real token, real account id, real project name, real local path, or real
+  provider response capture appears in docs, tests, commits, issues, or relay
+  turns;
+- docs may name generic locations such as `~/.codex/...` or `~/.claude/...`, but
+  must not include an operator-specific absolute path;
+- adapter examples must fabricate provider payloads for tests instead of pasting
+  real captures.
+
+### Implementation slices
+
+Recommended Phase 4 implementation order:
+
+1. **Docs + scaffolds** — update `usage init` so both Claude and Codex disabled
+   entries are present by default; document that all adapters are off until the
+   operator enables them. Each entry includes placeholder config fields (`scan_roots`,
+   `command`, `timeout_s`) so enabling is one deliberate edit, not a research task.
+2. **Claude Keychain example** — update or replace
+   `examples/usage-adapters/claude-oauth-usage.py` so macOS Keychain is the
+   default credential source, with fail-open behavior and no plaintext credential
+   default.
+3. **Codex local scan first** — keep `codex-jsonl-scan` as the real Codex source
+   for the first implementation slice; it is reporting/local-estimate only unless
+   the operator adds a budget.
+4. **Codex rate-limit TODO scaffold** — add the disabled `codex-ratelimits`
+   manifest entry now, but implement a working `examples/usage-adapters/codex-ratelimits.py`
+   only after the local Codex rate-limit RPC shape is verified.
+5. **Validation tests** — prove disabled adapters do not execute, enabled
+   adapters normalize fixtures correctly, credential material is not printed, and
+   unsupported provider state yields `unknown` rather than a pause.
+
+### Acceptance criteria (Phase 4)
+
+- `usage init` creates disabled Claude and Codex adapter entries by default.
+- A clean scaffold performs no Keychain read, Codex CLI launch, filesystem scan,
+  or network call until an adapter is enabled.
+- The Claude example reads OAuth material from macOS Keychain only after opt-in,
+  keeps tokens in memory only, emits no identity/token/raw response, and
+  fail-opens to an empty official fixture on any error, including Keychain ACL
+  prompt timeout/denial and API-key/no-OAuth setups.
+- The Codex `jsonl_scan` scaffold is the first real Codex source and remains
+  reporting/local-estimate by default.
+- The Codex official rate-limit scaffold is clearly marked unverified/disabled
+  and does not claim to gate until the RPC shape is confirmed.
+- Both examples use `used_ratio` for ratio-native quota and never encode a
+  percent as token counts.
+- Local JSONL scans for Claude/Codex remain `local_estimate` and never gate
+  unless an explicit operator budget supplies limits.
+- Tests use synthetic fixtures and placeholder paths only.
+- Core `m8shift.py` has no new network, Keychain, OAuth, or provider-specific
+  behavior.
+
+### Non-goals (Phase 4)
+
+- No automatic enabling of Claude or Codex quota adapters.
+- No storage of OAuth access tokens, refresh tokens, account ids, or raw provider
+  responses by M8Shift.
+- No browser-cookie scraping.
+- No provider SDK dependency in core.
+- No claim that local transcript scans are official quota truth.
+- No hosted usage dashboard or account manager.
 
 ---
 
