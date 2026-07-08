@@ -212,7 +212,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   candidate source copy and reports `adoption.update_recommended` when the
   source is newer. It also reports installed-runner preflight findings:
   `runner.stale` when `.m8shift/kit.json` proves a safe refresh is available,
-  and `runner.manual_review_required` when a runner is edited/untracked,
+  and `runner.manual_review_required` when a tracked runner is edited,
   symlinked, missing source verification, or otherwise unsafe to overwrite.
   The same preflight adds an advisory `workspace.dirty_worktree` finding when
   the project's git checkout carries uncommitted changes (coordinate/stash
@@ -233,7 +233,9 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   set includes `runner`: it refreshes only already-installed
   `scripts/watch-status.sh` / `examples/headless_runner.py` artifacts whose
   current checksum is proven by `.m8shift/kit.json`; absent runners are not
-  created, and locally edited/untracked runners require manual review unless
+  created, present-but-untracked regular runners are skipped by the default
+  update path, and explicit `--components runner` escalates untracked runners
+  to manual review. Locally edited tracked runners require manual review unless
   the operator deliberately uses `--force-generated`. Each real run appends a
   bounded audit row (`m8shift.update.audit.v1`) to `.m8shift/update-audit.jsonl`.
 

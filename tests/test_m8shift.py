@@ -3120,6 +3120,10 @@ class TestAuditFixes(CLIBase):
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertIn(v, r.stdout)
+        with open(os.path.join(REPO, "scripts", "watch-status.sh"), encoding="utf-8") as fh:
+            marker = re.search(r'^M8SHIFT_RUNNER_VERSION="([^"]+)"', fh.read(), re.M)
+        self.assertIsNotNone(marker)
+        self.assertEqual(marker.group(1), v)
 
     def test_headless_runner_once_writes_run_ledger_and_env_run_id(self):
         self.init()
@@ -9909,6 +9913,46 @@ class TestRFC048PRB(CLIBase):
         with open(outside, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "OUTSIDE\n")
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_runner_symlinked_ancestor_target_refused(self):
+        self.init()
+        rel = os.path.join("scripts", "watch-status.sh")
+        self._copy_runner_sources([rel])
+        self._source_manifest([rel])
+        outside_dir = os.path.join(self.out, "outside-scripts")
+        os.makedirs(outside_dir, exist_ok=True)
+        outside = os.path.join(outside_dir, "watch-status.sh")
+        with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+            body = self._stale_runner_body(rel, fh.read())
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        with open(outside, "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+        os.makedirs(os.path.join(self.d, ".m8shift"), exist_ok=True)
+        with open(os.path.join(self.d, ".m8shift", "kit.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.kit.v1",
+                "core": {"script": "m8shift.py", "version": cowork.VERSION},
+                "companions": [],
+                "runners": [{
+                    "name": "watch-status",
+                    "path": rel,
+                    "version": "0.1.0",
+                    "sha256": sha,
+                    "copied_at": "2026-01-01T00:00:00Z",
+                    "source": "test",
+                }],
+            }, fh, indent=2)
+        os.symlink(outside_dir, os.path.join(self.d, "scripts"))
+        with open(outside, encoding="utf-8") as fh:
+            before = fh.read()
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "refused")
+        with open(outside, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), before)
+
     def test_locally_edited_runner_requires_manual_review_without_force(self):
         self.init()
         rel = os.path.join("examples", "headless_runner.py")
@@ -9928,6 +9972,67 @@ class TestRFC048PRB(CLIBase):
                     if i["name"] == "headless-runner")
         self.assertIn("differs from", item["detail"])
         self.assertEqual(self.read_target(rel), before)
+
+    def test_force_generated_runner_backup_is_binary_for_non_utf8(self):
+        self.init()
+        rel = os.path.join("examples", "headless_runner.py")
+        self._copy_runner_sources([rel])
+        self._source_manifest([rel])
+        self._install_runner_targets([rel], stale=True, with_metadata=True)
+        target = os.path.join(self.d, rel)
+        with open(target, "ab") as fh:
+            fh.write(b"\xff")
+        r = self.update("--components", "runner", "--force-generated", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "updated")
+        with open(target + ".m8shift.bak", "rb") as fh:
+            self.assertTrue(fh.read().endswith(b"\xff"))
+        self.assertIn('VERSION = "%s"' % cowork.VERSION, self.read_target(rel))
+
+    def test_runner_non_list_kit_value_does_not_traceback(self):
+        self.init()
+        os.makedirs(os.path.join(self.d, ".m8shift"), exist_ok=True)
+        with open(os.path.join(self.d, ".m8shift", "kit.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.kit.v1",
+                "core": {"script": "m8shift.py", "version": cowork.VERSION},
+                "companions": [],
+                "runners": 5,
+            }, fh, indent=2)
+        r = self.update("--components", "runner", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "skipped")
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_default_update_skips_present_untracked_runners(self):
+        self.init()
+        rels = self._runner_rels()
+        self._copy_runner_sources(rels)
+        self._source_manifest(rels)
+        self._install_runner_targets(rels, stale=True, with_metadata=False)
+        r = self.update("--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "skipped")
+        r = self.update("--components", "runner", "--json")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["runner"], "manual_review_required")
+
+    def test_doctor_source_skips_present_untracked_regular_runners(self):
+        self.init()
+        rels = self._runner_rels()
+        self._copy_runner_sources(rels)
+        self._source_manifest(rels)
+        self._install_runner_targets(rels, stale=True, with_metadata=False)
+        r = self.cw("doctor", "--json", "--severity-min", "info", "--source", self.src)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        checks = [f["check"] for f in json.loads(r.stdout)["findings"]]
+        self.assertNotIn("runner.manual_review_required", checks)
+        self.assertNotIn("runner.stale", checks)
 
     def test_doctor_source_reports_runner_stale_and_manual_review_read_only(self):
         self.init()

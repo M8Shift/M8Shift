@@ -277,7 +277,7 @@ Downgrade detection MUST use the source version authority, not filename guesses.
 | `protocol` | Refresh target `M8SHIFT.protocol.md` from source embedded content. |
 | `pack` | Refresh target `M8SHIFT.agent-pack.md` from source embedded content. |
 | `anchors` | Refresh only generated stanza blocks in target anchors. |
-| `runner` | Refresh already-installed runner artifacts (`scripts/watch-status.sh`, `examples/headless_runner.py`) only when `kit.json` proves the target checksum; absent runners are never created. |
+| `runner` | Refresh already-installed runner artifacts (`scripts/watch-status.sh`, `examples/headless_runner.py`) only when `kit.json` proves the target checksum; absent runners are never created. In the default update path, present-but-untracked regular runners are skipped so a full checkout/dogfood tree does not fail. Explicit `--components runner` escalates untracked runners to `manual_review_required`; symlinked, non-regular, or target-root-escaping runner paths are refused. |
 | `companions` | Refresh installed companions by default when already present, via RFC 044 plan/apply machinery; never silently add absent companions. |
 
 Default components for PR B:

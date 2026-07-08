@@ -641,7 +641,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   candidate source copy and reports `adoption.update_recommended` when the
   source is newer. It also reports installed-runner preflight findings:
   `runner.stale` when `.m8shift/kit.json` proves a safe refresh is available,
-  and `runner.manual_review_required` when a runner is edited/untracked,
+  and `runner.manual_review_required` when a tracked runner is edited,
   symlinked, missing source verification, or otherwise unsafe to overwrite.
   The same preflight adds an advisory `workspace.dirty_worktree` finding when
   the project's git checkout carries uncommitted changes (coordinate/stash
@@ -662,7 +662,9 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   set includes `runner`: it refreshes only already-installed
   `scripts/watch-status.sh` / `examples/headless_runner.py` artifacts whose
   current checksum is proven by `.m8shift/kit.json`; absent runners are not
-  created, and locally edited/untracked runners require manual review unless
+  created, present-but-untracked regular runners are skipped by the default
+  update path, and explicit `--components runner` escalates untracked runners
+  to manual review. Locally edited tracked runners require manual review unless
   the operator deliberately uses `--force-generated`. Each real run appends a
   bounded audit row (`m8shift.update.audit.v1`) to `.m8shift/update-audit.jsonl`.
 
@@ -2065,12 +2067,17 @@ def _read_kit_manifest(root=None):
         return {}
 
 
+def _kit_list(data, key):
+    value = data.get(key) if isinstance(data, dict) else []
+    return value if isinstance(value, list) else []
+
+
 def _write_kit_manifest(installed, runners=None):
     path = os.path.join(HERE, KIT_MANIFEST_REL)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     previous = _read_kit_manifest(HERE)
     if runners is None:
-        runners = previous.get("runners") if isinstance(previous.get("runners"), list) else []
+        runners = _kit_list(previous, "runners")
     data = {"schema": "m8shift.kit.v1",
             "core": {"script": "m8shift.py", "version": VERSION},
             "companions": installed}
@@ -2198,7 +2205,7 @@ def _merge_kit_runners(installed):
     """Merge refreshed runner metadata into kit.json (by runner name)."""
     by_name = {}
     prev = _read_kit_manifest(HERE)
-    for e in (prev.get("runners") or []):
+    for e in _kit_list(prev, "runners"):
         if isinstance(e, dict) and e.get("name"):
             by_name[e["name"]] = e
     for e in installed:
@@ -2652,7 +2659,7 @@ def _update_companions_component(selection, source_dir, checksums, allow_downgra
 def _kit_runners_by_name(target_root):
     out = {}
     data = _read_kit_manifest(target_root)
-    for entry in (data.get("runners") or []):
+    for entry in _kit_list(data, "runners"):
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
@@ -2696,7 +2703,8 @@ def _copy_regular_file_atomic(src, dest):
                 os.unlink(tmp)
 
 
-def _update_runners_component(source_dir, checksums, force_generated, dry_run, guard=None):
+def _update_runners_component(source_dir, checksums, force_generated, strict_untracked,
+                              dry_run, guard=None):
     """Refresh installed runner artifacts.
 
     Runners are not companions: they live under scripts/ and examples/. The
@@ -2722,6 +2730,9 @@ def _update_runners_component(source_dir, checksums, force_generated, dry_run, g
         target = os.path.join(HERE, rel)
         source_link = os.path.join(source_dir, rel)
         source = os.path.realpath(source_link)
+        if not _physically_under(HERE, target):
+            record(name, "refused", "runner %s: target %s escapes the target root" % (name, rel))
+            continue
         if os.path.islink(target) or (os.path.lexists(target) and not os.path.isfile(target)):
             record(name, "refused", "runner %s: target %s is not a regular file" % (name, rel))
             continue
@@ -2750,8 +2761,12 @@ def _update_runners_component(source_dir, checksums, force_generated, dry_run, g
         meta = kit.get(name)
         meta_sha = (meta or {}).get("sha256")
         if not meta:
-            record(name, "manual_review_required",
-                   "runner %s: installed but untracked in %s; refusing blind overwrite" % (name, KIT_MANIFEST_REL))
+            if strict_untracked:
+                record(name, "manual_review_required",
+                       "runner %s: installed but untracked in %s; refusing blind overwrite" % (name, KIT_MANIFEST_REL))
+            else:
+                record(name, "skipped",
+                       "runner %s: installed but untracked in %s; default update skips it" % (name, KIT_MANIFEST_REL))
             continue
         if meta_sha != target_sha and not force_generated:
             record(name, "manual_review_required",
@@ -2766,8 +2781,7 @@ def _update_runners_component(source_dir, checksums, force_generated, dry_run, g
         if guard is not None:
             guard.require_owned()
         if meta_sha != target_sha and force_generated:
-            with contextlib.suppress(OSError):
-                write(read(target), target + ".m8shift.bak")
+            _copy_regular_file_atomic(target, target + ".m8shift.bak")
         try:
             _copy_regular_file_atomic(source, target)
         except OSError as e:
@@ -2921,8 +2935,10 @@ def cmd_update(args):
         return _update_refusal(args, "refused", "--target %s is not a directory" % args.target)
 
     # components selection (order-independent CSV; execution follows UPDATE_ORDER)
+    components_arg = UPDATE_DEFAULT_COMPONENTS if args.components is None else args.components
+    components_explicit = args.components is not None
     selected = []
-    for tok in (args.components or "").split(","):
+    for tok in (components_arg or "").split(","):
         tok = tok.strip()
         if not tok:
             continue
@@ -3065,7 +3081,8 @@ def cmd_update(args):
                 continue
             elif comp == "runner":
                 res, detail, runner_items = _update_runners_component(
-                    source_dir, checksums, args.force_generated, dry_run, guard)
+                    source_dir, checksums, args.force_generated,
+                    components_explicit and "runner" in selected, dry_run, guard)
                 rows.append({"component": comp, "result": res, "detail": detail,
                              "runners": runner_items})
                 continue
@@ -4950,6 +4967,14 @@ def _doctor_runner_source_findings(target_root, source_dir):
         target = os.path.join(target_root, rel)
         source_link = os.path.join(source_dir, rel)
         source = os.path.realpath(source_link)
+        if not _physically_under(target_root, target):
+            out.append(doctor_finding(
+                "runner.manual_review_required", "warning",
+                "runner %s target %s escapes the target root; update will refuse it." % (name, rel),
+                rel,
+                "replace the escaping path with a regular in-project file before rerunning update",
+            ))
+            continue
         if os.path.islink(target) or (os.path.lexists(target) and not os.path.isfile(target)):
             out.append(doctor_finding(
                 "runner.manual_review_required", "warning",
@@ -4959,6 +4984,13 @@ def _doctor_runner_source_findings(target_root, source_dir):
             ))
             continue
         if not os.path.exists(target):
+            continue
+        meta = kit.get(name)
+        if not meta:
+            # Default update skips regular present-but-untracked runners. Doctor
+            # mirrors that default path: no warning until the operator explicitly
+            # asks `update --components runner`, which then escalates to manual
+            # review.
             continue
         if (os.path.islink(source_link) or not os.path.isfile(source)
                 or not _physically_under(source_dir, source)):
@@ -4982,15 +5014,6 @@ def _doctor_runner_source_findings(target_root, source_dir):
                 "runner.manual_review_required", "warning",
                 "runner %s source %s has no parseable runner VERSION marker." % (name, rel),
                 rel,
-            ))
-            continue
-        meta = kit.get(name)
-        if not meta:
-            out.append(doctor_finding(
-                "runner.manual_review_required", "warning",
-                "runner %s is installed but not tracked in %s." % (name, KIT_MANIFEST_REL),
-                rel,
-                "refresh manually once, or run update after kit metadata exists",
             ))
             continue
         try:
@@ -5048,7 +5071,7 @@ def _install_report():
                 kit_sha[e["name"]] = e.get("sha256", "")
                 if COMPANION_REGISTRY.get(e["name"]) == e.get("script"):
                     kit_tracked.add(e["script"])
-        for e in (data.get("runners") or []):
+        for e in _kit_list(data, "runners"):
             if isinstance(e, dict) and e.get("name"):
                 kit_runner_sha[e["name"]] = e.get("sha256", "")
     except (OSError, json.JSONDecodeError, ValueError, AttributeError):
@@ -7522,7 +7545,7 @@ def main():
     up.add_argument("--source", default="",
                     help="source release/checkout directory providing the new core "
                          "(default: the running script's own directory)")
-    up.add_argument("--components", default=UPDATE_DEFAULT_COMPONENTS,
+    up.add_argument("--components", default=None,
                     help="comma-separated components to update: core,protocol,pack,anchors,"
                          "runner,companions (default: %s; `runner` refreshes installed runner "
                          "artifacts, `companions` refreshes companions ALREADY installed in the "
