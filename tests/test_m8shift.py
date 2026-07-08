@@ -7776,6 +7776,32 @@ class TestRFC040UsagePRA(CLIBase):
         with open(path, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["marker"], "operator-edited")
 
+    def test_enabled_adapter_secret_payload_never_reaches_snapshot_or_ledger(self):
+        secret = "SYNTH_SECRET_TOKEN_SHOULD_NOT_LEAK"
+        script = os.path.join(self.d, "secret-bearing-usage-cli.py")
+        doc = self.usage_doc(captured_at="2026-01-01T00:00:00Z", windows=[
+            {"kind": "session_5h", "used": 42000, "limit": 100000,
+             "resets_at": "2026-01-01T05:00:00Z", "raw_secret": secret},
+        ])
+        doc["raw_provider_response"] = {"body": secret}
+        doc["account_identity"] = "operator@example.invalid " + secret
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("import json\nprint(json.dumps(" + repr(doc) + "))\n")
+        self.write_adapters([{
+            "name": "secret-cli", "agent": "claude", "kind": "cli_json",
+            "command": [sys.executable, script], "timeout_s": 10, "enabled": True,
+        }])
+        r = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(secret, r.stdout)
+        self.assertNotIn(secret, r.stderr)
+        self.assertEqual(len(self.ledger_lines()), 1)
+        self.assertNotIn(secret, self.ledger_lines()[0])
+        snapshot = json.loads(r.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snapshot["decision_ratio"], 0.42)
+        self.assertNotIn("raw_provider_response", json.dumps(snapshot))
+        self.assertNotIn("account_identity", json.dumps(snapshot))
+
     def test_adapters_check_refuses_shell_string_and_bad_timeout_warns_unknown_key(self):
         self.write_adapters([
             {"name": "bad-shell", "agent": "claude", "kind": "cli_json",
@@ -8540,6 +8566,18 @@ class TestRFC040UsageQuota(CLIBase):
         for w in fx["windows"]:
             self.assertNotIn("used", w)                           # ratio window, no token field
 
+    def test_example_build_fixture_bounds_used_ratio(self):
+        mod = self._example()
+        fx = mod.build_fixture({"windows": [
+            {"kind": "five_hour", "remainingPercent": -25},
+            {"kind": "seven_day", "remainingPercent": 125},
+            {"kind": "session", "remainingPercent": float("nan")},
+            {"kind": "weekly", "remainingPercent": float("inf")},
+        ]}, "2026-01-01T00:00:00Z")
+        ratios = [w["used_ratio"] for w in fx["windows"]]
+        self.assertEqual(ratios, [1.0, 0.0])
+        self.assertTrue(all(0.0 <= ratio <= 1.0 for ratio in ratios))
+
     def test_example_build_fixture_skips_non_finite_percent(self):
         """Codex PR #51 blocker 2: json accepts NaN/Infinity; a non-finite
         remainingPercent must be skipped (never clamped into a bogus used_ratio),
@@ -8672,6 +8710,7 @@ class TestRFC040UsageQuota(CLIBase):
     def test_example_never_emits_token_credential_or_identity(self):
         mod = self._example()
         out = io.StringIO()
+        fixed_now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
         secret = "SECRET_ACCESS_TOKEN_SHOULD_NOT_LEAK"
         identity = "operator@example.invalid"
 
@@ -8684,32 +8723,43 @@ class TestRFC040UsageQuota(CLIBase):
                 {"kind": "five_hour", "remainingPercent": 50,
                  "resetsAt": "2026-01-01T05:00:00Z"}]}
 
-        self.assertEqual(mod.main(env={}, fetch=fetch, token_loader=token_loader, out=out), 0)
+        self.assertEqual(mod.main(env={}, fetch=fetch, token_loader=token_loader,
+                                  out=out, now=fixed_now), 0)
         text = out.getvalue()
         self.assertNotIn(secret, text)
         self.assertNotIn(identity, text)
         fx = json.loads(text)
+        self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
         self.assertEqual(fx["windows"][0]["used_ratio"], 0.5)
         self.assertNotIn("account", fx)
 
     def test_example_main_fail_opens_on_http_and_generic_exceptions(self):
         mod = self._example()
         secret = "SECRET_ACCESS_TOKEN_SHOULD_NOT_LEAK"
+        fixed_now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+
+        class ExoticAdapterFailure(Exception):
+            pass
 
         def token_loader(**kwargs):
             return secret
 
-        for exc in (http.client.IncompleteRead(b"partial"), Exception("boom " + secret)):
+        for exc in (http.client.IncompleteRead(b"partial"), ExoticAdapterFailure("boom " + secret)):
             out = io.StringIO()
+            err = io.StringIO()
 
             def fetch(_token, exc=exc):
                 raise exc
 
-            rc = mod.main(env={}, fetch=fetch, token_loader=token_loader, out=out)
+            with mock.patch("sys.stderr", err):
+                rc = mod.main(env={}, fetch=fetch, token_loader=token_loader,
+                              out=out, now=fixed_now)
             self.assertEqual(rc, 0)
             text = out.getvalue()
             self.assertNotIn(secret, text)
+            self.assertNotIn(secret, err.getvalue())
             fx = json.loads(text)
+            self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
             self.assertEqual(fx["provenance"], "official")
             self.assertEqual(fx["windows"], [])
 

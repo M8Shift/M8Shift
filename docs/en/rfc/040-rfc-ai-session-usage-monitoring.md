@@ -1941,15 +1941,106 @@ Recommended Phase 4 implementation order:
    `examples/usage-adapters/claude-oauth-usage.py` so macOS Keychain is the
    default credential source, with fail-open behavior and no plaintext credential
    default.
-3. **Codex local scan first** — keep `codex-jsonl-scan` as the real Codex source
-   for the first implementation slice; it is reporting/local-estimate only unless
-   the operator adds a budget.
-4. **Codex rate-limit TODO scaffold** — add the disabled `codex-ratelimits`
-   manifest entry now, but implement a working `examples/usage-adapters/codex-ratelimits.py`
-   only after the local Codex rate-limit RPC shape is verified.
-5. **Validation tests** — prove disabled adapters do not execute, enabled
+3. **Codex rate-limit TODO scaffold** — keep the disabled `codex-ratelimits`
+   manifest entry, but implement a working
+   `examples/usage-adapters/codex-ratelimits.py` only after the local Codex
+   rate-limit RPC shape is verified live. Until then, `codex-jsonl-scan` remains
+   the real Codex source: reporting/local-estimate only unless the operator adds a
+   budget.
+4. **Validation tests** — prove disabled adapters do not execute, enabled
    adapters normalize fixtures correctly, credential material is not printed, and
    unsupported provider state yields `unknown` rather than a pause.
+
+### Slice 4 draft — validation and contract tests
+
+Slice 4 is a test-hardening slice. It should not add a new provider integration
+and should not enable any adapter by default. Its value is to pin the Phase 4
+contract so later provider work cannot quietly weaken privacy, fail-open, or
+disabled-by-default behavior.
+
+Recommended test surface:
+
+1. **Default adapter manifest contract**
+   - Fresh `usage init` creates exactly the four Phase-4 default adapters:
+     `claude-jsonl-scan`, `claude-quota-keychain`, `codex-jsonl-scan`, and
+     `codex-ratelimits`.
+   - All four ship `enabled:false`, bounded `timeout_s`, argv arrays for
+     `cli_json`, and explicit placeholder fields (`scan_roots` or `command`).
+   - `usage adapters check` is clean for the scaffold: no unsupported-key
+     warnings, no stale fixture references, no operator-specific paths.
+   - Re-running `usage init` is no-clobber and preserves operator edits.
+
+2. **Disabled means inert**
+   - A clean scaffold followed by `usage snapshot` yields no snapshots and writes
+     no usage ledger lines.
+   - Tests must prove disabled defaults do not perform filesystem scans, Keychain
+     reads, Codex CLI launches, subprocess adapter calls, or network access. Use
+     synthetic monkeypatches/stubs only; never touch a real Keychain or provider.
+   - The disabled `codex-ratelimits` placeholder remains a TODO scaffold, not an
+     attempted RPC probe.
+
+3. **Fixture schema conformance**
+   - Every enabled synthetic adapter used in tests emits or normalizes to
+     `m8shift.usage.fixture.v1`.
+   - Ratio-native fixtures use `windows[].used_ratio` and keep `used`,
+     `limit`, `used_tokens`, and `limit_tokens` null/absent as appropriate.
+   - `used_ratio` is always in `[0, 1]`: remaining percent below `0` clamps to a
+     fully-used ratio (`1.0`), above `100` clamps to `0.0`, and NaN/Infinity
+     windows are skipped rather than emitted.
+   - Percent values are never encoded in token-named fields; unit-mixed windows
+     are rejected or skipped, never coerced.
+   - Malformed windows are isolated per entry: one bad window cannot discard
+     already-valid windows.
+   - Arbitrary-precision numeric values that can overflow float conversion are
+     explicit malformed cases: huge `resetsAt` values skip only that window and
+     huge `expiresAt` values fail open to no token.
+
+4. **Claude Keychain example contract**
+   - The example reads the macOS Keychain via the exact argv
+     `security find-generic-password -s "Claude Code-credentials" -w`, with a
+     bounded timeout and no shell.
+   - Missing, expired, malformed, denied, timed out, non-JSON, bad HTTP, broken
+     stdout, and generic provider failures all fail open to an empty official
+     fixture and return `0` where `main()` owns the boundary.
+   - The fail-open boundary must catch any `Exception` subtype, not an enumerated
+     list of known provider or HTTP errors. Tests should inject a custom
+     `Exception` subclass to guard against accidental re-narrowing.
+   - No access token, refresh token, raw credential JSON, account identity, or raw
+     provider response body appears in stdout, stderr, fixture JSON, ledgers, or
+     relay text. Tests should include secrets in failing inputs to prove absence.
+   - At least one enabled end-to-end snapshot must include a secret-bearing
+     synthetic provider payload and then assert the secret is absent from the
+     normalized snapshot, stdout/stderr, and the append-only usage ledger. Disabled
+     adapters producing no ledger lines are a separate invariant, not a leak proof.
+   - Non-macOS has no plaintext credential-file default; any file path is an
+     explicit operator/test override.
+
+5. **Adapter identity and runner contract**
+   - `cli_json` adapters require argv arrays, not shell strings.
+   - Optional `sha256` identity pins are checked for enabled command adapters and
+     fail closed on mismatch.
+   - Adapter stdout size, timeout, and stderr diagnostics remain bounded; failure
+     records are diagnostic-only and credential-free.
+
+6. **No-network test harness**
+   - Slice 4 tests must run offline and deterministically.
+   - Provider responses, credential blobs, and JSONL logs are fabricated fixtures.
+   - Any test that exercises network-capable code must inject a fake fetcher or
+     fake subprocess runner; it must not call the real provider endpoint.
+   - Tests use fixed clocks for `captured_at` / reset assertions; no wall-clock
+     or `Date` value is part of the oracle.
+   - Fabricated fixtures use synthetic placeholders only and must pass
+     `doctor --hygiene-only --lint` before merge because these files land in the
+     public repository.
+
+Coverage note for `codex-jsonl-scan`:
+
+- The active Codex source is already pinned by Phase-3 tests rather than
+  duplicated in Slice 4: version-tolerant Codex token extraction, content-nested
+  `usage` ignored, raw prompt content absent from stdout and ledger, stale-mtime
+  skip, disabled scan inertness, candidate-enumeration cap, and wall-clock
+  deadline cap. Slice 4 should cite and keep those tests green; add only missing
+  assertions if a future review identifies a gap.
 
 ### Acceptance criteria (Phase 4)
 
