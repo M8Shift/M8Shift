@@ -7738,7 +7738,8 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(first.returncode, 0, first.stderr)
         created = json.loads(first.stdout)["created"]
         self.assertIn(".m8shift/usage/adapters.json", created)
-        self.assertIn(".m8shift/usage/fixtures/codex.json", created)
+        self.assertNotIn(".m8shift/usage/fixtures/codex.json", created)
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "usage", "fixtures")))
         path = os.path.join(self.d, self.ADAPTERS_REL)
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)

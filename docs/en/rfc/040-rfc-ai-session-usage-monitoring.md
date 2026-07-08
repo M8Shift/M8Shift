@@ -815,16 +815,20 @@ lands with PR B): `--warn-threshold` (default `0.80`), `--limit-threshold`
 `status` reads that ledger and writes nothing.
 
 `usage init` scaffolds `.m8shift/usage/adapters.json`
-(schema `m8shift.usage.adapters.v1`) with **disabled** example entries for
-`claude` (`kind: cli_json`, argv-array `command`) and `codex` (`kind: fixture`,
-`fixture_path`), plus a synthetic sample fixture under
-`.m8shift/usage/fixtures/codex.json`. It is idempotent and never clobbers
-existing files. PR A adapter entries carry exactly: `name`, `agent`,
-optional `provider`, `kind` (`cli_json` | `fixture`), `command` (argv array of
-strings — a shell string is a config **error**), `fixture_path` (fixture kind),
-`timeout_s` (number, bounded `1..60`, default `10`), `enabled` (bool, default
-`false`), optional `sha256` (identity pin for `command[0]`; mismatch fails
-closed), and optional `//` comments. Unknown keys are **warnings**.
+(schema `m8shift.usage.adapters.v1`) with **disabled** example entries for the
+four Phase-4 sources: `claude-jsonl-scan`, `claude-quota-keychain`,
+`codex-jsonl-scan`, and `codex-ratelimits`. The JSONL scans are local
+aggregate-only spent sources; the quota/rate-limit entries are disabled
+`cli_json` placeholders that must be edited by the operator before use.
+`usage init` also writes `.m8shift/usage/budget.example.json`; it does not write
+orphan fixture files. It is idempotent and never clobbers existing files. PR A
+adapter entries carry exactly: `name`, `agent`, optional `provider`, `kind`
+(`cli_json` | `fixture` | `jsonl_scan`), `command` (argv array of strings — a
+shell string is a config **error**), `fixture_path` (fixture kind), `scan_roots`
+(`jsonl_scan` kind), `timeout_s` (number, bounded `1..60`, default `10`),
+`enabled` (bool, default `false`), optional `sha256` (identity pin for
+`command[0]`; mismatch fails closed), and optional `//` comments. Unknown keys
+are **warnings**.
 `adapters check` probes only **enabled** adapters, with a bounded argv-only
 subprocess run (never a shell string, never network access by M8Shift itself);
 adapter failures are appended to `.m8shift/runtime/usage-adapter-errors.jsonl`,

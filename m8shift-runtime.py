@@ -5606,13 +5606,9 @@ def default_usage_budget_example():
 
 
 def cmd_usage_init(args):
-    os.makedirs(USAGE_FIXTURES_DIR, exist_ok=True)
     created = []
     if write_json_if_missing(USAGE_ADAPTERS, default_usage_adapters()):
         created.append(".m8shift/usage/adapters.json")
-    codex_fixture = os.path.join(USAGE_FIXTURES_DIR, "codex.json")
-    if write_json_if_missing(codex_fixture, sample_usage_fixture("codex")):
-        created.append(".m8shift/usage/fixtures/codex.json")
     if write_json_if_missing(USAGE_BUDGET_EXAMPLE, default_usage_budget_example()):
         created.append(".m8shift/usage/budget.example.json")
     ensure_runtime_gitignore()
