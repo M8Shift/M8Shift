@@ -13,6 +13,8 @@ Standard library only.
 """
 import datetime as dt
 import hashlib
+import http.client
+import io
 import json
 import os
 import ast
@@ -8467,10 +8469,11 @@ class TestRFC040UsageJsonlScanBounds(unittest.TestCase):
 
 
 class TestRFC040UsageQuota(CLIBase):
-    """RFC 040 Phase 3 Slice 3 — GATING remaining-quota via a ratio-native source.
+    """RFC 040 Phase 3/4 — GATING remaining-quota via a ratio-native source.
     A quota fixture carrying per-window `used_ratio` (a percent, never tokens)
     drives decision_ratio directly and gates cooldown; the shipped example OAuth
-    adapter maps the endpoint's remainingPercent to that shape and is fail-open."""
+    adapter maps the endpoint's remainingPercent to that shape, reads macOS
+    Keychain by default only after opt-in, and is fail-open."""
 
     ADAPTERS_REL = os.path.join(".m8shift", "usage", "adapters.json")
     FIXTURE_REL = os.path.join(".m8shift", "usage", "fixtures", "quota.json")
@@ -8493,7 +8496,7 @@ class TestRFC040UsageQuota(CLIBase):
     def snapshot_for(self, doc):
         for rel, payload in ((self.FIXTURE_REL, doc), (self.ADAPTERS_REL, {
                 "schema": "m8shift.usage.adapters.v1", "adapters": [{
-                    "name": "claude-quota", "agent": "claude", "kind": "fixture",
+                    "name": "claude-quota-synthetic", "agent": "claude", "kind": "fixture",
                     "fixture_path": self.FIXTURE_REL, "timeout_s": 5, "enabled": True}]})):
             path = os.path.join(self.d, rel)
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -8548,6 +8551,20 @@ class TestRFC040UsageQuota(CLIBase):
                 "2026-01-01T00:00:00Z")
             self.assertEqual(fx["windows"], [], bad)             # window dropped, stays fail-open
 
+    def test_example_build_fixture_keeps_good_window_when_one_window_is_bad(self):
+        mod = self._example()
+        fx = mod.build_fixture({"windows": [
+            {"kind": "five_hour", "remainingPercent": 25,
+             "resetsAt": "2026-01-01T05:00:00Z"},
+            {"kind": "five_hour", "remainingPercent": 50, "resetsAt": 10 ** 400},
+        ]}, "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["windows"], [{
+            "kind": "session_5h",
+            "used_ratio": 0.75,
+            "resets_at": "2026-01-01T05:00:00Z",
+        }])
+        self.assertEqual(mod.build_fixture({"windows": 5}, "2026-01-01T00:00:00Z")["windows"], [])
+
     def _run_example(self, creds_text):
         cred = os.path.join(self.d, "creds.json")
         with open(cred, "w", encoding="utf-8") as fh:
@@ -8577,6 +8594,135 @@ class TestRFC040UsageQuota(CLIBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         fx = json.loads(r.stdout)
         self.assertEqual(fx["windows"], [])
+
+    def test_example_keychain_default_uses_security_argv_and_expiry(self):
+        mod = self._example()
+        calls = []
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps({"claudeAiOauth": {
+                "accessToken": "SECRET_ACCESS_TOKEN",
+                "expiresAt": 2_000,
+                "refreshToken": "SECRET_REFRESH_TOKEN",
+            }})
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return Result()
+
+        token = mod._load_access_token(env={}, system="Darwin", run=fake_run, now_ms=1_000)
+        self.assertEqual(token, "SECRET_ACCESS_TOKEN")
+        self.assertEqual(calls[0][0], ["security", "find-generic-password", "-s",
+                                       "Claude Code-credentials", "-w"])
+        self.assertTrue(calls[0][1]["capture_output"])
+        self.assertTrue(calls[0][1]["text"])
+        self.assertFalse(calls[0][1]["check"])
+        self.assertLessEqual(calls[0][1]["timeout"], 5)
+
+    def test_example_keychain_fail_opens_on_acl_timeout_bad_json_and_expiry(self):
+        mod = self._example()
+
+        class Result:
+            def __init__(self, returncode=0, stdout=""):
+                self.returncode = returncode
+                self.stdout = stdout
+
+        def token_for(run):
+            return mod._load_access_token(env={}, system="Darwin", run=run, now_ms=1_000)
+
+        self.assertIsNone(token_for(lambda *a, **k: Result(returncode=1, stdout="SECRET")))
+        self.assertIsNone(token_for(lambda *a, **k: Result(stdout="not-json SECRET")))
+        self.assertIsNone(token_for(lambda *a, **k: Result(stdout=json.dumps({"other": {}}))))
+        self.assertIsNone(token_for(lambda *a, **k: Result(stdout=json.dumps({
+            "claudeAiOauth": {"accessToken": "SECRET", "expiresAt": 999}}))))
+
+        def timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout"))
+
+        self.assertIsNone(token_for(timeout_run))
+
+    def test_example_keychain_expiry_overflow_returns_none(self):
+        mod = self._example()
+        blob = json.dumps({"claudeAiOauth": {
+            "accessToken": "SECRET_ACCESS_TOKEN",
+            "expiresAt": 10 ** 400,
+        }})
+        self.assertIsNone(mod._parse_credentials_blob(blob, now_ms=1_000))
+
+        class Result:
+            returncode = 0
+            stdout = blob
+
+        self.assertIsNone(mod._load_access_token(
+            env={}, system="Darwin", run=lambda *a, **k: Result(), now_ms=1_000))
+
+    def test_example_has_no_plaintext_default_on_non_macos(self):
+        mod = self._example()
+        called = []
+
+        def fake_run(*args, **kwargs):
+            called.append((args, kwargs))
+            raise AssertionError("security must not run on non-macOS default")
+
+        token = mod._load_access_token(env={}, system="Linux", run=fake_run, now_ms=1_000)
+        self.assertIsNone(token)
+        self.assertEqual(called, [])
+
+    def test_example_never_emits_token_credential_or_identity(self):
+        mod = self._example()
+        out = io.StringIO()
+        secret = "SECRET_ACCESS_TOKEN_SHOULD_NOT_LEAK"
+        identity = "operator@example.invalid"
+
+        def token_loader(**kwargs):
+            return secret
+
+        def fetch(token):
+            self.assertEqual(token, secret)
+            return {"account": {"email": identity}, "raw": secret, "windows": [
+                {"kind": "five_hour", "remainingPercent": 50,
+                 "resetsAt": "2026-01-01T05:00:00Z"}]}
+
+        self.assertEqual(mod.main(env={}, fetch=fetch, token_loader=token_loader, out=out), 0)
+        text = out.getvalue()
+        self.assertNotIn(secret, text)
+        self.assertNotIn(identity, text)
+        fx = json.loads(text)
+        self.assertEqual(fx["windows"][0]["used_ratio"], 0.5)
+        self.assertNotIn("account", fx)
+
+    def test_example_main_fail_opens_on_http_and_generic_exceptions(self):
+        mod = self._example()
+        secret = "SECRET_ACCESS_TOKEN_SHOULD_NOT_LEAK"
+
+        def token_loader(**kwargs):
+            return secret
+
+        for exc in (http.client.IncompleteRead(b"partial"), Exception("boom " + secret)):
+            out = io.StringIO()
+
+            def fetch(_token, exc=exc):
+                raise exc
+
+            rc = mod.main(env={}, fetch=fetch, token_loader=token_loader, out=out)
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertNotIn(secret, text)
+            fx = json.loads(text)
+            self.assertEqual(fx["provenance"], "official")
+            self.assertEqual(fx["windows"], [])
+
+    def test_example_main_suppresses_broken_stdout_and_returns_zero(self):
+        mod = self._example()
+
+        class BrokenOut:
+            def write(self, _text):
+                raise BrokenPipeError()
+
+        rc = mod.main(env={}, fetch=lambda _token: {}, token_loader=lambda **kwargs: None,
+                      out=BrokenOut())
+        self.assertEqual(rc, 0)
 
 
 class TestRFC040UsageBudget(CLIBase):
