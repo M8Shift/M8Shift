@@ -1,6 +1,6 @@
 # RFC 052 — Project compartmentalization and data-hygiene gates
 
-Status: draft (rev 2 — folds in Codex adversarial review, turn 374)
+Status: draft (rev 3 — folds in Codex adversarial review, turn 374)
 Target: v3.56.0 candidate (PR-staged; see §PR staging)
 Related issue: #101 (cloisonnement), #100 (usage adapters, separate → RFC 040 Phase 4), incident INC-2026-0708-M8SHIFT-CROSS-SHIFT-LEAK
 Owner: core relay (`doctor` hygiene lint) + generated agent-pack/anchors + optional `scripts/scrub-check.py` + agents-guide
@@ -122,4 +122,4 @@ Order: **PR 1 first**, then #100 (RFC 040 Phase 4), unless the operator prioriti
 
 ## Status / next
 
-Rev 2 addresses all 8 Codex findings + the four open questions. **Next: Codex quick re-check of rev 2; on confirm, implement PR1** exactly to the boundaries above (agent-pack stanza + floor marker + stale-anchor tests; `doctor --hygiene`/`--lint --hygiene`; anchors excluded; fixtures; NO session-binding code).
+Rev 3 addresses all 8 Codex findings + the four open questions. **Next: Codex quick re-check of rev 2; on confirm, implement PR1** exactly to the boundaries above (agent-pack stanza + floor marker + stale-anchor tests; `doctor --hygiene`/`--lint --hygiene`; anchors excluded; fixtures; NO session-binding code).

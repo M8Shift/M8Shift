@@ -10823,6 +10823,74 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertIn("90%", r.stdout)
 
 
+class TestRFC052Hygiene(CLIBase):
+    """RFC 052 (#101) PR1: compartmentalization stanza (C2) + `doctor --hygiene`
+    outbound path lint (C1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", *a], cwd=self.d, capture_output=True)
+
+    def _track(self, rel, body):
+        p = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        subprocess.run(["git", "add", rel], cwd=self.d, capture_output=True)
+
+    def _hyg(self, *extra):
+        r = self.cw("doctor", "--hygiene", "--json", *extra)
+        return r, json.loads(r.stdout)["findings"]
+
+    def test_c2_compartmentalization_in_floor_and_pack(self):
+        self.assertIn("Compartmentalization", cowork.STANZA_FLOOR_MARKERS)
+        with open(os.path.join(self.d, "M8SHIFT.agent-pack.md"), encoding="utf-8") as fh:
+            self.assertIn("Compartmentalization", fh.read())
+
+    def test_c1_real_home_path_fails_lint(self):
+        self._track("docs/x.md", "cwd /Users/realuser/Documents/Code/Secret/x\n")
+        r = self.cw("doctor", "--lint", "--hygiene", "--json")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        fp = [f for f in json.loads(r.stdout)["findings"]
+              if f["check"] == "hygiene.foreign_path" and f["severity"] == "warning"]
+        self.assertTrue(fp and fp[0]["path"] == "docs/x.md", r.stdout)
+
+    def test_c1_placeholders_pass_lint(self):
+        self._track("docs/x.md",
+                    "use /Users/<name>/code, /Users/.../p, /path/to/project, ~/code\n")
+        r = self.cw("doctor", "--lint", "--hygiene", "--json")
+        fp = [f for f in json.loads(r.stdout)["findings"]
+              if f["check"] == "hygiene.foreign_path" and f["severity"] == "warning"]
+        self.assertEqual(fp, [], r.stdout)
+
+    def test_c1_examples_scanned_anchors_and_src_excluded(self):
+        self._track("examples/e.py", "HOME = '/home/realuser/app'\n")
+        self._track("CLAUDE.md", "cwd /Users/realuser/anchor-is-ok\n")
+        self._track("src/code.py", "p = '/Users/realuser/not-publishable'\n")
+        _, findings = self._hyg("--severity-min", "info")
+        hits = {f["path"] for f in findings if f["check"] == "hygiene.foreign_path"}
+        self.assertIn("examples/e.py", hits)     # examples/** scanned
+        self.assertNotIn("CLAUDE.md", hits)      # anchors excluded
+        self.assertNotIn("src/code.py", hits)    # non-publishable trees not scanned
+
+    def test_c1_binary_file_skipped_not_crash(self):
+        p = os.path.join(self.d, "docs", "logo.md")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(b"\x00\x01\x02/Users/realuser/x\x00")
+        subprocess.run(["git", "add", "docs/logo.md"], cwd=self.d, capture_output=True)
+        r = self.cw("doctor", "--hygiene", "--json", "--severity-min", "info")
+        findings = json.loads(r.stdout)["findings"]
+        self.assertIn("hygiene.unreadable_binary_skipped",
+                      [f["check"] for f in findings])
+        self.assertFalse(any(f["check"] == "hygiene.foreign_path"
+                             and f["severity"] == "warning" and f["path"] == "docs/logo.md"
+                             for f in findings))
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")
