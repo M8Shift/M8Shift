@@ -12,6 +12,8 @@ Verified local protocol shape:
   - transport: newline-delimited JSON-RPC on stdio
   - required first call: `initialize`
   - rate-limit call: `account/rateLimits/read`
+  - honesty note: this read uses the app-server experimental API surface, so the
+    shape may drift; fail-open behavior is part of the contract.
 
 Honesty / safety:
   - provider `usedPercent` is emitted as `used_ratio`, never as token counts;
@@ -158,18 +160,21 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
     stdin = json.dumps(initialize, separators=(",", ":")) + "\n" \
         + json.dumps(read_limits, separators=(",", ":")) + "\n"
     proc = None
-    try:
-        proc = popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                     stderr=subprocess.PIPE, text=True)
-        stdout, _stderr = proc.communicate(input=stdin, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
+    def kill_reap():
         if proc is not None:
             with contextlib.suppress(Exception):
                 proc.kill()
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=1)
+    try:
+        proc = popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        stdout, _stderr = proc.communicate(input=stdin, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        kill_reap()
         return None
     except Exception:
+        kill_reap()
         return None
     for line in (stdout or "").splitlines():
         try:
@@ -189,7 +194,7 @@ def main(out=None, now=None, read_limits=None):
         fixture = build_fixture(payload, now_iso) if payload is not None else _empty_fixture(now_iso)
     except Exception:
         fixture = _empty_fixture(now_iso)
-    with contextlib.suppress(BrokenPipeError, OSError):
+    with contextlib.suppress(BrokenPipeError, OSError, ValueError):
         json.dump(fixture, out)
         out.write("\n")
     return 0

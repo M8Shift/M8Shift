@@ -8806,6 +8806,8 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         bucket = {
             "limitId": "codex",
             "limitName": "SECRET_BUCKET_NAME_SHOULD_NOT_LEAK",
+            "planType": "SECRET_BUCKET_PLAN_SHOULD_NOT_LEAK",
+            "credits": {"balance": "SECRET_BUCKET_CREDITS_SHOULD_NOT_LEAK"},
             "primary": {"usedPercent": bucket_used, "windowDurationMins": 300,
                         "resetsAt": resets_at},
             "secondary": {"usedPercent": 40, "windowDurationMins": 10080,
@@ -8824,11 +8826,16 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertEqual(fx["provenance"], "official")
         self.assertIsNone(fx["used_tokens"])
         self.assertIsNone(fx["limit_tokens"])
+        self.assertEqual(set(fx), {
+            "schema", "agent", "provenance", "captured_at",
+            "used_tokens", "limit_tokens", "windows",
+        })
         by = {w["kind"]: w for w in fx["windows"]}
         self.assertEqual(by["session_5h"]["used_ratio"], 0.65)   # bucket wins over top 0.80
         self.assertEqual(by["weekly"]["used_ratio"], 0.4)
         self.assertEqual(by["session_5h"]["resets_at"], "2027-03-06T07:20:00Z")
         for win in fx["windows"]:
+            self.assertEqual(set(win), {"kind", "used_ratio", "resets_at"})
             self.assertNotIn("used", win)
             self.assertNotIn("limit", win)
 
@@ -8900,6 +8907,8 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertIs(calls["kwargs"]["stdout"], subprocess.PIPE)
         self.assertIs(calls["kwargs"]["stderr"], subprocess.PIPE)
         self.assertTrue(calls["kwargs"]["text"])
+        self.assertEqual(calls["kwargs"]["encoding"], "utf-8")
+        self.assertEqual(calls["kwargs"]["errors"], "replace")
 
     def test_call_app_server_fail_opens_on_timeout_and_non_json(self):
         mod = self._example()
@@ -8921,6 +8930,20 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
 
         self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: BadJsonProcess()))
 
+    def test_call_app_server_kills_child_on_generic_communicate_error(self):
+        mod = self._example()
+        killed = []
+
+        class ErrorProcess:
+            def communicate(self, input=None, timeout=None):
+                raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")
+
+            def kill(self):
+                killed.append(True)
+
+        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: ErrorProcess()))
+        self.assertEqual(killed, [True])
+
     def test_main_never_emits_raw_response_identity_credits_or_stderr(self):
         mod = self._example()
         out = io.StringIO()
@@ -8931,10 +8954,18 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         text = out.getvalue()
         for forbidden in (secret, "SECRET_BUCKET_NAME_SHOULD_NOT_LEAK",
                           "SECRET_PLAN_SHOULD_NOT_LEAK",
-                          "SECRET_CREDITS_SHOULD_NOT_LEAK"):
+                          "SECRET_CREDITS_SHOULD_NOT_LEAK",
+                          "SECRET_BUCKET_PLAN_SHOULD_NOT_LEAK",
+                          "SECRET_BUCKET_CREDITS_SHOULD_NOT_LEAK"):
             self.assertNotIn(forbidden, text)
         fx = json.loads(text)
         self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(set(fx), {
+            "schema", "agent", "provenance", "captured_at",
+            "used_tokens", "limit_tokens", "windows",
+        })
+        for win in fx["windows"]:
+            self.assertEqual(set(win), {"kind", "used_ratio", "resets_at"})
         self.assertEqual(fx["windows"][0]["kind"], "session_5h")
 
     def test_main_suppresses_broken_stdout_and_returns_zero(self):
@@ -8945,6 +8976,12 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
                 raise BrokenPipeError()
 
         self.assertEqual(mod.main(out=BrokenOut(), read_limits=lambda: None), 0)
+
+    def test_main_suppresses_closed_file_value_error_and_returns_zero(self):
+        mod = self._example()
+        out = io.StringIO()
+        out.close()
+        self.assertEqual(mod.main(out=out, read_limits=lambda: None), 0)
 
 
 class TestRFC040UsageBudget(CLIBase):

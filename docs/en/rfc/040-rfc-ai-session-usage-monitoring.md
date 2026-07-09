@@ -186,6 +186,8 @@ Recommended sources, in priority order:
    The adapter must send `initialize` before `account/rateLimits/read`; calling
    the rate-limit method first returns `Not initialized`. The transport is
    newline-delimited JSON-RPC on stdio, not LSP Content-Length framing.
+   The read relies on the app-server experimental API surface, so the response
+   shape may drift; the adapter must fail open if that happens.
 
    Privacy rule: the adapter emits only normalized aggregate ratios and reset
    instants. It must not emit account identity, plan type, credits, limit names,
