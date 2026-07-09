@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**RFC 040 Phase 4 Slice 3 — Codex rate-limit adapter.** The disabled
+`codex-ratelimits` scaffold now points to a shipped reference adapter
+(`examples/usage-adapters/codex-ratelimits.py`) for the verified local Codex CLI
+app-server protocol: newline-delimited JSON-RPC over `codex app-server --stdio`,
+with `initialize` before `account/rateLimits/read`. The adapter maps only known
+aggregate windows (`300` minutes → `session_5h`, `10080` minutes → `weekly`),
+emits provider `usedPercent` as `used_ratio`, fails open to an empty official
+fixture on every app-server/auth/schema error, and never emits account identity,
+credits, plan type, limit names, raw responses, or stderr.
+
 ## v3.56.0 — 2026-07-08
 
 Usage-provider adapters and project compartmentalization.
@@ -25,8 +37,8 @@ verified live.
 
 **RFC 052 PR1 — project compartmentalization and data hygiene (#101).** A new
 `doctor --hygiene` / `--hygiene-only` lint raw-reads tracked docs and examples for
-real home paths (`/Users/…`, `/home/…`, `C:\Users\…`) and flags them —
-placeholder-aware, so it never trips on its own `<name>` / `.../` examples.
+real home-directory paths and flags them — placeholder-aware, so it never trips on
+its own `<name>` / `.../` examples.
 High-confidence hits gate under `--lint`; advisory hits are informational; it runs
 without a relay. The agent-guidance floor gains a Compartmentalization rule: a fact
 learned in one shift keeps its identity there, and cross-project reference is

@@ -8775,6 +8775,215 @@ class TestRFC040UsageQuota(CLIBase):
         self.assertEqual(rc, 0)
 
 
+class TestRFC040CodexRateLimitsAdapter(CLIBase):
+    """RFC 040 Phase 4 Slice 3 — disabled Codex app-server rate-limit adapter.
+    It uses the verified local JSON-RPC shape, maps only aggregate rate-limit
+    percentages, and stays fail-open on every unexpected condition."""
+
+    EXAMPLE_REL = os.path.join("examples", "usage-adapters", "codex-ratelimits.py")
+
+    def _example(self):
+        import importlib.util
+        rp = os.path.join(REPO, self.EXAMPLE_REL)
+        spec = importlib.util.spec_from_file_location("codex_ratelimits", rp)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _rpc_response(*, top_used=80, bucket_used=65, resets_at=1_804_317_600,
+                      include_bucket=True):
+        top = {
+            "limitId": "codex",
+            "limitName": "SECRET_LIMIT_NAME_SHOULD_NOT_LEAK",
+            "planType": "SECRET_PLAN_SHOULD_NOT_LEAK",
+            "credits": {"balance": "SECRET_CREDITS_SHOULD_NOT_LEAK"},
+            "primary": {"usedPercent": top_used, "windowDurationMins": 300,
+                        "resetsAt": resets_at},
+            "secondary": {"usedPercent": 25, "windowDurationMins": 10080,
+                          "resetsAt": resets_at + 3600},
+        }
+        bucket = {
+            "limitId": "codex",
+            "limitName": "SECRET_BUCKET_NAME_SHOULD_NOT_LEAK",
+            "planType": "SECRET_BUCKET_PLAN_SHOULD_NOT_LEAK",
+            "credits": {"balance": "SECRET_BUCKET_CREDITS_SHOULD_NOT_LEAK"},
+            "primary": {"usedPercent": bucket_used, "windowDurationMins": 300,
+                        "resetsAt": resets_at},
+            "secondary": {"usedPercent": 40, "windowDurationMins": 10080,
+                          "resetsAt": resets_at + 3600},
+        }
+        result = {"rateLimits": top}
+        if include_bucket:
+            result["rateLimitsByLimitId"] = {"codex": bucket, "other": top}
+        return {"id": 2, "result": result}
+
+    def test_build_fixture_prefers_codex_bucket_and_maps_known_windows(self):
+        mod = self._example()
+        fx = mod.build_fixture(self._rpc_response(), "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["schema"], "m8shift.usage.fixture.v1")
+        self.assertEqual(fx["agent"], "codex")
+        self.assertEqual(fx["provenance"], "official")
+        self.assertIsNone(fx["used_tokens"])
+        self.assertIsNone(fx["limit_tokens"])
+        self.assertEqual(set(fx), {
+            "schema", "agent", "provenance", "captured_at",
+            "used_tokens", "limit_tokens", "windows",
+        })
+        by = {w["kind"]: w for w in fx["windows"]}
+        self.assertEqual(by["session_5h"]["used_ratio"], 0.65)   # bucket wins over top 0.80
+        self.assertEqual(by["weekly"]["used_ratio"], 0.4)
+        self.assertEqual(by["session_5h"]["resets_at"], "2027-03-06T07:20:00Z")
+        for win in fx["windows"]:
+            self.assertEqual(set(win), {"kind", "used_ratio", "resets_at"})
+            self.assertNotIn("used", win)
+            self.assertNotIn("limit", win)
+
+    def test_build_fixture_falls_back_to_top_level_rate_limits(self):
+        mod = self._example()
+        fx = mod.build_fixture(self._rpc_response(include_bucket=False),
+                               "2026-01-01T00:00:00Z")
+        by = {w["kind"]: w for w in fx["windows"]}
+        self.assertEqual(by["session_5h"]["used_ratio"], 0.8)
+        self.assertEqual(by["weekly"]["used_ratio"], 0.25)
+
+    def test_build_fixture_clamps_percent_and_skips_unknown_or_invalid_windows(self):
+        mod = self._example()
+        payload = {"id": 2, "result": {"rateLimits": {
+            "primary": {"usedPercent": 150, "windowDurationMins": 300},
+            "secondary": {"usedPercent": -20, "windowDurationMins": 10080},
+        }}}
+        fx = mod.build_fixture(payload, "2026-01-01T00:00:00Z")
+        self.assertEqual([w["used_ratio"] for w in fx["windows"]], [1.0, 0.0])
+        bad_payload = {"id": 2, "result": {"rateLimits": {
+            "primary": {"usedPercent": 50, "windowDurationMins": 60},
+            "secondary": {"usedPercent": float("nan"), "windowDurationMins": 10080},
+        }}}
+        self.assertEqual(mod.build_fixture(bad_payload, "2026-01-01T00:00:00Z")["windows"], [])
+
+    def test_build_fixture_is_fail_open_on_rpc_errors_and_bad_shapes(self):
+        mod = self._example()
+        for payload in (
+            {"id": 2, "error": {"message": "Not initialized"}},
+            {"id": 2, "result": {}},
+            {"result": {"rateLimits": []}},
+            [],
+            None,
+        ):
+            fx = mod.build_fixture(payload, "2026-01-01T00:00:00Z")
+            self.assertEqual(fx["provenance"], "official")
+            self.assertEqual(fx["windows"], [])
+
+    def test_call_app_server_sends_initialize_before_rate_limit_read(self):
+        mod = self._example()
+        calls = {}
+
+        class FakeProcess:
+            def communicate(self, input=None, timeout=None):
+                calls["input"] = input
+                calls["timeout"] = timeout
+                response = "\n".join([
+                    json.dumps({"id": 1, "result": {}}),
+                    json.dumps(self_response),
+                ]) + "\n"
+                return response, "SECRET_STDERR_SHOULD_NOT_LEAK"
+
+        self_response = self._rpc_response(include_bucket=False)
+
+        def fake_popen(argv, **kwargs):
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+            return FakeProcess()
+
+        payload = mod._call_app_server(popen=fake_popen, timeout_s=3)
+        self.assertEqual(payload, self_response)
+        sent = [json.loads(line) for line in calls["input"].splitlines()]
+        self.assertEqual(sent[0]["method"], "initialize")
+        self.assertEqual(sent[1]["method"], "account/rateLimits/read")
+        self.assertIsNone(sent[1]["params"])
+        self.assertEqual(calls["argv"], ["codex", "app-server", "--stdio"])
+        self.assertEqual(calls["timeout"], 3)
+        self.assertIs(calls["kwargs"]["stdin"], subprocess.PIPE)
+        self.assertIs(calls["kwargs"]["stdout"], subprocess.PIPE)
+        self.assertIs(calls["kwargs"]["stderr"], subprocess.PIPE)
+        self.assertTrue(calls["kwargs"]["text"])
+        self.assertEqual(calls["kwargs"]["encoding"], "utf-8")
+        self.assertEqual(calls["kwargs"]["errors"], "replace")
+
+    def test_call_app_server_fail_opens_on_timeout_and_non_json(self):
+        mod = self._example()
+        killed = []
+
+        class TimeoutProcess:
+            def communicate(self, input=None, timeout=None):
+                raise subprocess.TimeoutExpired(["codex"], timeout)
+
+            def kill(self):
+                killed.append(True)
+
+        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: TimeoutProcess()))
+        self.assertEqual(killed, [True])
+
+        class BadJsonProcess:
+            def communicate(self, input=None, timeout=None):
+                return "not-json\n" + json.dumps({"id": 1, "result": {}}) + "\n", ""
+
+        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: BadJsonProcess()))
+
+    def test_call_app_server_kills_child_on_generic_communicate_error(self):
+        mod = self._example()
+        killed = []
+
+        class ErrorProcess:
+            def communicate(self, input=None, timeout=None):
+                raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")
+
+            def kill(self):
+                killed.append(True)
+
+        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: ErrorProcess()))
+        self.assertEqual(killed, [True])
+
+    def test_main_never_emits_raw_response_identity_credits_or_stderr(self):
+        mod = self._example()
+        out = io.StringIO()
+        fixed_now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        secret = "SECRET_LIMIT_NAME_SHOULD_NOT_LEAK"
+        self.assertEqual(mod.main(out=out, now=fixed_now,
+                                  read_limits=lambda: self._rpc_response()), 0)
+        text = out.getvalue()
+        for forbidden in (secret, "SECRET_BUCKET_NAME_SHOULD_NOT_LEAK",
+                          "SECRET_PLAN_SHOULD_NOT_LEAK",
+                          "SECRET_CREDITS_SHOULD_NOT_LEAK",
+                          "SECRET_BUCKET_PLAN_SHOULD_NOT_LEAK",
+                          "SECRET_BUCKET_CREDITS_SHOULD_NOT_LEAK"):
+            self.assertNotIn(forbidden, text)
+        fx = json.loads(text)
+        self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(set(fx), {
+            "schema", "agent", "provenance", "captured_at",
+            "used_tokens", "limit_tokens", "windows",
+        })
+        for win in fx["windows"]:
+            self.assertEqual(set(win), {"kind", "used_ratio", "resets_at"})
+        self.assertEqual(fx["windows"][0]["kind"], "session_5h")
+
+    def test_main_suppresses_broken_stdout_and_returns_zero(self):
+        mod = self._example()
+
+        class BrokenOut:
+            def write(self, _text):
+                raise BrokenPipeError()
+
+        self.assertEqual(mod.main(out=BrokenOut(), read_limits=lambda: None), 0)
+
+    def test_main_suppresses_closed_file_value_error_and_returns_zero(self):
+        mod = self._example()
+        out = io.StringIO()
+        out.close()
+        self.assertEqual(mod.main(out=out, read_limits=lambda: None), 0)
+
+
 class TestRFC040UsageBudget(CLIBase):
     """RFC 040 Phase 3 Slice 4 — the OPT-IN operator budget bridge. A declared
     per-window cap supplies a missing `limit` so a SPENT-only source can gate — as

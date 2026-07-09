@@ -4768,9 +4768,11 @@ def default_usage_adapters():
                 "enabled": False,
             },
             {
-                "//": ("Disabled TODO scaffold: official Codex rate-limit RPC shape is "
-                       "unverified. Verify against a live Codex before enabling or replacing "
-                       "this placeholder command. Fail-open adapter planned for a later slice."),
+                "//": ("Disabled by default: Codex CLI app-server rate-limit adapter. "
+                       "When enabled, the referenced script talks to the local Codex "
+                       "app-server over stdio, calls initialize then account/rateLimits/read, "
+                       "and emits aggregate m8shift.usage.fixture.v1 ratios only. M8Shift "
+                       "never talks to provider APIs itself."),
                 "name": "codex-ratelimits",
                 "agent": "codex",
                 "provider": "openai-codex",
