@@ -163,29 +163,33 @@ Implementation note: M8Shift should prefer official/fresh `rate_limits` provenan
 
 Recommended sources, in priority order:
 
-1. Native Codex CLI RPC, following the CodexBar-documented approach:
+1. Native Codex CLI app-server RPC:
 
    ```bash
-   codex -s read-only -a untrusted app-server
+   codex app-server --stdio
    ```
 
-   JSON-RPC methods documented by CodexBar:
+   Verified JSON-RPC sequence:
 
    ```text
    initialize
-   account/read
    account/rateLimits/read
    ```
 
    Expected useful data:
 
    ```text
-   primary_window
-   secondary_window
-   reset timestamps
-   credits snapshot
-   account identity
+   primary usedPercent + reset timestamp
+   secondary usedPercent + reset timestamp
    ```
+
+   The adapter must send `initialize` before `account/rateLimits/read`; calling
+   the rate-limit method first returns `Not initialized`. The transport is
+   newline-delimited JSON-RPC on stdio, not LSP Content-Length framing.
+
+   Privacy rule: the adapter emits only normalized aggregate ratios and reset
+   instants. It must not emit account identity, plan type, credits, limit names,
+   provider bucket names, raw response bodies, or app-server stderr.
 
 2. CodexBar CLI, if installed and if it exposes a stable machine-readable usage command on the local platform.
 
@@ -464,9 +468,9 @@ Example:
       "name": "codex-cli-rpc",
       "agent": "codex",
       "provider": "openai-codex",
-      "kind": "codex_app_server_rpc",
-      "command": ["codex", "-s", "read-only", "-a", "untrusted", "app-server"],
-      "methods": ["initialize", "account/read", "account/rateLimits/read"],
+      "kind": "cli_json",
+      "command": ["python3", "examples/usage-adapters/codex-ratelimits.py"],
+      "methods": ["initialize", "account/rateLimits/read"],
       "timeout_seconds": 15,
       "failure_policy": "warn_open",
       "provenance_preference": ["official", "local_estimate"]
@@ -1318,14 +1322,15 @@ Phase 2 may ship a conservative reader with two modes:
    exports. This produces `historical_estimate` snapshots for per-agent token and
    cost reports but does not gate usage cooldowns unless an operator explicitly opts
    into `fail_closed` or threshold use.
-2. **Live gating mode** through the Codex CLI read-only app-server RPC
-   (`initialize`, `account/read`, `account/rateLimits/read`) when that surface is
+2. **Live gating mode** through the Codex CLI local app-server RPC
+   (`initialize`, `account/rateLimits/read`) when that surface is
    available and identity-pinned. This may produce `official` or `local_estimate`
    windows suitable for `guard`.
 
-Phase 6 promotes the native Codex reader once the live RPC contract has stable
-fixtures. Until then, Codex historical snapshots are useful for the operator's
-token-consumption study but should not overclaim live rate-limit truth.
+Phase 4 Slice 3 ships a disabled reference adapter for the verified
+`codex app-server --stdio` shape. Codex historical snapshots remain useful for
+the operator's token-consumption study but should not overclaim live rate-limit
+truth.
 
 ### Resolved open questions for Phase 2/3
 
@@ -1405,16 +1410,28 @@ m8shift-runtime.py usage wait <agent>
 
 ### Phase 6 — native Codex adapter
 
-Implement direct Codex CLI RPC adapter:
+Status: implemented as a disabled reference adapter in Phase 4 Slice 3.
+
+Verified direct Codex CLI RPC adapter:
 
 ```text
-codex -s read-only -a untrusted app-server
+codex app-server --stdio
 initialize
-account/read
 account/rateLimits/read
 ```
 
-This avoids requiring CodexBar for live gating while preserving CodexBar as the implementation reference.
+Mapping:
+
+- read `result.rateLimitsByLimitId.codex` when present, else `result.rateLimits`;
+- map `primary.windowDurationMins=300` to `session_5h`;
+- map `secondary.windowDurationMins=10080` to `weekly`;
+- map provider `usedPercent` to M8Shift `used_ratio` (`usedPercent / 100`);
+- convert Unix-second `resetsAt` to UTC ISO;
+- skip unknown durations or malformed windows;
+- fail open to an empty official fixture on every app-server/auth/schema error.
+
+This avoids requiring CodexBar for live gating while preserving CodexBar as the
+original implementation reference.
 
 ---
 
@@ -1820,7 +1837,7 @@ core relay mutations beyond the existing `cooldown`/runtime contract.
       "provider": "openai-codex",
       "kind": "cli_json",
       "enabled": false,
-      "//": "TODO: official Codex rate-limit RPC shape is unverified; verify before enabling",
+      "//": "Disabled by default: verified local Codex app-server rate-limit adapter; enable only after operator review",
       "command": ["python3", "examples/usage-adapters/codex-ratelimits.py"],
       "timeout_s": 15,
       "failure_policy": "warn_open",
