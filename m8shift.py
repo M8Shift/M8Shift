@@ -6177,7 +6177,9 @@ def cmd_doctor(args):
             contracts=getattr(args, "contracts", False),
             update_source=getattr(args, "source", "") or "",
             install_report=install_report,
-            hygiene=getattr(args, "hygiene", False),
+            # --hygiene-anchors implies the hygiene pass (Codex review 1: the
+            # flag alone silently collected nothing in the full doctor path).
+            hygiene=getattr(args, "hygiene", False) or hygiene_anchors,
             hygiene_verbose=hygiene_verbose,
             hygiene_anchors=hygiene_anchors,
         )
@@ -6216,7 +6218,8 @@ def cmd_doctor(args):
     # higher false-positive risk than the path lint, so it is advisory-by-default
     # even in lint mode. Everything else gates exactly as before.
     enforce = os.environ.get(HYGIENE_SCRUB_ENFORCE_ENV, "") == "1"
-    advisory_checks = ("hygiene.denylist", "hygiene.anchor_foreign_path")
+    advisory_checks = ("hygiene.denylist", "hygiene.anchor_foreign_path",
+                       "hygiene.anchor_roots_unset")
     gating = [f for f in visible if f["check"] not in advisory_checks or enforce]
     return 1 if args.lint and gating else 0
 

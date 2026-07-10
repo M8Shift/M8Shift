@@ -11808,6 +11808,30 @@ class TestRFC052AnchorMode(CLIBase):
         self.assertEqual(len(hits), 1, r2.stdout)
         self.assertEqual(hits[0]["path"], "AGENTS.md")
 
+    def test_flag_alone_implies_hygiene_pass_in_full_doctor(self):
+        # Codex review 1: `doctor --hygiene-anchors` WITHOUT --hygiene/--hygiene-only
+        # silently collected nothing in the full doctor path.
+        self._anchor_append("leak /Users/foreignuser/x\n")
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["M8SHIFT_HYGIENE_ALLOWED_ROOTS"] = "/Users/me-own"
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--hygiene-anchors", "--json"],
+            cwd=self.d, capture_output=True, text=True, env=env)
+        hits = [f for f in json.loads(r.stdout)["findings"]
+                if f["check"] == "hygiene.anchor_foreign_path"]
+        self.assertEqual(len(hits), 1, r.stdout)
+
+    def test_unset_roots_info_never_gates_even_at_severity_min_info(self):
+        # Codex review 2: the anchor_roots_unset INFO notice flipped rc 1 under
+        # `--severity-min info --lint` — optional anchor mode must not block on
+        # its own missing opt-in config.
+        self._anchor_append("leak /Users/foreignuser/x\n")
+        r = self._run("--severity-min", "info", "--lint")    # no roots env
+        self.assertEqual(
+            len(self._findings(r, "hygiene.anchor_roots_unset")), 1, r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_without_flag_anchors_stay_excluded(self):
         self._anchor_append("leak /Users/foreignuser/x\n")
         env = dict(os.environ)
