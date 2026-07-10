@@ -111,7 +111,75 @@ identity within a session).
 - `m8shift-runtime.py` / `m8shift-context.py` / `m8shift-worktree.py` resolve the **same** relay
   namespace without confusing it with the runtime lane id (§5.1).
 
-## 9. Recommendation
+## 9. Session binding (amendment — RFC 052 PR4, design for review)
+
+Operator requirement (RFC 052): *a shift is a work session bound to ONE project; if the
+target is ambiguous, the tooling asks the operator instead of guessing; identifiers never
+cross shifts.* PR1 shipped the behavioral rule (agent-pack text). This amendment adds the
+**mechanics**, without implementing the full named-namespace resolver above (which stays
+future work). Everything below is **opt-in / triggered state**: with no binding and no
+ambiguity, behavior stays byte-identical.
+
+### 9.1 The ambiguity this closes
+
+`M8SHIFT_ROOT` (RFC 035) silently WINS over a cwd-local relay. A leftover
+`M8SHIFT_ROOT` from a previous shift (shell profile, reused terminal) plus a cd into
+another project that has its own `M8SHIFT.md` is exactly the recorded cross-shift leak
+vector: the agent writes into the WRONG project's relay without any signal.
+
+- **A1 — ambiguity refusal (write commands).** When the `M8SHIFT_ROOT`-designated relay
+  AND a cwd-local relay BOTH exist and differ, write commands (`claim`, `append`, `next`,
+  `request-turn`, `yield-turn`, `steer-turn`, `resume`, `pause`, `task add/done/drop`,
+  `remember`, …) **refuse before any write**, naming both candidates and asking the
+  operator to disambiguate (unset `M8SHIFT_ROOT`, or bind — A2). Read-only commands
+  (`status`, `doctor`, `log`, `peek`, …) keep working and surface both candidates.
+- **A2 — explicit binding.** `m8shift.py bind <agent>` records the agent's durable choice
+  in the TARGET relay: `.m8shift/bindings/<agent>.json` holding the resolved root
+  identity (realpath), the project name, `bound_at`, and a reserved `relay_session`
+  field (RFC 038 §3 names, default session today). Penless by design — you bind BEFORE
+  claiming (same class as `task add` / `remember`). `bind <agent> --show` and
+  `bind <agent> --clear` round it out. Binding is per-agent, per-relay, operator-visible.
+- **A3 — binding verification (fail-closed when present).** `may-i-write`, `claim` and
+  `append` verify an existing binding: if the binding's root identity does not match the
+  effective root, **refuse** with the bound-elsewhere path (redacted to basename +
+  hash if outside this project — a foreign project path must not leak into this relay's
+  terminal/logs, per RFC 052) and the rebind instruction. A binding that MATCHES one of
+  two ambiguous candidates **resolves A1** to the bound relay. No binding = today's
+  behavior.
+- **A4 — `sessions list` (read-only inventory).** Ships RFC 038 §5's command surface
+  early: enumerates the default relay plus any named session directories under
+  `.m8shift/sessions/` (forward-compatible with §3; today that is normally just the
+  default), each with its state and the agents bound to it. Operator inventory, never
+  routing authority (§7 Q3) — single-project only, never scans sibling projects
+  (RFC 052 C3: auto-discovery across projects would violate the rule it enforces).
+- **A5 — delivery.** The agent-pack Compartmentalization section gains the mechanical
+  line: *"at session start run `./m8shift.py bind <you>`; if a write is refused for
+  ambiguity or a binding mismatch, STOP and ask the operator which project this shift
+  binds to."* Floor-marker addition so stale anchors surface it.
+
+### 9.2 Charter fit
+
+Local, stdlib-only, no network, no daemon. Fail-closed refusals trigger only on
+operator/agent-created state (a binding) or true ambiguity (two candidate relays); the
+zero-config path is untouched. The named-namespace resolver (§3) remains unimplemented;
+`relay_session` is recorded but only the default session is addressable until RFC 038
+lands fully.
+
+### 9.3 Acceptance criteria (implementation)
+
+- No binding, no ambiguity → byte-identical behavior (full suite unaffected).
+- `M8SHIFT_ROOT` + differing cwd-local relay → every write verb refuses BEFORE any write,
+  naming both candidates; read-only verbs still work.
+- Binding mismatch → `may-i-write`/`claim`/`append` refuse; foreign path redacted in the
+  message; `bind --clear` + rebind recovers.
+- Binding match resolves the A1 ambiguity to the bound relay.
+- `bind` is penless, idempotent, safe-name/JSON-shape validated, and never creates a
+  relay (binding to a missing relay is refused).
+- `sessions list` is read-only, single-project, and lists bindings per session.
+- Hygiene: binding files carry the OPERATOR'S OWN paths only (they never leave the
+  machine — gitignored like the rest of `.m8shift/` state).
+
+## 10. Recommendation
 
 Adopt the named relay-session model with the default session preserving today's behavior. Use the
 distinct `--relay-session` / `M8SHIFT_RELAY_SESSION` selector (§5.1). Pair parallel sessions with
