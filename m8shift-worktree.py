@@ -151,15 +151,31 @@ def roster_or_die(lk, *names):
 
 # ──────────────── owner sidecar (RFC 049 PR C — advisory, never authority) ────────────────
 #
-# Ownership metadata lives OUTSIDE the peer checkout (`.m8shift/worktree-owners/<id>.json`)
-# so a peer editing inside the worktree can never rewrite who owns it. The guard is an
-# ADVISORY companion guardrail only: direct `git`, editor, or filesystem writes do not pass
-# through the companion and cannot be refused by M8Shift (RFC 049 "Security and prompt
-# boundaries"). Consequently every reader here FAILS OPEN: a malformed/unreadable sidecar
-# must never brick a verb — it degrades to "no recorded owner" and `doctor` reports the gap.
+# Ownership metadata lives in `.m8shift/worktree-owners/<id>.json`, a sibling of the peer's
+# checkout rather than a file inside it, so NORMAL edits confined to the worktree do not
+# touch it. This is an ADVISORY companion guardrail, NOT a security boundary: a process with
+# filesystem access can address the sidecar path directly, and direct `git`, editor, or
+# filesystem writes never pass through the companion and cannot be refused (RFC 049 "Security
+# and prompt boundaries"). Consequently every READER fails open (a malformed/unreadable
+# sidecar degrades to "no recorded owner" and `doctor` reports the gap), while every WRITE is
+# hardened against path-escape (unpredictable temp via the core primitive + validated real
+# parents), and a MANDATORY audit write (a takeover) fails CLOSED if it cannot be persisted.
 
 OWNER_SCHEMA = "m8shift.worktree_owner.v1"
-OWNER_MAX_BYTES = 8192          # an owner doc is ~200 bytes; anything huge is not ours
+OWNER_MAX_BYTES = 8192           # an owner doc is ~200 bytes; anything larger is not ours
+OWNER_FIELD_MAX = 256            # bound every recorded string field (defeats oversized echo)
+_TS_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z", re.ASCII)  # strict ASCII UTC-Z
+_AGENT_RE = re.compile(core.AGENT_RE + r"\Z", re.ASCII)   # anchored ASCII roster-agent shape
+_UNSAFE = re.compile(r"[^\x20-\x7e]")                      # printable-ASCII whitelist for echo
+
+
+def _safe(value, cap=OWNER_FIELD_MAX):
+    """Reduce any recorded/derived string to a short printable-ASCII token before it reaches
+    a terminal (RFC 052 §9.5 prompt-safety): control chars / ANSI escapes → `?`, length
+    capped. NEVER echo an untrusted agent/id/path/reason/filename raw."""
+    if not isinstance(value, str):
+        value = str(value)
+    return _UNSAFE.sub("?", value)[:cap]
 
 
 def owners_dir():
@@ -170,13 +186,66 @@ def owner_path(idv):
     return os.path.join(owners_dir(), f"{idv}.json")
 
 
-def read_owner(idv):
-    """Bounded tolerant read of the owner sidecar: the OPENED fd is the proof (O_NOFOLLOW,
-    regular file, size cap) — a symlink, FIFO, directory, oversized or malformed document
-    reads as None (no recorded owner). Advisory fail-open by design."""
+def _owners_dir_safe():
+    """Return the absolute owners directory ONLY when every parent component within ROOT is a
+    real directory (never a symlink) and the resolved directory stays contained in ROOT —
+    else None. O_NOFOLLOW protects only the FINAL path component, so a symlinked
+    `.m8shift` or `worktree-owners` would otherwise let reads/writes/unlinks escape the
+    project (Codex PR C review BLOCKER 1). A not-yet-created leaf is fine (claim makes it)."""
+    root = os.path.realpath(ROOT)
+    m8 = os.path.join(root, ".m8shift")
+    owners = os.path.join(m8, "worktree-owners")
+    for comp in (m8, owners):
+        if os.path.islink(comp):
+            return None                                   # symlinked parent → escape risk
+        if os.path.exists(comp) and not os.path.isdir(comp):
+            return None                                   # a file/FIFO/device where a dir must be
     try:
-        fd = os.open(owner_path(idv), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                     | getattr(os, "O_NONBLOCK", 0))
+        if os.path.exists(m8) and os.path.commonpath([root, os.path.realpath(m8)]) != root:
+            return None                                   # .m8shift resolves outside ROOT
+    except ValueError:
+        return None                                       # different drives (Windows) → refuse
+    return owners
+
+
+def validate_owner_doc(idv, doc):
+    """STRICT tri-state validation of a parsed owner document against the EXPECTED id.
+    Returns the doc when WELL-SHAPED (schema exact, `id == idv`, `agent` roster-shaped,
+    `created_at` strict-Z, `path` a bounded normalized RELATIVE path, `branch` a bounded
+    string, every field length-bounded), else None. A well-shaped doc may still CONFLICT
+    with reality (roster/path/branch) — that is doctor's `owner_mismatch`; a doc that fails
+    THIS shape check is `owner_missing` (Codex PR C review finding 4)."""
+    if not isinstance(doc, dict) or doc.get("schema") != OWNER_SCHEMA:
+        return None
+    if doc.get("id") != idv:
+        return None
+    agent = doc.get("agent")
+    if not isinstance(agent, str) or len(agent) > OWNER_FIELD_MAX or not _AGENT_RE.match(agent):
+        return None
+    created = doc.get("created_at")
+    if not isinstance(created, str) or not _TS_RE.match(created):
+        return None
+    path = doc.get("path")
+    if (not isinstance(path, str) or not path or len(path) > OWNER_FIELD_MAX
+            or os.path.isabs(path) or "\\" in path or ".." in path.split("/")):
+        return None
+    branch = doc.get("branch")
+    if not isinstance(branch, str) or len(branch) > OWNER_FIELD_MAX:
+        return None
+    return doc
+
+
+def read_owner(idv):
+    """Bounded, path-safe, STRICT read of the owner sidecar. The opened fd is the proof
+    (O_NOFOLLOW final component + validated real parents + regular file + size cap), and the
+    parsed document must pass `validate_owner_doc`. Anything else → None (no recorded owner).
+    Advisory fail-open by design: a malformed sidecar never bricks a verb."""
+    owners = _owners_dir_safe()
+    if owners is None:
+        return None
+    try:
+        fd = os.open(os.path.join(owners, f"{idv}.json"),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return None
     try:
@@ -192,18 +261,18 @@ def read_owner(idv):
         doc = json.loads(raw.decode("utf-8", errors="replace"))
     except Exception:
         return None
-    if not isinstance(doc, dict) or doc.get("schema") != OWNER_SCHEMA:
-        return None
-    agent = doc.get("agent")
-    if not isinstance(agent, str) or not agent.strip():
-        return None
-    return doc
+    return validate_owner_doc(idv, doc)
 
 
 def write_owner(idv, agent, branch, *, created_at=None, takeover_from=None, reason=None):
-    """Record ownership (atomic tmp+replace). Best-effort: a failed write WARNS and never
-    blocks the verb — the sidecar is advisory, never authority. A takeover keeps the
-    original `created_at` and appends an audit trail inside the document."""
+    """Record ownership and return `(ok: bool, err: str|None)`. Path-hardened: refuses when
+    the owners directory is missing/uncontained/symlinked, and writes through the core's
+    UNIQUE-temp `+ os.replace` primitive (an unpredictable `.m8shift-*.tmp` name inside the
+    validated real directory — the fixed `<id>.json.tmp` preplant is defused). The CALLER
+    decides fail-open (claim/cleanup) vs fail-closed (a mandatory takeover audit)."""
+    owners = _owners_dir_safe()
+    if owners is None:
+        return False, "owners directory missing, uncontained, or symlinked"
     t = core.iso(core.now())
     doc = {
         "schema": OWNER_SCHEMA, "id": idv, "agent": agent,
@@ -214,46 +283,89 @@ def write_owner(idv, agent, branch, *, created_at=None, takeover_from=None, reas
     if takeover_from is not None:
         doc.update(taken_over_from=takeover_from, takeover_reason=reason, takeover_at=t)
     try:
-        os.makedirs(owners_dir(), exist_ok=True)
-        tmp = owner_path(idv) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=1, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, owner_path(idv))
+        os.makedirs(owners, exist_ok=True)
+        if _owners_dir_safe() is None:                    # re-validate post-makedirs (TOCTOU)
+            return False, "owners directory became unsafe"
+        core.write(json.dumps(doc, indent=1, sort_keys=True) + "\n",
+                   os.path.join(owners, f"{idv}.json"))
+        return True, None
     except OSError as e:
-        print(f"⚠ owner sidecar write failed ({e}) — advisory only, continuing", file=sys.stderr)
+        return False, str(e)
 
 
 def remove_owner(idv):
-    """Best-effort cleanup (errors suppressed — a leftover orphan is a doctor info-level
-    concern, never a failure)."""
+    """Best-effort cleanup (a leftover orphan is a doctor concern, never a failure). Refuses
+    an unsafe owners directory rather than unlink through a symlinked parent."""
+    owners = _owners_dir_safe()
+    if owners is None:
+        return
     try:
-        os.unlink(owner_path(idv))
+        os.unlink(os.path.join(owners, f"{idv}.json"))
     except OSError:
         pass
 
 
-def owner_gate(idv, agent, args):
-    """ADVISORY cross-owner guard (RFC 049 PR C): refuse a mutating verb when a DIFFERENT
-    agent's ownership is recorded, unless `--takeover --reason TEXT` is explicit — the
-    takeover re-stamps the sidecar with an audit trail (previous owner, reason, timestamp).
-    A missing/malformed sidecar never refuses (fail-open; doctor reports the gap)."""
+def require_takeover_or_die(idv, actor, args):
+    """READ-ONLY phase of the advisory cross-owner guard: return a takeover TICKET (dict with
+    the CAPTURED prior owner's agent/branch/created_at + the validated reason) to commit
+    LATER, or None when no takeover is needed (no recorded owner, malformed → fail open, or
+    the actor already owns it). Validates `--takeover --reason` WITHOUT writing, so the caller
+    can run every remaining precondition before persisting anything (Codex PR C review finding
+    3). The ticket CARRIES the branch/created_at observed here so the commit phase does NOT
+    re-read the sidecar — a concurrent swap between the two phases can no longer make the audit
+    record name the wrong displaced owner or reset `created_at` (PR C round-2 hunt)."""
     owner = read_owner(idv)
-    if owner is None or owner.get("agent") == agent:
-        return
-    prev = owner.get("agent")
+    if owner is None or owner.get("agent") == actor:
+        return None
+    prev = owner["agent"]                                # validated: present, roster-shaped
     if not getattr(args, "takeover", False):
-        die(f"worktree {idv!r} is owned by {prev!r} (advisory sidecar) — pass "
+        die(f"worktree {_safe(idv)!r} is owned by {_safe(prev)!r} (advisory sidecar) — pass "
             f"--takeover --reason TEXT to take it over explicitly")
     reason = (getattr(args, "reason", None) or "").strip()
     if not reason:
         die("--takeover requires a non-empty --reason")
-    write_owner(idv, agent, owner.get("branch") or "",
-                created_at=owner.get("created_at"), takeover_from=prev, reason=reason)
-    print(f"⚠ takeover: worktree {idv} ownership {prev} → {agent} (reason: {reason})")
+    if len(reason) > OWNER_FIELD_MAX:                    # keep the written doc under the read cap
+        die(f"--reason too long (max {OWNER_FIELD_MAX} chars) — the audit must stay readable")
+    return {"prev": prev, "reason": reason,
+            "branch": owner["branch"], "created_at": owner["created_at"]}
+
+
+def commit_takeover_or_die(idv, actor, ticket):
+    """COMMIT phase: persist the takeover audit from the require-phase TICKET, FAILING CLOSED
+    (die, ownership unchanged) if the mandatory write cannot be persisted OR does not read
+    back as this actor's ownership — a takeover must never print success on a lost audit
+    (Codex PR C review finding 3 + round-2 oversized-field hunt). Uses the captured
+    branch/created_at (no re-read)."""
+    if ticket is None:
+        return
+    ok, err = write_owner(idv, actor, ticket["branch"], created_at=ticket["created_at"],
+                          takeover_from=ticket["prev"], reason=ticket["reason"])
+    if not ok:
+        die(f"takeover audit write failed ({_safe(err)}) — refusing (ownership unchanged)")
+    back = read_owner(idv)                               # the audit MUST be readable back
+    if back is None or back["agent"] != actor:
+        die("takeover audit did not persist as readable — refusing (ownership unverified)")
+    print(f"⚠ takeover: worktree {_safe(idv)} ownership {_safe(ticket['prev'])} → "
+          f"{_safe(actor)} (reason: {_safe(ticket['reason'])})")
 
 
 # ───────────────────────────── pen flips (file_lock) ───────────────────────────
+
+def _integration_pen_free_or_die(agent, idv):
+    """READ-ONLY mirror of `claim_pen`'s availability gate (no lock, no write): refuse a busy
+    or not-free integration pen BEFORE `cmd_integrate` commits a takeover, so the ROUTINE
+    busy-pen case cannot strand a transferred ownership (PR C round-2 hunt). `claim_pen`
+    remains the authoritative gate under the file lock."""
+    lk = core.get_lock(core.load_or_die())
+    working_self = f"WORKING_{agent.upper()}"
+    st, held = lk.get("state", ""), lk.get("integrating")
+    if held:
+        if st == working_self and held.split("@", 1)[0] == idv:
+            return                                       # resuming OUR own integration of this id
+        die(f"integration pen busy: {lk.get('holder')} is integrating {held}")
+    if st not in ("IDLE", f"AWAITING_{agent.upper()}", working_self):
+        die(f"integration pen not free: state={st}, holder={lk.get('holder')}")
+
 
 def claim_pen(agent, idv, target_sha):
     """Take (or resume) the integration pen and stamp the `integrating:<id>@<sha>` sentinel,
@@ -355,9 +467,14 @@ def cmd_claim(args):
         git(["worktree", "add", ftree, branch])              # check out an existing branch
     else:
         git(["worktree", "add", "-b", branch, ftree, args.base])  # new branch off --base
-    # RFC 049 PR C: a fresh claim owns the worktree — record it OUTSIDE the checkout.
-    # (A stale sidecar for a since-removed worktree is moot: the claimer owns the new tree.)
-    write_owner(idv, args.agent, branch)
+    # RFC 049 PR C: a fresh claim owns the worktree — record it beside the checkout.
+    # Creation is best-effort (the worktree already exists; a failed sidecar is a doctor
+    # owner_missing, not a claim failure). A stale sidecar for a since-removed worktree is
+    # moot: the claimer owns the new tree.
+    ok, err = write_owner(idv, args.agent, branch)
+    if not ok:
+        print(f"⚠ owner sidecar not recorded ({_safe(err)}) — advisory only, continuing",
+              file=sys.stderr)
     print(f"✓ claimed worktree {idv} → {os.path.relpath(ftree, ROOT)} (branch {branch} from {args.base})")
     return 0
 
@@ -369,14 +486,16 @@ def cmd_done(args):
     ledger). It records that a worktree's branch is ready to integrate; the real handoff is
     `integrate`."""
     idv = safe_id(args.id)
-    owner_gate(idv, args.agent, args)                        # RFC 049 PR C advisory guard
+    roster_or_die(core.get_lock(core.load_or_die()), args.agent)   # actor BEFORE any owner op
+    ticket = require_takeover_or_die(idv, args.agent, args)         # validate (no write yet)
     with core.file_lock() as guard:
-        roster_or_die(core.get_lock(core.load_or_die()), args.agent)
+        roster_or_die(core.get_lock(core.load_or_die()), args.agent)  # re-check under the lock
+        commit_takeover_or_die(idv, args.agent, ticket)            # persist AFTER the re-check
         log = os.path.join(ROOT, ".m8shift", "done.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
-        prev = core.read(log) if os.path.exists(log) else "# m8shift-worktree done ledger (degree-2)\n"
+        prev_log = core.read(log) if os.path.exists(log) else "# m8shift-worktree done ledger (degree-2)\n"
         guard.require_owned()
-        core.write(prev + f"- {idv} done by {args.agent} @ {core.iso(core.now())}\n", log)
+        core.write(prev_log + f"- {idv} done by {args.agent} @ {core.iso(core.now())}\n", log)
     print(f"✓ noted worktree {idv} done by {args.agent}")
     return 0
 
@@ -385,7 +504,12 @@ def cmd_drop(args):
     if not args.yes:
         die("drop needs --yes (a worktree is never removed automatically)")
     idv = safe_id(args.id)
-    owner_gate(idv, args.agent, args)                        # RFC 049 PR C advisory guard
+    roster_or_die(core.get_lock(core.load_or_die()), args.agent)   # actor BEFORE any destruction
+    # A cross-owner drop still requires an explicit --takeover --reason INTENT gate; the
+    # reason need not persist (the sidecar is removed with the worktree), so drop does not
+    # commit an audit — but the destructive `git worktree remove` never runs for an
+    # unauthorized actor or an unacknowledged foreign owner (Codex PR C review finding 2).
+    require_takeover_or_die(idv, args.agent, args)
     ftree = wt_path(idv)
     if not os.path.exists(ftree):
         die(f"no worktree {idv!r} at {ftree}")
@@ -403,40 +527,68 @@ def cmd_status(args):
     if lk.get("integrating"):
         print(f"  ⚠ integrating: {lk['integrating']}  (merge in flight — pen locked)")
     print("worktrees:")
-    path, found = None, False
-    base = os.path.abspath(os.path.join(ROOT, ".m8shift", "worktrees"))
-    for line in git_out(["worktree", "list", "--porcelain"]).splitlines():
-        if line.startswith("worktree "):
-            path = os.path.abspath(line[len("worktree "):])
-        elif line.startswith("branch ") and path and os.path.abspath(path).startswith(base):
-            name = os.path.basename(path)
-            if args.id and name != args.id:
-                continue
-            owner = read_owner(name) if name != "_integration" else None
-            who = owner.get("agent") if owner else "?"       # "?" = no usable sidecar (doctor flags it)
-            print(f"  {name:<20} {line[len('branch '):].strip():<30} owner={who}")
-            found = True
-    if not found:
+    found = [False]
+
+    def flush(path, branchref):
+        # Record on the WORKTREE line (like `_managed_worktrees`/doctor), so a DETACHED-HEAD
+        # worktree — which has no porcelain `branch ` line — is not silently omitted (PR C
+        # round-2 hunt: status and doctor must agree). The basename is echoed via `_safe` so
+        # a hostile worktree dirname can never inject ANSI into the terminal.
+        if path is None or not _under_worktrees_base(path):
+            return
+        name = os.path.basename(os.path.abspath(path))
+        if args.id and name != args.id:
+            return
+        if name == "_integration":
+            who = "n/a"                                   # shared integration tree (doctor excludes)
+        else:
+            owner = read_owner(name)
+            who = _safe(owner["agent"]) if owner else "?" # "?" = no usable sidecar → doctor flags it
+        br = branchref if branchref else "(detached)"
+        print(f"  {_safe(name):<20} {_safe(br):<30} owner={who}")
+        found[0] = True
+
+    path, branchref = None, None
+    for line in git_out(["worktree", "list", "--porcelain"]).splitlines() + [""]:
+        if line.startswith("worktree ") or line == "":
+            flush(path, branchref)                        # flush the PREVIOUS worktree block
+            path = line[len("worktree "):] if line else None
+            branchref = None
+        elif line.startswith("branch "):
+            branchref = line[len("branch "):].strip()
+    if not found[0]:
         print("  (none)")
     return 0
+
+
+def _under_worktrees_base(path):
+    """True when `path` is contained in `.m8shift/worktrees/` by REALPATH/COMMONPATH (not a
+    raw `startswith`, which a sibling like `.m8shift/worktrees-evil` or a symlink could
+    spoof)."""
+    base = os.path.realpath(os.path.join(ROOT, ".m8shift", "worktrees"))
+    try:
+        rp = os.path.realpath(path)
+        return rp != base and os.path.commonpath([base, rp]) == base
+    except ValueError:
+        return False
 
 
 def _managed_worktrees():
     """{id: {"path": abs, "branch": ref-or-None}} for every NON-integration worktree under
     `.m8shift/worktrees/` (from `git worktree list --porcelain` — never a directory scan,
-    so a stray folder that git does not know is not a managed worktree)."""
-    base = os.path.abspath(os.path.join(ROOT, ".m8shift", "worktrees"))
+    so a stray folder that git does not know is not a managed worktree). Containment is by
+    realpath/commonpath, not a raw prefix match (Codex PR C review finding 5)."""
     out, path = {}, None
     for line in git_out(["worktree", "list", "--porcelain"]).splitlines() + [""]:
         if line.startswith("worktree "):
-            path = os.path.abspath(line[len("worktree "):])
-            name = os.path.basename(path)
-            if path.startswith(base + os.sep) and name != "_integration":
-                out[name] = {"path": path, "branch": None}
+            path = line[len("worktree "):]
+            name = os.path.basename(os.path.abspath(path))
+            if _under_worktrees_base(path) and name != "_integration":
+                out[name] = {"path": os.path.abspath(path), "branch": None}
             else:
                 path = None
         elif line.startswith("branch ") and path:
-            out[os.path.basename(path)]["branch"] = line[len("branch "):].strip()
+            out[os.path.basename(os.path.abspath(path))]["branch"] = line[len("branch "):].strip()
     return out
 
 
@@ -457,34 +609,37 @@ def cmd_doctor(args):
     trees = _managed_worktrees()
     findings = []
     for idv, info in sorted(trees.items()):
-        owner = read_owner(idv)
+        owner = read_owner(idv)                          # STRICT: well-shaped doc or None
         if owner is None:
             findings.append({"id": "worktree.owner_missing", "severity": "warning",
-                             "worktree": idv,
+                             "worktree": _safe(idv),
                              "detail": "no usable ownership sidecar (absent or malformed)"})
             continue
         problems = []
-        if owner.get("agent") not in roster:
-            problems.append(f"owner {owner.get('agent')!r} not on the roster")
+        if owner["agent"] not in roster:                 # well-shaped agent, but off-roster
+            problems.append(f"owner {_safe(owner['agent'])!r} not on the roster")
         rel = os.path.relpath(info["path"], ROOT)
-        if owner.get("path") != rel:
-            problems.append(f"recorded path {owner.get('path')!r} != {rel!r}")
+        if owner["path"] != rel:
+            problems.append(f"recorded path {_safe(owner['path'])!r} != {_safe(rel)!r}")
         branch = info.get("branch") or ""
         short = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
-        if owner.get("branch") and short and owner.get("branch") != short:
-            problems.append(f"recorded branch {owner.get('branch')!r} != {short!r}")
+        if owner["branch"] and short and owner["branch"] != short:
+            problems.append(f"recorded branch {_safe(owner['branch'])!r} != {_safe(short)!r}")
         if problems:
             findings.append({"id": "worktree.owner_mismatch", "severity": "warning",
-                             "worktree": idv, "detail": "; ".join(problems)})
+                             "worktree": _safe(idv), "detail": "; ".join(problems)})
+    owners = _owners_dir_safe()
     try:
-        names = [f for f in os.listdir(owners_dir()) if f.endswith(".json")]
+        names = [f for f in os.listdir(owners)] if owners else []
     except OSError:
         names = []
     for f in sorted(names):
+        if not f.endswith(".json"):
+            continue
         idv = f[:-len(".json")]
         if idv not in trees:
             findings.append({"id": "worktree.owner_mismatch", "severity": "warning",
-                             "worktree": idv,
+                             "worktree": _safe(idv),
                              "detail": "orphan sidecar — no such managed worktree"})
     if args.json:
         print(json.dumps({"ok": not findings, "findings": findings},
@@ -500,13 +655,23 @@ def cmd_doctor(args):
 def cmd_integrate(args):
     idv = safe_id(args.id)
     agent, to, into = args.agent, args.to, safe_branch_name(args.into, "--into")
-    owner_gate(idv, agent, args)     # RFC 049 PR C advisory guard — fail BEFORE any pen flip
 
-    # ---- fail BEFORE claiming (pure reads + integration-tree prep) -------------
+    # ---- validate the ACTOR and RECIPIENT before ANY owner op (Codex PR C review
+    #      finding 2) and capture (but do NOT yet commit) a required takeover -------
     lk = core.get_lock(core.load_or_die())
     roster_or_die(lk, agent, to)
     if to == agent:
         die("--to must hand off to a DIFFERENT agent")
+    ticket = require_takeover_or_die(idv, agent, args)        # validates --takeover; no write
+
+    # ---- every remaining precondition BEFORE the takeover commit and the pen flip,
+    #      so a failed precondition never transfers ownership (finding 3) ----------
+    _integration_pen_free_or_die(agent, idv)     # read-only pen precheck (PR C round-2 hunt):
+    #      a busy pen is the pen's ROUTINE serialization state; without this precheck the
+    #      takeover would commit and then claim_pen would die on the busy pen, stranding a
+    #      transferred ownership. claim_pen still re-checks under the lock (authoritative), so
+    #      the pen is never taken before the fail-closed audit — only a rare become-busy race
+    #      between this precheck and claim_pen remains (advisory sidecar, documented).
     if not local_branch_exists(into):
         die(f"--into {into!r} is not a local branch — integration must advance a BRANCH; pass a "
             f"branch name (a commit/tag/detached ref would merge into a detached HEAD and silently "
@@ -520,9 +685,10 @@ def cmd_integrate(args):
 
     foreign = foreign_checkout_of(into)
     if foreign:
-        die(f"target branch {into!r} is checked out in {foreign} — git forbids a second checkout, so "
-            f"the dedicated integration tree cannot own it. Free {into!r} there (detach it, or keep "
-            f"the canonical root on a coordination branch) so only the _integration tree holds it.")
+        die(f"target branch {into!r} is checked out in {_safe(foreign)} — git forbids a second "
+            f"checkout, so the dedicated integration tree cannot own it. Free {into!r} there "
+            f"(detach it, or keep the canonical root on a coordination branch) so only the "
+            f"_integration tree holds it.")
 
     integ = integ_path()
     if not os.path.isdir(integ):
@@ -538,6 +704,10 @@ def cmd_integrate(args):
     if git_out(["status", "--porcelain"], integ):
         die(f"integration tree {integ} is not clean — refusing (pre-flip precondition)")
     target_sha = git_out(["rev-parse", "HEAD"], integ)
+
+    # ---- all preconditions passed: NOW commit the takeover (fail-closed), THEN the
+    #      pen flip. A takeover audit that cannot persist aborts here, before any flip.
+    commit_takeover_or_die(idv, agent, ticket)
 
     # ---- take the pen + stamp the sentinel -------------------------------------
     mode, sentinel = claim_pen(agent, idv, target_sha)

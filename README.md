@@ -337,7 +337,7 @@ published site, or use the repository-local docs when working from a clone.
 | 039 | [Model/task routing](docs/en/rfc/039-rfc-model-task-routing.md) | Capability-first model/task routing | Phase 1 shipped | v3.35.0 · 2026-07-01 | operator manifests, no baked-in vendors/prices, no launch |
 | 049 | [Holder liveness](docs/en/rfc/049-rfc-holder-liveness-stale-claim-hardening.md) | Separate holder liveness from pen TTL; harden stale force-claim and worktree ownership | **implemented — PR A+B+C** (heartbeat verb + two-phase force recovery; listener liveness producer; worktree ownership sidecar/guard + companion doctor) | — | target next minor |
 | 050 | [Manual multi-agent specialists](docs/en/rfc/050-rfc-manual-multi-agent-specialists.md) | Manual specialist workflow with advisory read-only and isolated worktree lanes | draft | — | reports return to the relay |
-| 051 | [Usage advisory in the core display](docs/en/rfc/051-rfc-usage-advisory-in-core-display.md) | Read-only usage line in core `status`/`watch`, fed by the companion sidecar (echo-only, fail-open) | draft | — | Voie A follow-up of RFC 040 Phase 3; companion adds `decision_window`, core adds a bounded tolerant reader |
+| 051 | [Usage advisory in the core display](docs/en/rfc/051-rfc-usage-advisory-in-core-display.md) | Read-only usage line in core `status`/`watch`, fed by the companion sidecar (echo-only, fail-open) | implemented (amendment E #106: unified multi-window line) | — | Voie A follow-up of RFC 040 Phase 3; companion adds `decision_window`, core adds a bounded tolerant reader |
 
 ## 🔁 How it works
 

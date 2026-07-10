@@ -4,23 +4,54 @@
 
 **RFC 049 PR C — worktree ownership sidecar and advisory guard (#104).**
 `m8shift-worktree.py claim` now records the claiming agent in
-`.m8shift/worktree-owners/<id>.json` (`m8shift.worktree_owner.v1`) —
-deliberately OUTSIDE the checkout, so a peer editing inside the worktree can
-never rewrite who owns it. `done`/`integrate`/`drop` refuse when a DIFFERENT
+`.m8shift/worktree-owners/<id>.json` (`m8shift.worktree_owner.v1`) — a SIBLING
+of the checkout (not a file inside it), so normal edits confined to the
+worktree do not touch it. `done`/`integrate`/`drop` refuse when a DIFFERENT
 agent owns the worktree unless `--takeover --reason TEXT` is explicit; a
 takeover re-stamps the sidecar with an audit trail (previous owner, reason,
-timestamp) and preserves the original `created_at`; the `integrate` guard runs
-BEFORE any pen flip. `drop` cleans the sidecar best-effort; `status` shows the
-recorded owner per worktree (`owner=?` when unusable). New read-only
-`doctor [--json]` emits the advisory findings `worktree.owner_missing`
-(managed worktree without a USABLE sidecar — absent or malformed, matching the
-fail-open guard) and `worktree.owner_mismatch` (recorded agent/path/branch
-conflicts with reality, or an orphan sidecar) — never repairs, never gates.
-The sidecar read is bounded and fail-open (`O_NOFOLLOW`, regular-file only,
-8 KiB cap, tolerant JSON): a malformed or symlinked sidecar never bricks a
-verb. This is an ADVISORY companion guardrail, never a security boundary —
-direct git/editor/filesystem writes do not pass through the companion
-(RFC 049 "Security and prompt boundaries"). 10 new tests.
+timestamp) and preserves the original `created_at`. New read-only
+`doctor [--json]` emits `worktree.owner_missing` (managed worktree without a
+USABLE sidecar) and `worktree.owner_mismatch` (well-shaped metadata conflicting
+with roster/path/branch, or an orphan sidecar) — never repairs, never gates.
+This is an ADVISORY companion guardrail, NOT a security boundary (direct
+git/editor/filesystem writes never pass through the companion, RFC 049
+"Security and prompt boundaries"), but the mechanism is hardened:
+
+- **Actor-first.** Every actor is roster-validated BEFORE any owner read/write
+  or destruction — an unknown agent can no longer drop or take over a worktree.
+- **Fail-closed takeover.** A takeover is committed only AFTER all preconditions
+  pass (no pen flip, no ownership transfer on a failed `--into`/precondition),
+  and its mandatory audit write fails CLOSED — a failed write leaves ownership
+  unchanged and reports failure instead of printing success.
+- **Path-safe writes.** Writes go through the core's unpredictable-temp
+  `+ os.replace` primitive inside a validated real parent (no symlinked
+  `.m8shift`/`worktree-owners` component; contained in ROOT by realpath/
+  commonpath), so a preplanted `<id>.json.tmp` symlink or a symlinked owners
+  directory can no longer redirect a write outside the project.
+- **Strict reader + sanitized output.** The reader is bounded, path-safe, and
+  STRICT (schema/id/agent/ASCII-strict timestamp/relative-path/branch shape); a
+  malformed, symlinked, oversized, or wrong-shaped sidecar reads as no recorded
+  owner (`owner_missing`). No recorded agent/id/path/reason, orphan filename, or
+  foreign-checkout path is ever echoed raw — every untrusted string (including
+  the `status` worktree name and `integrate` error paths) is reduced to
+  printable ASCII (RFC 052 §9.5). `status` lists a DETACHED-HEAD worktree
+  (marked `(detached)`) and shows `owner=n/a` for the shared `_integration`
+  tree, so it agrees with `doctor`/`_managed_worktrees`.
+- **Race-narrowed takeover.** The takeover ticket captures the prior owner's
+  branch/created_at in the read phase and the commit does NOT re-read, so a
+  concurrent sidecar swap cannot make the audit name the wrong displaced owner;
+  the mandatory audit is re-read after write and fails closed if it did not
+  persist as readable; `--reason` is length-bounded so the audit stays under the
+  read cap; and `integrate` refuses a busy pen BEFORE committing the takeover.
+  The remaining parent-symlink TOCTOU (swapping `.m8shift` between validation
+  and use) needs a live privileged concurrent filesystem writer — explicitly
+  out of the RFC 049 advisory threat model and not portably closable in
+  stdlib — and is documented, not papered over.
+
+26 new tests (10 lifecycle/guard/doctor + 16 adversarial hardening: tmp/dir
+symlink escape, unknown-actor destruction, fail-closed audit, precondition/
+pen-before-transfer, ANSI/oversized/traversal/non-ASCII schema, detached-HEAD
++ `_integration` status↔doctor agreement).
 
 **Unified multi-window usage line (#106, RFC 051 amendment E).** The
 `── usage ──` block in `status`/`watch` now renders EVERY plausible

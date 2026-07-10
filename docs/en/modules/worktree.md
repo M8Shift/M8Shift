@@ -54,16 +54,30 @@ Legend:
 ### Ownership guard (RFC 049 PR C — advisory, never a security boundary)
 
 `claim` records `{schema: m8shift.worktree_owner.v1, id, agent, created_at, path, branch}`
-in `.m8shift/worktree-owners/<id>.json` — deliberately OUTSIDE the checkout, so a peer
-editing inside the worktree can never rewrite who owns it. `done`/`integrate`/`drop`
+in `.m8shift/worktree-owners/<id>.json` — a **sibling of** the checkout rather than a
+file inside it, so NORMAL edits confined to the worktree do not touch it. This is **not**
+a security boundary: a process with filesystem access can address the sibling path
+directly, and direct `git`, editor, or filesystem writes never pass through the companion
+and cannot be refused (RFC 049 "Security and prompt boundaries"). `done`/`integrate`/`drop`
 refuse when the recorded owner is a DIFFERENT agent, unless `--takeover --reason TEXT`
 is explicit; a takeover re-stamps the sidecar with an audit trail
 (`taken_over_from`/`takeover_reason`/`takeover_at`) and preserves the original
-`created_at`. The reader is bounded and fail-open (`O_NOFOLLOW`, regular-file only,
-8 KiB cap, tolerant JSON): a malformed, symlinked, or oversized sidecar reads as "no
-recorded owner" — the verb proceeds and `doctor` reports the gap. Direct `git`, editor,
-or filesystem writes never pass through the companion and cannot be refused (RFC 049
-"Security and prompt boundaries").
+`created_at`.
+
+Every actor is **roster-validated before any owner read/write or destruction** (an
+unknown agent cannot drop or take over a worktree); a takeover is committed **only after
+all preconditions pass**, and a mandatory takeover audit **fails closed** — if it cannot
+be persisted the ownership does not change and the command reports failure. Writes go
+through the core's unpredictable-temp `+ os.replace` primitive inside a **validated real
+parent** (no symlinked `.m8shift`/`worktree-owners` component, contained in ROOT), so a
+sidecar write can never escape the project. The reader is bounded, path-safe, and STRICT
+(`O_NOFOLLOW` final component + validated real parents + regular-file + 8 KiB cap +
+schema/id/agent/timestamp/path/branch shape check): a malformed, symlinked, oversized, or
+wrong-shaped sidecar reads as "no recorded owner" — the verb fails open and `doctor`
+reports the gap (`owner_missing`). Well-shaped metadata that merely conflicts with reality
+(off-roster agent, wrong path/branch) is `owner_mismatch`. No recorded agent, id, path,
+reason, or orphan filename is ever echoed raw to the terminal — every untrusted string is
+reduced to printable ASCII before display (RFC 052 §9.5).
 
 ## Inputs and outputs
 
