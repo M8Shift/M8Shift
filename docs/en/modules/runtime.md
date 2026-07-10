@@ -49,7 +49,7 @@ Legend:
 | Red | relay LOCK authority |
 | Amber | human or agent actor |
 
-The dashed edges are the boundary: the companion only ever **directly reads** the LOCK (through the core) — every mutation it can trigger (headroom checkpoint/pause, and the RFC 049 liveness calls while a child is alive) is **delegated** to `m8shift.py`. It never writes `M8SHIFT.md` itself. The runner child owns the normal relay workflow; the explicitly launched listener's own core surface is exactly two bounded liveness argv calls while its child is alive (`claim --refresh` near TTL/2 and the protective `heartbeat` verb, RFC 049 PR B) — it never plain-claims, appends, releases or completes, and it writes the LOCK only through those core verbs, never directly.
+The dashed edges are the boundary: the companion never directly **writes** the LOCK — it reads via core helpers/`status --json` (or, for the listener's wake/liveness decisions, its own bounded direct read-only parser) and delegates every mutation (headroom checkpoint/pause, the RFC 049 liveness calls) to `m8shift.py` argv. It never writes `M8SHIFT.md` itself. The runner child owns the normal relay workflow; the explicitly launched listener's own core surface is exactly two bounded liveness argv calls while its child is alive (`claim --refresh` near TTL/2 and the protective `heartbeat` verb, RFC 049 PR B) — it never plain-claims, appends, releases or completes, and it writes the LOCK only through those core verbs, never directly.
 
 ## Command surface
 
@@ -87,12 +87,11 @@ The dashed edges are the boundary: the companion only ever **directly reads** th
 
 **Files read**
 
-- `M8SHIFT.md` — the LOCK/roster, always through `m8shift.py` (`status --json` subprocess or imported `load_or_die`/`get_lock`/`active_agents`), never parsed for authority here.
+- `M8SHIFT.md` — the LOCK/roster: most companion reads go through `m8shift.py` (`status --json` subprocess or imported `load_or_die`/`get_lock`/`active_agents`); the listener's wake/liveness decisions use its own bounded direct read-only parser. Neither path grants authority.
 - `.m8shift/runtime/*` — `presence.json`, `runs.jsonl`, `progress.jsonl`, `approvals.jsonl`, `idempotency.jsonl`, `inbox/<agent>.jsonl`, `notify.config.json`, `notify/log.jsonl`, `retention.json`.
 - `.m8shift/providers.json` and `.m8shift/routing/{models,skills}.json` — registry and advisory routing manifests.
 - `.m8shift/providers/*.json` — operator-owned `m8shift.listener.profile.v1` listener profiles (argv array, `cwd`, `env_allowlist`, `start_on_idle`); scanned for the at-most-one-starter guard and `doctor`.
 - `.m8shift/runtime/listeners/<agent>.pid` / `<agent>.json` / `<agent>.backend.json` and `.m8shift/runtime/logs/<agent>-listener.log` — listener process, state, backend-record, and log sidecars (`listener status/logs`, `doctor`).
-- `.m8shift/holder-heartbeats/<agent>.json` and the LOCK `expires` field — written ONLY core-mediated (RFC 049 liveness: the protective `heartbeat` verb and `claim --refresh`, both bounded `m8shift.py` argv calls while a listener's child turn is alive).
 - For the listener loop only: the `M8SHIFT.md` LOCK fields, parsed **read-only** to decide sleep vs wake — a missing or invalid relay is neutral (the loop waits; it never repairs and never launches).
 - `.m8shift/roles/*.md`, `.m8shift/workflows/*.json`, `.m8shift/policies/*.md` — contracts scaffolded by `init`.
 - `.m8shift/context/adapters/rtk-shell-output.json` and `.m8shift/context/metrics.jsonl` — surfaced read-only by `status-runtime`/`doctor` (owned by the context companion, see the honesty note below).
@@ -102,6 +101,7 @@ The dashed edges are the boundary: the companion only ever **directly reads** th
 - `runtime/presence.json` (`watch`), `runtime/inbox/<agent>.jsonl` (`operator`), `runtime/progress.jsonl` (`progress`), `runtime/approvals.jsonl` (`approve`), `runtime/idempotency.jsonl`, `runtime/runs.jsonl` (`headroom --checkpoint`).
 - `runtime/notify.config.json`, `runtime/notify/<agent>.prompt`, `runtime/notify/<agent>.event.json`, `runtime/notify/log.jsonl` (`notify`).
 - `runtime/archive/*` (retention archival), `.m8shift/runs/<run>/report.md` (`report --write`).
+- INDIRECT, core-mediated only (RFC 049 PR B, while a listener's child turn is alive): the LOCK `expires` field (`claim --refresh` near TTL/2) and `.m8shift/holder-heartbeats/<agent>.json` (the protective `heartbeat` verb) — both through bounded `m8shift.py` argv calls, never written by this companion directly.
 - `runtime/listeners/<agent>.pid`, `runtime/listeners/<agent>.json` (`m8shift.listener.state.v1`: phase `polling`/`backoff`/`halted`, consecutive failures, last run id/classification, `start_on_idle`, runtime version), `runtime/listeners/<agent>.backend.json` (`m8shift.listener.backend.v1`: installed backend, label, service file, uninstall argv steps, last error), and — for `launchd`/`systemd`/`windows` backends — the generated service definition (`<label>.plist` / `<label>.service` / `<label>.task.json`) in the same directory (`listener start/stop`).
 - `runtime/logs/<agent>-listener.log` — the listener's loop log, rotated **writer-side at 5 MiB, keeping 3 generations** (`<log>.1`…`<log>.3`, oldest dropped). `runs.jsonl` is explicitly exempt from this rotation: it is the runtime ledger and only the `retention` commands may prune it.
 - The `init`/`providers init` scaffold set listed in the command table, plus a `.m8shift/.gitignore` marking `runtime/`, `runs/`, `cache/`, `tmp/` as ignored generated state.

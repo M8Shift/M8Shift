@@ -3131,9 +3131,11 @@ def cmd_doctor(args):
 # ── RFC 047 — listener lifecycle companion (Phases B–E, all backends) ──
 #
 # Advisory charter (never negotiable): the listener is a supervisor, NOT a routing
-# authority. It never writes M8SHIFT.md, never runs claim/append/done itself (only
-# the runner child performs relay actions, including its own `claim --refresh`
-# heartbeat), and never force-steals a pen. PAUSED / DONE / peer-owned / externally
+# authority. It never writes M8SHIFT.md directly; the runner child owns the normal
+# relay workflow (claim --refresh TTL extension, append). While a child turn is
+# alive the listener invokes ONLY the core `claim --refresh` (TTL + audit beat)
+# and the protective `heartbeat` verb via bounded argv (RFC 049 PR B) — never a
+# plain claim, force, append, release or done. PAUSED / DONE / peer-owned / externally
 # moved relay states are first-class neutral: the listener sleeps. All process
 # control uses explicit argv arrays (no shell interpolation), and the Windows
 # aliveness/stop paths never use os.kill(pid, 0) or POSIX signals (RFC 047).
