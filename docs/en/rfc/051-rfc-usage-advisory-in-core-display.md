@@ -1,6 +1,6 @@
 # RFC 051 — Usage advisory in the core display
 
-Status: draft
+Status: implemented (shipped with the v3.54 line; #59 consumption fragment; amendment E #106 unified multi-window line, 2026-07-10)
 Target: v3.54.0 candidate
 Related issue: #47 follow-up (RFC 040 Phase 3)
 Owner: core relay (display) + runtime usage companion (one additive schema field)
@@ -125,6 +125,33 @@ stdlib-only, independently unit-tested unit to `m8shift.py`:
      `--stale-after-minutes` default) the line is marked `stale`.
 
 ### Rendered line
+
+**Amendment E (#106) — unified multi-window line.** When the snapshot carries at
+least one plausible `windows[]` entry, the line renders EVERY plausible window
+inline — consumed percentage first, reset next — instead of only the decision
+window:
+
+```text
+  codex    5h 64% (Reset 18:05) - weekly 42% (Reset 16/07 23:45) · (official) · 2m ago
+```
+
+- Each fragment is `label NN% (Reset when)`: `NN%` echoes the window's CONSUMED
+  `used_ratio` (validated exactly like the decision ratio — implausible → the
+  fragment is skipped, never `—` noise), `label` is the window `kind`
+  (`session_5h` aliased to `5h`, any other kind sanitized and rendered as-is so
+  every agent's window vocabulary works — inter-agent generic), and `when` is
+  the local reset: `HH:MM` when the reset falls on today's LOCAL date,
+  `dd/mm HH:MM` otherwise (a weekly window resetting next Wednesday must never
+  read as tonight). An unusable `resets_at` omits just the `(Reset …)` part.
+- Field-level degradation: a non-dict entry, an implausible ratio, or an
+  unlabelable kind contributes nothing; fragments are capped at
+  `USAGE_LINE_MAX_WINDOWS` with a disclosed `+N` overflow (a hostile many-window
+  snapshot cannot blow up the line).
+- Provenance renders once per line; the `used …` consumption fragment (below),
+  age, and `stale` keep their tail positions.
+- A snapshot with NO plausible window entry (older adapters, spent-only scans,
+  budget gates) falls back to the pre-amendment single-window line below,
+  byte-identical:
 
 ```text
   claude   87% session_5h (official) · used 80M/5h · resets 20:00 · 2m ago

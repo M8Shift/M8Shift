@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+**Unified multi-window usage line (#106, RFC 051 amendment E).** The
+`── usage ──` block in `status`/`watch` now renders EVERY plausible
+`windows[]` entry inline — consumed percentage plus its reset —
+instead of only the decision window:
+`codex  5h 64% (Reset 18:05) - weekly 42% (Reset 16/07 23:45) · (official) · 2m ago`.
+The reset shows the DATE (`dd/mm HH:MM`) whenever it does not fall on today's
+local date, so a weekly window resetting next Wednesday never reads as tonight.
+Window labels adapt to each agent's real window kinds (`session_5h` → `5h`,
+anything else sanitized as-is — inter-agent generic); fragments degrade at
+field level and are capped with a disclosed `+N` overflow. Snapshots without a
+plausible `windows[]` (older adapters, spent-only scans) keep the previous
+single-window line byte-identical, and `--json` output is unchanged (the full
+`windows[]` was already echoed). The watch `--changes-only` signature now
+covers per-window changes.
+
 **RFC 049 PR B — the listener is the managed liveness producer (#104).** While
 a child runner turn is ALIVE, the listener supervision loop now emits
 PROTECTIVE heartbeats through the core `heartbeat` verb (never writing the

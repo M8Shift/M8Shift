@@ -11231,6 +11231,101 @@ class TestRFC051UsageAdvisory(CLIBase):
         for _, flags in opened:                                # read-only: no write/create bits
             self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT), 0)
 
+    # ── #106 unified multi-window line ────────────────────────────────────────
+    @staticmethod
+    def _local_when(iso_z):
+        """Expected #106 reset rendering for a strict-Z timestamp: local HH:MM when it
+        falls on today's LOCAL date, dd/mm HH:MM otherwise (computed independently of
+        the implementation, from the fixture timestamp)."""
+        d = dt.datetime.strptime(iso_z, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=dt.timezone.utc).astimezone()
+        today = dt.datetime.now(dt.timezone.utc).astimezone().date()
+        return d.strftime("%H:%M") if d.date() == today else d.strftime("%d/%m %H:%M")
+
+    def _agent_line(self, out, agent):
+        block = out[out.index("── usage"):]
+        return next(l for l in block.splitlines() if l.strip().startswith(agent))
+
+    def test_unified_line_all_windows_consumed_and_reset_dates(self):
+        near = self.fresh_iso(7200)        # usually today; expected computed either way
+        far = self.fresh_iso(6 * 86400)    # always a different local day
+        self.write_sidecar([self.event(self.snapshot(
+            agent="codex", decision_ratio=0.64, provenance="official",
+            windows=[
+                {"kind": "session_5h", "used_ratio": 0.64, "resets_at": near,
+                 "used": None, "limit": None},
+                {"kind": "weekly", "used_ratio": 0.42, "resets_at": far,
+                 "used": None, "limit": None},
+            ]))])
+        line = self._agent_line(self.status_out(), "codex")
+        self.assertIn(f"5h 64% (Reset {self._local_when(near)})", line)
+        self.assertIn(f"weekly 42% (Reset {self._local_when(far)})", line)
+        self.assertIn(" - ", line)                      # operator's window separator
+        self.assertIn("(official)", line)
+        self.assertIn("/", self._local_when(far))       # cross-day reset carries the DATE
+        self.assertNotIn("resets ", line)               # legacy fragment replaced
+        self.assertNotIn("36%", line)                   # consumed %, never a remaining figure
+        # --json keeps echoing the full windows[] for downstream tooling
+        d = json.loads(self.status_out("--json"))
+        entry = next(u for u in d["usage"] if u["agent"] == "codex")
+        self.assertEqual(entry["windows"][0]["used_ratio"], 0.64)
+        self.assertEqual(entry["windows"][1]["used_ratio"], 0.42)
+
+    def test_unified_line_field_level_degradation(self):
+        far = self.fresh_iso(6 * 86400)
+        self.write_sidecar([self.event(self.snapshot(
+            agent="claude", decision_ratio=0.42, provenance="official",
+            windows=[
+                "not-a-dict",
+                {"kind": "session_5h", "used_ratio": float("nan"),
+                 "resets_at": self.fresh_iso(60)},          # implausible ratio → skipped
+                {"used_ratio": 0.5, "resets_at": self.fresh_iso(60)},  # no kind → skipped
+                {"kind": "\x1b[31mevil\x1b[0m", "used_ratio": 0.77,
+                 "resets_at": "garbage"},                    # sanitized label, reset omitted
+                {"kind": "weekly", "used_ratio": 0.42, "resets_at": far},
+            ]))])
+        out = self.status_out()
+        line = self._agent_line(out, "claude")
+        self.assertIn(f"weekly 42% (Reset {self._local_when(far)})", line)
+        self.assertNotIn("5h", line)                    # NaN window contributes nothing
+        self.assertNotIn("50%", line)                   # unlabeled window contributes nothing
+        self.assertIn("31mevil0m 77%", line)            # hostile kind reduced to safe token
+        self.assertNotIn("31mevil0m 77% (Reset", line)  # unusable reset simply omitted
+        self.assertNotIn("\x1b", out)                   # no raw escape reaches the terminal
+
+    def test_unified_line_caps_hostile_many_windows(self):
+        self.write_sidecar([self.event(self.snapshot(
+            agent="claude",
+            windows=[{"kind": f"w{i}", "used_ratio": 0.1, "resets_at": None}
+                     for i in range(9)]))])
+        line = self._agent_line(self.status_out(), "claude")
+        self.assertIn("w0 10%", line)
+        self.assertIn("w3 10%", line)
+        self.assertNotIn("w4 10%", line)                # capped after USAGE_LINE_MAX_WINDOWS
+        self.assertIn("+5", line)                       # overflow disclosed, never silent
+        self.assertLess(len(line), 200)
+
+    def test_unified_line_falls_back_when_windows_unusable(self):
+        for windows in ("huh", None, []):
+            self.write_sidecar([self.event(self.snapshot(
+                agent="claude", decision_ratio=0.9, windows=windows))])
+            line = self._agent_line(self.status_out(), "claude")
+            self.assertIn("90%", line)                  # legacy single-window line intact
+            self.assertIn("session_5h (", line)
+            self.assertNotIn(" - ", line)
+
+    def test_usage_signature_reflects_window_change(self):
+        cowork.configure_root(self.d)
+        self.addCleanup(cowork.configure_root, REPO)
+        lk = {"agents": "claude,codex"}
+        cap = self.fresh_iso()
+        win = {"kind": "session_5h", "used_ratio": 0.64, "resets_at": self.fresh_iso(7200)}
+        self.write_sidecar([self.event(self.snapshot(captured_at=cap, windows=[win]))])
+        sig1 = cowork._usage_signature(lk)
+        self.write_sidecar([self.event(self.snapshot(
+            captured_at=cap, windows=[{**win, "used_ratio": 0.71}]))])
+        self.assertNotEqual(cowork._usage_signature(lk), sig1)  # a window flip reprints
+
     # ── watch --changes-only: reprint on a usage-line delta, not on the clock ──
     def test_usage_signature_reprints_on_snapshot_delta_not_on_age(self):
         cowork.configure_root(self.d)

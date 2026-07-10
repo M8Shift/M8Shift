@@ -7388,6 +7388,8 @@ USAGE_RATIO_DISPLAY_MAX = 1000                         # ratio above 100000% is 
 USAGE_TOKEN_DISPLAY_MAX = 10 ** 18                     # a used count above ~1e18 is not plausible → omitted (#59)
 USAGE_CONSUMPTION_MAX_WINDOWS = 6                      # cap rendered per-window fragments; excess → "+N" (Codex review)
 USAGE_WINDOW_ALIASES = {"session_5h": "5h", "weekly": "wk", "daily": "day", "monthly": "mo"}
+USAGE_WINDOW_LABELS = {"session_5h": "5h"}             # #106 unified line labels; other kinds render sanitized as-is
+USAGE_LINE_MAX_WINDOWS = 4                             # cap per-window fragments on the unified line; excess → "+N"
 _USAGE_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 _.:%()/+-]")  # display whitelist (amendment C)
 
 
@@ -7553,17 +7555,60 @@ def _usage_age_display(age):
     return f"{age // 86400}d ago"
 
 
-def _usage_reset_display(snap):
-    """Local HH:MM for the decision window's `resets_at`, or None when the window is
-    absent / null or its `resets_at` is missing / non-strict-Z-parseable (never format a
-    raw reset)."""
+def _usage_reset_when(reset_iso, ref):
+    """#106: local display of a `resets_at` — `HH:MM` when the reset falls on the same
+    LOCAL calendar day as `ref`, `dd/mm HH:MM` otherwise (a weekly window resetting next
+    Wednesday must never read as tonight). None when missing / non-strict-Z-parseable
+    (never format a raw reset)."""
+    reset = parse_iso(reset_iso)
+    if reset is None:
+        return None
+    loc = reset.astimezone()
+    if loc.date() == ref.astimezone().date():
+        return loc.strftime("%H:%M")
+    return loc.strftime("%d/%m %H:%M")
+
+
+def _usage_reset_display(snap, ref):
+    """Local reset fragment for the decision window (legacy single-window line), or None
+    when the window is absent / null or its `resets_at` is unusable. Same same-day /
+    cross-day rule as the unified line (#106)."""
     dw = snap.get("decision_window")
     if not isinstance(dw, dict):
         return None
-    reset = parse_iso(dw.get("resets_at"))
-    if reset is None:
-        return None
-    return reset.astimezone().strftime("%H:%M")
+    return _usage_reset_when(dw.get("resets_at"), ref)
+
+
+def _usage_window_frags(snap, ref):
+    """#106 unified line: one `label NN% (Reset when)` fragment per plausible entry of
+    `windows[]` — NN% is the CONSUMED `used_ratio` (echo-only, validated like the
+    decision ratio), label is the window's kind (aliased `session_5h`→`5h`, otherwise
+    sanitized as-is so any agent's window kinds render — inter-agent generic), reset is
+    same-day `HH:MM` / cross-day `dd/mm HH:MM` and simply omitted when unusable.
+    An entry that is not a dict, has no plausible ratio, or no safe label contributes
+    nothing (field-level degradation, never a crash). Capped with a `+N` overflow so a
+    hostile many-window snapshot cannot blow up the status/watch line. Empty list when
+    nothing renders — the caller then falls back to the legacy decision-window line."""
+    windows = snap.get("windows")
+    if not isinstance(windows, list):
+        return []
+    frags = []
+    for w in windows:
+        if not isinstance(w, dict):
+            continue
+        pct = _usage_pct(w.get("used_ratio"))
+        if pct == "—":
+            continue
+        kind = w.get("kind")
+        label = USAGE_WINDOW_LABELS.get(kind) or _usage_sanitize(kind, cap=10, fallback="")
+        if not label:
+            continue
+        when = _usage_reset_when(w.get("resets_at"), ref)
+        frags.append(f"{label} {pct}" + (f" (Reset {when})" if when else ""))
+    if len(frags) > USAGE_LINE_MAX_WINDOWS:
+        extra = len(frags) - USAGE_LINE_MAX_WINDOWS
+        frags = frags[:USAGE_LINE_MAX_WINDOWS] + [f"+{extra}"]
+    return frags
 
 
 def _humanize_tokens(n):
@@ -7644,7 +7689,8 @@ def _usage_rows(lk, ref=None):
                 "provenance": provenance,
                 "kind": kind,
                 "consumption": _usage_consumption(snap),
-                "reset": _usage_reset_display(snap),
+                "windows_display": _usage_window_frags(snap, ref),
+                "reset": _usage_reset_display(snap, ref),
                 "age_seconds": age,
                 "age_display": _usage_age_display(age),
                 "stale": age is None or age > USAGE_STALE_AFTER_SECONDS,
@@ -7664,10 +7710,24 @@ def _print_usage_block(lk, rows=None):
         return
     print("── usage " + "─" * 30)
     for row in rows:
-        window = f"{row['kind']} ({row['provenance']})" if row["kind"] else f"({row['provenance']})"
         segs = []
         if row.get("consumption"):
             segs.append(row["consumption"])          # #59: actual token consumption
+        if row.get("windows_display"):
+            # #106 unified line: every plausible window inline, consumed %, reset with
+            # date when not today — `agent  5h 64% (Reset 18:05) - weekly 42%
+            # (Reset 16/07 23:45) · (official) · 2m ago`.
+            if row["age_display"]:
+                segs.append(row["age_display"])
+            if row["stale"]:
+                segs.append("stale")
+            tail = " · " + " · ".join(segs) if segs else ""
+            print(f"  {row['agent']:<8} {' - '.join(row['windows_display'])}"
+                  f" · ({row['provenance']}){tail}")
+            continue
+        # Legacy single-window line: snapshots without a usable `windows[]` (older
+        # adapters, budget-only gates) keep rendering exactly as before.
+        window = f"{row['kind']} ({row['provenance']})" if row["kind"] else f"({row['provenance']})"
         if row["reset"]:
             segs.append(f"resets {row['reset']}")
         if row["age_display"]:
@@ -7707,8 +7767,8 @@ def _usage_signature(lk):
     worth reprinting) but NOT the ticking age, so a steady relay is not reprinted every
     poll."""
     return [
-        [r["agent"], r["pct"], r["kind"], r.get("consumption"), r["provenance"], r["reset"],
-         r["snapshot"].get("captured_at"), r["stale"]]
+        [r["agent"], r["pct"], r["kind"], r.get("consumption"), r.get("windows_display"),
+         r["provenance"], r["reset"], r["snapshot"].get("captured_at"), r["stale"]]
         for r in _usage_rows(lk)
     ]
 
