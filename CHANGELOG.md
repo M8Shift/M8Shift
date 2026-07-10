@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**RFC 049 PR B — the listener is the managed liveness producer (#104).** While
+a child runner turn is ALIVE, the listener supervision loop now emits
+PROTECTIVE heartbeats through the core `heartbeat` verb (never writing the
+sidecar itself) at `min(poll, 60)s` cadence, and performs the early
+`claim --refresh` at ~TTL/2 when it owns the holder turn — closing the exact
+gap of the recorded incidents: a long-running child could outlive the pen with
+no liveness signal. Every liveness call is fail-open (logged once, supervision
+never interrupted); a relay outside the agent's WORKING window skips quietly.
+Unit-tested via the injectable tick (heartbeat / refresh-first ordering /
+foreign-window no-op) and integration-tested against a real sleeping child
+emitting a real protective beat.
+
 **RFC 049 PR A — holder liveness core (#104).** A managed producer can now
 prove a WORKING holder is alive: new `heartbeat <agent> --source
 runtime-listener|wrapper --cadence-seconds N` verb (RFC 052-gated,

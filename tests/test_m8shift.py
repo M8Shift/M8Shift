@@ -12759,6 +12759,93 @@ class TestRFC049LivenessCore(CLIBase):
         self.assertIn("holder.heartbeat_orphaned", checks)
 
 
+class TestRFC049PRBListenerProducer(CLIBase):
+    """RFC 049 PR B — the listener as managed liveness producer: protective
+    beats through the core verb while a child turn runs + early refresh at
+    ~TTL/2. Unit-tested via the injectable tick; integration via a real
+    sleeping child against a real relay."""
+
+    @staticmethod
+    def _runtime_mod(d):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_prb", os.path.join(d, "m8shift-runtime.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def setUp(self):
+        super().setUp()
+        self.init("--agents", "claude,codex")
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(self.d, "m8shift-runtime.py"))
+        self.rt = self._runtime_mod(self.d)
+
+    def test_tick_unit_heartbeat_and_early_refresh(self):
+        calls = []
+
+        class _R:
+            returncode = 0
+
+        def run(argv):
+            calls.append(argv)
+            return _R()
+
+        far = {"state": "WORKING_CLAUDE", "holder": "claude",
+               "expires": "2094-01-01T00:00:00Z"}
+        action = self.rt.listener_liveness_tick(
+            "claude", 60, run=run, lock_fields=lambda: dict(far))
+        self.assertEqual(action, "heartbeat")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("heartbeat", calls[0])
+        self.assertIn("--cadence-seconds", calls[0])
+        calls.clear()
+        near = dict(far, expires="2020-01-01T00:00:00Z")   # < TTL/2 remaining
+        action = self.rt.listener_liveness_tick(
+            "claude", 60, run=run, lock_fields=lambda: dict(near))
+        self.assertEqual(action, "refresh+heartbeat")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("--refresh", calls[0])               # refresh FIRST
+        self.assertIn("heartbeat", calls[1])
+        calls.clear()
+        foreign = {"state": "WORKING_CODEX", "holder": "codex",
+                   "expires": "2094-01-01T00:00:00Z"}
+        self.assertIsNone(self.rt.listener_liveness_tick(
+            "claude", 60, run=run, lock_fields=lambda: dict(foreign)))
+        self.assertEqual(calls, [])                        # nothing invoked
+
+    def test_supervision_emits_real_protective_beat(self):
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"],
+                                 cwd=self.d)
+        said = []
+        rc = self.rt.supervise_child_with_liveness(
+            child, "claude", poll_s=1, say=said.append)
+        self.assertEqual(rc, 0)
+        beat = os.path.join(self.d, ".m8shift", "holder-heartbeats",
+                            "claude.json")
+        self.assertTrue(os.path.exists(beat), said)
+        with open(beat, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertIs(doc["protective"], True)
+        self.assertEqual(doc["source"], "runtime-listener")
+        self.assertEqual(doc["cadence_seconds"], 1)
+        out = json.loads(self.cw("status", "--json").stdout)
+        self.assertEqual(out["heartbeat"]["source"], "runtime-listener")
+
+    def test_supervision_fail_open_without_working_window(self):
+        # no claim: the relay is IDLE — ticks skip quietly, child still reaped.
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2)"],
+                                 cwd=self.d)
+        said = []
+        rc = self.rt.supervise_child_with_liveness(
+            child, "claude", poll_s=1, say=said.append)
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("skipped" in m for m in said), said)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "holder-heartbeats", "claude.json")))
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")

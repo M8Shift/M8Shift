@@ -3142,6 +3142,81 @@ def cmd_doctor(args):
 # mode (never a plain relaunch, never a force-claim).
 
 
+# --- RFC 049 PR B: managed liveness producer (listener-side) --------------------
+# While a child runner turn is ALIVE, the listener is the managed producer the
+# design promises: it emits PROTECTIVE beats through the core `heartbeat` verb
+# (never writing the sidecar itself — RFC 052 binding + file_lock preserved) and
+# performs the early `claim --refresh` at ~TTL/2 when it owns the holder turn.
+# Every call is fail-open: a liveness failure never kills the supervision loop.
+LIVENESS_TTL_MIN_FALLBACK = 30
+
+
+def _core_ttl_minutes():
+    try:
+        core = load_core()
+        return int(getattr(core, "TTL_MIN", LIVENESS_TTL_MIN_FALLBACK))
+    except Exception:
+        return LIVENESS_TTL_MIN_FALLBACK
+
+
+def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
+                           now_utc=None):
+    """One liveness tick during a live child turn. Returns the action taken:
+    "refresh+heartbeat", "heartbeat", or None (relay not in this agent's
+    WORKING window — nothing to protect). `run`, `lock_fields` and `now_utc`
+    are injectable for deterministic tests."""
+    lk = lock_fields() if lock_fields is not None else read_relay_lock_fields()
+    if not lk or lk.get("state") != "WORKING_%s" % agent.upper() \
+            or lk.get("holder") != agent:
+        return None
+    runner = run or (lambda argv: subprocess.run(
+        argv, cwd=HERE, capture_output=True, text=True, timeout=30))
+    action = "heartbeat"
+    expires = parse_utc(lk.get("expires") or "")
+    ttl_min = _core_ttl_minutes()
+    now_dt = now_utc or now()
+    if expires is not None:
+        remaining = (expires - now_dt).total_seconds()
+        if remaining < (ttl_min * 60) / 2:
+            # A1: refresh EARLY (~TTL/2), never at the deadline.
+            r = runner([sys.executable, CORE_PATH, "claim", agent, "--refresh"])
+            if getattr(r, "returncode", 1) == 0:
+                action = "refresh+heartbeat"
+    r = runner([sys.executable, CORE_PATH, "heartbeat", agent,
+                "--source", "runtime-listener",
+                "--cadence-seconds", str(int(cadence_s))])
+    if getattr(r, "returncode", 1) != 0 and action == "heartbeat":
+        return None                     # nothing recorded; caller logs once
+    return action
+
+
+def supervise_child_with_liveness(proc, agent, poll_s, say):
+    """Wait for a child runner while emitting liveness (RFC 049 PR B): a
+    protective beat every min(poll, 60)s and the early refresh at ~TTL/2.
+    Returns the child's exit code. Liveness failures are logged once and never
+    interrupt supervision."""
+    cadence = max(1, min(int(poll_s or 5), 60))
+    warned = False
+    next_beat = time.monotonic()        # first beat immediately: the child may
+    while True:                         # outlive the pen well before cadence*2
+        rc = proc.poll()
+        if rc is not None:
+            return rc
+        if time.monotonic() >= next_beat:
+            try:
+                if listener_liveness_tick(agent, cadence) is None and not warned:
+                    say(f"{agent}: liveness tick skipped (relay not in this "
+                        "agent's WORKING window) — will keep trying quietly.")
+                    warned = True
+            except Exception as exc:    # noqa: BLE001 — fail-open by contract
+                if not warned:
+                    say(f"{agent}: liveness tick failed ({exc.__class__.__name__}) "
+                        "— supervision continues without it.")
+                    warned = True
+            next_beat = time.monotonic() + cadence
+        time.sleep(min(1.0, cadence))
+
+
 def listener_backoff(consecutive_failures, base=LISTENER_BACKOFF_BASE_S, cap=LISTENER_MAX_BACKOFF_S):
     """RFC 047 bounded failure backoff ladder: 20 → 40 → 80 → 160 → 300 (capped).
 
@@ -4350,10 +4425,16 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             say(f"{agent}: state={state} ({wake}) → launching one runner turn"
                 f"{' (resume-working)' if resume else ''}, run {run_id}.")
             try:
-                rc = subprocess.run(argv, cwd=HERE).returncode
+                child = subprocess.Popen(argv, cwd=HERE)
             except OSError as e:
                 say(f"{agent}: runner launch failed: {e}")
+                child = None
+            if child is None:
                 rc = 2
+            else:
+                # RFC 049 PR B: the listener is the managed liveness producer
+                # while the child turn runs (protective beats + early refresh).
+                rc = supervise_child_with_liveness(child, agent, poll, say)
             last_run_id = run_id
             last_classification = (listener_run_classification(run_id)
                                    or LISTENER_RUNNER_EXITS.get(rc, "runner_crash"))
