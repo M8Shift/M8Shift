@@ -7584,8 +7584,16 @@ def _usage_window_pct(r):
     not plausible. Unlike `decision_ratio` (whose token-derived over-limit semantics may
     legitimately exceed 1), `windows[].used_ratio` is schema-bounded to finite [0, 1] —
     the core treats the sidecar as hostile and enforces that boundary here, so a corrupt
-    `-0.5` / `1.5` never renders as `-50%` / `150%` (Codex #106 review, finding 2)."""
-    if isinstance(r, bool) or not isinstance(r, (int, float)) or not math.isfinite(r):
+    `-0.5` / `1.5` never renders as `-50%` / `150%` (Codex #106 review, finding 2).
+    A bare huge integer (>= ~1.8e308) makes `math.isfinite` itself raise OverflowError
+    converting to float — same edge as `_usage_ratio_valid` — and must degrade to None,
+    never explode the agent's whole row (Codex #106 round 2)."""
+    if isinstance(r, bool) or not isinstance(r, (int, float)):
+        return None
+    try:
+        if not math.isfinite(r):
+            return None
+    except OverflowError:
         return None
     if r < 0 or r > 1:
         return None

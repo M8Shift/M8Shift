@@ -11348,8 +11348,11 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertEqual(entry["decision_ratio"], 0.42)  # the agent's JSON row survives too
 
     def test_window_ratio_enforced_to_schema_range(self):
-        # Codex #106 review finding 2: windows[].used_ratio is schema-bounded [0,1];
-        # the hostile sidecar must not render -50% / 150% / bool / huge-int percentages.
+        # Codex #106 review finding 2 + round 2: windows[].used_ratio is schema-bounded
+        # [0,1]; the hostile sidecar must not render -50% / 150% / bool / huge-int
+        # percentages — and a 10**400 integer (math.isfinite itself raises
+        # OverflowError converting to float; 10**300 is still a finite float and does
+        # NOT exercise this) must degrade at field level, never hide the agent row.
         far = self.fresh_iso(6 * 86400)
         self.write_sidecar([self.event(self.snapshot(
             agent="claude", decision_ratio=0.42,
@@ -11359,17 +11362,22 @@ class TestRFC051UsageAdvisory(CLIBase):
                 {"kind": "w-bool", "used_ratio": True},
                 {"kind": "w-nan", "used_ratio": float("nan")},
                 {"kind": "w-inf", "used_ratio": float("inf")},
-                {"kind": "w-huge", "used_ratio": 10 ** 300},
+                {"kind": "w-huge", "used_ratio": 10 ** 300},   # finite-float huge → range-rejected
+                {"kind": "w-ovf", "used_ratio": 10 ** 400},    # isfinite() OverflowError boundary
                 {"kind": "weekly", "used_ratio": 0.42, "resets_at": far},
                 {"kind": "w-full", "used_ratio": 1},     # boundary: exactly 1 is valid
             ]))])
-        line = self._agent_line(self.status_out(), "claude")
-        self.assertIn("weekly 42%", line)               # valid siblings survive
-        self.assertIn("w-full 100%", line)
-        self.assertNotIn("-50%", line)
-        self.assertNotIn("150%", line)
-        for k in ("w-neg", "w-over", "w-bool", "w-nan", "w-inf", "w-huge"):
-            self.assertNotIn(k, line)
+        for out in (self.status_out(), self.watch_out()):    # both public render surfaces
+            line = self._agent_line(out, "claude")
+            self.assertIn("weekly 42%", line)           # valid siblings survive
+            self.assertIn("w-full 100%", line)
+            self.assertNotIn("-50%", line)
+            self.assertNotIn("150%", line)
+            for k in ("w-neg", "w-over", "w-bool", "w-nan", "w-inf", "w-huge", "w-ovf"):
+                self.assertNotIn(k, line)
+        d = json.loads(self.status_out("--json"))
+        entry = next(u for u in d["usage"] if u["agent"] == "claude")
+        self.assertEqual(entry["decision_ratio"], 0.42)  # the agent's JSON row survives
 
     def test_fallback_reset_carries_date_when_cross_day(self):
         # Codex #106 review finding 3: the fallback line's dated cross-day reset is the
