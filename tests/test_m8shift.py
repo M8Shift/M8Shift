@@ -11730,6 +11730,96 @@ class TestRFC052ScrubCheck(CLIBase):
             self.assertIn("continuing without it", r.stderr, name)
 
 
+class TestRFC052AnchorMode(CLIBase):
+    """RFC 052 (#101) PR3 — opt-in anchor hygiene: anchors legitimately carry the
+    operator's OWN path (Q2 paradox), so the mode requires an explicit
+    allowed-root pin and flags only FOREIGN home roots. Advisory: never gates
+    `--lint` unless M8SHIFT_SCRUB_ENFORCE=1."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()                                     # generates the anchors
+        self.home = tempfile.mkdtemp(prefix="m8-anch-home-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def _anchor_append(self, body, base="CLAUDE.md"):
+        with open(os.path.join(self.d, base), "a", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def _run(self, *args, roots=None, enforce=False):
+        env = dict(os.environ)
+        env["HOME"] = self.home                          # isolate ~/.config
+        for k in ("M8SHIFT_DENYLIST", "M8SHIFT_SCRUB_ENFORCE",
+                  "M8SHIFT_HYGIENE_ALLOWED_ROOTS"):
+            env.pop(k, None)
+        if roots is not None:
+            env["M8SHIFT_HYGIENE_ALLOWED_ROOTS"] = roots
+        if enforce:
+            env["M8SHIFT_SCRUB_ENFORCE"] = "1"
+        return subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--hygiene-only",
+             "--hygiene-anchors", "--json", *args],
+            cwd=self.d, capture_output=True, text=True, env=env)
+
+    def _findings(self, r, check="hygiene.anchor_foreign_path"):
+        return [f for f in json.loads(r.stdout)["findings"] if f["check"] == check]
+
+    def test_foreign_root_flagged_own_root_and_placeholder_skipped(self):
+        self._anchor_append("cwd /Users/me-own/project ok\n"
+                            "leak /Users/foreignuser/other-shift/x\n"
+                            "ph /Users/<name>/y\n")
+        r = self._run(roots="/Users/me-own")
+        hits = self._findings(r)
+        self.assertEqual(len(hits), 1, r.stdout)
+        self.assertIn("/Users/foreignuser", hits[0]["message"])
+        self.assertNotIn("me-own", " ".join(h["message"] for h in hits))
+
+    def test_own_root_comparison_is_case_insensitive(self):
+        # The recorded incident class: a case-variant of the operator's own root
+        # on a case-insensitive filesystem must not read as foreign.
+        self._anchor_append("cwd /users/ME-OWN/x\n")
+        r = self._run(roots="/Users/me-own")
+        self.assertEqual(self._findings(r), [], r.stdout)
+
+    def test_unset_roots_yields_info_notice_never_a_guess(self):
+        self._anchor_append("leak /Users/foreignuser/x\n")
+        r = self._run("--severity-min", "info")          # no roots env
+        self.assertEqual(self._findings(r), [], r.stdout)   # no invented ownership
+        self.assertEqual(
+            len(self._findings(r, "hygiene.anchor_roots_unset")), 1, r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+    def test_advisory_never_gates_lint_unless_enforced(self):
+        self._anchor_append("leak /Users/foreignuser/x\n")
+        r = self._run("--lint", roots="/Users/me-own")
+        self.assertEqual(len(self._findings(r)), 1, r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout)      # advisory: no rc 1
+        r2 = self._run("--lint", roots="/Users/me-own", enforce=True)
+        self.assertEqual(r2.returncode, 1, r2.stdout)
+
+    def test_multiple_roots_and_agents_md_scanned(self):
+        self._anchor_append("a /Users/first/x and /home/second/y\n",
+                            base="AGENTS.md")
+        r = self._run(roots="/Users/first,/home/second")
+        self.assertEqual(self._findings(r), [], r.stdout)
+        self._anchor_append("z /home/intruder/w\n", base="AGENTS.md")
+        r2 = self._run(roots="/Users/first,/home/second")
+        hits = self._findings(r2)
+        self.assertEqual(len(hits), 1, r2.stdout)
+        self.assertEqual(hits[0]["path"], "AGENTS.md")
+
+    def test_without_flag_anchors_stay_excluded(self):
+        self._anchor_append("leak /Users/foreignuser/x\n")
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["M8SHIFT_HYGIENE_ALLOWED_ROOTS"] = "/Users/me-own"
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--hygiene-only", "--json"],
+            cwd=self.d, capture_output=True, text=True, env=env)
+        checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
+        self.assertNotIn("hygiene.anchor_foreign_path", checks)   # opt-in only
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")

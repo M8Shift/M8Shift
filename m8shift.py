@@ -5549,6 +5549,78 @@ def _denylist_redact(text, rules):
     return text
 
 
+# RFC 052 PR3 (#101): OPT-IN anchor hygiene. Anchors (CLAUDE.md / AGENTS.md)
+# legitimately hold the OPERATOR'S OWN absolute path, so C1 excludes them by
+# default (the anchor paradox, Q2). This mode re-scans the anchors with an
+# EXPLICIT allowed-root pin: the operator declares their own home root(s) in
+# $M8SHIFT_HYGIENE_ALLOWED_ROOTS (comma-separated, e.g. "/Users/<name>"), and
+# only FOREIGN home roots are flagged. Advisory posture: a visible warning that
+# never gates `--lint` unless M8SHIFT_SCRUB_ENFORCE=1 (no default rc 1 for
+# anchors). Never guesses the operator's root — unset means an info notice, not
+# a scan with invented ownership.
+HYGIENE_ALLOWED_ROOTS_ENV = "M8SHIFT_HYGIENE_ALLOWED_ROOTS"
+HYGIENE_ANCHOR_BASENAMES = ("CLAUDE.md", "AGENTS.md", "AGENTS.override.md")
+
+
+def _hygiene_allowed_roots(env=None):
+    env = os.environ if env is None else env
+    raw = (env.get(HYGIENE_ALLOWED_ROOTS_ENV) or "").strip()
+    roots = []
+    for part in raw.split(","):
+        part = part.strip().rstrip("/\\")
+        if part:
+            roots.append(part.lower())
+    return roots
+
+
+def _hygiene_anchor_findings(root=None, verbose=False):
+    """RFC 052 PR3: `hygiene.anchor_foreign_path` findings over the generated
+    anchors at the project root (direct file presence — anchors are commonly
+    gitignored, so `git ls-files` cannot see them). A high-confidence home root
+    whose full match differs from every operator-pinned allowed root is flagged;
+    the operator's own pinned root never is. Placeholders are skipped as in C1."""
+    root = root or project_root()
+    findings = []
+    allowed = _hygiene_allowed_roots()
+    if not allowed:
+        findings.append(doctor_finding(
+            "hygiene.anchor_roots_unset", "info",
+            "anchor hygiene requested but %s is not set — set it to your own "
+            "home root(s), comma-separated, so only FOREIGN roots are flagged"
+            % HYGIENE_ALLOWED_ROOTS_ENV, "anchors",
+            "export %s=/path/to/your/home-root" % HYGIENE_ALLOWED_ROOTS_ENV))
+        return findings
+    for base in HYGIENE_ANCHOR_BASENAMES:
+        path = os.path.join(root, base)
+        try:
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            if os.path.getsize(path) > HYGIENE_MAX_FILE_BYTES:
+                continue
+            with open(path, "rb") as fh:
+                raw = fh.read(HYGIENE_MAX_FILE_BYTES + 1)
+        except OSError:
+            continue
+        if b"\x00" in raw[:8192]:
+            continue
+        for i, line in enumerate(raw.split(b"\n"), 1):
+            for m in HYGIENE_HIGH_CONF_RE.finditer(line):
+                if _hygiene_is_placeholder(m.group(1)):
+                    continue
+                matched_root = m.group(0).decode("utf-8", "replace").rstrip("/\\")
+                if matched_root.lower() in allowed:
+                    continue                       # the operator's own pin
+                disp = line[:HYGIENE_MAX_LINE_BYTES].decode("utf-8", "replace").strip()
+                findings.append(doctor_finding(
+                    "hygiene.anchor_foreign_path", "warning",
+                    "%s:%d: FOREIGN home root in an anchor (yours are pinned via "
+                    "%s): %s" % (base, i, HYGIENE_ALLOWED_ROOTS_ENV,
+                                 disp if verbose else matched_root),
+                    base, "a foreign session capture leaked into this anchor — "
+                    "remove it; anchors may only carry the operator's own path"))
+    return findings
+
+
 def _parse_denylist_text(text):
     """Parse denylist text -> (rules, allows, skipped_count).
 
@@ -5643,6 +5715,10 @@ def _hygiene_is_placeholder(seg):
     if seg in _HYGIENE_PLACEHOLDER_SEGS:                       # UPPERCASE synthetic
         return True
     if set(seg) <= {ord(".")}:                                 # `.` / `...`
+        return True
+    if seg == b"\xe2\x80\xa6":                                 # UTF-8 ellipsis `…`
+        # The generated anchor stanza documents `/Users/…` with a REAL ellipsis
+        # character, not three ASCII dots (caught by the PR3 anchor-mode tests).
         return True
     return False
 
@@ -5745,7 +5821,7 @@ def _hygiene_findings(root=None, verbose=False):
 
 def collect_doctor_findings(security=False, contracts=False, update_source="",
                             install_report=None, hygiene=False,
-                            hygiene_verbose=False):
+                            hygiene_verbose=False, hygiene_anchors=False):
     """Read-only health checks. No file_lock, no write, no force recovery."""
     findings = []
     turns = []
@@ -5765,6 +5841,8 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
             # not relay-scoped — it must still run in a project that has no relay
             # yet (e.g. a pre-push hook in a repo dogfooded via a separate relay dir).
             out.extend(_hygiene_findings(verbose=hygiene_verbose))
+            if hygiene_anchors:
+                out.extend(_hygiene_anchor_findings(verbose=hygiene_verbose))
         return out
     try:
         text = read()
@@ -6073,6 +6151,9 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
     if hygiene:
         # RFC 052 C1+C3: outbound data-hygiene lint (opt-in; raw read, read-only).
         findings.extend(_hygiene_findings(verbose=hygiene_verbose))
+        if hygiene_anchors:
+            # RFC 052 PR3: opt-in anchor mode (explicit allowed roots, advisory).
+            findings.extend(_hygiene_anchor_findings(verbose=hygiene_verbose))
     return findings
 
 
@@ -6080,11 +6161,14 @@ def cmd_doctor(args):
     threshold = SEVERITY_RANK[args.severity_min]
     hygiene_only = getattr(args, "hygiene_only", False)
     hygiene_verbose = getattr(args, "hygiene_verbose", False)
+    hygiene_anchors = getattr(args, "hygiene_anchors", False)
     if hygiene_only:
         # RFC 052: hygiene-only run — the exit code reflects ONLY the data-hygiene
         # findings, so a pre-push hook is never dominated by relay.missing/adoption.
         install_report = None
         findings = _hygiene_findings(verbose=hygiene_verbose)
+        if hygiene_anchors:
+            findings.extend(_hygiene_anchor_findings(verbose=hygiene_verbose))
     else:
         # #24: --install computes the read-only snapshot ONCE; findings derive from it.
         install_report = _install_report() if getattr(args, "install", False) else None
@@ -6095,6 +6179,7 @@ def cmd_doctor(args):
             install_report=install_report,
             hygiene=getattr(args, "hygiene", False),
             hygiene_verbose=hygiene_verbose,
+            hygiene_anchors=hygiene_anchors,
         )
     visible = [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
     ok = not visible
@@ -6131,7 +6216,8 @@ def cmd_doctor(args):
     # higher false-positive risk than the path lint, so it is advisory-by-default
     # even in lint mode. Everything else gates exactly as before.
     enforce = os.environ.get(HYGIENE_SCRUB_ENFORCE_ENV, "") == "1"
-    gating = [f for f in visible if f["check"] != "hygiene.denylist" or enforce]
+    advisory_checks = ("hygiene.denylist", "hygiene.anchor_foreign_path")
+    gating = [f for f in visible if f["check"] not in advisory_checks or enforce]
     return 1 if args.lint and gating else 0
 
 
@@ -7932,6 +8018,14 @@ def main():
                          "identifier. The denylist itself is out-of-repo: M8SHIFT_DENYLIST if set, "
                          "else ~/.config/m8shift/denylist.txt; missing = no-op. A hygiene.denylist "
                          "warning never fails --lint unless M8SHIFT_SCRUB_ENFORCE=1")
+    dr.add_argument("--hygiene-anchors", action="store_true",
+                    help="RFC 052 PR3: opt-in anchor hygiene — re-scan the generated anchors "
+                         "(CLAUDE.md, AGENTS.md), which C1 excludes by default because they "
+                         "legitimately hold YOUR OWN path. Pin your own home root(s) in "
+                         "M8SHIFT_HYGIENE_ALLOWED_ROOTS (comma-separated); only FOREIGN home "
+                         "roots are flagged (hygiene.anchor_foreign_path, advisory — never "
+                         "fails --lint unless M8SHIFT_SCRUB_ENFORCE=1). Unset roots = an info "
+                         "notice, never a guess")
     dr.add_argument("--install", action="store_true",
                     help="include read-only post-install verification (#24): python/script "
                          "versions, local checksum-manifest state, kit companions/runners, generated "
