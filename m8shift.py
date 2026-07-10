@@ -5539,6 +5539,16 @@ def _denylist_label(term):
     return "denylist:" + hashlib.sha256(term.strip().lower().encode("utf-8")).hexdigest()[:10]
 
 
+def _denylist_redact(text, rules):
+    """Redact every denied-term occurrence in a display string (Codex review
+    BLOCKER: a denied term inside a file PATH re-leaked through the
+    supposedly-redacted locator/message/path output). Case-insensitive, all
+    rules, word- and literal-mode alike."""
+    for _label, _term, rx in rules:
+        text = rx.sub("[redacted]", text)
+    return text
+
+
 def _parse_denylist_text(text):
     """Parse denylist text -> (rules, allows, skipped_count).
 
@@ -5718,11 +5728,16 @@ def _hygiene_findings(root=None, verbose=False):
                 for label, term, rx in deny_rules:
                     if rx.search(text_line):
                         detail = (" term=%r" % term) if verbose else ""
+                        # Codex review BLOCKER: the PATH itself can carry the
+                        # denied term — redact it in the message AND the path
+                        # field for the default (pasteable) output; verbose is
+                        # the local forensic mode and keeps the raw locator.
+                        disp_rel = rel if verbose else _denylist_redact(rel, deny_rules)
                         findings.append(doctor_finding(
                             "hygiene.denylist", "warning",
                             "%s:%d: operator-denylisted identifier present (%s)%s"
-                            % (rel, i, label, detail),
-                            rel, "abstract or remove the identifier (RFC 052 "
+                            % (disp_rel, i, label, detail),
+                            disp_rel, "abstract or remove the identifier (RFC 052 "
                             "compartmentalization); the term is confidential and "
                             "not echoed — use --hygiene-verbose locally"))
     return findings

@@ -11492,6 +11492,20 @@ class TestRFC052Denylist(CLIBase):
         r = self._run("--lint")                          # no denylist at all
         self.assertEqual(r.returncode, 1, r.stdout)      # C1 gate unchanged by C3
 
+    def test_term_in_path_is_redacted_in_default_output(self):
+        # Codex review BLOCKER: a denied term inside the file PATH re-leaked
+        # through the message and the path field of the default output.
+        self._track("docs/%s/leak.md" % self.TERM, "The %s twice.\n" % self.TERM)
+        dl = self._deny(self.TERM + "\n")
+        r = self._run(denylist=dl)
+        hits = self._findings(r)
+        self.assertEqual(len(hits), 1, r.stdout)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)   # NOWHERE, path included
+        self.assertIn("[redacted]", hits[0]["message"])
+        self.assertIn("[redacted]", hits[0]["path"])
+        rv = self._run("--hygiene-verbose", denylist=dl)   # forensic keeps raw path
+        self.assertIn("docs/%s/leak.md" % self.TERM, rv.stdout)
+
 
 class TestRFC052ScrubCheck(CLIBase):
     """RFC 052 (#101) PR2 — E1 `scripts/scrub-check.py` (tip + history) and E2
@@ -11630,6 +11644,38 @@ class TestRFC052ScrubCheck(CLIBase):
         core_word = {t for l, t, rx in core_rules if rx.pattern.startswith("\\b")}
         s_word = {t for l, t, m in s_rules if m == "word"}
         self.assertEqual(core_word, s_word)
+
+    def test_term_in_path_redacted_and_allow_in_path_does_not_suppress(self):
+        # Review BLOCKER (locator leak) + MEDIUM 3 (allow matched on the full
+        # git grep line, so an allow substring in the PATH suppressed a real
+        # content hit).
+        self._commit("docs/%s/leak.md" % self.TERM, "content %s here\n" % self.TERM)
+        self._commit("docs/approved sample/leak2.md",
+                     "The %s without approval marker.\n" % self.TERM)
+        dl = self._deny("%s\nallow:approved sample\n" % self.TERM)
+        r = self._scrub("--no-history", denylist=dl)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)   # path redacted too
+        self.assertIn("[redacted]", r.stdout)
+        self.assertIn("leak2.md", r.stdout)                # path-allow must NOT suppress
+        rv = self._scrub("--no-history", "--verbose", denylist=dl)
+        self.assertIn("docs/%s/leak.md" % self.TERM, rv.stdout)  # forensic raw
+
+    def test_non_utf8_tracked_file_never_tracebacks(self):
+        # Review MEDIUM 2: bare text=True made the decode raise
+        # UnicodeDecodeError -> traceback -> rc 1 misread as a hit by the hooks.
+        p = os.path.join(self.d, "docs", "bad.md")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(b"bad byte \xff then " + self.TERM.encode() + b"\n")
+        subprocess.run(["git", "add", "docs/bad.md"], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "bad"], cwd=self.d,
+                       capture_output=True)
+        r = self._scrub("--no-history", denylist=self._deny(self.TERM + "\n"))
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        # errors=replace keeps the ASCII term matchable: a real redacted hit.
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("docs/bad.md", r.stdout)
 
     def test_hooks_advisory_by_default_enforce_blocks_pen_guard_intact(self):
         self._commit("docs/a.md", "The %s pipeline.\n" % self.TERM)

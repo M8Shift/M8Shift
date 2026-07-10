@@ -122,9 +122,21 @@ def history_cmd(rule, max_commits, refs_pull):
     return cmd
 
 
+def redact(text, rules):
+    """Redact every denied-term occurrence in a display string (review BLOCKER:
+    a denied term inside a file PATH re-leaked through the default locator)."""
+    for _label, term, mode in rules:
+        text = re.sub(re.escape(term), "[redacted]", text, flags=re.IGNORECASE)
+    return text
+
+
 def run_git(cmd, repo):
-    """Raw argv execution (shell=False), bounded. -> CompletedProcess."""
-    return subprocess.run(cmd, cwd=repo, capture_output=True, text=True,
+    """Raw argv execution (shell=False), bounded. -> CompletedProcess.
+    Explicit utf-8 + errors=replace: with bare text=True, invalid UTF-8 in a
+    tracked file made the decode raise UnicodeDecodeError -> traceback -> rc 1,
+    which the hooks then misread as a scrub HIT (review MEDIUM 2)."""
+    return subprocess.run(cmd, cwd=repo, capture_output=True,
+                          encoding="utf-8", errors="replace",
                           timeout=GIT_TIMEOUT_S)
 
 
@@ -161,7 +173,7 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         # TIP — revision (HEAD) before `--`; rc 0 = match, 1 = clean, >1 = error.
         try:
             r = run(tip_cmd(rule), args.repo)
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
             print("scrub-check: ERROR running git grep (%s)" % exc.__class__.__name__,
                   file=err)
             return 2
@@ -180,11 +192,17 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                 content = parts[3] if len(parts) >= 4 else line
                 if word_rx is not None and not word_rx.search(content):
                     continue          # literal over-match without a word boundary
-                lowered = line.lower()
-                if any(a in lowered for a in allows):
+                # allow: is matched on the CONTENT only — matching the full grep
+                # line let an allow substring in the PATH suppress a real content
+                # hit (review MEDIUM 3).
+                if any(a in content.lower() for a in allows):
                     continue
                 hits += 1
-                print("TIP hit: %s [%s]" % (loc, shown), file=out)
+                # The locator itself can carry a denied term (a term-named dir or
+                # file) — redact it in default mode; --verbose keeps it raw.
+                print("TIP hit: %s [%s]"
+                      % (loc if args.verbose else redact(loc, rules), shown),
+                      file=out)
         # HISTORY — pickaxe across all refs; any commit listed = the term was
         # added or removed there (an allow-substring cannot be evaluated without
         # echoing blob content, so history hits are always reported).
@@ -192,7 +210,7 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
             continue
         try:
             r = run(history_cmd(rule, args.max_commits, args.refs_pull), args.repo)
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
             print("scrub-check: ERROR running git log (%s)" % exc.__class__.__name__,
                   file=err)
             return 2
