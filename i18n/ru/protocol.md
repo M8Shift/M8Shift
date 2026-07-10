@@ -223,6 +223,7 @@ loop:
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # добавить долговременную заметку памяти (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # журнал задач advisory (дела по агентам)
+./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # привязывает эту смену к ОДНОМУ реле проекта (RFC 038 §9); без пера; отказывает при неоднозначности без закрытого селектора
 ./m8shift.py release <agent> --to <other> [--force]  # передаёт без тела (НЕ инкрементирует turn повторно)
 ./m8shift.py done <agent> [--force]                 # закрывает сессию (state=DONE)
 ./m8shift.py archive [--keep N]                     # очищает старые закрытые ходы (никогда ход #0)

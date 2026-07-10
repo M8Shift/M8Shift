@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+**RFC 052 PR4 — session binding (#101, RFC 038 §9).** A shift now binds
+mechanically to ONE project. A centralized pre-write gate covers every relay
+mutator: when the `M8SHIFT_ROOT`-designated relay and the script-local relay
+BOTH exist and physically differ (`samefile` identity — symlinked same-root is
+not ambiguous), every write refuses BEFORE any lock file exists — agentless
+admin writes (`archive`, `cooldown`, `decisions --set`, `session report
+--write`) always refuse under unresolved ambiguity; an actor-bearing command is
+resolved only by that actor's own self-consistent binding. New penless
+`bind <agent>` verb (`--show`/`--list` read-only, `--clear`) with a
+deterministic target: under ambiguity it requires the closed
+`--candidate env|script` selector — never silent env-wins — and a live-pen
+guard refuses rebinding while the agent holds a live WORKING lock in any
+candidate. Binding verification re-checks under the file lock (TOCTOU pin).
+`init` refuses any non-empty `M8SHIFT_ROOT` resolving to a different physical
+root than HERE — even if it does not exist yet — before creating anything. One
+disclosure rule everywhere: a foreign root appears as basename + sha256-10,
+never the full path. The agent-pack and anchor stanza gain the mechanical
+bind-at-start rule (floor-marked). Zero-config behavior is byte-identical.
+
 **RFC 052 PR3 — opt-in anchor hygiene (#101).** `doctor --hygiene-anchors`
 re-scans the generated anchors (`CLAUDE.md`, `AGENTS.md`), which the default
 path lint excludes because they legitimately carry the operator's OWN path. The

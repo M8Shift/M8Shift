@@ -6114,22 +6114,37 @@ class TestStage8Core(CLIBase):
             f.write(t.replace("note:", f"integrating: {sentinel}\nnote:", 1))
 
     def test_root_env_redirects_coordination(self):
-        # $M8SHIFT_ROOT rebases coordination paths to a canonical root, not the script's dir
+        # $M8SHIFT_ROOT rebases RUNTIME coordination (claim/status/...) to the
+        # canonical root. Bootstrapping THROUGH it was always doctrine-discouraged
+        # ("don't bootstrap a kit through $M8SHIFT_ROOT") and is now REFUSED
+        # (RFC 038 §9.2: the hybrid writes anchors locally while coordinating
+        # elsewhere — the recorded cross-shift leak vector).
         root = tempfile.mkdtemp(prefix="m8root-")
         self.addCleanup(shutil.rmtree, root, True)
         env = dict(os.environ, M8SHIFT_ROOT=root)
         r = subprocess.run([sys.executable, "m8shift.py", "init"],
                            cwd=self.d, capture_output=True, text=True, env=env)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(os.path.exists(os.path.join(root, "M8SHIFT.md")))       # canonical root
-        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))    # not the script dir
-        # and without the env, init writes next to the script (degree-1 unchanged)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("script-local bootstrap", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(root, "M8SHIFT.md")))
+        # without the env, init writes next to the script (degree-1 unchanged),
+        # and the env then redirects RUNTIME coordination to an init'd root.
         self.init()
         self.assertTrue(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+        r2 = subprocess.run([sys.executable, os.path.join(root, "..", "nope")],
+                            capture_output=True, text=True)  # placeholder no-op
+        shutil.copy(os.path.join(self.d, "m8shift.py"), os.path.join(root, "m8shift.py"))
+        ri = subprocess.run([sys.executable, "m8shift.py", "init"],
+                            cwd=root, capture_output=True, text=True)
+        self.assertEqual(ri.returncode, 0, ri.stderr)
+        rs = subprocess.run([sys.executable, "m8shift.py", "status"],
+                            cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(rs.returncode, 0, rs.stderr)    # runtime rebase intact
 
     def test_root_env_nonexistent_dir_no_traceback(self):
-        # $M8SHIFT_ROOT at a not-yet-existing dir must not crash file_lock with a raw traceback
-        # (file_lock mirrors write()'s makedirs); init then auto-creates the root like a fresh dir.
+        # $M8SHIFT_ROOT at a not-yet-existing dir must not crash with a raw
+        # traceback. Since RFC 038 §9.2 the remote bootstrap is REFUSED (cleanly,
+        # before any directory creation) instead of auto-created.
         base = tempfile.mkdtemp(prefix="m8ne-")
         self.addCleanup(shutil.rmtree, base, True)
         root = os.path.join(base, "deep", "child")     # parents do not exist yet
@@ -6139,8 +6154,11 @@ class TestStage8Core(CLIBase):
         self.assertNotIn("Traceback", r.stderr)        # clean refusal (not init'd), no crash
         ri = subprocess.run([sys.executable, "m8shift.py", "init"],
                             cwd=self.d, capture_output=True, text=True, env=env)
-        self.assertEqual(ri.returncode, 0, ri.stderr)
-        self.assertTrue(os.path.exists(os.path.join(root, "M8SHIFT.md")))    # auto-created
+        self.assertNotEqual(ri.returncode, 0)
+        self.assertNotIn("Traceback", ri.stderr)       # clean refusal, no crash
+        # The earlier claim's file_lock may have created the bare dir (pinned
+        # anti-crash makedirs); what matters is that init BOOTSTRAPPED nothing.
+        self.assertFalse(os.path.exists(os.path.join(root, "M8SHIFT.md")))
 
     def test_integrating_locks_the_pen(self):
         # an in-flight merge (`integrating:` set) locks the pen: every normal/forced public op is
@@ -11842,6 +11860,136 @@ class TestRFC052AnchorMode(CLIBase):
             cwd=self.d, capture_output=True, text=True, env=env)
         checks = {f["check"] for f in json.loads(r.stdout)["findings"]}
         self.assertNotIn("hygiene.anchor_foreign_path", checks)   # opt-in only
+
+
+class TestRFC052SessionBinding(CLIBase):
+    """RFC 038 §9 / RFC 052 PR4 — session binding: centralized pre-write gate
+    (A1 two-candidate ambiguity, A3 per-actor binding), deterministic penless
+    `bind`, live-pen guard, init hybrid refusal, one disclosure rule."""
+
+    def setUp(self):
+        super().setUp()
+        self.init("--agents", "claude,codex")            # script-local relay
+        self.other = tempfile.mkdtemp(prefix="m8-bind-other-")
+        self.addCleanup(shutil.rmtree, self.other, True)
+        shutil.copy(SCRIPT, os.path.join(self.other, "m8shift.py"))
+        r = subprocess.run([sys.executable, "m8shift.py", "init",
+                            "--agents", "claude,codex"],
+                           cwd=self.other, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def _run(self, *args, env_root=None):
+        env = dict(os.environ)
+        env.pop("M8SHIFT_ROOT", None)
+        if env_root is not None:
+            env["M8SHIFT_ROOT"] = env_root
+        return subprocess.run([sys.executable, "m8shift.py", *args],
+                              cwd=self.d, capture_output=True, text=True, env=env)
+
+    def test_no_binding_no_ambiguity_byte_identical(self):
+        self.assertEqual(self._run("claim", "claude").returncode, 0)
+        self.assertEqual(
+            self._run("release", "claude", "--to", "codex").returncode, 0)
+
+    def test_a1_ambiguity_refuses_actor_and_agentless_mutators(self):
+        for args in (("claim", "claude"), ("archive",),
+                     ("remember", "claude", "note"),
+                     ("task", "add", "claude", "desc")):
+            r = self._run(*args, env_root=self.other)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertIn("two candidate relays", r.stderr, args)
+        # No lock file left behind by a refusal.
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift.lock")))
+        self.assertFalse(os.path.exists(os.path.join(self.other, ".m8shift.lock")))
+
+    def test_a1_disclosure_never_shows_full_foreign_path(self):
+        r = self._run("claim", "claude", env_root=self.other)
+        self.assertNotIn(self.other, r.stderr)           # full path absent
+        self.assertIn("[root:", r.stderr)                # hashed disclosure present
+
+    def test_read_only_commands_keep_working_under_ambiguity(self):
+        for args in (("status",), ("log",), ("task", "list"), ("claim", "claude", "--check")):
+            r = self._run(*args, env_root=self.other)
+            self.assertIn(r.returncode, (0, 3), args)    # informational rcs allowed
+
+    def test_bind_requires_closed_selector_under_ambiguity(self):
+        r = self._run("bind", "claude", env_root=self.other)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("--candidate", r.stderr)
+        ok = self._run("bind", "claude", "--candidate", "script", env_root=self.other)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.d, ".m8shift", "bindings", "claude.json")))
+
+    def test_actor_binding_resolves_a1_to_bound_relay_env_untouched(self):
+        self._run("bind", "claude", "--candidate", "script", env_root=self.other)
+        r = self._run("claim", "claude", env_root=self.other)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WORKING_CLAUDE", self.md())       # script-local mutated
+        with open(os.path.join(self.other, "M8SHIFT.md"), encoding="utf-8") as fh:
+            self.assertNotIn("WORKING", fh.read())       # env relay untouched
+
+    def test_agentless_mutator_still_refuses_despite_binding(self):
+        self._run("bind", "claude", "--candidate", "script", env_root=self.other)
+        r = self._run("archive", env_root=self.other)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("two candidate relays", r.stderr)
+
+    def test_binding_mismatch_refuses_with_redaction(self):
+        self._run("bind", "claude")                      # single candidate: script
+        bpath = os.path.join(self.d, ".m8shift", "bindings", "claude.json")
+        with open(bpath, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["root_realpath"] = os.path.join(self.other, "moved-elsewhere")
+        with open(bpath, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        r = self._run("claim", "claude")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("bound to a different project root", r.stderr)
+        self.assertNotIn(self.other, r.stderr)           # redacted
+        self.assertEqual(self._run("bind", "claude", "--clear").returncode, 0)
+        self.assertEqual(self._run("claim", "claude").returncode, 0)
+
+    def test_live_pen_guard_blocks_rebind_until_release(self):
+        self._run("bind", "claude")
+        self.assertEqual(self._run("claim", "claude").returncode, 0)
+        r = self._run("bind", "claude", "--clear")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("live WORKING lock", r.stderr)
+        self._run("release", "claude", "--to", "codex")
+        self.assertEqual(self._run("bind", "claude", "--clear").returncode, 0)
+
+    def test_init_refuses_differing_env_root_even_nonexistent(self):
+        fresh = tempfile.mkdtemp(prefix="m8-bind-fresh-")
+        self.addCleanup(shutil.rmtree, fresh, True)
+        shutil.copy(SCRIPT, os.path.join(fresh, "m8shift.py"))
+        ghost = os.path.join(self.other, "does-not-exist-yet")
+        r = subprocess.run([sys.executable, "m8shift.py", "init"],
+                           cwd=fresh, capture_output=True, text=True,
+                           env={**os.environ, "M8SHIFT_ROOT": ghost})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("script-local bootstrap", r.stderr)
+        self.assertFalse(os.path.exists(ghost))          # nothing created
+        self.assertFalse(os.path.exists(os.path.join(fresh, "M8SHIFT.md")))
+
+    def test_bind_show_and_list_read_only_under_ambiguity(self):
+        self._run("bind", "claude", "--candidate", "script", env_root=self.other)
+        for args in (("bind", "claude", "--show"), ("bind", "claude", "--list")):
+            r = self._run(*args, env_root=self.other)
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+        r = self._run("bind", "claude", "--list")
+        self.assertIn("claude", r.stdout)
+        self.assertIn("(valid)", r.stdout)
+
+    def test_symlinked_same_root_is_not_ambiguous(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlink support")
+        link = os.path.join(tempfile.mkdtemp(prefix="m8-bind-ln-"), "alias")
+        self.addCleanup(shutil.rmtree, os.path.dirname(link), True)
+        os.symlink(self.d, link)
+        r = self._run("claim", "claude", env_root=link)  # same physical root
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self._run("release", "claude", "--to", "codex", env_root=link)
 
 
 if __name__ == "__main__":

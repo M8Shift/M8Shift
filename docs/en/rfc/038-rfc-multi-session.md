@@ -111,7 +111,7 @@ identity within a session).
 - `m8shift-runtime.py` / `m8shift-context.py` / `m8shift-worktree.py` resolve the **same** relay
   namespace without confusing it with the runtime lane id (§5.1).
 
-## 9. Session binding (amendment — RFC 052 PR4, design rev 2 after Codex review)
+## 9. Session binding (amendment — RFC 052 PR4; design rev 3 Codex-approved, IMPLEMENTED)
 
 Operator requirement (RFC 052): *a shift is a work session bound to ONE project; if the
 target is ambiguous, the tooling asks the operator instead of guessing; identifiers never
