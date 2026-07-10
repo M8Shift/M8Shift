@@ -418,7 +418,7 @@ Worktree companion doctor findings:
 
 - `heartbeat <agent>` writes a matching sidecar only for current
   `WORKING_<agent>`.
-- `claim --refresh` writes heartbeat metadata after refreshing TTL and warns if
+- `claim --refresh` writes AUDIT-ONLY beat metadata (protective=false, null cadence) after refreshing TTL and warns if
   the sidecar write fails.
 - `claim --force` refuses stale peer locks with fresh matching heartbeat.
 - `claim --force --live-override --reason ...` succeeds and audits the override.
