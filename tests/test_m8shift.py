@@ -11326,6 +11326,82 @@ class TestRFC051UsageAdvisory(CLIBase):
             captured_at=cap, windows=[{**win, "used_ratio": 0.71}]))])
         self.assertNotEqual(cowork._usage_signature(lk), sig1)  # a window flip reprints
 
+    def test_unhashable_kind_degrades_at_field_level_not_row_level(self):
+        # Codex #106 review finding 1: a hostile list/dict `kind` exploded dict.get and
+        # the row-level fail-open then hid the ENTIRE agent (valid sibling windows AND
+        # the --json entry). Pin: the fragment degrades, everything else stays visible.
+        far = self.fresh_iso(6 * 86400)
+        self.write_sidecar([self.event(self.snapshot(
+            agent="codex", decision_ratio=0.42, provenance="official",
+            windows=[
+                {"kind": [], "used_ratio": 0.5, "resets_at": self.fresh_iso(60)},
+                {"kind": {"x": 1}, "used_ratio": 0.6, "resets_at": self.fresh_iso(60)},
+                {"kind": "weekly", "used_ratio": 0.42, "resets_at": far},
+            ]))])
+        out = self.status_out()
+        line = self._agent_line(out, "codex")
+        self.assertIn("weekly 42%", line)               # valid sibling survives
+        self.assertNotIn("50%", line)
+        self.assertNotIn("60%", line)
+        d = json.loads(self.status_out("--json"))
+        entry = next(u for u in d["usage"] if u["agent"] == "codex")
+        self.assertEqual(entry["decision_ratio"], 0.42)  # the agent's JSON row survives too
+
+    def test_window_ratio_enforced_to_schema_range(self):
+        # Codex #106 review finding 2: windows[].used_ratio is schema-bounded [0,1];
+        # the hostile sidecar must not render -50% / 150% / bool / huge-int percentages.
+        far = self.fresh_iso(6 * 86400)
+        self.write_sidecar([self.event(self.snapshot(
+            agent="claude", decision_ratio=0.42,
+            windows=[
+                {"kind": "w-neg", "used_ratio": -0.5},
+                {"kind": "w-over", "used_ratio": 1.5},
+                {"kind": "w-bool", "used_ratio": True},
+                {"kind": "w-nan", "used_ratio": float("nan")},
+                {"kind": "w-inf", "used_ratio": float("inf")},
+                {"kind": "w-huge", "used_ratio": 10 ** 300},
+                {"kind": "weekly", "used_ratio": 0.42, "resets_at": far},
+                {"kind": "w-full", "used_ratio": 1},     # boundary: exactly 1 is valid
+            ]))])
+        line = self._agent_line(self.status_out(), "claude")
+        self.assertIn("weekly 42%", line)               # valid siblings survive
+        self.assertIn("w-full 100%", line)
+        self.assertNotIn("-50%", line)
+        self.assertNotIn("150%", line)
+        for k in ("w-neg", "w-over", "w-bool", "w-nan", "w-inf", "w-huge"):
+            self.assertNotIn(k, line)
+
+    def test_fallback_reset_carries_date_when_cross_day(self):
+        # Codex #106 review finding 3: the fallback line's dated cross-day reset is the
+        # INTENTIONAL operator behavior (never byte-identity) — pin it both ways.
+        far = self.fresh_iso(6 * 86400)
+        self.write_sidecar([self.event(self.snapshot(
+            agent="claude", decision_ratio=0.9, resets_at=far, windows=[]))])
+        line = self._agent_line(self.status_out(), "claude")
+        self.assertIn(f"resets {self._local_when(far)}", line)   # dd/mm HH:MM
+        self.assertIn("/", self._local_when(far))
+        near = self.fresh_iso(120)
+        self.write_sidecar([self.event(self.snapshot(
+            agent="claude", decision_ratio=0.9, resets_at=near, windows=[]))])
+        line = self._agent_line(self.status_out(), "claude")
+        self.assertIn(f"resets {self._local_when(near)}", line)  # same-day: HH:MM as before
+
+    def test_reset_when_midnight_boundary_deterministic(self):
+        # Codex #106 review: pin the same-local-day boundary with an INJECTED ref so the
+        # test cannot flake if wall-clock midnight falls between render and expectation.
+        # The local offset is captured AT the pinned July instant (not today's), so the
+        # expectation is DST-proof whenever the suite runs.
+        ref = dt.datetime(2026, 7, 10, 12, 0, tzinfo=dt.timezone.utc)
+        ref_loc = ref.astimezone()                   # July's local offset, by construction
+        same = ref_loc.replace(hour=23, minute=59)               # same LOCAL date as ref
+        next_day = (ref_loc + dt.timedelta(days=1)).replace(hour=0, minute=1)
+        as_z = lambda t: t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertEqual(cowork._usage_reset_when(as_z(same), ref), "23:59")
+        self.assertEqual(cowork._usage_reset_when(as_z(next_day), ref),
+                         next_day.strftime("%d/%m %H:%M"))
+        self.assertIsNone(cowork._usage_reset_when("garbage", ref))
+        self.assertIsNone(cowork._usage_reset_when(None, ref))
+
     # ── watch --changes-only: reprint on a usage-line delta, not on the clock ──
     def test_usage_signature_reprints_on_snapshot_delta_not_on_age(self):
         cowork.configure_root(self.d)

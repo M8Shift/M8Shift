@@ -10,12 +10,17 @@ instead of only the decision window:
 The reset shows the DATE (`dd/mm HH:MM`) whenever it does not fall on today's
 local date, so a weekly window resetting next Wednesday never reads as tonight.
 Window labels adapt to each agent's real window kinds (`session_5h` → `5h`,
-anything else sanitized as-is — inter-agent generic); fragments degrade at
-field level and are capped with a disclosed `+N` overflow. Snapshots without a
-plausible `windows[]` (older adapters, spent-only scans) keep the previous
-single-window line byte-identical, and `--json` output is unchanged (the full
-`windows[]` was already echoed). The watch `--changes-only` signature now
-covers per-window changes.
+anything else sanitized as-is — inter-agent generic); per-window percentages
+are enforced to the schema range (finite, non-bool, `[0, 1]` — a hostile
+`-0.5`/`1.5` never renders `-50%`/`150%`), and fragments degrade at FIELD
+level, never row level (an unhashable hostile `kind` skips that fragment; the
+valid sibling windows and the agent's row — human and `--json` — stay
+visible), capped with a disclosed `+N` overflow. Snapshots without a plausible
+`windows[]` (older adapters, spent-only scans) keep the previous single-window
+layout, with one intentional correction: the fallback `resets …` fragment also
+carries the date when the reset is not same-day. `--json` output is unchanged
+(the full `windows[]` was already echoed). The watch `--changes-only`
+signature now covers per-window changes.
 
 **RFC 049 PR B — the listener is the managed liveness producer (#104).** While
 a child runner turn is ALIVE, the listener supervision loop now emits

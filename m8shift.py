@@ -7579,16 +7579,32 @@ def _usage_reset_display(snap, ref):
     return _usage_reset_when(dw.get("resets_at"), ref)
 
 
+def _usage_window_pct(r):
+    """The per-window CONSUMED ratio as an integer-percent string, or None when it is
+    not plausible. Unlike `decision_ratio` (whose token-derived over-limit semantics may
+    legitimately exceed 1), `windows[].used_ratio` is schema-bounded to finite [0, 1] —
+    the core treats the sidecar as hostile and enforces that boundary here, so a corrupt
+    `-0.5` / `1.5` never renders as `-50%` / `150%` (Codex #106 review, finding 2)."""
+    if isinstance(r, bool) or not isinstance(r, (int, float)) or not math.isfinite(r):
+        return None
+    if r < 0 or r > 1:
+        return None
+    return f"{int(round(r * 100))}%"
+
+
 def _usage_window_frags(snap, ref):
     """#106 unified line: one `label NN% (Reset when)` fragment per plausible entry of
-    `windows[]` — NN% is the CONSUMED `used_ratio` (echo-only, validated like the
-    decision ratio), label is the window's kind (aliased `session_5h`→`5h`, otherwise
-    sanitized as-is so any agent's window kinds render — inter-agent generic), reset is
-    same-day `HH:MM` / cross-day `dd/mm HH:MM` and simply omitted when unusable.
-    An entry that is not a dict, has no plausible ratio, or no safe label contributes
-    nothing (field-level degradation, never a crash). Capped with a `+N` overflow so a
-    hostile many-window snapshot cannot blow up the status/watch line. Empty list when
-    nothing renders — the caller then falls back to the legacy decision-window line."""
+    `windows[]` — NN% is the CONSUMED `used_ratio` (echo-only, enforced to the schema
+    range [0, 1] by `_usage_window_pct`), label is the window's kind (aliased
+    `session_5h`→`5h`, otherwise sanitized as-is so any agent's window kinds render —
+    inter-agent generic), reset is same-day `HH:MM` / cross-day `dd/mm HH:MM` and simply
+    omitted when unusable. An entry that is not a dict, has no plausible ratio, or no
+    safe label contributes nothing — field-level degradation that must NEVER raise: a
+    hostile unhashable `kind` (list/dict) would explode `dict.get` and take the whole
+    agent row (and its JSON entry) with it (Codex #106 review, finding 1), so the alias
+    lookup is reached only for strings. Capped with a `+N` overflow so a hostile
+    many-window snapshot cannot blow up the status/watch line. Empty list when nothing
+    renders — the caller then falls back to the legacy decision-window line."""
     windows = snap.get("windows")
     if not isinstance(windows, list):
         return []
@@ -7596,11 +7612,12 @@ def _usage_window_frags(snap, ref):
     for w in windows:
         if not isinstance(w, dict):
             continue
-        pct = _usage_pct(w.get("used_ratio"))
-        if pct == "—":
+        pct = _usage_window_pct(w.get("used_ratio"))
+        if pct is None:
             continue
         kind = w.get("kind")
-        label = USAGE_WINDOW_LABELS.get(kind) or _usage_sanitize(kind, cap=10, fallback="")
+        label = (USAGE_WINDOW_LABELS.get(kind) if isinstance(kind, str) else None) \
+            or _usage_sanitize(kind, cap=10, fallback="")
         if not label:
             continue
         when = _usage_reset_when(w.get("resets_at"), ref)

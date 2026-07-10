@@ -136,22 +136,31 @@ window:
 ```
 
 - Each fragment is `label NN% (Reset when)`: `NN%` echoes the window's CONSUMED
-  `used_ratio` (validated exactly like the decision ratio — implausible → the
-  fragment is skipped, never `—` noise), `label` is the window `kind`
-  (`session_5h` aliased to `5h`, any other kind sanitized and rendered as-is so
-  every agent's window vocabulary works — inter-agent generic), and `when` is
-  the local reset: `HH:MM` when the reset falls on today's LOCAL date,
-  `dd/mm HH:MM` otherwise (a weekly window resetting next Wednesday must never
-  read as tonight). An unusable `resets_at` omits just the `(Reset …)` part.
-- Field-level degradation: a non-dict entry, an implausible ratio, or an
-  unlabelable kind contributes nothing; fragments are capped at
-  `USAGE_LINE_MAX_WINDOWS` with a disclosed `+N` overflow (a hostile many-window
-  snapshot cannot blow up the line).
+  `used_ratio`, enforced to the schema range — finite, non-bool, `0 <= r <= 1`
+  (STRICTER than the decision ratio, whose token-derived over-limit semantics
+  may exceed 1: a hostile `-0.5`/`1.5` must never render `-50%`/`150%`);
+  implausible → the fragment is skipped, never `—` noise. `label` is the window
+  `kind` (`session_5h` aliased to `5h`, any other kind sanitized and rendered
+  as-is so every agent's window vocabulary works — inter-agent generic; the
+  alias lookup is reached only for STRING kinds, so an unhashable hostile kind
+  degrades instead of raising), and `when` is the local reset: `HH:MM` when the
+  reset falls on today's LOCAL date, `dd/mm HH:MM` otherwise (a weekly window
+  resetting next Wednesday must never read as tonight). An unusable `resets_at`
+  omits just the `(Reset …)` part.
+- Field-level degradation, never row-level: a non-dict entry, an implausible
+  ratio, or an unlabelable/unhashable kind contributes nothing while its valid
+  sibling windows (and the agent's row, human and `--json`) remain visible;
+  fragments are capped at `USAGE_LINE_MAX_WINDOWS` with a disclosed `+N`
+  overflow (a hostile many-window snapshot cannot blow up the line).
 - Provenance renders once per line; the `used …` consumption fragment (below),
   age, and `stale` keep their tail positions.
 - A snapshot with NO plausible window entry (older adapters, spent-only scans,
-  budget gates) falls back to the pre-amendment single-window line below,
-  byte-identical:
+  budget gates) falls back to the single-window line below — same layout and
+  fields as before this amendment, with ONE intentional correction: its
+  `resets …` fragment follows the same same-day/cross-day rule, so a cross-day
+  reset reads `resets 16/07 22:00` instead of the misleading bare `22:00` (the
+  operator's dated-reset requirement applies to EVERY line, fallback included;
+  a same-day reset renders exactly as before):
 
 ```text
   claude   87% session_5h (official) · used 80M/5h · resets 20:00 · 2m ago
