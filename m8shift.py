@@ -5878,8 +5878,12 @@ def _read_binding(root, agent):
     if not agent or not re.fullmatch(AGENT_RE, agent):
         return "invalid", "invalid agent name"
     path = _binding_path(root, agent)
-    if not os.path.exists(path):
+    if not os.path.lexists(path):
         return "absent", None
+    if os.path.islink(path):
+        # A dangling symlink is PRESENT (lexists) — and a binding must be a plain
+        # file: a symlinked binding is refused outright (fail closed).
+        return "invalid", "binding is a symlink"
     try:
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
@@ -6042,13 +6046,63 @@ def session_binding_gate(actor=None):
         _GATE_ACTOR = actor
 
 
+def resolve_actor_relay_readonly(actor):
+    """READ-ONLY actor resolution (Codex re-review BLOCKER 2): under a
+    two-candidate ambiguity, a unique self-consistent binding selects that
+    candidate BEFORE the LOCK is read — no lock taken, nothing mutated.
+    Returns (status, detail): ("ok", None) — COWORK now points at the actor's
+    relay; ("invalid", reason); ("unresolved", None) — ambiguity with no/dual
+    resolution."""
+    env_root, script_root = _root_pair()
+    env_ok, script_ok = _root_has_relay(env_root), _root_has_relay(script_root)
+    ambiguous = (env_ok and script_ok
+                 and not _same_physical_root(env_root, script_root))
+    if not ambiguous:
+        st, payload = _read_binding(os.path.dirname(COWORK), actor)
+        if st == "invalid":
+            return "invalid", payload
+        if st == "valid" and not _binding_matches(os.path.dirname(COWORK), payload):
+            return "invalid", ("bound to a different project root (%s)"
+                               % _foreign_root_disp(payload["root_realpath"]))
+        return "ok", None
+    matches = []
+    for c in (env_root, script_root):
+        st, payload = _read_binding(c, actor)
+        if st == "invalid":
+            return "invalid", payload
+        if st == "valid" and _binding_matches(c, payload):
+            matches.append(c)
+    if len(matches) != 1:
+        return "unresolved", None
+    if not _same_physical_root(matches[0], os.path.dirname(COWORK)):
+        configure_root(matches[0])
+    return "ok", None
+
+
 def session_binding_preflight(actor=None):
     """PUBLIC companion API (RFC 038 §9.2): companions that mutate M8Shift-owned
     state (worktree pen flips, context artifacts, runtime sidecars) MUST call this
     before any filesystem write — the core argparse dispatcher cannot see them.
     Same semantics as the dispatch gate: refuses two-candidate ambiguity (always,
-    for agentless writes), resolves/validates an actor's binding fail-closed."""
-    return session_binding_gate(actor)
+    for agentless writes), resolves/validates an actor's binding fail-closed.
+    Returns the RESOLVED canonical effective root — companions MUST rebase their
+    own root variable on it (Codex re-review BLOCKER 3: split-brain otherwise)."""
+    session_binding_gate(actor)
+    return os.path.dirname(COWORK)
+
+
+def _ambiguity_safe_path(path):
+    """§9.5 display of a path while an ambiguity is unresolved: redacted when it
+    IS or is UNDER either candidate root; otherwise shown as-is."""
+    real = os.path.realpath(path)
+    for cand in _root_pair():
+        if not cand:
+            continue
+        cr = os.path.realpath(cand)
+        if real == cr or real.startswith(cr + os.sep):
+            return _foreign_root_disp(cand) + (
+                "" if real == cr else os.sep + "…")
+    return path
 
 
 def relay_ambiguity_snapshot():
@@ -6189,8 +6243,13 @@ def cmd_bind(args):
             print("refused: the target relay disappeared or is unreadable — "
                   "nothing bound.", file=sys.stderr)
             return 2
-        roster = [a.strip() for a in (lk.get("agents") or "").split(",") if a.strip()]
-        if roster and agent not in roster:
+        roster = [a.strip() for a in (lk.get("agents") or "").split(",")
+                  if a.strip() and re.fullmatch(AGENT_RE, a.strip())]
+        if len(roster) < 2:
+            print("refused: the target relay's roster is missing or malformed — "
+                  "nothing bound.", file=sys.stderr)
+            return 2
+        if agent not in roster:
             print("refused: '%s' is not on the target relay's roster (%s)."
                   % (agent, ",".join(roster)), file=sys.stderr)
             return 2
@@ -6990,19 +7049,24 @@ def _status_info(text=None):
 
 
 def cmd_may_i_write(args):
+    # RFC 038 §9.4 (Codex re-review BLOCKER 2): resolve the ACTOR's relay first,
+    # read-only — a unique self-consistent binding selects its candidate before
+    # the LOCK is read, so the guard reports the BOUND relay's pen, not the
+    # env-selected one. Invalid/dual/unresolved-ambiguity is STOP (rc 3).
+    agent_raw = (args.agent or "").strip().lower()
+    r_st, r_detail = resolve_actor_relay_readonly(agent_raw)
+    if r_st == "invalid":
+        print("STOP: %s may not write (binding INVALID: %s). Recover: "
+              "./m8shift.py bind %s --clear, then rebind." % (agent_raw, r_detail,
+                                                              agent_raw))
+        return 3
+    if r_st == "unresolved":
+        print("STOP: %s may not write (two candidate relays exist and no unique "
+              "binding resolves them — bind first: ./m8shift.py bind %s "
+              "--candidate env|script)." % (agent_raw, agent_raw))
+        return 3
     text = load_or_die()
     agent = need_agent(args.agent)
-    # RFC 038 §9.4: the hard guard REPORTS binding validity read-only — a present
-    # but invalid or mismatched binding is STOP (Codex code-review BLOCKER 1).
-    b_st, b_payload = _read_binding(os.path.dirname(COWORK), agent)
-    if b_st == "invalid":
-        print("STOP: %s may not write (binding INVALID: %s). Recover: "
-              "./m8shift.py bind %s --clear, then rebind." % (agent, b_payload, agent))
-        return 3
-    if b_st == "valid" and not _binding_matches(os.path.dirname(COWORK), b_payload):
-        print("STOP: %s may not write (bound to a different project root: %s)."
-              % (agent, _foreign_root_disp(b_payload["root_realpath"])))
-        return 3
     lk = get_lock(text)
     st = lk.get("state", "")
     holder = lk.get("holder", "none")
@@ -7368,8 +7432,19 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
     print(f"m8shift.py v{VERSION}")
     print(f"project  {project_display_name()}")
     if not brief:
-        print(f"cwd      {os.getcwd()}")
-        print(f"root     {project_root()}")
+        amb = relay_ambiguity_snapshot()
+        if amb is not None:
+            # §9.5 one disclosure rule: under an unresolved two-candidate
+            # ambiguity NO candidate-derived raw path is printed (Codex
+            # re-review BLOCKER 1) — cwd included, it is the script candidate
+            # or under it in the leak scenario.
+            print("cwd      %s" % _ambiguity_safe_path(os.getcwd()))
+            print("root     %s" % _foreign_root_disp(project_root()))
+            print("⚠ two candidate relays: %s (env) vs %s (script-local) — "
+                  "writes refuse until disambiguated" % (amb["env"], amb["script"]))
+        else:
+            print(f"cwd      {os.getcwd()}")
+            print(f"root     {project_root()}")
     if brief:
         for k in ("holder", "state", "agents", "turn", "since", "expires"):
             _print_lock_line(k, lk)
@@ -7438,8 +7513,9 @@ def cmd_status(args):
         out["last_turn"] = last
         out["m8shift_version"] = VERSION     # the RUNNING script's version (dogfooding skew check)
         out["project"] = project_display_name()
-        out["cwd"] = os.getcwd()
         amb = relay_ambiguity_snapshot()
+        out["cwd"] = (os.getcwd() if amb is None
+                      else _ambiguity_safe_path(os.getcwd()))
         if amb is not None:
             # §9.5: under unresolved ambiguity the JSON must not retain a raw
             # foreign candidate path — the effective (env-wins) root is redacted
@@ -7487,7 +7563,7 @@ def cmd_watch(args):
             if should_print:
                 if args.clear:
                     print("\033[2J\033[H", end="")
-                print(tr("watch_header", ts=display_time(iso(now())), project=project_display_name(), cwd=os.getcwd()))
+                print(tr("watch_header", ts=display_time(iso(now())), project=project_display_name(), cwd=(os.getcwd() if relay_ambiguity_snapshot() is None else _ambiguity_safe_path(os.getcwd()))))
                 _print_status_block(lk, stale, last, current_session_info(lk, parse_turns(text)),
                                     args.for_agent)
                 print("", flush=True)

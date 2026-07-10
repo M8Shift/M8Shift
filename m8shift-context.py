@@ -325,7 +325,10 @@ def _binding_a1_preflight(args, cmd, verb=""):
     writes are never resolved by someone's binding). Standalone on purpose —
     this companion does not import the core; the check is A1-only and local.
     An explicit --root is a command-scoped authority (like update --target)."""
-    mutating = (cmd in ("init", "pack", "compress") or
+    mutating = (cmd in ("init", "compress") or
+                (cmd == "pack" and (getattr(args, "write", False)
+                                    or getattr(args, "output", None))) or
+                (cmd == "benchmark" and getattr(args, "write", False)) or
                 (cmd == "adapters" and verb == "init"))
     if not mutating or getattr(args, "root", None):
         return

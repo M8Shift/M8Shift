@@ -429,7 +429,14 @@ def main(argv=None):
     ROOT = discover_root()
     core.configure_root(ROOT)        # rebase the core onto the canonical root BEFORE any read/write
     if getattr(args, "cmd", "") in _MUTATING_VERBS:
-        core.session_binding_preflight(getattr(args, "agent", None))
+        # The preflight may resolve the actor's binding to the OTHER candidate;
+        # the companion's own ROOT must follow the returned root or the core
+        # lock and the companion writes split across relays (Codex re-review
+        # BLOCKER 3).
+        resolved = core.session_binding_preflight(getattr(args, "agent", None))
+        if resolved and os.path.realpath(resolved) != os.path.realpath(ROOT):
+            ROOT = resolved
+            core.configure_root(ROOT)
     return args.fn(args)
 
 
