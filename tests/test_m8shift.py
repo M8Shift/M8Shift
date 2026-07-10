@@ -12781,38 +12781,183 @@ class TestRFC049PRBListenerProducer(CLIBase):
                     os.path.join(self.d, "m8shift-runtime.py"))
         self.rt = self._runtime_mod(self.d)
 
-    def test_tick_unit_heartbeat_and_early_refresh(self):
+    def test_tick_unit_structured_results_and_ordering(self):
         calls = []
 
-        class _R:
-            returncode = 0
+        def runner_rc(rcs):
+            seq = iter(rcs)
 
-        def run(argv):
-            calls.append(argv)
-            return _R()
+            def run(argv):
+                calls.append(argv)
+                class _R:
+                    returncode = next(seq)
+                return _R()
+            return run
 
         far = {"state": "WORKING_CLAUDE", "holder": "claude",
                "expires": "2094-01-01T00:00:00Z"}
-        action = self.rt.listener_liveness_tick(
-            "claude", 60, run=run, lock_fields=lambda: dict(far))
-        self.assertEqual(action, "heartbeat")
-        self.assertEqual(len(calls), 1)
+        near = dict(far, expires="2020-01-01T00:00:00Z")
+        # heartbeat only (far expiry), success
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=runner_rc([0]), lock_fields=lambda: dict(far))
+        self.assertTrue(res["working_window"] and res["heartbeat_ok"])
+        self.assertFalse(res["refresh_attempted"])
         self.assertIn("heartbeat", calls[0])
-        self.assertIn("--cadence-seconds", calls[0])
         calls.clear()
-        near = dict(far, expires="2020-01-01T00:00:00Z")   # < TTL/2 remaining
-        action = self.rt.listener_liveness_tick(
-            "claude", 60, run=run, lock_fields=lambda: dict(near))
-        self.assertEqual(action, "refresh+heartbeat")
-        self.assertEqual(len(calls), 2)
-        self.assertIn("--refresh", calls[0])               # refresh FIRST
+        # near expiry: refresh FIRST then heartbeat, both attempted
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=runner_rc([0, 0]), lock_fields=lambda: dict(near))
+        self.assertTrue(res["refresh_attempted"] and res["refresh_ok"])
+        self.assertTrue(res["heartbeat_attempted"] and res["heartbeat_ok"])
+        self.assertIn("--refresh", calls[0])
         self.assertIn("heartbeat", calls[1])
         calls.clear()
+        # foreign window: neutral, nothing invoked
         foreign = {"state": "WORKING_CODEX", "holder": "codex",
                    "expires": "2094-01-01T00:00:00Z"}
-        self.assertIsNone(self.rt.listener_liveness_tick(
-            "claude", 60, run=run, lock_fields=lambda: dict(foreign)))
-        self.assertEqual(calls, [])                        # nothing invoked
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=runner_rc([]), lock_fields=lambda: dict(foreign))
+        self.assertFalse(res["working_window"])
+        self.assertFalse(res["heartbeat_attempted"])
+        self.assertEqual(calls, [])
+
+    def test_tick_failure_matrix_independent_outcomes(self):
+        # Codex PR-B review B1: refresh and heartbeat outcomes are independent;
+        # a refresh failure or exception never suppresses the heartbeat.
+        near = {"state": "WORKING_CLAUDE", "holder": "claude",
+                "expires": "2020-01-01T00:00:00Z"}
+
+        def runner_rc(rcs):
+            seq = iter(rcs)
+
+            def run(argv):
+                class _R:
+                    returncode = next(seq)
+                return _R()
+            return run
+
+        # refresh rc fail -> heartbeat still attempted and succeeds
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=runner_rc([2, 0]), lock_fields=lambda: dict(near))
+        self.assertFalse(res["refresh_ok"])
+        self.assertTrue(res["heartbeat_ok"])
+        # refresh raises -> heartbeat still succeeds
+        state = {"n": 0}
+
+        def raise_then_ok(argv):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise OSError("boom")
+            class _R:
+                returncode = 0
+            return _R()
+
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=raise_then_ok, lock_fields=lambda: dict(near))
+        self.assertEqual(res["refresh_error"], "OSError")
+        self.assertTrue(res["heartbeat_ok"])
+        # refresh ok -> heartbeat rc fail: NOT a success (the reproduced blocker)
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=runner_rc([0, 2]), lock_fields=lambda: dict(near))
+        self.assertTrue(res["refresh_ok"])
+        self.assertFalse(res["heartbeat_ok"])
+        self.assertEqual(res["heartbeat_error"], "rc=2")
+        # heartbeat raises
+        def ok_then_raise(argv):
+            state["n"] += 1
+            if state["n"] >= 4:
+                raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+            class _R:
+                returncode = 0
+            return _R()
+        state["n"] = 2
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=ok_then_raise, lock_fields=lambda: dict(near))
+        self.assertTrue(res["refresh_ok"])
+        self.assertEqual(res["heartbeat_error"], "TimeoutExpired")
+        # both fail
+        res = self.rt.listener_liveness_tick(
+            "claude", 60, run=runner_rc([2, 2]), lock_fields=lambda: dict(near))
+        self.assertFalse(res["refresh_ok"])
+        self.assertFalse(res["heartbeat_ok"])
+
+    def test_supervision_logs_per_episode_and_rearms(self):
+        # Codex PR-B review H2: neutral skip is silent; a failure logs once per
+        # episode; success re-arms the log so a later regression is visible.
+        said = []
+        seq = {"i": 0}
+        plans = [None,                          # neutral pre-claim skip: silent
+                 {"working_window": True, "refresh_attempted": False,
+                  "refresh_ok": False, "refresh_error": None,
+                  "heartbeat_attempted": True, "heartbeat_ok": True,
+                  "heartbeat_error": None},     # success
+                 {"working_window": True, "refresh_attempted": False,
+                  "refresh_ok": False, "refresh_error": None,
+                  "heartbeat_attempted": True, "heartbeat_ok": False,
+                  "heartbeat_error": "rc=2"},   # failure -> logs
+                 {"working_window": True, "refresh_attempted": False,
+                  "refresh_ok": False, "refresh_error": None,
+                  "heartbeat_attempted": True, "heartbeat_ok": False,
+                  "heartbeat_error": "rc=2"}]   # same episode -> silent
+
+        def fake_tick(agent, cadence):
+            plan = plans[min(seq["i"], len(plans) - 1)]
+            seq["i"] += 1
+            if plan is None:
+                return {"working_window": False, "refresh_attempted": False,
+                        "refresh_ok": False, "refresh_error": None,
+                        "heartbeat_attempted": False, "heartbeat_ok": False,
+                        "heartbeat_error": None}
+            return plan
+
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import time; time.sleep(4.5)"], cwd=self.d)
+        original = self.rt.listener_liveness_tick
+        self.rt.listener_liveness_tick = fake_tick
+        try:
+            rc = self.rt.supervise_child_with_liveness(
+                child, "claude", poll_s=1, say=said.append)
+        finally:
+            self.rt.listener_liveness_tick = original
+        self.assertEqual(rc, 0)
+        fails = [m for m in said if "heartbeat failed" in m]
+        self.assertEqual(len(fails), 1, said)   # once per episode
+        self.assertFalse(any("skipped" in m or "window" in m for m in said), said)
+
+    def test_listener_start_rejects_nan_inf_poll(self):
+        for bad in ("nan", "inf"):
+            r = subprocess.run([sys.executable, "m8shift-runtime.py", "listener",
+                                "start", "--agent", "claude", "--dry-run",
+                                "--poll-interval", bad],
+                               cwd=self.d, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("finite", r.stderr, bad)
+
+    def test_two_relay_listener_mutation_fails_closed(self):
+        # RFC 049 x RFC 052: a differing M8SHIFT_ROOT never lets the listener
+        # write liveness into the wrong project.
+        other = tempfile.mkdtemp(prefix="m8-prb-other-")
+        self.addCleanup(shutil.rmtree, other, True)
+        shutil.copy(SCRIPT, os.path.join(other, "m8shift.py"))
+        r = subprocess.run([sys.executable, "m8shift.py", "init",
+                            "--agents", "claude,codex"],
+                           cwd=other, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        env = dict(os.environ)
+        env["M8SHIFT_ROOT"] = other
+        r = subprocess.run([sys.executable, "m8shift-runtime.py", "listener",
+                            "start", "--agent", "claude", "--dry-run"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        # dry-run is read-only: allowed but the redacted warning surfaces
+        self.assertIn("two candidate relays", r.stderr)
+        r = subprocess.run([sys.executable, "m8shift-runtime.py", "listener",
+                            "start", "--agent", "claude", "--max-ticks", "1"],
+                           cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("fails closed", r.stderr)
+        for root in (self.d, other):
+            self.assertFalse(os.path.exists(os.path.join(
+                root, ".m8shift", "holder-heartbeats", "claude.json")), root)
 
     def test_supervision_emits_real_protective_beat(self):
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
@@ -12841,7 +12986,8 @@ class TestRFC049PRBListenerProducer(CLIBase):
         rc = self.rt.supervise_child_with_liveness(
             child, "claude", poll_s=1, say=said.append)
         self.assertEqual(rc, 0)
-        self.assertTrue(any("skipped" in m for m in said), said)
+        # neutral no-window skips are SILENT (H2) and nothing is written
+        self.assertEqual([m for m in said if "failed" in m], [], said)
         self.assertFalse(os.path.exists(os.path.join(
             self.d, ".m8shift", "holder-heartbeats", "claude.json")))
 

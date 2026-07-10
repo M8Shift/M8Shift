@@ -3161,42 +3161,65 @@ def _core_ttl_minutes():
 
 def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
                            now_utc=None):
-    """One liveness tick during a live child turn. Returns the action taken:
-    "refresh+heartbeat", "heartbeat", or None (relay not in this agent's
-    WORKING window — nothing to protect). `run`, `lock_fields` and `now_utc`
-    are injectable for deterministic tests."""
+    """One liveness tick during a live child turn. Returns a STRUCTURED result
+    (Codex PR-B review B1 — refresh and heartbeat outcomes are independent;
+    a refresh failure or exception NEVER suppresses the heartbeat attempt):
+
+        {"working_window": bool,
+         "refresh_attempted": bool, "refresh_ok": bool, "refresh_error": str|None,
+         "heartbeat_attempted": bool, "heartbeat_ok": bool,
+         "heartbeat_error": str|None}
+
+    `run`, `lock_fields` and `now_utc` are injectable for deterministic tests."""
+    result = {"working_window": False,
+              "refresh_attempted": False, "refresh_ok": False,
+              "refresh_error": None,
+              "heartbeat_attempted": False, "heartbeat_ok": False,
+              "heartbeat_error": None}
     lk = lock_fields() if lock_fields is not None else read_relay_lock_fields()
     if not lk or lk.get("state") != "WORKING_%s" % agent.upper() \
             or lk.get("holder") != agent:
-        return None
+        return result                    # neutral: nothing to protect
+    result["working_window"] = True
     runner = run or (lambda argv: subprocess.run(
         argv, cwd=HERE, capture_output=True, text=True, timeout=30))
-    action = "heartbeat"
     expires = parse_utc(lk.get("expires") or "")
-    ttl_min = _core_ttl_minutes()
     now_dt = now_utc or now()
-    if expires is not None:
-        remaining = (expires - now_dt).total_seconds()
-        if remaining < (ttl_min * 60) / 2:
-            # A1: refresh EARLY (~TTL/2), never at the deadline.
+    if expires is not None and (expires - now_dt).total_seconds() \
+            < (_core_ttl_minutes() * 60) / 2:
+        # A1: refresh EARLY (~TTL/2), never at the deadline — in its OWN try.
+        result["refresh_attempted"] = True
+        try:
             r = runner([sys.executable, CORE_PATH, "claim", agent, "--refresh"])
-            if getattr(r, "returncode", 1) == 0:
-                action = "refresh+heartbeat"
-    r = runner([sys.executable, CORE_PATH, "heartbeat", agent,
-                "--source", "runtime-listener",
-                "--cadence-seconds", str(int(cadence_s))])
-    if getattr(r, "returncode", 1) != 0 and action == "heartbeat":
-        return None                     # nothing recorded; caller logs once
-    return action
+            result["refresh_ok"] = getattr(r, "returncode", 1) == 0
+            if not result["refresh_ok"]:
+                result["refresh_error"] = "rc=%s" % getattr(r, "returncode", "?")
+        except Exception as exc:         # noqa: BLE001 — fail-open by contract
+            result["refresh_error"] = exc.__class__.__name__
+    # The protective beat is attempted UNCONDITIONALLY within the window.
+    result["heartbeat_attempted"] = True
+    try:
+        r = runner([sys.executable, CORE_PATH, "heartbeat", agent,
+                    "--source", "runtime-listener",
+                    "--cadence-seconds", str(int(cadence_s))])
+        result["heartbeat_ok"] = getattr(r, "returncode", 1) == 0
+        if not result["heartbeat_ok"]:
+            result["heartbeat_error"] = "rc=%s" % getattr(r, "returncode", "?")
+    except Exception as exc:             # noqa: BLE001 — fail-open by contract
+        result["heartbeat_error"] = exc.__class__.__name__
+    return result
 
 
 def supervise_child_with_liveness(proc, agent, poll_s, say):
     """Wait for a child runner while emitting liveness (RFC 049 PR B): a
     protective beat every min(poll, 60)s and the early refresh at ~TTL/2.
-    Returns the child's exit code. Liveness failures are logged once and never
-    interrupt supervision."""
+    Returns the child's exit code. Logging contract (Codex PR-B review H2):
+    a missing WORKING window is a NEUTRAL skip (never a failure warning);
+    refresh and heartbeat failures log once per CONTINUOUS failure episode per
+    category, and a success resets that category's suppression so a later
+    regression is visible again. Supervision itself is always fail-open."""
     cadence = max(1, min(int(poll_s or 5), 60))
-    warned = False
+    episode = {"refresh": False, "heartbeat": False}
     next_beat = time.monotonic()        # first beat immediately: the child may
     while True:                         # outlive the pen well before cadence*2
         rc = proc.poll()
@@ -3204,15 +3227,23 @@ def supervise_child_with_liveness(proc, agent, poll_s, say):
             return rc
         if time.monotonic() >= next_beat:
             try:
-                if listener_liveness_tick(agent, cadence) is None and not warned:
-                    say(f"{agent}: liveness tick skipped (relay not in this "
-                        "agent's WORKING window) — will keep trying quietly.")
-                    warned = True
-            except Exception as exc:    # noqa: BLE001 — fail-open by contract
-                if not warned:
-                    say(f"{agent}: liveness tick failed ({exc.__class__.__name__}) "
+                res = listener_liveness_tick(agent, cadence)
+            except Exception as exc:    # noqa: BLE001 — belt: never kill supervision
+                res = None
+                if not episode["heartbeat"]:
+                    say(f"{agent}: liveness tick crashed ({exc.__class__.__name__}) "
                         "— supervision continues without it.")
-                    warned = True
+                    episode["heartbeat"] = True
+            if res is not None and res["working_window"]:
+                for cat in ("refresh", "heartbeat"):
+                    if not res[f"{cat}_attempted"]:
+                        continue
+                    if res[f"{cat}_ok"]:
+                        episode[cat] = False          # success re-arms the log
+                    elif not episode[cat]:
+                        say(f"{agent}: {cat} failed ({res[f'{cat}_error']}) — "
+                            "supervision continues; will log again after a success.")
+                        episode[cat] = True
             next_beat = time.monotonic() + cadence
         time.sleep(min(1.0, cadence))
 
@@ -4471,6 +4502,13 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
 
 
 def cmd_listener_start(args):
+    # Codex PR-B review M3: float("nan")/float("inf") passed the <=0 check and
+    # crashed int() deep inside supervision — validate finiteness up front.
+    _poll = getattr(args, "poll_interval", None)
+    if _poll is not None and (isinstance(_poll, bool)
+                              or not isinstance(_poll, (int, float))
+                              or not math.isfinite(_poll) or _poll <= 0):
+        sys.exit("m8shift-runtime: --poll-interval must be a finite number > 0.")
     agent = validate_listener_agent(args.agent)
     if args.poll_interval <= 0:
         sys.exit("m8shift-runtime: --poll-interval must be > 0 (fractional seconds allowed)")
