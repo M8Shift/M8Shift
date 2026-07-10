@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+**RFC 052 PR3 — opt-in anchor hygiene (#101).** `doctor --hygiene-anchors`
+re-scans the generated anchors (`CLAUDE.md`, `AGENTS.md`), which the default
+path lint excludes because they legitimately carry the operator's OWN path. The
+operator pins their own home root(s) in `M8SHIFT_HYGIENE_ALLOWED_ROOTS`
+(comma-separated; comparison is case-insensitive so a case-variant of the pinned
+root is not foreign); only FOREIGN home roots are flagged
+(`hygiene.anchor_foreign_path` — advisory, never fails `--lint` unless
+`M8SHIFT_SCRUB_ENFORCE=1`). Unset roots yield an info notice — ownership is
+never guessed. Building the mode surfaced a real false positive: the generated
+stanza documents `/Users/…` with a REAL UTF-8 ellipsis, which the placeholder
+matcher only knew as three ASCII dots — now recognized (strengthens the C1 lint
+too).
+
 **RFC 052 PR2 — confidential denylist + scrub-check (#101).** `doctor --hygiene`
 gains the operator-confidential denylist: identifiers listed OUT-OF-REPO
 (`$M8SHIFT_DENYLIST`, else `~/.config/m8shift/denylist.txt`, else a silent no-op)
