@@ -335,7 +335,7 @@ published site, or use the repository-local docs when working from a clone.
 | 034 | [Companion adapter interface](docs/en/rfc/034-rfc-companion-adapter-interface.md) | Context packs + optional shell-output adapters | shipped · RTK visible | v3.36.0 · 2026-07-01 | `m8shift-context.py status`, RTK ON/OFF, `M8SHIFT_RTK=on/off`, last-pack ratio |
 | 037 | [Agent context compression backends](docs/en/rfc/037-rfc-agent-context-compression-backends.md) | Digest-based context compression + bounded raw references | Phase D follow-up shipped | v3.40.0 · 2026-07-02 | `m8shift-context.py compress/retrieve`, redaction-before-store, builtin + RTK shell/tool dispatch, explicit/manual opt-in `headroom_ext`, reference-only fail-safe |
 | 039 | [Model/task routing](docs/en/rfc/039-rfc-model-task-routing.md) | Capability-first model/task routing | Phase 1 shipped | v3.35.0 · 2026-07-01 | operator manifests, no baked-in vendors/prices, no launch |
-| 049 | [Holder liveness](docs/en/rfc/049-rfc-holder-liveness-stale-claim-hardening.md) | Separate holder liveness from pen TTL; harden stale force-claim and worktree ownership | draft | — | target v3.53.0 candidate |
+| 049 | [Holder liveness](docs/en/rfc/049-rfc-holder-liveness-stale-claim-hardening.md) | Separate holder liveness from pen TTL; harden stale force-claim and worktree ownership | **in progress — PR A+B implemented** (heartbeat verb + two-phase force recovery; listener liveness producer); PR C worktree ownership remaining | — | target next minor |
 | 050 | [Manual multi-agent specialists](docs/en/rfc/050-rfc-manual-multi-agent-specialists.md) | Manual specialist workflow with advisory read-only and isolated worktree lanes | draft | — | reports return to the relay |
 | 051 | [Usage advisory in the core display](docs/en/rfc/051-rfc-usage-advisory-in-core-display.md) | Read-only usage line in core `status`/`watch`, fed by the companion sidecar (echo-only, fail-open) | draft | — | Voie A follow-up of RFC 040 Phase 3; companion adds `decision_window`, core adds a bounded tolerant reader |
 
@@ -412,7 +412,7 @@ Verified by the tests and by multi-agent review:
 > by itself.
 >
 > An example runner is provided: [`examples/headless_runner.py`](examples/headless_runner.py).
-> It supports `--once`, manual TTL heartbeat (`claim <agent> --refresh` — extends your own `WORKING` lock only), `M8SHIFT_RUN_ID`, immutable local run
+> It supports `--once`, manual TTL refresh (`claim <agent> --refresh` — extends your own `WORKING` lock only and records an audit-only beat; PROTECTIVE liveness comes from the `heartbeat` verb emitted by managed producers, RFC 049), `M8SHIFT_RUN_ID`, immutable local run
 > plans, post-run `LOCK` verification, and local `.m8shift/runtime/runs.jsonl`
 > lifecycle/finding events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
 > companion adds local presence, operator inbox, progress, and runtime diagnostics

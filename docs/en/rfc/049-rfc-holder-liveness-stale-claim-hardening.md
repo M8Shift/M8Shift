@@ -1,6 +1,6 @@
 # RFC 049 — Holder liveness and stale-claim hardening
 
-Status: design rev 4 APPROVED / PR A implemented (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, editorial fixes)
+Status: design rev 4 APPROVED / PR A + PR B implemented (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, editorial fixes)
 Target: next minor after RFC 052
 Related issues: #6, #104 (incident analysis + recurrences)
 Owner: core relay + runtime/worktree companions
@@ -265,9 +265,10 @@ Existing TTL-refresh behavior remains. New behavior:
 - if the heartbeat sidecar write fails, keep the TTL refresh but print/report a
   warning; the sidecar is not the source of pen authority.
 
-`claim --refresh` is still the preferred heartbeat for long interactive turns
-when the agent can call it before expiry. It does not solve the “forgot to call
-anything” case.
+`claim --refresh` is still the preferred TTL-extension for long interactive
+turns when the agent can call it before expiry — but its beat is audit-only:
+protective evidence comes exclusively from the `heartbeat` verb. It does not
+solve the “forgot to call anything” case.
 
 ### `claim <agent> --force`
 
@@ -417,7 +418,7 @@ Worktree companion doctor findings:
 
 - `heartbeat <agent>` writes a matching sidecar only for current
   `WORKING_<agent>`.
-- `claim --refresh` writes heartbeat metadata after refreshing TTL and warns if
+- `claim --refresh` writes AUDIT-ONLY beat metadata (protective=false, null cadence) after refreshing TTL and warns if
   the sidecar write fails.
 - `claim --force` refuses stale peer locks with fresh matching heartbeat.
 - `claim --force --live-override --reason ...` succeeds and audits the override.
