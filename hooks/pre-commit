@@ -1,16 +1,20 @@
 #!/bin/sh
-# M8Shift pre-commit guard — enforce the one-pen write rule for configured agents.
+# M8Shift pre-commit guard — one-pen write rule + advisory data-hygiene lint.
 #
 # This hook is ADVISORY and LOCAL: it does not contact the network and it is not a
 # security boundary. It only narrows the window in which a misconfigured agent can
 # commit without holding the relay pen (see the SEC-7 / TOCTOU note in the docs).
 #
 # Behavior:
-#   - $M8SHIFT_AGENT unset  -> exit 0 (skip). Humans and unconfigured checkouts are
-#     never blocked.
-#   - $M8SHIFT_AGENT set    -> run `m8shift.py may-i-write "$M8SHIFT_AGENT"`. On a
-#     non-zero return code, print why and exit 1 (BLOCK the commit). Fail CLOSED:
-#     a configured agent that cannot prove a valid WORKING lock cannot commit.
+#   1. RFC 052 E2 data-hygiene lint (`doctor --hygiene-only --lint`): ADVISORY —
+#      findings are printed but the commit proceeds, unless M8SHIFT_SCRUB_ENFORCE=1
+#      (then hygiene findings block). Scanner ERRORS always fail open (printed,
+#      never blocking) — a broken scanner must not freeze all commits.
+#   2. Pen guard (#39, unchanged semantics):
+#      - $M8SHIFT_AGENT unset  -> skip (humans/unconfigured checkouts never blocked).
+#      - $M8SHIFT_AGENT set    -> `m8shift.py may-i-write "$M8SHIFT_AGENT"`; on a
+#        non-zero return code, print why and exit 1 (BLOCK the commit). Fail CLOSED:
+#        a configured agent that cannot prove a valid WORKING lock cannot commit.
 #
 # Resolution:
 #   - The relay root is resolved by m8shift.py itself via $M8SHIFT_ROOT (opt-in);
@@ -24,12 +28,8 @@
 
 set -eu
 
-# Unconfigured / human commit: never block.
-if [ -z "${M8SHIFT_AGENT:-}" ]; then
-	exit 0
-fi
-
-# Resolve the m8shift.py program robustly.
+# Resolve the m8shift.py program robustly (soft here: hygiene is advisory, and the
+# pen guard below keeps its own fail-closed handling for a configured agent).
 m8shift=""
 if [ -n "${M8SHIFT_BIN:-}" ] && [ -x "${M8SHIFT_BIN}" ]; then
 	m8shift="${M8SHIFT_BIN}"
@@ -40,6 +40,28 @@ else
 	if [ -x "${repo_root}/m8shift.py" ]; then
 		m8shift="${repo_root}/m8shift.py"
 	fi
+fi
+
+# --- RFC 052 E2: advisory data-hygiene lint (runs for humans AND agents) --------
+if [ -n "${m8shift}" ]; then
+	hygiene_rc=0
+	"${m8shift}" doctor --hygiene-only --lint >&2 || hygiene_rc=$?
+	if [ "${hygiene_rc}" -eq 1 ]; then
+		if [ "${M8SHIFT_SCRUB_ENFORCE:-0}" = "1" ]; then
+			printf '%s\n' "m8shift pre-commit: data-hygiene findings above and M8SHIFT_SCRUB_ENFORCE=1 — commit blocked. Fix the findings or unset the enforce variable." >&2
+			exit 1
+		fi
+		printf '%s\n' "m8shift pre-commit: data-hygiene findings above are ADVISORY (set M8SHIFT_SCRUB_ENFORCE=1 to block on them); committing anyway." >&2
+	elif [ "${hygiene_rc}" -gt 1 ]; then
+		# Scanner error: fail OPEN, visibly — a broken scanner never freezes commits.
+		printf '%s\n' "m8shift pre-commit: hygiene scanner failed (rc ${hygiene_rc}) — continuing without it." >&2
+	fi
+fi
+
+# --- Pen guard (#39) — unchanged semantics ---------------------------------------
+# Unconfigured / human commit: never block.
+if [ -z "${M8SHIFT_AGENT:-}" ]; then
+	exit 0
 fi
 
 if [ -z "${m8shift}" ]; then
