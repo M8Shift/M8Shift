@@ -43,11 +43,11 @@ Legend:
 | Command | Mutates | Reads | Writes | Notes |
 |---------|---------|-------|--------|-------|
 | `claim <id> <agent> --base <b> [--branch <b>]` | local-state | `M8SHIFT.md` (roster), git refs | `.m8shift/worktrees/<id>/` + git worktree admin, `.m8shift/worktree-owners/<id>.json` | Adds a feature worktree; checks out an existing `--branch`, else creates it off `--base`. Refuses if the worktree path already exists. Records the claiming agent in the owner sidecar (RFC 049 PR C — best-effort: a failed sidecar write warns, never blocks). |
-| `done <id> <agent> [--takeover --reason TEXT]` | local-state | `M8SHIFT.md` (roster) under `.m8shift.lock`, owner sidecar | `.m8shift/done.log` (+ owner sidecar on takeover) | Dumb completion ledger line only; deliberately does NOT touch `M8SHIFT.tasks.md`. The real handoff is `integrate`. Refuses when a DIFFERENT agent owns the worktree unless `--takeover --reason` is explicit. |
-| `integrate <id> <agent> --into <branch> --to <next> [--takeover --reason TEXT]` | local-state + repository-code | `M8SHIFT.md` LOCK, git refs, integration tree, owner sidecar | `M8SHIFT.md` (LOCK flips + turn), `.m8shift/worktrees/_integration/`, merge commit on `--into` (+ owner sidecar on takeover) | Serialized `--no-ff --no-commit` merge in the dedicated `_integration` tree; commits only after re-verifying holder+state+sentinel+HEAD under the lock, then hands the pen to `--to`. The ownership guard runs FIRST — a cross-owner refusal happens before any pen flip. |
-| `drop <id> <agent> --yes [--takeover --reason TEXT]` | local-state | filesystem, owner sidecar | removes `.m8shift/worktrees/<id>/` and its owner sidecar | Never automatic (`--yes` required); `git worktree remove` refuses a dirty tree (no `--force`). Sidecar removal is best-effort (a leftover orphan is a doctor finding, never a failure). |
+| `done <id> <agent> [--takeover --reason TEXT]` | local-state | `M8SHIFT.md` (roster) under `.m8shift.lock`, owner sidecar | `.m8shift/done.log` (+ owner sidecar & takeover ledger on takeover) | Dumb completion ledger line only; deliberately does NOT touch `M8SHIFT.tasks.md`. The real handoff is `integrate`. Refuses when a DIFFERENT agent owns the worktree unless `--takeover --reason` is explicit. |
+| `integrate <id> <agent> --into <branch> --to <next> [--takeover --reason TEXT]` | local-state + repository-code | `M8SHIFT.md` LOCK, git refs, integration tree, owner sidecar | `M8SHIFT.md` (LOCK flips + turn), `.m8shift/worktrees/_integration/`, merge commit on `--into` (+ owner sidecar & takeover ledger on takeover) | Serialized `--no-ff --no-commit` merge in the dedicated `_integration` tree; commits only after re-verifying holder+state+sentinel+HEAD under the lock, then hands the pen to `--to`. The pen-availability check, the takeover audit, and the pen flip are ONE serialized phase under the file lock — a busy pen transfers nothing, a failed audit flips nothing. |
+| `drop <id> <agent> --yes [--takeover --reason TEXT]` | local-state | filesystem, owner sidecar | removes `.m8shift/worktrees/<id>/` and its owner sidecar (+ takeover ledger on takeover) | Never automatic (`--yes` required); `git worktree remove` refuses a dirty tree (no `--force`). A cross-owner drop appends a durable `authorized` ledger record BEFORE removal (fail-closed) and a `completed` record after — the sidecar removal itself is best-effort (a leftover orphan is a doctor finding, never a failure). |
 | `status [<id>]` | read-only | `M8SHIFT.md` LOCK, `git worktree list`, owner sidecars | none | Prints core version, pen state/holder/turn, an in-flight `integrating:` sentinel if any, and the companion worktrees with their recorded owner (`owner=?` when the sidecar is absent/unusable). |
-| `doctor [--json]` | read-only | `M8SHIFT.md` (roster), `git worktree list`, owner sidecars | none | RFC 049 PR C advisory findings: `worktree.owner_missing` (managed worktree without a USABLE sidecar — absent or malformed) and `worktree.owner_mismatch` (recorded agent/path/branch conflicts with reality, or an orphan sidecar). Never repairs, never gates: rc 0 always. |
+| `doctor [--json]` | read-only | `M8SHIFT.md` (roster), `git worktree list`, owner sidecars | none | RFC 049 PR C advisory findings: `worktree.owner_missing` (managed worktree without a USABLE sidecar — absent or malformed/wrong-shaped) and `worktree.owner_mismatch` (well-shaped metadata conflicting with reality: off-roster agent, wrong path, recorded branch mismatched or set while the worktree is DETACHED, or an orphan sidecar). Never repairs, never gates: rc 0 always. |
 
 `Mutates` classifies FILE mutation only. `local-state` = writes under `M8SHIFT.*` or `.m8shift/`. `integrate` is additionally `repository-code` because a successful merge creates a real merge commit that advances the `--into` branch. No command performs `external` (network) mutation.
 
@@ -60,24 +60,39 @@ a security boundary: a process with filesystem access can address the sibling pa
 directly, and direct `git`, editor, or filesystem writes never pass through the companion
 and cannot be refused (RFC 049 "Security and prompt boundaries"). `done`/`integrate`/`drop`
 refuse when the recorded owner is a DIFFERENT agent, unless `--takeover --reason TEXT`
-is explicit; a takeover re-stamps the sidecar with an audit trail
-(`taken_over_from`/`takeover_reason`/`takeover_at`) and preserves the original
-`created_at`.
+is explicit; a takeover re-stamps the surviving sidecar with an audit trail
+(`taken_over_from`/`takeover_reason`/`takeover_at`, preserving the original `created_at`)
+**and** appends a record to a durable append-only takeover ledger
+(`.m8shift/worktree-owners/_takeovers.jsonl`) — the latter is the audit that survives a
+`drop`, which destroys the sidecar (a `drop` records `authorized` before the removal and
+`completed` after, so an authorized-but-failed drop is distinguishable from a completed
+one).
 
 Every actor is **roster-validated before any owner read/write or destruction** (an
-unknown agent cannot drop or take over a worktree); a takeover is committed **only after
-all preconditions pass**, and a mandatory takeover audit **fails closed** — if it cannot
-be persisted the ownership does not change and the command reports failure. Writes go
-through the core's unpredictable-temp `+ os.replace` primitive inside a **validated real
-parent** (no symlinked `.m8shift`/`worktree-owners` component, contained in ROOT), so a
-sidecar write can never escape the project. The reader is bounded, path-safe, and STRICT
-(`O_NOFOLLOW` final component + validated real parents + regular-file + 8 KiB cap +
-schema/id/agent/timestamp/path/branch shape check): a malformed, symlinked, oversized, or
+unknown agent cannot drop or take over a worktree). For `integrate`, the authoritative
+pen-availability check, the mandatory takeover audit, and the pen flip are **one
+serialized phase under the canonical file lock**: a busy pen transfers nothing and a
+failed audit flips nothing — closing the become-busy race, not merely narrowing it. Every
+mandatory takeover audit **fails closed** (durable-ledger-first): if it cannot be
+persisted, ownership does not change and the command reports failure. The reader is
+bounded, path-safe, and STRICT — `O_NOFOLLOW` final component, validated real parents,
+regular-file, 8 KiB cap, and a semantic shape check (schema, exact id, roster-shaped
+agent, a REAL canonical UTC-Z `created_at`, a bounded relative path, a **non-empty**
+branch, and an all-or-none takeover audit tuple). A malformed, symlinked, oversized, or
 wrong-shaped sidecar reads as "no recorded owner" — the verb fails open and `doctor`
-reports the gap (`owner_missing`). Well-shaped metadata that merely conflicts with reality
-(off-roster agent, wrong path/branch) is `owner_mismatch`. No recorded agent, id, path,
-reason, or orphan filename is ever echoed raw to the terminal — every untrusted string is
-reduced to printable ASCII before display (RFC 052 §9.5).
+reports `owner_missing`. Well-shaped metadata that merely conflicts with reality
+(off-roster agent, wrong path, or a recorded branch while the worktree is detached) is
+`owner_mismatch`. No recorded agent, id, path, reason, or orphan filename is ever echoed
+raw to the terminal — every untrusted string is reduced to printable ASCII (RFC 052 §9.5).
+
+**Path-safety guarantee (precise).** Under the cooperative local threat model, a
+*pre-existing* symlinked parent (`.m8shift`/`worktree-owners`) or a *preplanted* fixed
+temp file is refused: writes validate real parents and go through the core's
+unpredictable-temp `+ os.replace` primitive inside the contained directory. What is **out
+of scope** is a live privileged attacker who *concurrently* replaces a parent component
+with a symlink in the microsecond window between validation and use (a classic TOCTOU);
+stdlib offers no portable `openat2(RESOLVE_NO_SYMLINKS)` on `makedirs`/`replace`, and this
+is the same class of write the RFC 049 threat model already excludes.
 
 ## Inputs and outputs
 
@@ -86,12 +101,14 @@ reduced to printable ASCII before display (RFC 052 §9.5).
 - `M8SHIFT.md` — the canonical LOCK block and roster, via the core's `load_or_die` / `get_lock` / `active_agents` helpers.
 - Git repository state — refs, `git worktree list --porcelain`, `MERGE_HEAD`, working-tree status.
 - `.m8shift/worktree-owners/<id>.json` — the ownership sidecar (bounded fail-open read; `status`, `doctor`, and the mutating verbs' advisory guard).
+- `.m8shift/worktree-owners/_takeovers.jsonl` — the durable append-only takeover ledger (read by nothing at runtime; it is the human/audit record that survives a `drop`).
 
 **Files written**
 
 - `.m8shift/worktrees/<id>/` — one linked git worktree per feature lane (`claim`), removed by `drop`.
 - `.m8shift/worktrees/_integration/` — the single dedicated integration checkout, created on demand by `integrate` and kept on the target branch.
 - `.m8shift/worktree-owners/<id>.json` — ownership metadata OUTSIDE the checkout (`claim` records, an explicit `--takeover` re-stamps with an audit trail, `drop` removes best-effort). Advisory, never authority.
+- `.m8shift/worktree-owners/_takeovers.jsonl` — durable append-only takeover audit; every `--takeover` appends a bounded JSON record (`done`/`integrate`: `applied`; `drop`: `authorized` before removal + `completed` after). This is the audit that survives the sidecar's deletion on `drop`.
 - `.m8shift/done.log` — the degree-2 completion ledger (`done`), created with a header on first append.
 - `M8SHIFT.md` — the LOCK (holder/state/turn/`since`/`expires`/`integrating` sentinel) and an appended immutable turn block, flipped by `integrate` only. All LOCK writes happen under the core `.m8shift.lock` file lock and only around the fast flips — never around `git merge`.
 

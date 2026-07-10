@@ -156,17 +156,43 @@ def roster_or_die(lk, *names):
 # touch it. This is an ADVISORY companion guardrail, NOT a security boundary: a process with
 # filesystem access can address the sidecar path directly, and direct `git`, editor, or
 # filesystem writes never pass through the companion and cannot be refused (RFC 049 "Security
-# and prompt boundaries"). Consequently every READER fails open (a malformed/unreadable
-# sidecar degrades to "no recorded owner" and `doctor` reports the gap), while every WRITE is
-# hardened against path-escape (unpredictable temp via the core primitive + validated real
-# parents), and a MANDATORY audit write (a takeover) fails CLOSED if it cannot be persisted.
+# and prompt boundaries"). Design invariants (Codex PR C review rounds 1-2):
+#   - every READER fails open + STRICT: a malformed/unreadable/wrong-shaped sidecar degrades
+#     to "no recorded owner" (doctor reports the gap); shape validation is SEMANTIC (a real
+#     UTC-Z calendar instant, a non-empty branch, an all-or-none takeover audit tuple);
+#   - every ACTOR is roster-validated BEFORE any owner read/write or destruction;
+#   - every WRITE is path-hardened against a PRE-EXISTING symlinked parent or a preplanted
+#     fixed temp (unpredictable temp via the core primitive + validated real parents); a
+#     live privileged CONCURRENT parent-symlink swap is a TOCTOU out of the threat model;
+#   - every MANDATORY takeover audit is durable-ledger-first and fails CLOSED (a durable
+#     append-only ledger records the takeover, surviving the sidecar's deletion on `drop`);
+#   - `integrate` folds the pen-availability check + audit + pen flip into ONE serialized
+#     file-lock phase, so a busy pen transfers nothing and a failed audit flips nothing.
 
 OWNER_SCHEMA = "m8shift.worktree_owner.v1"
 OWNER_MAX_BYTES = 8192           # an owner doc is ~200 bytes; anything larger is not ours
 OWNER_FIELD_MAX = 256            # bound every recorded string field (defeats oversized echo)
-_TS_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z", re.ASCII)  # strict ASCII UTC-Z
+TAKEOVER_LEDGER = "_takeovers.jsonl"  # durable append-only takeover audit (survives sidecar delete)
 _AGENT_RE = re.compile(core.AGENT_RE + r"\Z", re.ASCII)   # anchored ASCII roster-agent shape
 _UNSAFE = re.compile(r"[^\x20-\x7e]")                      # printable-ASCII whitelist for echo
+_TAKEOVER_KEYS = ("taken_over_from", "takeover_reason", "takeover_at")
+
+
+def _valid_ts(value):
+    """A CANONICAL UTC-Z timestamp of a real calendar instant. `core.parse_iso`
+    (`strptime("%Y-%m-%dT%H:%M:%SZ")`) rejects impossible dates (`2026-99-99…`), but strptime
+    alone still accepts single-digit fields (`2026-2-3T4:5:6Z`), surrounding whitespace (it
+    strips), and non-ASCII digits in the year (`\\d` is Unicode). So we additionally require the
+    string to EQUAL the re-rendered canonical form — that pins ASCII, zero-padding, and no
+    padding, exactly as the round-3 contract claims (PR C round-3 hunt, LOW deviations)."""
+    if not isinstance(value, str):
+        return False
+    parsed = core.parse_iso(value)
+    return parsed is not None and value == parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _bounded_str(value, *, allow_empty=False):
+    return isinstance(value, str) and len(value) <= OWNER_FIELD_MAX and (allow_empty or bool(value))
 
 
 def _safe(value, cap=OWNER_FIELD_MAX):
@@ -210,28 +236,39 @@ def _owners_dir_safe():
 
 def validate_owner_doc(idv, doc):
     """STRICT tri-state validation of a parsed owner document against the EXPECTED id.
-    Returns the doc when WELL-SHAPED (schema exact, `id == idv`, `agent` roster-shaped,
-    `created_at` strict-Z, `path` a bounded normalized RELATIVE path, `branch` a bounded
-    string, every field length-bounded), else None. A well-shaped doc may still CONFLICT
-    with reality (roster/path/branch) — that is doctor's `owner_mismatch`; a doc that fails
-    THIS shape check is `owner_missing` (Codex PR C review finding 4)."""
+    Returns the doc when WELL-SHAPED, else None. Well-shaped = schema exact, `id == idv`,
+    `agent` roster-shaped, `created_at` a REAL canonical UTC-Z instant, `path` a bounded
+    normalized RELATIVE path, `branch` a bounded NON-EMPTY string, every field length-bounded;
+    and the OPTIONAL takeover audit tuple is validated ALL-OR-NONE (a partial/oversized/
+    ANSI/impossible-time audit makes the whole doc malformed). A well-shaped doc may still
+    CONFLICT with reality (roster/path/branch/detached) — that is doctor's `owner_mismatch`;
+    a doc that fails THIS shape check is `owner_missing` (Codex PR C review findings 3-4)."""
     if not isinstance(doc, dict) or doc.get("schema") != OWNER_SCHEMA:
         return None
     if doc.get("id") != idv:
         return None
     agent = doc.get("agent")
-    if not isinstance(agent, str) or len(agent) > OWNER_FIELD_MAX or not _AGENT_RE.match(agent):
+    if not _bounded_str(agent) or not _AGENT_RE.match(agent):
         return None
-    created = doc.get("created_at")
-    if not isinstance(created, str) or not _TS_RE.match(created):
+    if not _valid_ts(doc.get("created_at")):                # real calendar instant, not just shape
         return None
     path = doc.get("path")
-    if (not isinstance(path, str) or not path or len(path) > OWNER_FIELD_MAX
-            or os.path.isabs(path) or "\\" in path or ".." in path.split("/")):
+    if (not _bounded_str(path) or os.path.isabs(path) or "\\" in path
+            or ".." in path.split("/")):
         return None
-    branch = doc.get("branch")
-    if not isinstance(branch, str) or len(branch) > OWNER_FIELD_MAX:
+    if not _bounded_str(doc.get("branch")):                 # a claimed owner always has a branch
         return None
+    present = [k for k in _TAKEOVER_KEYS if k in doc]        # optional audit tuple: all-or-none
+    if present:
+        if len(present) != len(_TAKEOVER_KEYS):
+            return None
+        tf = doc["taken_over_from"]
+        if not _bounded_str(tf) or not _AGENT_RE.match(tf):
+            return None
+        if not _bounded_str(doc["takeover_reason"]) or not doc["takeover_reason"].strip():
+            return None                                     # bounded AND non-whitespace
+        if not _valid_ts(doc["takeover_at"]):
+            return None
     return doc
 
 
@@ -305,6 +342,45 @@ def remove_owner(idv):
         pass
 
 
+def append_takeover_ledger(record):
+    """Append one bounded JSON record to the DURABLE append-only takeover ledger
+    (`.m8shift/worktree-owners/_takeovers.jsonl`). Returns `(ok, err)`. Path-safe (validated
+    owners dir; `O_APPEND|O_CREAT|O_NOFOLLOW` — a symlink or directory at the ledger path
+    fails deterministically, for every user including root). This is the audit that SURVIVES
+    a sidecar delete, so a cross-owner `drop` still leaves a durable record (Codex PR C
+    review round-2 finding 2)."""
+    owners = _owners_dir_safe()
+    if owners is None:
+        return False, "owners directory missing, uncontained, or symlinked"
+    try:
+        os.makedirs(owners, exist_ok=True)
+        if _owners_dir_safe() is None:
+            return False, "owners directory became unsafe"
+        line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        # O_NONBLOCK + S_ISREG parity with read_owner (PR C round-3 hunt): O_NOFOLLOW blocks
+        # only a symlinked FINAL component — a FIFO at the ledger path would otherwise make
+        # a write-only open BLOCK FOREVER while holding the global .m8shift.lock, freezing the
+        # relay. O_NONBLOCK turns that into ENXIO (fail-closed); the fstat rejects any
+        # non-regular file that still opened (e.g. a FIFO with a reader attached).
+        fd = os.open(os.path.join(owners, TAKEOVER_LEDGER),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                     | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return False, "ledger path is not a regular file"
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+        return True, None
+    except OSError as e:
+        return False, str(e)
+
+
+def _takeover_record(idv, actor, ticket, verb, phase):
+    return {"ts": core.iso(core.now()), "verb": verb, "phase": phase, "id": idv,
+            "from": ticket["prev"], "to": actor, "reason": ticket["reason"]}
+
+
 def require_takeover_or_die(idv, actor, args):
     """READ-ONLY phase of the advisory cross-owner guard: return a takeover TICKET (dict with
     the CAPTURED prior owner's agent/branch/created_at + the validated reason) to commit
@@ -330,23 +406,52 @@ def require_takeover_or_die(idv, actor, args):
             "branch": owner["branch"], "created_at": owner["created_at"]}
 
 
-def commit_takeover_or_die(idv, actor, ticket):
-    """COMMIT phase: persist the takeover audit from the require-phase TICKET, FAILING CLOSED
-    (die, ownership unchanged) if the mandatory write cannot be persisted OR does not read
-    back as this actor's ownership — a takeover must never print success on a lost audit
-    (Codex PR C review finding 3 + round-2 oversized-field hunt). Uses the captured
-    branch/created_at (no re-read)."""
+def commit_takeover_or_die(idv, actor, ticket, verb):
+    """COMMIT phase for `done`/`integrate` (the sidecar SURVIVES, so it holds the re-stamped
+    audit). Order is DURABLE-audit-first: append the ledger record, FAILING CLOSED before any
+    ownership change; then re-stamp the sidecar from the captured ticket (no re-read) and
+    verify it reads back as this actor's ownership, failing closed otherwise. Over-records
+    (a ledger line for a takeover whose sidecar apply then failed) rather than under-records
+    (an applied change with no audit). Callable UNDER a file lock (writes only sidecar files,
+    not the LOCK)."""
     if ticket is None:
         return
+    ok, err = append_takeover_ledger(_takeover_record(idv, actor, ticket, verb, "applied"))
+    if not ok:
+        die(f"takeover audit ledger write failed ({_safe(err)}) — refusing (ownership unchanged)")
     ok, err = write_owner(idv, actor, ticket["branch"], created_at=ticket["created_at"],
                           takeover_from=ticket["prev"], reason=ticket["reason"])
     if not ok:
-        die(f"takeover audit write failed ({_safe(err)}) — refusing (ownership unchanged)")
+        die(f"takeover sidecar write failed ({_safe(err)}) — refusing (ownership unverified)")
     back = read_owner(idv)                               # the audit MUST be readable back
     if back is None or back["agent"] != actor:
         die("takeover audit did not persist as readable — refusing (ownership unverified)")
     print(f"⚠ takeover: worktree {_safe(idv)} ownership {_safe(ticket['prev'])} → "
           f"{_safe(actor)} (reason: {_safe(ticket['reason'])})")
+
+
+def authorize_drop_takeover_or_die(idv, actor, ticket):
+    """`drop` COMMIT phase 1: the worktree AND its sidecar are about to be removed, so the
+    durable ledger is the ONLY surviving audit. Record `phase=authorized` BEFORE the
+    destructive `git worktree remove`, failing CLOSED if it cannot be persisted — a
+    cross-owner drop must never destroy without a durable record (Codex PR C review round-2
+    finding 2)."""
+    if ticket is None:
+        return
+    ok, err = append_takeover_ledger(_takeover_record(idv, actor, ticket, "drop", "authorized"))
+    if not ok:
+        die(f"takeover audit ledger write failed ({_safe(err)}) — refusing (worktree untouched)")
+    print(f"⚠ takeover: worktree {_safe(idv)} ownership {_safe(ticket['prev'])} → "
+          f"{_safe(actor)} for drop (reason: {_safe(ticket['reason'])})")
+
+
+def complete_drop_takeover(idv, actor, ticket):
+    """`drop` COMMIT phase 2: best-effort `phase=completed` tombstone AFTER a successful
+    removal, so the ledger truthfully distinguishes an authorized-but-failed drop (dirty
+    tree) from a completed one."""
+    if ticket is None:
+        return
+    append_takeover_ledger(_takeover_record(idv, actor, ticket, "drop", "completed"))
 
 
 # ───────────────────────────── pen flips (file_lock) ───────────────────────────
@@ -367,13 +472,20 @@ def _integration_pen_free_or_die(agent, idv):
         die(f"integration pen not free: state={st}, holder={lk.get('holder')}")
 
 
-def claim_pen(agent, idv, target_sha):
+def claim_pen(agent, idv, target_sha, ticket=None):
     """Take (or resume) the integration pen and stamp the `integrating:<id>@<sha>` sentinel,
     atomically under the canonical file lock. Returns `(mode, sentinel)` where mode is 'resume' if
     WE already hold an in-flight integration of THIS id (a committed-but-unhanded retry — its
     recorded sentinel is reused verbatim, since after a committed merge the target tip has moved and
     the sha no longer matches a freshly recomputed one), else 'claimed'. Refuses if another agent
-    — or our own pen carrying a DIFFERENT id — holds it."""
+    — or our own pen carrying a DIFFERENT id — holds it.
+
+    When a takeover `ticket` is supplied, the pen-availability check, the takeover commit, and the
+    pen flip run as ONE serialized phase UNDER THIS LOCK (Codex PR C review round-2 finding 1): if
+    the pen is busy we die having written NOTHING (no ownership transfer); if the mandatory audit
+    fails we die having flipped NOTHING. This closes the become-busy race the earlier read-only
+    precheck only narrowed — a peer that claims the pen between the precheck and here is caught
+    here, before the takeover is persisted."""
     working_self = f"WORKING_{agent.upper()}"
     with core.file_lock() as guard:
         text = core.load_or_die()
@@ -386,6 +498,9 @@ def claim_pen(agent, idv, target_sha):
             die(f"integration pen busy: {lk.get('holder')} is integrating {held}")
         if st not in ("IDLE", f"AWAITING_{agent.upper()}", working_self):
             die(f"integration pen not free: state={st}, holder={lk.get('holder')}")
+        # pen is FREE and WE hold the file lock → commit the takeover NOW, before the flip,
+        # so a busy pen could never have transferred ownership and a failed audit flips nothing.
+        commit_takeover_or_die(idv, agent, ticket, "integrate")
         sentinel = f"{idv}@{target_sha}"
         t = core.now()
         lk.update(holder=agent, state=working_self, since=core.iso(t),
@@ -490,7 +605,7 @@ def cmd_done(args):
     ticket = require_takeover_or_die(idv, args.agent, args)         # validate (no write yet)
     with core.file_lock() as guard:
         roster_or_die(core.get_lock(core.load_or_die()), args.agent)  # re-check under the lock
-        commit_takeover_or_die(idv, args.agent, ticket)            # persist AFTER the re-check
+        commit_takeover_or_die(idv, args.agent, ticket, "done")    # persist AFTER the re-check
         log = os.path.join(ROOT, ".m8shift", "done.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
         prev_log = core.read(log) if os.path.exists(log) else "# m8shift-worktree done ledger (degree-2)\n"
@@ -505,16 +620,17 @@ def cmd_drop(args):
         die("drop needs --yes (a worktree is never removed automatically)")
     idv = safe_id(args.id)
     roster_or_die(core.get_lock(core.load_or_die()), args.agent)   # actor BEFORE any destruction
-    # A cross-owner drop still requires an explicit --takeover --reason INTENT gate; the
-    # reason need not persist (the sidecar is removed with the worktree), so drop does not
-    # commit an audit — but the destructive `git worktree remove` never runs for an
-    # unauthorized actor or an unacknowledged foreign owner (Codex PR C review finding 2).
-    require_takeover_or_die(idv, args.agent, args)
+    ticket = require_takeover_or_die(idv, args.agent, args)         # INTENT gate (no write yet)
     ftree = wt_path(idv)
-    if not os.path.exists(ftree):
-        die(f"no worktree {idv!r} at {ftree}")
+    if not os.path.exists(ftree):                            # precondition BEFORE the audit, so a
+        die(f"no worktree {idv!r} at {ftree}")               # missing tree writes no phantom record
+    # A cross-owner drop destroys both the worktree AND its sidecar, so the DURABLE ledger is
+    # the only surviving audit: record `phase=authorized` BEFORE the destructive removal,
+    # failing CLOSED if it cannot persist (Codex PR C review round-2 finding 2).
+    authorize_drop_takeover_or_die(idv, args.agent, ticket)
     git(["worktree", "remove", ftree])                       # git refuses if dirty (no --force)
     remove_owner(idv)                                        # best-effort cleanup (RFC 049 PR C)
+    complete_drop_takeover(idv, args.agent, ticket)          # phase=completed tombstone (truthful)
     print(f"✓ dropped worktree {idv}")
     return 0
 
@@ -623,8 +739,10 @@ def cmd_doctor(args):
             problems.append(f"recorded path {_safe(owner['path'])!r} != {_safe(rel)!r}")
         branch = info.get("branch") or ""
         short = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
-        if owner["branch"] and short and owner["branch"] != short:
+        if short and owner["branch"] != short:
             problems.append(f"recorded branch {_safe(owner['branch'])!r} != {_safe(short)!r}")
+        elif not short:                                  # detached HEAD: owner claims a branch
+            problems.append(f"recorded branch {_safe(owner['branch'])!r} but worktree is detached")
         if problems:
             findings.append({"id": "worktree.owner_mismatch", "severity": "warning",
                              "worktree": _safe(idv), "detail": "; ".join(problems)})
@@ -634,7 +752,7 @@ def cmd_doctor(args):
     except OSError:
         names = []
     for f in sorted(names):
-        if not f.endswith(".json"):
+        if not f.endswith(".json") or f == TAKEOVER_LEDGER:   # ledger is not an owner sidecar
             continue
         idv = f[:-len(".json")]
         if idv not in trees:
@@ -664,14 +782,12 @@ def cmd_integrate(args):
         die("--to must hand off to a DIFFERENT agent")
     ticket = require_takeover_or_die(idv, agent, args)        # validates --takeover; no write
 
-    # ---- every remaining precondition BEFORE the takeover commit and the pen flip,
-    #      so a failed precondition never transfers ownership (finding 3) ----------
-    _integration_pen_free_or_die(agent, idv)     # read-only pen precheck (PR C round-2 hunt):
-    #      a busy pen is the pen's ROUTINE serialization state; without this precheck the
-    #      takeover would commit and then claim_pen would die on the busy pen, stranding a
-    #      transferred ownership. claim_pen still re-checks under the lock (authoritative), so
-    #      the pen is never taken before the fail-closed audit — only a rare become-busy race
-    #      between this precheck and claim_pen remains (advisory sidecar, documented).
+    # ---- every remaining precondition BEFORE the pen flip. The takeover is NOT committed
+    #      here: it is folded into claim_pen so the pen-availability check, the mandatory
+    #      audit, and the pen flip are ONE serialized phase under the file lock (finding 1).
+    #      This early read-only precheck is only a friendly fast-fail before the (reusable)
+    #      integration-tree prep; claim_pen re-checks authoritatively under the lock.
+    _integration_pen_free_or_die(agent, idv)
     if not local_branch_exists(into):
         die(f"--into {into!r} is not a local branch — integration must advance a BRANCH; pass a "
             f"branch name (a commit/tag/detached ref would merge into a detached HEAD and silently "
@@ -705,12 +821,9 @@ def cmd_integrate(args):
         die(f"integration tree {integ} is not clean — refusing (pre-flip precondition)")
     target_sha = git_out(["rev-parse", "HEAD"], integ)
 
-    # ---- all preconditions passed: NOW commit the takeover (fail-closed), THEN the
-    #      pen flip. A takeover audit that cannot persist aborts here, before any flip.
-    commit_takeover_or_die(idv, agent, ticket)
-
-    # ---- take the pen + stamp the sentinel -------------------------------------
-    mode, sentinel = claim_pen(agent, idv, target_sha)
+    # ---- take the pen + commit the takeover + stamp the sentinel, ALL under one file
+    #      lock (claim_pen): a busy pen transfers nothing, a failed audit flips nothing ----
+    mode, sentinel = claim_pen(agent, idv, target_sha, ticket)
 
     # ---- merge (OUTSIDE the lock) or detect already-integrated -----------------
     already = git(["merge-base", "--is-ancestor", feature_ref, "HEAD"], integ, check=False).returncode == 0

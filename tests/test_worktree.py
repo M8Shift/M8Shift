@@ -462,6 +462,13 @@ class TestRFC049PRCHardening(WTBase):
         with open(self.owner_file(idv)) as fh:
             return json.load(fh)["agent"]
 
+    def ledger_records(self):
+        path = os.path.join(self.d, self.OWNERS_REL, "_takeovers.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh if l.strip()]
+
     # ── finding 1: writes must never escape the project ───────────────────────
     def test_takeover_tmp_symlink_does_not_overwrite_external_file(self):
         self.claim_and_commit("feat-a", "a.txt", "x\n")
@@ -517,15 +524,15 @@ class TestRFC049PRCHardening(WTBase):
 
     # ── finding 3: failed audit / failed precondition never transfers ownership ─
     def test_takeover_fails_closed_when_audit_write_fails(self):
+        # DETERMINISTIC, permission-independent injection (Codex PR C round-2 finding 4:
+        # chmod 0500 is unreliable as root / on some Windows FS): make the durable takeover
+        # ledger path a DIRECTORY so its append fails for every user, and assert the takeover
+        # fails closed with ownership unchanged and no done-ledger line.
         self.claim_and_commit("feat-a", "a.txt", "x\n")
-        owners = os.path.join(self.d, self.OWNERS_REL)
-        os.chmod(owners, 0o500)                              # unwritable → audit write fails
-        try:
-            r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "x")
-        finally:
-            os.chmod(owners, 0o700)
+        os.makedirs(os.path.join(self.d, self.OWNERS_REL, "_takeovers.jsonl"))
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "x")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("audit write failed", r.stderr)
+        self.assertIn("audit", r.stderr)
         self.assertEqual(self.read_owner_agent("feat-a"), "claude")     # ownership unchanged
         self.assertNotIn("done by codex", self._done_log())             # no ledger line either
 
@@ -654,13 +661,172 @@ class TestRFC049PRCHardening(WTBase):
         self.assertEqual(self.read_owner_agent("feat-a"), "codex")
 
     def test_non_ascii_timestamp_is_owner_missing(self):
-        # _TS_RE is ASCII-strict: Arabic-Indic digits must not validate as "strict UTC-Z".
+        # semantic timestamp validation is ASCII-strict: Arabic-Indic digits must not validate.
         self.claim_and_commit("feat-a", "a.txt", "x\n")
         self.write_raw("feat-a", json.dumps(self.doc(
             "feat-a", created_at="٢٠٢٦-٠١-"
                                  "٠١T٠٠:٠٠:٠٠Z")))
         by = {f["worktree"]: f for f in self.doctor_findings()}
         self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    # ── round-3 adversarial regressions (Codex PR C round-2 review) ────────────
+    def test_integrate_become_busy_race_is_atomic(self):
+        # finding 1: the become-busy race — a peer claiming the pen AFTER the read-only
+        # precheck but BEFORE claim_pen — must not transfer ownership. Deterministic race
+        # seam: a one-shot git post-checkout hook (fired during integrate's integration-tree
+        # prep, which runs between the precheck and claim_pen) claims the pen as codex.
+        # Because the takeover commit is folded INTO claim_pen under the file lock, claim_pen
+        # sees the now-busy pen and refuses, transferring NOTHING.
+        self.assertEqual(self.wt("claim", "feat-a", "codex", "--base", "main").returncode, 0)
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self._write("a.txt", "x\n", cwd=wtdir)
+        self.git("add", "a.txt", cwd=wtdir)
+        self.git("commit", "-qm", "w", cwd=wtdir)
+        hookdir = os.path.join(self.d, ".git", "hooks")
+        os.makedirs(hookdir, exist_ok=True)
+        sentinel = os.path.join(self.d, ".race-fired")
+        hook = os.path.join(hookdir, "post-checkout")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\n"
+                     f'[ -e "{sentinel}" ] && exit 0\n'
+                     f'touch "{sentinel}"\n'
+                     f'cd "{self.d}" && "{sys.executable}" m8shift.py claim codex '
+                     ">/dev/null 2>&1\nexit 0\n")
+        os.chmod(hook, 0o755)
+        r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex",
+                    "--takeover", "--reason", "race")
+        self.assertTrue(os.path.exists(sentinel), "race seam did not fire")   # hook ran
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")    # ownership NOT transferred
+        self.assertFalse(any(x["verb"] == "integrate" for x in self.ledger_records()))
+        self.assertEqual(self.lock()["state"], "WORKING_CODEX")       # LOCK consistent (codex holds)
+        self.assertNotIn("integrating", self.lock())                  # no stranded sentinel
+
+    def test_integrate_busy_pen_precheck_no_transfer(self):
+        # the read-only precheck also refuses a statically-busy pen (friendly fast-fail).
+        self.assertEqual(self.wt("claim", "feat-a", "codex", "--base", "main").returncode, 0)
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self._write("a.txt", "x\n", cwd=wtdir)
+        self.git("add", "a.txt", cwd=wtdir)
+        self.git("commit", "-qm", "w", cwd=wtdir)
+        self.assertEqual(self.core("claim", "codex").returncode, 0)   # pen busy up front
+        r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex",
+                    "--takeover", "--reason", "hijack")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+        self.assertFalse(any(x["verb"] == "integrate" for x in self.ledger_records()))
+
+    def test_drop_takeover_leaves_durable_ledger_audit(self):
+        # finding 2: a cross-owner drop destroys the sidecar, so the durable ledger must
+        # hold the authorized + completed records with the reason.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.wt("drop", "feat-a", "codex", "--yes", "--takeover",
+                    "--reason", "DROP_SENTINEL_9931")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        drops = [x for x in self.ledger_records() if x["verb"] == "drop"]
+        self.assertEqual({x["phase"] for x in drops}, {"authorized", "completed"})
+        self.assertTrue(all(x["from"] == "claude" and x["to"] == "codex" for x in drops))
+        self.assertTrue(any(x["reason"] == "DROP_SENTINEL_9931" for x in drops))
+
+    def test_drop_dirty_tree_records_authorized_not_completed(self):
+        # finding 2: a dirty worktree makes `git worktree remove` fail AFTER the authorized
+        # record — the ledger must truthfully show attempted (authorized) but NOT completed,
+        # and the worktree must survive.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self._write("dirty.txt", "uncommitted\n", cwd=wtdir)       # dirty → remove refuses
+        r = self.wt("drop", "feat-a", "codex", "--yes", "--takeover", "--reason", "r")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(os.path.isdir(wtdir))                     # worktree survived
+        phases = {x["phase"] for x in self.ledger_records() if x["verb"] == "drop"}
+        self.assertIn("authorized", phases)
+        self.assertNotIn("completed", phases)
+
+    def test_same_owner_drop_has_no_bogus_takeover_audit(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.assertEqual(self.wt("drop", "feat-a", "claude", "--yes").returncode, 0)
+        self.assertEqual(self.ledger_records(), [])               # no takeover records at all
+
+    def test_drop_missing_worktree_writes_no_phantom_audit(self):
+        # the worktree-exists precondition runs BEFORE the authorize record, so a drop of a
+        # non-existent (but sidecar-owned) worktree dies without a phantom ledger entry.
+        self.write_raw("ghost", json.dumps(self.doc("ghost")))
+        r = self.wt("drop", "ghost", "codex", "--yes", "--takeover", "--reason", "phantom")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no worktree", r.stderr)
+        self.assertEqual(self.ledger_records(), [])               # no authorized record written
+
+    def test_impossible_calendar_timestamp_is_owner_missing(self):
+        # finding 3: 2026-99-99T99:99:99Z has the right SHAPE but is an impossible instant.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", created_at="2026-99-99T99:99:99Z")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    def test_empty_branch_owner_doc_is_owner_missing(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", branch="")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    def test_detached_head_recorded_branch_is_mismatch(self):
+        # finding 3: a claimed owner branch while the worktree is detached is a mismatch.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self.git("checkout", "-q", "--detach", cwd=wtdir)
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_mismatch")
+        self.assertIn("detached", by["feat-a"]["detail"])
+
+    def test_fifo_ledger_path_fails_closed_no_hang(self):
+        # PR C round-3 hunt: a FIFO at the ledger path must NOT block the write-only open
+        # forever (which would freeze the relay under the global lock) — O_NONBLOCK + S_ISREG
+        # make it fail closed. Run under a wall-clock timeout to catch a regression hang.
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no os.mkfifo on this platform")
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        os.makedirs(os.path.join(self.d, self.OWNERS_REL), exist_ok=True)
+        os.mkfifo(os.path.join(self.d, self.OWNERS_REL, "_takeovers.jsonl"))
+        r = subprocess.run([sys.executable, COMPANION, "done", "feat-a", "codex",
+                            "--takeover", "--reason", "x"], cwd=self.d,
+                           capture_output=True, text=True, timeout=30)  # timeout catches a hang
+        self.assertEqual(r.returncode, 1)                  # fail-closed, not a hang
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")   # ownership unchanged
+
+    def test_non_canonical_timestamps_are_owner_missing(self):
+        # PR C round-3 hunt: single-digit fields, whitespace padding, and non-ASCII year all
+        # deviate from the canonical strftime form and must be rejected (owner_missing).
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        for bad in ("2026-2-3T4:5:6Z", "  2026-01-01T00:00:00Z  ",
+                    "٢٠٢٦-01-01T00:00:00Z"):
+            self.write_raw("feat-a", json.dumps(self.doc("feat-a", created_at=bad)))
+            by = {f["worktree"]: f for f in self.doctor_findings()}
+            self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing", bad)
+
+    def test_whitespace_only_takeover_reason_is_owner_missing(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc(
+            "feat-a", taken_over_from="codex", takeover_reason="   ",
+            takeover_at="2026-01-01T00:00:00Z")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    def test_malformed_takeover_tuple_is_owner_missing(self):
+        # finding 3: the optional audit tuple is validated ALL-OR-NONE — a partial, oversized,
+        # ANSI-agent, or bad-time audit makes the whole doc malformed (owner_missing).
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        for bad in (
+            self.doc("feat-a", taken_over_from="mallory"),                 # partial tuple
+            self.doc("feat-a", taken_over_from="x\x1bevil",
+                     takeover_reason="r", takeover_at="2026-01-01T00:00:00Z"),  # ANSI prev
+            self.doc("feat-a", taken_over_from="x", takeover_reason="z" * 300,
+                     takeover_at="2026-01-01T00:00:00Z"),                  # oversized reason
+            self.doc("feat-a", taken_over_from="x", takeover_reason="r",
+                     takeover_at="2026-99-99T00:00:00Z"),                  # impossible time
+        ):
+            self.write_raw("feat-a", json.dumps(bad))
+            by = {f["worktree"]: f for f in self.doctor_findings()}
+            self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing", bad)
 
 
 if __name__ == "__main__":
