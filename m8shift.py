@@ -5869,20 +5869,34 @@ def _binding_path(root, agent):
     return os.path.join(root, BINDINGS_SUBDIR, "%s.json" % agent)
 
 
-def _load_binding(root, agent):
-    """Validated binding dict or None. Never raises."""
+def _read_binding(root, agent):
+    """Tri-state binding read -> (status, payload). status is "absent" (no file),
+    "valid" (payload = validated dict), or "invalid" (payload = short reason).
+    A PRESENT but unreadable/malformed/mis-shaped binding is a fail-CLOSED signal
+    (Codex code-review BLOCKER 1): it must refuse actor writes, never silently
+    read as no-binding. Never raises."""
     if not agent or not re.fullmatch(AGENT_RE, agent):
-        return None
+        return "invalid", "invalid agent name"
+    path = _binding_path(root, agent)
+    if not os.path.exists(path):
+        return "absent", None
     try:
-        with open(_binding_path(root, agent), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
-    except (OSError, ValueError, RecursionError):
-        return None
+    except (OSError, ValueError, RecursionError) as exc:
+        return "invalid", "unreadable/malformed (%s)" % exc.__class__.__name__
     if not isinstance(doc, dict) or doc.get("schema") != BINDING_SCHEMA:
-        return None
-    if not isinstance(doc.get("root_realpath"), str) or not doc["root_realpath"]:
-        return None
-    return doc
+        return "invalid", "wrong or missing schema"
+    if doc.get("agent") != agent:
+        return "invalid", "document agent differs from the requested agent"
+    rr = doc.get("root_realpath")
+    if not isinstance(rr, str) or not rr or not os.path.isabs(rr):
+        return "invalid", "missing/non-absolute root_realpath"
+    if not isinstance(doc.get("bound_at"), str) or not doc["bound_at"]:
+        return "invalid", "missing bound_at"
+    if doc.get("relay_session", "default") != "default":
+        return "invalid", "unknown relay_session (RFC 038 namespaces not shipped)"
+    return "valid", doc
 
 
 def _binding_matches(root, binding):
@@ -5897,26 +5911,84 @@ def _binding_matches(root, binding):
     return os.path.realpath(root) == rr
 
 
-def _relay_lock_live_for(root, agent):
-    """True iff <root>'s relay LOCK is WORKING_<AGENT> with an unexpired TTL —
-    read raw and tolerant (this may be the OTHER candidate's relay)."""
+def _relay_lock_fields(root):
+    """Marker-delimited LOCK fields of <root>'s relay, or None (missing/broken).
+    Parses ONLY the LOCK block — a turn BODY containing `state: WORKING_X` must
+    never read as a live pen (Codex code-review HIGH 4 body-spoof)."""
     try:
         with open(os.path.join(root, "M8SHIFT.md"), encoding="utf-8") as fh:
             text = fh.read()
     except OSError:
+        return None
+    try:
+        return get_lock(text)
+    except (ValueError, KeyError):
+        return None
+
+
+def _relay_lock_live_for(root, agent):
+    """True iff <root>'s LOCK block is WORKING_<AGENT> with an unexpired TTL."""
+    lk = _relay_lock_fields(root)
+    if lk is None:
         return False
-    m_state = re.search(r"^state:\s*WORKING_([A-Za-z0-9_-]+)\s*$", text, re.M)
-    if not m_state or m_state.group(1).lower() != agent.lower():
+    if lk.get("state", "") != "WORKING_%s" % agent.upper():
         return False
-    m_exp = re.search(r"^expires:\s*(\S+)\s*$", text, re.M)
-    if not m_exp or m_exp.group(1) in ("-", ""):
+    if lk.get("holder", "").lower() != agent.lower():
+        return False
+    raw = (lk.get("expires") or "-").strip()
+    if raw in ("-", ""):
         return True                              # no TTL recorded -> treat as live
     try:
-        exp = dt.datetime.strptime(m_exp.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(
+        exp = dt.datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=dt.timezone.utc)
     except ValueError:
         return True                              # unparseable -> conservative: live
     return exp > dt.datetime.now(dt.timezone.utc)
+
+
+@contextlib.contextmanager
+def _candidate_locks(roots):
+    """Acquire the .m8shift.lock of EVERY existing candidate relay, in stable
+    physical-root order (race-free multi-relay section for bind mutations —
+    Codex code-review HIGH 4). Timeout per lock; a lock file older than
+    LOCK_STALE_S is treated as abandoned and taken over."""
+    ordered = sorted({os.path.realpath(r) for r in roots if r and _root_has_relay(r)})
+    held = []
+    token = ("bind:%d:%d" % (os.getpid(), time.time_ns())).encode()
+    try:
+        for root in ordered:
+            lockfile = os.path.join(root, ".m8shift.lock")
+            start = time.monotonic()
+            while True:
+                try:
+                    fd = os.open(lockfile, _lock_open_flags(read=False), 0o600)
+                    try:
+                        os.write(fd, token)
+                    finally:
+                        os.close(fd)
+                    held.append(lockfile)
+                    break
+                except FileExistsError:
+                    try:
+                        if time.time() - os.path.getmtime(lockfile) > LOCK_STALE_S:
+                            os.unlink(lockfile)   # abandoned -> take over
+                            continue
+                    except OSError:
+                        pass
+                    if time.monotonic() - start > LOCK_TIMEOUT:
+                        raise SystemExit(
+                            "refused: candidate relay %s is busy (its write lock "
+                            "is held) — retry when the peer finishes."
+                            % _foreign_root_disp(root))
+                    time.sleep(0.05)
+        yield
+    finally:
+        for lockfile in held:
+            with contextlib.suppress(OSError):
+                with open(lockfile, "rb") as fh:
+                    if fh.read() != token:
+                        continue                 # not ours anymore — never erase
+                os.unlink(lockfile)
 
 
 def session_binding_gate(actor=None):
@@ -5934,8 +6006,16 @@ def session_binding_gate(actor=None):
     if ambiguous:
         resolved = None
         if actor:
-            matches = [c for c in (env_root, script_root)
-                       if (b := _load_binding(c, actor)) and _binding_matches(c, b)]
+            matches = []
+            for c in (env_root, script_root):
+                st, payload = _read_binding(c, actor)
+                if st == "invalid":
+                    sys.exit("refused: the binding for '%s' in %s is INVALID (%s) — "
+                             "fail closed. Recover: ./m8shift.py bind %s --clear "
+                             "--candidate env|script, then rebind." % (
+                                 actor, _foreign_root_disp(c), payload, actor))
+                if st == "valid" and _binding_matches(c, payload):
+                    matches.append(c)
             if len(matches) == 1:
                 resolved = matches[0]
         if resolved is None:
@@ -5948,14 +6028,40 @@ def session_binding_gate(actor=None):
             configure_root(resolved)             # resolve A1 to the BOUND relay
     if actor:
         effective = os.path.dirname(COWORK)
-        b = _load_binding(effective, actor)
-        if b is not None and not _binding_matches(effective, b):
+        st, payload = _read_binding(effective, actor)
+        if st == "invalid":
+            sys.exit("refused: the binding for '%s' in this relay is INVALID (%s) — "
+                     "fail closed. Recover: ./m8shift.py bind %s --clear, then "
+                     "rebind." % (actor, payload, actor))
+        if st == "valid" and not _binding_matches(effective, payload):
             sys.exit("refused: '%s' is bound to a different project root (%s); this "
                      "relay is %s. Recover: ./m8shift.py bind %s --clear on the bound "
                      "relay, then rebind here." % (
-                         actor, _foreign_root_disp(b["root_realpath"]),
+                         actor, _foreign_root_disp(payload["root_realpath"]),
                          _foreign_root_disp(effective), actor))
         _GATE_ACTOR = actor
+
+
+def session_binding_preflight(actor=None):
+    """PUBLIC companion API (RFC 038 §9.2): companions that mutate M8Shift-owned
+    state (worktree pen flips, context artifacts, runtime sidecars) MUST call this
+    before any filesystem write — the core argparse dispatcher cannot see them.
+    Same semantics as the dispatch gate: refuses two-candidate ambiguity (always,
+    for agentless writes), resolves/validates an actor's binding fail-closed."""
+    return session_binding_gate(actor)
+
+
+def relay_ambiguity_snapshot():
+    """Read-only: None, or a dict describing an unresolved two-candidate relay
+    ambiguity with REDACTED display labels (RFC 038 §9.5) — for status/JSON and
+    read-only warnings. Never raises, never refuses."""
+    env_root, script_root = _root_pair()
+    if not (_root_has_relay(env_root) and _root_has_relay(script_root)):
+        return None
+    if _same_physical_root(env_root, script_root):
+        return None
+    return {"env": _foreign_root_disp(env_root),
+            "script": _foreign_root_disp(script_root)}
 
 
 def binding_recheck_locked():
@@ -5965,10 +6071,11 @@ def binding_recheck_locked():
     if not _GATE_ACTOR:
         return
     effective = os.path.dirname(COWORK)
-    b = _load_binding(effective, _GATE_ACTOR)
-    if b is not None and not _binding_matches(effective, b):
-        sys.exit("refused: binding for '%s' changed while acquiring the lock — rerun."
-                 % _GATE_ACTOR)
+    st, payload = _read_binding(effective, _GATE_ACTOR)
+    if st == "invalid" or (st == "valid"
+                           and not _binding_matches(effective, payload)):
+        sys.exit("refused: binding for '%s' changed/invalidated while acquiring the "
+                 "lock — rerun." % _GATE_ACTOR)
 
 
 def cmd_bind(args):
@@ -5980,34 +6087,58 @@ def cmd_bind(args):
     env_root, script_root = _root_pair()
     env_ok, script_ok = _root_has_relay(env_root), _root_has_relay(script_root)
     effective = os.path.dirname(COWORK)
+    def _inspect_roots():
+        """Read-only inspection targets: BOTH candidates under ambiguity (never a
+        silent env-win — Codex code-review BLOCKER 2), else the effective root;
+        --candidate narrows explicitly."""
+        cand = getattr(args, "candidate", None)
+        if cand == "env" and env_ok:
+            return [("env", env_root)]
+        if cand == "script" and script_ok:
+            return [("script", script_root)]
+        roots = []
+        if env_ok:
+            roots.append(("env", env_root))
+        if script_ok and not (env_ok and _same_physical_root(env_root, script_root)):
+            roots.append(("script", script_root))
+        return roots or [("effective", effective)]
+
+    def _binding_line(label, root, name, st, payload):
+        if st == "valid":
+            state = "(valid)" if _binding_matches(root, payload) else "(MISMATCH)"
+            return "[%s] %s -> %s %s bound_at=%s session=%s" % (
+                label, payload.get("agent", name), _foreign_root_disp(
+                    payload["root_realpath"]), state,
+                payload.get("bound_at", "?"), payload.get("relay_session", "default"))
+        return "[%s] %s -> INVALID (%s)" % (label, name, payload)
+
     if getattr(args, "list", False):             # read-only, lock-free
-        bdir = os.path.join(effective, BINDINGS_SUBDIR)
-        try:
-            names = sorted(n for n in os.listdir(bdir) if n.endswith(".json"))
-        except OSError:
-            names = []
         shown = 0
-        for n in names:
-            b = _load_binding(effective, n[:-5])
-            if b is None:
-                continue
-            shown += 1
-            print("%s -> %s %s bound_at=%s session=%s" % (
-                b.get("agent", n[:-5]), _foreign_root_disp(b["root_realpath"]),
-                "(valid)" if _binding_matches(effective, b) else "(MISMATCH)",
-                b.get("bound_at", "?"), b.get("relay_session", "default")))
+        for label, root in _inspect_roots():
+            bdir = os.path.join(root, BINDINGS_SUBDIR)
+            try:
+                names = sorted(n for n in os.listdir(bdir) if n.endswith(".json"))
+            except OSError:
+                names = []
+            for n in names:
+                st, payload = _read_binding(root, n[:-5])
+                if st == "absent":
+                    continue
+                shown += 1
+                print(_binding_line(label, root, n[:-5], st, payload))
         if not shown:
-            print("no bindings recorded in this relay.")
+            print("no bindings recorded.")
         return 0
     if getattr(args, "show", False):             # read-only, lock-free
-        b = _load_binding(effective, agent)
-        if b is None:
-            print("no binding for '%s' in this relay." % agent)
-        else:
-            print("%s -> %s %s bound_at=%s session=%s" % (
-                agent, _foreign_root_disp(b["root_realpath"]),
-                "(valid)" if _binding_matches(effective, b) else "(MISMATCH)",
-                b.get("bound_at", "?"), b.get("relay_session", "default")))
+        shown = 0
+        for label, root in _inspect_roots():
+            st, payload = _read_binding(root, agent)
+            if st == "absent":
+                continue
+            shown += 1
+            print(_binding_line(label, root, agent, st, payload))
+        if not shown:
+            print("no binding for '%s'." % agent)
         return 0
     # --- mutation: deterministic target selection (§9.3) ---
     ambiguous = (env_ok and script_ok
@@ -6019,8 +6150,11 @@ def cmd_bind(args):
         elif candidate == "script":
             target = script_root
         else:
-            matches = [c for c in (env_root, script_root)
-                       if (b := _load_binding(c, agent)) and _binding_matches(c, b)]
+            matches = []
+            for c in (env_root, script_root):
+                st, payload = _read_binding(c, agent)
+                if st == "valid" and _binding_matches(c, payload):
+                    matches.append(c)
             if len(matches) == 1:
                 target = matches[0]
             else:
@@ -6036,16 +6170,30 @@ def cmd_bind(args):
             print("refused: no existing relay to bind to — bind never creates a "
                   "relay; run init first.", file=sys.stderr)
             return 2
-    # Live-pen guard (§9.3): a rebind/clear must never strand a WORKING pen.
-    for cand in (env_root, script_root):
-        if cand and _root_has_relay(cand) and _relay_lock_live_for(cand, agent):
-            print("refused: '%s' holds a live WORKING lock in %s — finish with "
-                  "append/release/pause (or recover the stale lock explicitly) "
-                  "before rebinding." % (agent, _foreign_root_disp(cand)),
-                  file=sys.stderr)
+    # Live-pen guard (§9.3) — evaluated AND re-evaluated under the ordered locks
+    # of every existing candidate relay (a pre-check alone is TOCTOU-prone:
+    # Codex code-review HIGH 4).
+    with _candidate_locks([env_root, script_root]):
+        for cand in (env_root, script_root):
+            if cand and _root_has_relay(cand) and _relay_lock_live_for(cand, agent):
+                print("refused: '%s' holds a live WORKING lock in %s — finish with "
+                      "append/release/pause (or recover the stale lock explicitly) "
+                      "before rebinding." % (agent, _foreign_root_disp(cand)),
+                      file=sys.stderr)
+                return 2
+        # MEDIUM 5: bind promises a ROSTER agent of a still-existing relay —
+        # both re-verified under the locks (a disappearance race must not let
+        # bind create state in a non-relay directory).
+        lk = _relay_lock_fields(target)
+        if lk is None:
+            print("refused: the target relay disappeared or is unreadable — "
+                  "nothing bound.", file=sys.stderr)
             return 2
-    configure_root(target)                       # serialize under the TARGET lock
-    with file_lock():
+        roster = [a.strip() for a in (lk.get("agents") or "").split(",") if a.strip()]
+        if roster and agent not in roster:
+            print("refused: '%s' is not on the target relay's roster (%s)."
+                  % (agent, ",".join(roster)), file=sys.stderr)
+            return 2
         bpath = _binding_path(target, agent)
         if getattr(args, "clear", False):
             try:
@@ -6119,6 +6267,16 @@ def _dispatch_binding_gate(args):
     if cmd in _MUTATOR_ACTORS:
         attr = _MUTATOR_ACTORS[cmd]
         session_binding_gate(getattr(args, attr, None) if attr else None)
+        return
+    # Read-only commands are never refused, but an unresolved ambiguity must be
+    # OBSERVABLE (Codex code-review BLOCKER 2): one redacted warning to stderr.
+    if cmd not in ("bind", "update"):
+        amb = relay_ambiguity_snapshot()
+        if amb is not None:
+            print("warning: two candidate relays exist and differ — %s (env "
+                  "M8SHIFT_ROOT) vs %s (script-local); reads use the env candidate. "
+                  "Writes will refuse until disambiguated (RFC 038 \u00a79)."
+                  % (amb["env"], amb["script"]), file=sys.stderr)
 
 
 def collect_doctor_findings(security=False, contracts=False, update_source="",
@@ -6834,6 +6992,17 @@ def _status_info(text=None):
 def cmd_may_i_write(args):
     text = load_or_die()
     agent = need_agent(args.agent)
+    # RFC 038 §9.4: the hard guard REPORTS binding validity read-only — a present
+    # but invalid or mismatched binding is STOP (Codex code-review BLOCKER 1).
+    b_st, b_payload = _read_binding(os.path.dirname(COWORK), agent)
+    if b_st == "invalid":
+        print("STOP: %s may not write (binding INVALID: %s). Recover: "
+              "./m8shift.py bind %s --clear, then rebind." % (agent, b_payload, agent))
+        return 3
+    if b_st == "valid" and not _binding_matches(os.path.dirname(COWORK), b_payload):
+        print("STOP: %s may not write (bound to a different project root: %s)."
+              % (agent, _foreign_root_disp(b_payload["root_realpath"])))
+        return 3
     lk = get_lock(text)
     st = lk.get("state", "")
     holder = lk.get("holder", "none")
@@ -7270,7 +7439,15 @@ def cmd_status(args):
         out["m8shift_version"] = VERSION     # the RUNNING script's version (dogfooding skew check)
         out["project"] = project_display_name()
         out["cwd"] = os.getcwd()
-        out["root"] = project_root()
+        amb = relay_ambiguity_snapshot()
+        if amb is not None:
+            # §9.5: under unresolved ambiguity the JSON must not retain a raw
+            # foreign candidate path — the effective (env-wins) root is redacted
+            # and both candidates are surfaced as structured, redacted labels.
+            out["root"] = _foreign_root_disp(project_root())
+            out["relay_ambiguity"] = amb
+        else:
+            out["root"] = project_root()
         out["session_started_at"] = (
             None if session_info["started_at"] == "-" else session_info["started_at"]
         )

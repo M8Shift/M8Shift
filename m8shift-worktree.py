@@ -416,11 +416,20 @@ def build_parser():
     return p
 
 
+# RFC 038 §9.2 (Codex code-review BLOCKER 3): companion mutators bypass the core
+# argparse dispatcher, so the session-binding preflight runs HERE. claim/done/
+# integrate/drop mutate relay/ledger state (actor-bearing via their agent arg);
+# status is read-only.
+_MUTATING_VERBS = {"claim", "done", "integrate", "drop"}
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     global ROOT
     ROOT = discover_root()
     core.configure_root(ROOT)        # rebase the core onto the canonical root BEFORE any read/write
+    if getattr(args, "cmd", "") in _MUTATING_VERBS:
+        core.session_binding_preflight(getattr(args, "agent", None))
     return args.fn(args)
 
 
