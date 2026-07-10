@@ -1,8 +1,8 @@
 # RFC 049 — Holder liveness and stale-claim hardening
 
-Status: draft
-Target: v3.53.0 candidate
-Related issue: #6
+Status: design rev 2 (2026-07-10 — three same-session live incidents folded; see §Live incident evidence)
+Target: next minor after RFC 052
+Related issues: #6, #104 (incident analysis + recurrences)
 Owner: core relay + runtime/worktree companions
 
 ## Summary
@@ -43,6 +43,52 @@ There are two distinct cases:
 
 The first case can be improved mechanically. The second cannot be proven without
 a producer; it must be documented as an operator/agent discipline boundary.
+
+## Live incident evidence and amendments (forge #104, 2026-07-10)
+
+Three same-session incidents turned this draft's problem statement into
+recorded fact, and the recovery behavior the reviewer improvised is codified
+here as the REQUIRED recovery contract.
+
+**What happened (three times in one shift):** the holder's pen expired mid-work
+during long implementation phases (multi-minute test suites; every wake-up
+consumed by fix work), despite an adopted refresh-on-wakeup discipline. The
+peer's listener flagged the stale lock; the operator had to relay the warning
+by hand. The peer then performed two textbook recoveries (relay turns 425/426):
+checked whether any commit had been pushed, found none, recovered the stale
+lock, and RENEWED THE SAME ASSIGNMENT unchanged as a time-boxed checkpoint
+handoff — zero work lost. A session-side 15-minute refresh loop then stopped
+the recurrence: that loop is exactly what this RFC productizes.
+
+**Amendments (each becomes normative below):**
+
+- **A1 — refresh early, never at the deadline.** The refresh/heartbeat cadence
+  targets ~TTL/2 (minute 15 of a 30-minute pen), not the expiry edge. Listener
+  cadence stays `min(wait_interval, 60s)`; an interactive holder's guidance is
+  "refresh on every wake-up AND before starting any operation expected to run
+  longer than TTL/2".
+- **A2 — grace recheck before recovery.** A claimant that observed a stale
+  `WORKING_*` MUST re-read the LOCK under `file_lock()` after a grace delay
+  (one poll interval, min 5s) before recovering — a lock refreshed between
+  observation and recovery is never stolen (the refresh-vs-reclaim race).
+- **A3 — progress-aware recovery (the proven contract).** On stale +
+  heartbeat-dead, the recovering peer checks for pushed/checkpointed progress
+  tied to the open assignment. None found → recover and RENEW the same
+  assignment unchanged (a time-boxed checkpoint handoff — never silently
+  reassign different work). Progress found → hand back referencing it,
+  findings preserved. Recovery never destroys or rewrites the pending
+  handoff body.
+- **A4 — checkpoint discipline (guidance, not enforcement).** Long work
+  commits/pushes or records an explicit progress note before the TTL, or
+  refreshes around minute 15. Delivered as agent-pack/stanza text within the
+  existing byte budget.
+- **A5 — observable waiting.** `wait`/listener state stays queryable while
+  blocked: the listener distinguishes and surfaces alive-expired vs ordinary
+  stale, and a `wait` whose UI was never resumed still reflects the true relay
+  state on the next `status` (no invisible parked state).
+- **A6 — no automatic double-holder.** No recovery path may ever produce two
+  `WORKING_*` holders: the A2 grace recheck plus under-lock validation keep the
+  single-pen invariant, and the race is pinned by tests.
 
 ## Goals
 
@@ -304,12 +350,28 @@ Worktree companion doctor findings:
   cross-owner protection as advisory companion enforcement only.
 - Tests cover malformed, stale, orphaned, fresh, wrong-session, wrong-turn, and
   mixed-version/no-heartbeat behavior.
+- **Incident-derived test families (A1-A6)**:
+  - refresh-vs-reclaim race: a lock refreshed after the claimant observed
+    staleness but before recovery is NOT stolen (grace recheck under
+    `file_lock()`, single holder throughout);
+  - repeated stale windows: two consecutive recoveries renew the SAME
+    assignment unchanged, and the pending handoff body survives both
+    byte-for-byte;
+  - progress-aware branch: with a pushed commit present, recovery hands back
+    referencing it instead of renewing silently;
+  - UI-not-resumed wait: a `wait` that was never foregrounded reflects the true
+    relay state on the next `status` query (alive-expired vs stale surfaced);
+  - no-double-holder: concurrent recovery attempts under contention never yield
+    two `WORKING_*` states.
 
-## Open questions for implementation review
+## Resolved questions (rev 2, informed by the live incidents)
 
-- Freshness window: fixed 2 minutes, `2 * listener poll interval`, or explicit
-  config?
-- Should `--live-override` require a human-maintained marker file in addition to
-  `--reason`?
-- Should orphan heartbeat cleanup be automatic on `release`/`done`, or only a
-  doctor/prune concern?
+- **Freshness window**: `2 x` the producing cadence with a **120s floor**
+  (listener at 60s -> 120s window; `claim --refresh` heartbeats at ~TTL/2 ->
+  the window follows). Fixed formula, no new config knob.
+- **`--live-override`**: `--force --live-override --reason` suffices — the
+  override is audited in session events; a human marker file adds ceremony
+  without proof (the CLI cannot authenticate a human either way).
+- **Orphan heartbeat cleanup**: best-effort removal on `release`/`done`
+  (suppressed errors — the sidecar is never authority), plus the existing
+  doctor info finding; no separate prune command in this RFC.
