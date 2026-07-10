@@ -12882,36 +12882,31 @@ class TestRFC049PRBListenerProducer(CLIBase):
         self.assertFalse(res["heartbeat_ok"])
 
     def test_supervision_logs_per_episode_and_rearms(self):
-        # Codex PR-B review H2: neutral skip is silent; a failure logs once per
-        # episode; success re-arms the log so a later regression is visible.
+        # Codex PR-B rounds 2+3 (H2): neutral skip silent; a failure logs once
+        # per CONTINUOUS episode; success re-arms so a LATER failure logs again
+        # (exactly two heartbeat-failure lines across two episodes).
         said = []
         seq = {"i": 0}
-        plans = [None,                          # neutral pre-claim skip: silent
-                 {"working_window": True, "refresh_attempted": False,
-                  "refresh_ok": False, "refresh_error": None,
-                  "heartbeat_attempted": True, "heartbeat_ok": True,
-                  "heartbeat_error": None},     # success
-                 {"working_window": True, "refresh_attempted": False,
-                  "refresh_ok": False, "refresh_error": None,
-                  "heartbeat_attempted": True, "heartbeat_ok": False,
-                  "heartbeat_error": "rc=2"},   # failure -> logs
-                 {"working_window": True, "refresh_attempted": False,
-                  "refresh_ok": False, "refresh_error": None,
-                  "heartbeat_attempted": True, "heartbeat_ok": False,
-                  "heartbeat_error": "rc=2"}]   # same episode -> silent
+
+        def mk(ok):
+            return {"working_window": True, "refresh_attempted": False,
+                    "refresh_ok": False, "refresh_error": None,
+                    "heartbeat_attempted": True, "heartbeat_ok": ok,
+                    "heartbeat_error": None if ok else "rc=2"}
+
+        neutral = {"working_window": False, "refresh_attempted": False,
+                   "refresh_ok": False, "refresh_error": None,
+                   "heartbeat_attempted": False, "heartbeat_ok": False,
+                   "heartbeat_error": None}
+        plans = [neutral, mk(False), mk(False), mk(True), mk(False)]
 
         def fake_tick(agent, cadence):
             plan = plans[min(seq["i"], len(plans) - 1)]
             seq["i"] += 1
-            if plan is None:
-                return {"working_window": False, "refresh_attempted": False,
-                        "refresh_ok": False, "refresh_error": None,
-                        "heartbeat_attempted": False, "heartbeat_ok": False,
-                        "heartbeat_error": None}
-            return plan
+            return dict(plan)
 
         child = subprocess.Popen([sys.executable, "-c",
-                                  "import time; time.sleep(4.5)"], cwd=self.d)
+                                  "import time; time.sleep(5.5)"], cwd=self.d)
         original = self.rt.listener_liveness_tick
         self.rt.listener_liveness_tick = fake_tick
         try:
@@ -12921,8 +12916,17 @@ class TestRFC049PRBListenerProducer(CLIBase):
             self.rt.listener_liveness_tick = original
         self.assertEqual(rc, 0)
         fails = [m for m in said if "heartbeat failed" in m]
-        self.assertEqual(len(fails), 1, said)   # once per episode
+        self.assertEqual(len(fails), 2, said)   # two episodes -> two lines
         self.assertFalse(any("skipped" in m or "window" in m for m in said), said)
+
+    def test_supervision_returns_nonzero_child_exit_unchanged(self):
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        child = subprocess.Popen([sys.executable, "-c",
+                                  "import sys, time; time.sleep(1); sys.exit(7)"],
+                                 cwd=self.d)
+        rc = self.rt.supervise_child_with_liveness(
+            child, "claude", poll_s=1, say=lambda m: None)
+        self.assertEqual(rc, 7)
 
     def test_listener_start_rejects_nan_inf_poll(self):
         for bad in ("nan", "inf"):

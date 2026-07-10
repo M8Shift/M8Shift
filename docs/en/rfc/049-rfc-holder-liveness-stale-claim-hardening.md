@@ -265,9 +265,10 @@ Existing TTL-refresh behavior remains. New behavior:
 - if the heartbeat sidecar write fails, keep the TTL refresh but print/report a
   warning; the sidecar is not the source of pen authority.
 
-`claim --refresh` is still the preferred heartbeat for long interactive turns
-when the agent can call it before expiry. It does not solve the “forgot to call
-anything” case.
+`claim --refresh` is still the preferred TTL-extension for long interactive
+turns when the agent can call it before expiry — but its beat is audit-only:
+protective evidence comes exclusively from the `heartbeat` verb. It does not
+solve the “forgot to call anything” case.
 
 ### `claim <agent> --force`
 

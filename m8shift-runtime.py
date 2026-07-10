@@ -3,7 +3,11 @@
 
 The companion records local presence, operator messages, progress, and run lifecycle
 sidecars under `.m8shift/runtime/`. It never edits `M8SHIFT.md` directly and never becomes
-an authority for the pen; all routing remains owned by `m8shift.py`.
+an authority for the pen; all routing remains owned by `m8shift.py`. Since RFC 049 PR B an
+explicitly launched listener additionally makes two bounded core argv calls while its
+child turn is alive — `claim <agent> --refresh` near TTL/2 (TTL extension + audit-only
+beat) and the protective `heartbeat` verb — and still never plain-claims, force-claims,
+appends, releases or completes.
 """
 import argparse
 import datetime as dt
