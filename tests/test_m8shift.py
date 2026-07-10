@@ -12203,24 +12203,55 @@ class TestRFC052SessionBinding(CLIBase):
         self.assertFalse(os.path.exists(
             os.path.join(self.other, ".m8shift", "done.log")))   # foreign untouched
 
-    def test_runtime_mutators_fail_closed_reads_warn_redacted(self):
-        # Codex re-review BLOCKER 4: the runtime companion cannot rebase its
-        # script-local sidecars — mutators fail closed even with a binding;
-        # reads warn, redacted.
+    def test_runtime_predicate_both_sides_table_driven(self):
+        # Codex re-review round 3: gate ONLY invocations that actually write a
+        # sidecar — documented read-only modes are never refused, every
+        # conditional write intent is. Both sides of every conditional pinned.
         shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
                     os.path.join(self.d, "m8shift-runtime.py"))
         self._run("bind", "claude", "--candidate", "script", env_root=self.other)
         env = dict(os.environ)
         env["M8SHIFT_ROOT"] = self.other
-        r = subprocess.run([sys.executable, "m8shift-runtime.py", "init"],
-                           cwd=self.d, capture_output=True, text=True, env=env)
-        self.assertNotEqual(r.returncode, 0, r.stdout)
-        self.assertIn("fails closed", r.stderr)
-        self.assertNotIn(self.other, r.stdout + r.stderr)
-        r = subprocess.run([sys.executable, "m8shift-runtime.py", "doctor"],
-                           cwd=self.d, capture_output=True, text=True, env=env)
-        self.assertIn("two candidate relays", r.stderr)
-        self.assertNotIn(self.other, r.stderr)
+
+        def rt(*argv):
+            return subprocess.run([sys.executable, "m8shift-runtime.py", *argv],
+                                  cwd=self.d, capture_output=True, text=True,
+                                  env=env)
+
+        read_only = (("report", "run1"),
+                     ("retention", "apply", "--dry-run"),
+                     ("listener", "start", "--agent", "claude", "--dry-run"),
+                     ("notify", "config", "--show"),
+                     ("headroom",),
+                     ("doctor",),
+                     ("usage", "status"),
+                     ("usage", "guard"))
+        for argv in read_only:
+            r = rt(*argv)
+            self.assertNotIn("fails closed", r.stderr, argv)
+            self.assertIn("two candidate relays", r.stderr, argv)   # redacted warn
+            self.assertNotIn(self.other, r.stdout + r.stderr, argv)
+        mutating = (("init",),
+                    ("watch", "claude"),
+                    ("progress", "claude", "msg", "--run", "r1"),
+                    ("report", "run1", "--write"),
+                    ("retention", "apply"),
+                    ("listener", "start", "--agent", "claude"),
+                    ("notify", "config", "--enable", "stdout"),
+                    ("notify", "claude"),
+                    ("headroom", "--checkpoint"),
+                    ("providers", "init"),
+                    ("usage", "init"),
+                    ("usage", "snapshot"),
+                    ("usage", "watch"))
+        for argv in mutating:
+            r = rt(*argv)
+            self.assertNotEqual(r.returncode, 0, argv)
+            self.assertIn("fails closed", r.stderr, argv)
+            self.assertNotIn(self.other, r.stdout + r.stderr, argv)
+        # the gated report --write left no artifact behind
+        self.assertFalse(os.path.exists(
+            os.path.join(self.d, ".m8shift", "runs", "run1", "report.md")))
 
     def test_context_predicate_exact(self):
         # Codex re-review HIGH 5: pack/benchmark mutate only with --write/--output.
