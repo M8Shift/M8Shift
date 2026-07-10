@@ -6486,6 +6486,86 @@ def usage_doctor_findings():
     return findings
 
 
+# RFC 038 §9.2 (Codex re-review BLOCKER 4): the runtime companion writes
+# M8Shift-owned sidecars via SCRIPT-LOCAL path constants, so under an unresolved
+# two-candidate relay ambiguity its mutating verbs FAIL CLOSED (even with a
+# binding — no root rebasing exists here yet); read-only verbs emit one redacted
+# warning and never print a raw candidate path for the ambiguity itself.
+def _runtime_is_mutating(args):
+    """Exact mutator predicate (Codex re-review round 3): a verb is gated ONLY
+    when this invocation actually writes an M8Shift-owned sidecar — documented
+    read-only modes (--dry-run, --show, no-write report) are never refused, and
+    every conditional write intent (--write/--repair/--apply/--checkpoint/
+    --pause-on/config-changing notify options) IS gated."""
+    cmd = getattr(args, "cmd", "")
+    verb = getattr(args, "verb", "") or ""
+    if cmd in ("init", "watch", "operator", "progress", "approve"):
+        return True
+    if (cmd, verb) in (("providers", "init"), ("retention", "prune"),
+                       ("listener", "stop"), ("usage", "init"),
+                       ("usage", "snapshot"), ("usage", "watch"),
+                       ("usage", "resume")):
+        return True
+    if cmd == "notify":
+        if getattr(args, "target", "") != "config":
+            return True                            # agent notification event
+        return bool(getattr(args, "enable", "")
+                    or getattr(args, "os_preset", "")
+                    or getattr(args, "hook_argv", None) is not None
+                    or getattr(args, "hook_json", "")
+                    or getattr(args, "dedup_window_seconds", None) is not None)
+    if cmd == "headroom":
+        return bool(getattr(args, "checkpoint", False)
+                    or getattr(args, "pause_on", ""))
+    if cmd == "report":
+        return bool(getattr(args, "write", False))
+    if (cmd, verb) == ("retention", "apply"):
+        return not getattr(args, "dry_run", False)
+    if (cmd, verb) == ("listener", "start"):
+        return not getattr(args, "dry_run", False)
+    if (cmd, verb) == ("listener", "status"):
+        return bool(getattr(args, "repair", False))
+    if (cmd, verb) == ("usage", "guard"):
+        return bool(getattr(args, "apply", False))
+    return False
+
+
+def _binding_a1_preflight(args):
+    env = (os.environ.get("M8SHIFT_ROOT") or "").strip()
+    if not env:
+        return
+    env_root = os.path.abspath(env)
+
+    def _has_relay(r):
+        return os.path.isfile(os.path.join(r, "M8SHIFT.md"))
+
+    if not (_has_relay(env_root) and _has_relay(HERE)):
+        return
+    try:
+        same = os.path.samefile(env_root, HERE)
+    except OSError:
+        same = os.path.realpath(env_root) == os.path.realpath(HERE)
+    if same:
+        return
+    import hashlib as _h
+
+    def _disp(r):
+        real = os.path.realpath(r)
+        return ".../%s [root:%s]" % (os.path.basename(real.rstrip("/\\")) or real,
+                                     _h.sha256(real.encode()).hexdigest()[:10])
+
+    if _runtime_is_mutating(args):
+        raise SystemExit(
+            "refused: two candidate relays exist and differ — %s (env M8SHIFT_ROOT) "
+            "vs %s (script-local); the runtime companion writes script-local "
+            "sidecars and cannot rebase, so it fails closed (RFC 038 \u00a79). "
+            "Unset M8SHIFT_ROOT or run the copy installed in the intended root."
+            % (_disp(env_root), _disp(HERE)))
+    print("warning: two candidate relays exist and differ — %s (env) vs %s "
+          "(script-local); runtime reads are script-local (RFC 038 \u00a79)."
+          % (_disp(env_root), _disp(HERE)), file=sys.stderr)
+
+
 def main():
     p = argparse.ArgumentParser(
         prog=os.path.basename(sys.argv[0]),
@@ -6861,6 +6941,7 @@ def main():
     urs.set_defaults(fn=cmd_usage_resume)
 
     args = p.parse_args()
+    _binding_a1_preflight(args)
     sys.exit(args.fn(args))
 
 

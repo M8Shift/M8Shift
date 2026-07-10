@@ -224,6 +224,7 @@ Schutzvorrichtung:
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # eine dauerhafte Speichernotiz anhängen (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # advisory Aufgabenliste (To-dos pro Agent)
+./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # bindet diese Schicht an EIN Projekt-Relay (RFC 038 §9); stiftfrei; verweigert bei Mehrdeutigkeit ohne den geschlossenen Selektor
 ./m8shift.py release <agent> --to <other> [--force]  # übergibt ohne Text (erhöht turn NICHT erneut)
 ./m8shift.py done <agent> [--force]                 # schließt die Sitzung (state=DONE)
 ./m8shift.py archive [--keep N]                     # alte abgeschlossene Züge bereinigen (niemals Zug #0)

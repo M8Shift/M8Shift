@@ -222,6 +222,7 @@ loop:
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # 永続的なメモリのメモを追記（advisory）
 ./m8shift.py task {add,done,drop,list,show} …  # advisory なタスク台帳（エージェントごとの ToDo）
+./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # このシフトを一つのプロジェクトリレーに固定（RFC 038 §9）。ペン不要。曖昧な場合はクローズドセレクタなしでは拒否
 ./m8shift.py release <agent> --to <other> [--force]  # 本文なしで引き継ぐ（ターンを再インクリメントしない）
 ./m8shift.py done <agent> [--force]                 # セッションを閉じる（state=DONE）
 ./m8shift.py archive [--keep N]                     # 古い閉じたターンを削除（ターン #0 は決して削除しない）

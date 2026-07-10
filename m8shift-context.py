@@ -318,6 +318,46 @@ def iso(t=None):
     return (t or now()).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _binding_a1_preflight(args, cmd, verb=""):
+    """RFC 038 §9.2 (Codex code-review BLOCKER 3): the context companion writes
+    M8Shift-owned artifacts and bypasses the core dispatcher, so its MUTATING
+    verbs refuse an unresolved two-candidate relay ambiguity locally (agentless
+    writes are never resolved by someone's binding). Standalone on purpose —
+    this companion does not import the core; the check is A1-only and local.
+    An explicit --root is a command-scoped authority (like update --target)."""
+    mutating = (cmd in ("init", "compress") or
+                (cmd == "pack" and (getattr(args, "write", False)
+                                    or getattr(args, "output", None))) or
+                (cmd == "benchmark" and getattr(args, "write", False)) or
+                (cmd == "adapters" and verb == "init"))
+    if not mutating or getattr(args, "root", None):
+        return
+    env = (os.environ.get("M8SHIFT_ROOT") or "").strip()
+    if not env:
+        return
+    env_root = os.path.abspath(env)
+    def _has_relay(r):
+        return os.path.isfile(os.path.join(r, "M8SHIFT.md"))
+    if not (_has_relay(env_root) and _has_relay(HERE)):
+        return
+    try:
+        same = os.path.samefile(env_root, HERE)
+    except OSError:
+        same = os.path.realpath(env_root) == os.path.realpath(HERE)
+    if same:
+        return
+    import hashlib as _h
+    def _disp(r):
+        real = os.path.realpath(r)
+        return ".../%s [root:%s]" % (os.path.basename(real.rstrip("/\\")) or real,
+                                     _h.sha256(real.encode()).hexdigest()[:10])
+    raise SystemExit("refused: two candidate relays exist and differ — %s (env "
+                     "M8SHIFT_ROOT) vs %s (script-local); an agentless companion "
+                     "write never guesses (RFC 038 \u00a79). Pass an explicit "
+                     "--root, or unset M8SHIFT_ROOT."
+                     % (_disp(env_root), _disp(HERE)))
+
+
 def root_from(args):
     return os.path.abspath(args.root or os.environ.get("M8SHIFT_ROOT") or HERE)
 
@@ -2784,6 +2824,7 @@ def main(argv=None):
     sd.set_defaults(func=cmd_doctor)
 
     args = p.parse_args(argv)
+    _binding_a1_preflight(args, getattr(args, "cmd", ""), getattr(args, "verb", ""))
     return args.func(args)
 
 
