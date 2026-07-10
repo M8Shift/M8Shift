@@ -138,11 +138,25 @@ ambiguity, behavior stays byte-identical.
 
 ### 9.2 A1 — centralized pre-write ambiguity/binding policy (Codex #1)
 
-One **single pre-write gate**, not a per-command check. It runs for EVERY relay/project
-mutator — `claim` (incl. `--refresh`), `append`, `next` (treated as mutating BEFORE it
-polls/claims), `request-turn`, `yield-turn`, `decline-turn`, `steer-turn`, `pause`,
-`cooldown`, `resume`, `release`, `done`, `remember`, `task add/done/drop`, `archive`,
-`decisions target --set`, `decisions scaffold`, and `session report --write`.
+One **single pre-write gate**, not a per-command check, with TWO distinct layers
+(Codex rev-2 #1 — several mutators deliberately carry NO agent identity; never invent
+or infer one):
+
+- **A1 ambiguity layer — every mutator, agentless included**: `claim` (incl.
+  `--refresh`), `append`, `next` (treated as mutating BEFORE it polls/claims),
+  `request-turn`, `yield-turn`, `decline-turn`, `steer-turn`, `pause`, `cooldown`,
+  `resume`, `release`, `done`, `remember`, `task add/done/drop`, `archive`,
+  `decisions target --set`, `decisions scaffold`, and `session report --write`.
+  An **agentless mutator under unresolved ambiguity always refuses** — no agent
+  binding may silently resolve the target for a write that names no actor; with a
+  single candidate it preserves today's behavior.
+- **A3 binding layer — actor-bearing mutators only**: the per-agent binding
+  verification applies exactly where the command has a validated actor argument
+  (`claim`, `append`, `next` via its agent, `request-turn`/`yield-turn`/
+  `decline-turn`/`steer-turn`, `pause`/`resume`/`release`/`done`, `remember`,
+  task mutations). `may-i-write` reports binding validity read-only. Acceptance
+  tests must pin BOTH branches (an agentless write refused under ambiguity even
+  when a binding exists; an actor-bearing write resolved by its own binding).
 Read-only commands are explicitly excluded: `status`, `doctor`, `log`, `peek`,
 `history`, `recap`, `watch`, `wait`, `claim --check`, `task list/show`,
 `contract validate`, `decisions target` (without `--set`),
@@ -158,9 +172,13 @@ candidates (disclosure per §9.5).
   - `update` carries an **explicit `--target` authority** with command-scoped rebase:
     ambient `M8SHIFT_ROOT`/local ambiguity must **not** refuse or override that explicit
     target (its own safety checks still apply).
-  - `init` is bootstrap, not a bound write: initializing a missing local relay stays
-    allowed; the already-documented invalid hybrid (M8SHIFT_ROOT designating a DIFFERENT
-    existing root while initializing locally) is **explicitly refused**; a binding never
+  - `init` is bootstrap, not a bound write: no-env bootstrap and same-physical-root
+    env stay allowed. `init` **refuses whenever a non-empty M8SHIFT_ROOT resolves to
+    a physical/canonical root different from HERE — whether or not the env target or
+    its relay exists yet** (Codex rev-2 #2: import-time root configuration plus
+    `file_lock` can CREATE a previously missing external directory while `init`
+    writes script-local anchors/companions — exactly the hybrid this rule prevents).
+    The refusal precedes `file_lock` and any directory creation; a binding never
     silently chooses where `init` writes.
 
 ### 9.3 A2 — explicit binding with a deterministic target (Codex #2, #3)
@@ -172,9 +190,12 @@ reserved `relay_session` field — RFC 038 §3 names stay future work). Penless 
 
 - **Deterministic target selection**: zero or one existing candidate → deterministic.
   With TWO distinct candidates, `bind` **refuses** unless (a) exactly one existing,
-  self-consistent binding already resolves the choice, or (b) the operator passes an
-  **explicit selector that must equal one of the displayed candidates**
-  (`--root <path-of-candidate>`). `bind` **never silently inherits env-wins**.
+  self-consistent binding already resolves the choice, or (b) the operator passes the
+  **closed selector `--candidate env|script`** (env = the M8SHIFT_ROOT relay, script =
+  the script-local relay). The refusal message gives the non-leaking symbolic hints
+  (`--candidate env` / `--candidate script`) — the operator is never asked to
+  reconstruct a redacted absolute path (§9.5 displays basename+hash only). `bind`
+  **never silently inherits env-wins**.
 - **Live-pen guard (charter condition for penless writes)**: any binding **mutation**
   (`bind`, `bind --clear`) takes the target relay's file lock and **refuses while the
   named agent holds a live `WORKING_<agent>` lock in ANY candidate** — rebinding must
@@ -227,8 +248,14 @@ addressable until RFC 038 lands fully.
 - Binding verification re-checked under the relay file lock (TOCTOU pin); mismatch →
   refusal with §9.5 disclosure; `bind --clear` + rebind recovers.
 - Binding match resolves the A1 ambiguity to the bound relay.
-- `bind` with two candidates refuses without an explicit `--root` selector equal to a
-  displayed candidate (or a pre-existing resolving binding); it never env-wins silently.
+- `bind` with two candidates refuses without the closed `--candidate env|script`
+  selector (or a pre-existing resolving binding); it never env-wins silently.
+- Split-layer pins: an AGENTLESS mutator (e.g. `archive`, `decisions target --set`)
+  refuses under unresolved ambiguity even when an agent binding exists; an
+  actor-bearing mutator is resolved by its own agent's matching binding.
+- `init` refuses whenever non-empty `M8SHIFT_ROOT` resolves to a different physical
+  root than HERE — even if that target does not exist yet — before any lock/dir
+  creation; no-env and same-physical-root init are unaffected.
 - `bind`/`bind --clear` refuse while the named agent holds a live WORKING lock in any
   candidate; a stale lock requires explicit recovery first.
 - Symlinked same-physical-root checkouts are NOT ambiguous (samefile); `/Foo` vs `/foo`
