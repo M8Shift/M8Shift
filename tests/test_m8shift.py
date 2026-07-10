@@ -12422,7 +12422,7 @@ class TestRFC049LivenessCore(CLIBase):
         self.assertEqual(self.cw("claim", "claude", "--refresh").returncode, 0)
         _, err = proc.communicate(timeout=30)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("during the recovery grace", err)
+        self.assertIn("refreshed its TTL", err)            # DEDICATED branch (H6)
 
     def test_race_new_heartbeat_during_grace_refuses(self):
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
@@ -12458,9 +12458,9 @@ class TestRFC049LivenessCore(CLIBase):
         r = self.cw("claim", "codex", "--force", "--live-override",
                     "--reason", "human approved")
         self.assertEqual(r.returncode, 0, r.stderr)
-        events = [json.loads(l) for l in
-                  open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"),
-                       encoding="utf-8")]
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"),
+                  encoding="utf-8") as fh:
+            events = [json.loads(l) for l in fh]
         force = [e for e in events if e.get("event") == "force"
                  and e.get("op") == "claim"]
         self.assertTrue(force and force[-1].get("live_override") == "true")
@@ -12493,9 +12493,9 @@ class TestRFC049LivenessCore(CLIBase):
             strip = lambda t: t[t.index(cowork.LOCK_END):]
             self.assertEqual(strip(before), strip(after), cycle)
             self.assertEqual(self.cw("claim", "claude").returncode, 0)
-        events = [json.loads(l) for l in
-                  open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"),
-                       encoding="utf-8")]
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"),
+                  encoding="utf-8") as fh:
+            events = [json.loads(l) for l in fh]
         force = [e for e in events if e.get("event") == "force"]
         self.assertGreaterEqual(len(force), 4)                     # 2 per cycle
 
@@ -12512,6 +12512,86 @@ class TestRFC049LivenessCore(CLIBase):
         self.cw("done", "codex")
         self.assertFalse(os.path.exists(self._beat_path("codex")))
 
+    def test_readiness_and_hints_are_liveness_aware(self):
+        # Codex PR-A review B1: wait --once, claim --check and the status hint
+        # must all treat alive-expired as NOT reclaimable.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.cw("heartbeat", "claude", "--source", "wrapper",
+                "--cadence-seconds", "900")
+        self._expire_lock()
+        r = self.cw("wait", "codex", "--once")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("alive-expired", r.stdout)
+        r = self.cw("claim", "codex", "--check")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("alive-expired", r.stdout)
+        r = self.cw("status", "--for", "codex")
+        self.assertIn("do NOT force", r.stdout)
+        self.assertNotIn("--force  # recover", r.stdout)
+        # ordinary stale (aged beat): hints offer recovery again
+        self._age_beat()
+        r = self.cw("claim", "codex", "--check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_status_json_heartbeat_metadata_bounded(self):
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.cw("heartbeat", "claude", "--source", "runtime-listener",
+                "--cadence-seconds", "60")
+        out = json.loads(self.cw("status", "--json").stdout)
+        hb = out.get("heartbeat")
+        self.assertIsNotNone(hb)
+        self.assertIs(hb["protective"], True)
+        self.assertEqual(hb["source"], "runtime-listener")
+        self.assertEqual(hb["cadence_seconds"], 60)
+        self.assertIsInstance(hb["age_seconds"], int)
+        self.assertGreaterEqual(hb["age_seconds"], 0)
+
+    def test_live_override_misuse_refused_everywhere(self):
+        # Codex PR-A review M7: the override contract is unconditional.
+        r = self.cw("claim", "claude", "--live-override")        # IDLE, no force
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("only valid with --force", r.stderr)
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        r = self.cw("claim", "claude", "--live-override", "--force")  # own, no reason
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("requires --reason", r.stderr)
+
+    def test_future_timestamp_beat_fails_open(self):
+        # Codex PR-A review H4: a far-future beat must never protect.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.cw("heartbeat", "claude", "--source", "wrapper",
+                "--cadence-seconds", "900")
+        with open(self._beat_path(), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["written_at"] = "2094-01-01T00:00:00Z"
+        with open(self._beat_path(), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        self._expire_lock()
+        self.assertEqual(
+            json.loads(self.cw("status", "--json").stdout)["liveness"],
+            "ordinary-stale")
+        r = self.cw("claim", "codex", "--force")
+        self.assertEqual(r.returncode, 0, r.stderr)               # fails open
+
+    def test_semantic_invalid_beats_are_malformed(self):
+        # Codex PR-A review H3: wrong-shape-but-schema-valid beats diagnose.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        base = {"schema": "m8shift.holder_heartbeat.v1", "agent": "claude",
+                "session": "x", "turn": 1, "state": "WORKING_CLAUDE",
+                "written_at": "2026-01-01T00:00:00Z"}
+        bad = [dict(base, source="bad-src", protective=True, cadence_seconds=60),
+               dict(base, source="wrapper", protective=True, cadence_seconds=10**9),
+               dict(base, source="wrapper", protective=True, cadence_seconds=True),
+               dict(base, source="claim-refresh", protective=False, cadence_seconds=5),
+               dict(base, source="wrapper", protective="yes", cadence_seconds=60)]
+        for doc in bad:
+            os.makedirs(os.path.dirname(self._beat_path()), exist_ok=True)
+            with open(self._beat_path(), "w", encoding="utf-8") as fh:
+                json.dump(doc, fh)
+            d = json.loads(self.cw("doctor", "--json", "--severity-min", "info").stdout)
+            checks = {f["check"] for f in d["findings"]}
+            self.assertIn("holder.heartbeat_malformed", checks, doc)
+
     def test_doctor_sidecar_findings(self):
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
         os.makedirs(os.path.dirname(self._beat_path()), exist_ok=True)
@@ -12523,10 +12603,16 @@ class TestRFC049LivenessCore(CLIBase):
         self.cw("heartbeat", "claude", "--source", "wrapper",
                 "--cadence-seconds", "60")
         self.cw("release", "claude", "--to", "codex")
-        # recreate an orphan manually (cleanup removed the real one)
+        # recreate an orphan manually (cleanup removed the real one): a fully
+        # VALID protective beat whose work window no longer matches (the strict
+        # validator classifies shape-invalid docs as malformed, not orphaned).
         with open(self._beat_path(), "w", encoding="utf-8") as fh:
             json.dump({"schema": "m8shift.holder_heartbeat.v1",
-                       "agent": "claude", "protective": True}, fh)
+                       "agent": "claude", "session": "x", "turn": 1,
+                       "state": "WORKING_CLAUDE",
+                       "written_at": "2026-01-01T00:00:00Z",
+                       "source": "wrapper", "protective": True,
+                       "cadence_seconds": 60}, fh)
         d = json.loads(self.cw("doctor", "--json", "--severity-min", "info").stdout)
         checks = {f["check"] for f in d["findings"]}
         self.assertIn("holder.heartbeat_orphaned", checks)

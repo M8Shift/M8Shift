@@ -16,6 +16,7 @@ import argparse
 import ast
 import contextlib
 import datetime as dt
+import errno
 import hashlib
 import json
 import math
@@ -6315,30 +6316,91 @@ def _heartbeat_path(agent):
     return os.path.join(os.path.dirname(COWORK), HEARTBEATS_SUBDIR, "%s.json" % agent)
 
 
+HEARTBEAT_MAX_BYTES = 8 * 1024
+
+
+def _validate_heartbeat_doc(doc):
+    """ONE schema validator (Codex PR-A review H3). Returns None when the doc is
+    a well-formed protective OR audit beat, else a short reason. Protective:
+    source in the closed enum, protective=true, cadence int 1..TTL_SECONDS.
+    Audit: source=claim-refresh, protective=false, cadence null. Field types
+    are validated for both shapes."""
+    if not isinstance(doc, dict) or doc.get("schema") != HEARTBEAT_SCHEMA:
+        return "wrong or missing schema"
+    for key in ("agent", "session", "state", "written_at", "source"):
+        if not isinstance(doc.get(key), str) or not doc[key]:
+            return "missing/invalid %s" % key
+    if not re.fullmatch(AGENT_RE, doc["agent"]):
+        return "invalid agent"
+    if isinstance(doc.get("turn"), bool) or not isinstance(doc.get("turn"), int) \
+            or doc["turn"] < 0:
+        return "invalid turn"
+    if parse_iso(doc["written_at"]) is None:
+        return "invalid written_at"
+    protective = doc.get("protective")
+    cad = doc.get("cadence_seconds")
+    if protective is True:
+        if doc["source"] not in HEARTBEAT_SOURCES:
+            return "protective beat with unknown source"
+        if isinstance(cad, bool) or not isinstance(cad, int) \
+                or not (1 <= cad <= TTL_SECONDS):
+            return "protective beat with invalid cadence"
+        return None
+    if protective is False:
+        if doc["source"] != "claim-refresh":
+            return "audit beat with unexpected source"
+        if cad is not None:
+            return "audit beat carrying a cadence"
+        return None
+    return "invalid protective flag"
+
+
 def read_heartbeat(agent):
-    """Tri-state tolerant read -> (status, payload): "absent"/None,
-    "valid"/dict, "invalid"/reason. Never raises; a symlinked beat is invalid."""
+    """Tri-state HARDENED read -> (status, payload): "absent"/None,
+    "valid"/dict, "invalid"/reason. fd-based O_NOFOLLOW|O_NONBLOCK + fstat
+    regular-file check (no TOCTOU symlink follow, no FIFO/device block),
+    bounded size, then the single schema validator. Never raises."""
     if not agent or not re.fullmatch(AGENT_RE, agent):
         return "invalid", "invalid agent name"
     path = _heartbeat_path(agent)
     if not os.path.lexists(path):
         return "absent", None
-    if os.path.islink(path):
-        return "invalid", "symlink"
     try:
-        with open(path, encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (OSError, ValueError, RecursionError) as exc:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        return "invalid", ("symlink" if getattr(exc, "errno", None) == errno.ELOOP
+                           else exc.__class__.__name__)
+    try:
+        st_ = os.fstat(fd)
+        if not stat.S_ISREG(st_.st_mode):
+            return "invalid", "not a regular file"
+        if st_.st_size > HEARTBEAT_MAX_BYTES:
+            return "invalid", "oversized"
+        with os.fdopen(fd, "rb") as fh:
+            fd = None
+            raw = fh.read(HEARTBEAT_MAX_BYTES + 1)
+    except OSError as exc:
         return "invalid", exc.__class__.__name__
-    if not isinstance(doc, dict) or doc.get("schema") != HEARTBEAT_SCHEMA:
-        return "invalid", "wrong or missing schema"
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except (ValueError, RecursionError) as exc:
+        return "invalid", exc.__class__.__name__
+    reason = _validate_heartbeat_doc(doc)
+    if reason is not None:
+        return "invalid", reason
     return "valid", doc
 
 
 def heartbeat_protective(lk, agent, at=None):
     """True iff a MATCHING protective beat is fresh (RFC 049 rev 4 formula).
-    Audit beats (protective=false / null cadence), malformed cadence, identity
-    mismatch, or unparseable timestamps all FAIL OPEN for claimability."""
+    Audit/malformed beats, identity mismatch, and FUTURE timestamps all FAIL
+    OPEN for claimability (Codex PR-A review H4: a far-future beat must never
+    protect indefinitely; a small 30s clock-skew allowance is tolerated)."""
     st, doc = read_heartbeat(agent)
     if st != "valid" or doc.get("protective") is not True:
         return False
@@ -6347,14 +6409,12 @@ def heartbeat_protective(lk, agent, at=None):
             or str(doc.get("turn")) != str(lk.get("turn"))
             or doc.get("state") != lk.get("state")):
         return False
-    cad = doc.get("cadence_seconds")
-    if isinstance(cad, bool) or not isinstance(cad, int) or not (1 <= cad <= TTL_SECONDS):
-        return False
     ts = parse_iso(doc.get("written_at"))
     if ts is None:
         return False
-    window = max(HEARTBEAT_FLOOR_S, min(2 * cad, TTL_SECONDS))
-    return ((at or now()) - ts).total_seconds() <= window
+    age = ((at or now()) - ts).total_seconds()
+    window = max(HEARTBEAT_FLOOR_S, min(2 * doc["cadence_seconds"], TTL_SECONDS))
+    return -30 <= age <= window
 
 
 def write_heartbeat(agent, lk, source, protective, cadence_seconds):
@@ -6371,19 +6431,37 @@ def write_heartbeat(agent, lk, source, protective, cadence_seconds):
         "protective": bool(protective),
         "cadence_seconds": cadence_seconds,
     }
-    path = _heartbeat_path(agent)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, ensure_ascii=False, sort_keys=True)
-        fh.write("\n")
-    os.replace(tmp, path)
+    # unique-temp atomic replace via the core write() helper — a pre-planted
+    # predictable ".tmp" symlink can never be followed (Codex PR-A review B2).
+    write(json.dumps(doc, ensure_ascii=False, sort_keys=True) + "\n",
+          _heartbeat_path(agent))
 
 
 def remove_heartbeat(agent):
     """Best-effort orphan cleanup (release/done) — never authority, never fatal."""
     with contextlib.suppress(OSError):
         os.remove(_heartbeat_path(agent))
+
+
+def heartbeat_meta(lk):
+    """ONE bounded/sanitized heartbeat metadata projection for status human/
+    JSON and the watch signature (Codex PR-A review H5). None when no VALID
+    beat exists for the holder. Values are clamped/truncated — a hostile
+    sidecar can never inject unbounded or control content (the validator
+    already rejects non-string sources)."""
+    holder = lk.get("holder", "none")
+    hb_st, doc = read_heartbeat(holder)
+    if hb_st != "valid":
+        return None
+    ts = parse_iso(doc.get("written_at"))
+    age = None
+    if ts is not None:
+        age = max(0, min(int((now() - ts).total_seconds()), 10 * TTL_SECONDS))
+    src = re.sub(r"[^a-z0-9_-]", "", str(doc.get("source", ""))[:24])
+    return {"protective": doc.get("protective") is True,
+            "source": src,
+            "cadence_seconds": doc.get("cadence_seconds"),
+            "age_seconds": age}
 
 
 def lock_liveness(lk, at=None):
@@ -7203,6 +7281,9 @@ def next_action_for(lk, agent=None, stale=False):
         if st == working:
             return f"{agent}: finish with append/release/done before stopping"
         if st.startswith("WORKING_") and stale and holder != agent:
+            if lock_liveness(lk) == "alive-expired":
+                return (f"{agent}: holder {holder} appears ALIVE (protective "
+                        f"heartbeat) — wait; do NOT force-claim")
             return f"{agent}: ./m8shift.py next {agent} --force  # recover stale lock held by {holder}"
         return f"{agent}: ./m8shift.py wait {agent} --interval 5"
 
@@ -7217,6 +7298,9 @@ def next_action_for(lk, agent=None, stale=False):
         return f"{who}: ./m8shift.py next {who}"
     if st.startswith("WORKING_"):
         if stale:
+            if lock_liveness(lk) == "alive-expired":
+                return (f"{holder}: TTL expired but holder appears ALIVE "
+                        f"(protective heartbeat) — wait; do NOT force-claim")
             return f"{holder}: lock stale; recover with ./m8shift.py next <agent> --force"
         return f"{holder}: finish with append/release/done; others wait"
     return "inspect M8SHIFT.md"
@@ -7659,17 +7743,13 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
         liveness = lock_liveness(lk)
         print(tr("status_alive_expired" if liveness == "alive-expired"
                  else "status_stale"))
-        hb_st, hb = read_heartbeat(lk.get("holder", "none"))
-        if hb_st == "valid":
-            age = None
-            ts = parse_iso(hb.get("written_at"))
-            if ts is not None:
-                age = int((now() - ts).total_seconds())
-            print("  heartbeat %s · source=%s · cadence=%ss · %s ago" % (
-                "protective" if hb.get("protective") is True else "audit",
-                str(hb.get("source", "?"))[:24],
-                hb.get("cadence_seconds") if hb.get("cadence_seconds") is not None else "-",
-                age if age is not None else "?"))
+        hb_meta = heartbeat_meta(lk)
+        if hb_meta is not None:
+            print("  heartbeat %s · source=%s · cadence=%ss · %ss ago" % (
+                "protective" if hb_meta["protective"] else "audit",
+                hb_meta["source"] or "?",
+                hb_meta["cadence_seconds"] if hb_meta["cadence_seconds"] is not None else "-",
+                hb_meta["age_seconds"] if hb_meta["age_seconds"] is not None else "?"))
     if for_agent:
         agent = need_agent(for_agent)
         print(tr("status_next", action=next_action_for(lk, agent=agent, stale=stale)))
@@ -7696,6 +7776,13 @@ def _status_signature(lk, stale, last, for_agent=""):
         "stale": bool(stale),
         "last_turn": last or {},
         "usage": _usage_signature(lk),   # RFC 051: reprint on a usage-line delta (--changes-only)
+        # RFC 049: a beat appearing, flipping protective, or aging out of its
+        # window re-renders; raw age is bucketed so each tick does not churn.
+        "liveness": lock_liveness(lk),
+        "heartbeat": (lambda m: None if m is None else
+                      (m["protective"], m["source"], m["cadence_seconds"],
+                       None if m["age_seconds"] is None else m["age_seconds"] // 60)
+                      )(heartbeat_meta(lk)),
     }
     if for_agent:
         agent = need_agent(for_agent)
@@ -7713,6 +7800,9 @@ def cmd_status(args):
         out["agents_active"] = active_agents(lk)  # full active roster (N)
         out["stale"] = stale
         out["liveness"] = lock_liveness(lk)      # RFC 049: fresh/alive-expired/ordinary-stale/None
+        hb_meta = heartbeat_meta(lk)
+        if hb_meta is not None:
+            out["heartbeat"] = hb_meta           # RFC 049: bounded, sanitized projection
         out["last_turn"] = last
         out["m8shift_version"] = VERSION     # the RUNNING script's version (dogfooding skew check)
         out["project"] = project_display_name()
@@ -7815,6 +7905,20 @@ def cmd_wait(args):
         # stale lock here) and names the REAL holder, not other()'s first-non-self guess.
         if (st.startswith("WORKING_") and st != f"WORKING_{agent.upper()}"
                 and exp and now() > exp):
+            if heartbeat_protective(lk, lk.get("holder", "none")):
+                # RFC 049 alive-expired: the holder appears alive — the blocking
+                # wait stays ARMED; --once reports not-ready (rc 3).
+                msg = ("holder %s: TTL expired but a protective heartbeat is "
+                       "fresh (alive-expired) — keep waiting; do not force-claim."
+                       % lk.get("holder"))
+                if args.once:
+                    print(msg)
+                    return 3
+                if last_state != "ALIVE_EXPIRED":
+                    print(msg, flush=True)
+                last_state = "ALIVE_EXPIRED"
+                time.sleep(args.interval)
+                continue
             print(tr("wait_stale", other=lk.get("holder")))
             return 0
         if args.once:  # single, non-blocking poll: rc=3 = not (yet) your turn
@@ -7954,8 +8058,13 @@ def cmd_claim_check(args):
         ready = False
     elif (st.startswith("WORKING_") and st != f"WORKING_{agent.upper()}"
           and exp and now() > exp):
-        print(tr("wait_stale", other=lk.get("holder")))
-        ready = True
+        if lock_liveness(lk) == "alive-expired":
+            print("not ready: %s's TTL expired but a protective heartbeat is "
+                  "fresh (alive-expired) — do not force-claim." % lk.get("holder"))
+            ready = False
+        else:
+            print(tr("wait_stale", other=lk.get("holder")))
+            ready = True
     else:
         print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
         ready = False
@@ -8008,6 +8117,14 @@ def cmd_claim(args):
     # then phase 2 (the body below) revalidates before mutating. Exactly ONE
     # attempt — the three refusal branches never loop into a later work window.
     force_identity = None
+    if getattr(args, "live_override", False):
+        # M7: the override contract is unconditional — it exists ONLY as a
+        # force-recovery escape and always demands an audited reason.
+        if not args.force:
+            sys.exit("refused: --live-override is only valid with --force.")
+        if not clean_field("--reason", getattr(args, "reason", "") or ""):
+            sys.exit("refused: --live-override requires --reason "
+                     "(human-authorized recovery is audited).")
     if args.force and not getattr(args, "refresh", False):
         with file_lock():
             text = load_or_die()
@@ -8057,9 +8174,12 @@ def cmd_claim(args):
                 sys.exit(tr("claim_refresh_refused", st=st, holder=holder))
         # RFC 049 phase 2: exact-identity revalidation after the grace.
         if force_identity is not None:
-            ident2 = (lk.get("session"), str(lk.get("turn")),
-                      holder, st, lk.get("expires"))
-            if ident2 != force_identity:
+            # Compare the IDENTITY CORE first (session/turn/holder/state) —
+            # `expires` is excluded so a refresh classifies as the DEDICATED
+            # refreshed-TTL branch, not generic identity-change (Codex PR-A
+            # review H6); the captured expires remains audited.
+            ident2 = (lk.get("session"), str(lk.get("turn")), holder, st)
+            if ident2 != force_identity[:4]:
                 sys.exit("refused: the work window changed during the recovery grace "
                          "(identity no longer matches) — not claimable; rerun "
                          "status and reassess.")
