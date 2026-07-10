@@ -6335,8 +6335,12 @@ def _validate_heartbeat_doc(doc):
     if isinstance(doc.get("turn"), bool) or not isinstance(doc.get("turn"), int) \
             or doc["turn"] < 0:
         return "invalid turn"
-    if parse_iso(doc["written_at"]) is None:
+    ts = parse_iso(doc["written_at"])
+    if ts is None:
         return "invalid written_at"
+    if ts > now():
+        # a future beat could protect indefinitely — malformed, never current
+        return "written_at is in the future"
     protective = doc.get("protective")
     cad = doc.get("cadence_seconds")
     if protective is True:
@@ -6396,25 +6400,33 @@ def read_heartbeat(agent):
     return "valid", doc
 
 
+def heartbeat_matches_window(lk, agent, doc):
+    """Canonical current-work-window match (Codex PR-A round-2 H2), shared by
+    protective evaluation, doctor classification, and metadata projection: a
+    VALID beat whose agent/session/turn/state differ from the live LOCK is
+    nonmatching (orphaned) — never presented as the current heartbeat."""
+    return (doc.get("agent") == agent
+            and doc.get("session") == lk.get("session")
+            and str(doc.get("turn")) == str(lk.get("turn"))
+            and doc.get("state") == lk.get("state"))
+
+
 def heartbeat_protective(lk, agent, at=None):
     """True iff a MATCHING protective beat is fresh (RFC 049 rev 4 formula).
     Audit/malformed beats, identity mismatch, and FUTURE timestamps all FAIL
-    OPEN for claimability (Codex PR-A review H4: a far-future beat must never
-    protect indefinitely; a small 30s clock-skew allowance is tolerated)."""
+    OPEN for claimability (a future written_at is rejected by the validator
+    as malformed — exact approved rule: 0 <= age <= window)."""
     st, doc = read_heartbeat(agent)
     if st != "valid" or doc.get("protective") is not True:
         return False
-    if (doc.get("agent") != agent
-            or doc.get("session") != lk.get("session")
-            or str(doc.get("turn")) != str(lk.get("turn"))
-            or doc.get("state") != lk.get("state")):
+    if not heartbeat_matches_window(lk, agent, doc):
         return False
     ts = parse_iso(doc.get("written_at"))
     if ts is None:
         return False
     age = ((at or now()) - ts).total_seconds()
     window = max(HEARTBEAT_FLOOR_S, min(2 * doc["cadence_seconds"], TTL_SECONDS))
-    return -30 <= age <= window
+    return 0 <= age <= window          # the exact approved rev-4 rule
 
 
 def write_heartbeat(agent, lk, source, protective, cadence_seconds):
@@ -6451,8 +6463,8 @@ def heartbeat_meta(lk):
     already rejects non-string sources)."""
     holder = lk.get("holder", "none")
     hb_st, doc = read_heartbeat(holder)
-    if hb_st != "valid":
-        return None
+    if hb_st != "valid" or not heartbeat_matches_window(lk, holder, doc):
+        return None                     # nonmatching is never "the current beat"
     ts = parse_iso(doc.get("written_at"))
     age = None
     if ts is not None:
@@ -6909,11 +6921,13 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
                 os.path.join(HEARTBEATS_SUBDIR, f"{hb_agent}.json"),
                 "remove or regenerate the sidecar; it never protects while malformed",
             ))
-        elif hb_st == "valid" and _hb_lk.get("state") != f"WORKING_{hb_agent.upper()}":
+        elif hb_st == "valid" and not heartbeat_matches_window(
+                _hb_lk, hb_agent, hb_doc):
             findings.append(doctor_finding(
                 "holder.heartbeat_orphaned", "info",
-                f"a heartbeat exists for {hb_agent} but no matching WORKING "
-                f"lock is held (state={_hb_lk.get('state')}).",
+                f"a heartbeat exists for {hb_agent} but does not match the "
+                f"current work window (state={_hb_lk.get('state')}, "
+                f"turn={_hb_lk.get('turn')}).",
                 os.path.join(HEARTBEATS_SUBDIR, f"{hb_agent}.json"),
             ))
     findings.extend(_kit_doctor_findings())
@@ -8183,9 +8197,14 @@ def cmd_claim(args):
                 sys.exit("refused: the work window changed during the recovery grace "
                          "(identity no longer matches) — not claimable; rerun "
                          "status and reassess.")
-            if not stale:
+            if not stale or lk.get("expires") != force_identity[4]:
+                # ANY expiry mutation during the grace — a refresh OR a rewrite
+                # to a different (even past) timestamp — is the dedicated
+                # refreshed/changed-expiry branch: the full captured tuple is
+                # the invariant (Codex PR-A round-2 H1).
                 sys.exit("refused: the holder refreshed its TTL during the recovery "
-                         "grace — not claimable; the pen is live again.")
+                         "grace (expiry changed) — not claimable; the pen is no "
+                         "longer the observed stale window.")
             if heartbeat_protective(lk, holder) and not getattr(args, "live_override", False):
                 sys.exit("refused: a protective heartbeat appeared during the "
                          "recovery grace (alive-expired) — not claimable.")

@@ -12592,6 +12592,147 @@ class TestRFC049LivenessCore(CLIBase):
             checks = {f["check"] for f in d["findings"]}
             self.assertIn("holder.heartbeat_malformed", checks, doc)
 
+    def test_race_expiry_rewritten_to_past_still_refuses(self):
+        # Codex PR-A round-2 H1: ANY expiry mutation during the grace — even to
+        # another PAST timestamp — refuses through the dedicated branch.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self._expire_lock()
+        proc = self._popen_force()
+        time.sleep(1.5)
+        with open(os.path.join(self.d, "M8SHIFT.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        text = re.sub(r"^expires: .*$", "expires: 2020-06-06T06:06:06Z",
+                      text, count=1, flags=re.M)
+        with open(os.path.join(self.d, "M8SHIFT.md"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        _, err = proc.communicate(timeout=30)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("expiry changed", err)
+
+    def test_race_core_identity_change_has_its_own_branch(self):
+        # release during the grace: state/holder change -> identity branch.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self._expire_lock()
+        proc = self._popen_force()
+        time.sleep(1.5)
+        self.cw("release", "claude", "--to", "codex", "--force",
+                "--reason", "mid-grace handoff")
+        _, err = proc.communicate(timeout=30)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("identity no longer matches", err)
+
+    def test_valid_nonmatching_beats_are_orphaned_and_never_projected(self):
+        # Codex PR-A round-2 H2: same holder still WORKING, wrong window.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.cw("heartbeat", "claude", "--source", "wrapper",
+                "--cadence-seconds", "60")
+        for field, value in (("session", "other-session"), ("turn", 999),
+                             ("state", "WORKING_CODEX")):
+            with open(self._beat_path(), encoding="utf-8") as fh:
+                doc = json.load(fh)
+            doc[field] = value
+            with open(self._beat_path(), "w", encoding="utf-8") as fh:
+                json.dump(doc, fh)
+            d = json.loads(self.cw("doctor", "--json", "--severity-min",
+                                   "info").stdout)
+            checks = {f["check"] for f in d["findings"]}
+            self.assertIn("holder.heartbeat_orphaned", checks, field)
+            self.assertNotIn("holder.heartbeat_malformed", checks, field)
+            out = json.loads(self.cw("status", "--json").stdout)
+            self.assertNotIn("heartbeat", out, field)      # never projected
+
+    def test_future_beat_is_malformed_not_valid(self):
+        # Codex PR-A round-2 M3: exact rule 0 <= age <= window; future beats
+        # are diagnosed, never silently treated as current.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.cw("heartbeat", "claude", "--source", "wrapper",
+                "--cadence-seconds", "60")
+        with open(self._beat_path(), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["written_at"] = "2094-01-01T00:00:00Z"
+        with open(self._beat_path(), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        d = json.loads(self.cw("doctor", "--json", "--severity-min", "info").stdout)
+        self.assertIn("holder.heartbeat_malformed",
+                      {f["check"] for f in d["findings"]})
+
+    def test_sidecar_io_adversarial(self):
+        # Codex PR-A round-2 item 4: symlink refusal, oversized, FIFO,
+        # pre-planted tmp symlink target untouched.
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        bdir = os.path.join(self.d, ".m8shift", "holder-heartbeats")
+        os.makedirs(bdir, exist_ok=True)
+        # (a) final-path symlink -> invalid/malformed, never followed
+        target = os.path.join(self.d, "innocent.json")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        if hasattr(os, "symlink"):
+            os.symlink(target, self._beat_path())
+            d = json.loads(self.cw("doctor", "--json", "--severity-min",
+                                   "info").stdout)
+            self.assertIn("holder.heartbeat_malformed",
+                          {f["check"] for f in d["findings"]})
+            os.remove(self._beat_path())
+        # (b) oversized beat -> invalid
+        with open(self._beat_path(), "w", encoding="utf-8") as fh:
+            fh.write("[" + "1," * 6000 + "1]")
+        d = json.loads(self.cw("doctor", "--json", "--severity-min", "info").stdout)
+        self.assertIn("holder.heartbeat_malformed",
+                      {f["check"] for f in d["findings"]})
+        os.remove(self._beat_path())
+        # (c) FIFO -> fail fast (not a regular file), no block
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self._beat_path())
+            t0 = time.monotonic()
+            d = json.loads(self.cw("doctor", "--json", "--severity-min",
+                                   "info").stdout)
+            self.assertLess(time.monotonic() - t0, 10)
+            self.assertIn("holder.heartbeat_malformed",
+                          {f["check"] for f in d["findings"]})
+            os.remove(self._beat_path())
+        # (d) pre-planted legacy tmp symlink: unique-temp write never follows it
+        if hasattr(os, "symlink"):
+            victim = os.path.join(self.d, "victim.txt")
+            with open(victim, "w", encoding="utf-8") as fh:
+                fh.write("untouched")
+            os.symlink(victim, self._beat_path() + ".tmp")
+            r = self.cw("heartbeat", "claude", "--source", "wrapper",
+                        "--cadence-seconds", "60")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(victim, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "untouched")
+
+    def test_blocking_wait_stays_armed_on_alive_expired(self):
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.cw("heartbeat", "claude", "--source", "wrapper",
+                "--cadence-seconds", "900")
+        self._expire_lock()
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift.py", "wait", "codex", "--interval", "1"],
+            cwd=self.d, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True)
+        time.sleep(3.5)
+        self.assertIsNone(proc.poll(), "blocking wait must stay armed")
+        proc.kill()
+        out, _ = proc.communicate(timeout=10)
+        self.assertIn("alive-expired", out)
+
+    def test_next_normal_once_force_on_alive_expired(self):
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.cw("heartbeat", "claude", "--source", "wrapper",
+                "--cadence-seconds", "900")
+        self._expire_lock()
+        r = self.cw("next", "codex", "--once")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("alive-expired", r.stdout)
+        r = self.cw("next", "codex", "--force")
+        self.assertEqual(r.returncode, 3, r.stdout)        # never forces through
+        self.assertIn("alive-expired", r.stdout)
+        out = json.loads(self.cw("status", "--json", "--for", "codex").stdout)
+        self.assertIn("do NOT force", out.get("next_action", ""))
+        r = self.cw("status", "--brief", "--for", "codex")
+        self.assertIn("do NOT force", r.stdout)
+
     def test_doctor_sidecar_findings(self):
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
         os.makedirs(os.path.dirname(self._beat_path()), exist_ok=True)
