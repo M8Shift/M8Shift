@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+**RFC 052 PR2 — confidential denylist + scrub-check (#101).** `doctor --hygiene`
+gains the operator-confidential denylist: identifiers listed OUT-OF-REPO
+(`$M8SHIFT_DENYLIST`, else `~/.config/m8shift/denylist.txt`, else a silent no-op)
+are flagged in tracked publishable files with a hashed label — never the term,
+never the matched line (`--hygiene-verbose` shows terms locally for forensics).
+Literal and `word:` modes, `allow:` exceptions, case-insensitive; a denylist hit
+is a visible warning that never fails `--lint` unless `M8SHIFT_SCRUB_ENFORCE=1`.
+New `scripts/scrub-check.py` scans git TIP (`git grep -F`, revisions before `--`)
+and HISTORY (`git log --all --pickaxe-regex -i -S`, `refs/pull/*` opt-in, bounded)
+via raw git argv — never a lossy optimizer; word semantics are post-filtered
+in-process because `\b` in `git grep -E` scans silently CLEAN on BSD/macOS (an
+empirically-caught false negative). New `hooks/pre-push` plus an advisory hygiene
+stage in `hooks/pre-commit` (the pen guard is unchanged): findings are printed
+and the operation proceeds unless `M8SHIFT_SCRUB_ENFORCE=1`; scanner errors fail
+open, visibly. 15 tests pin redaction, precedence, argument order, parser drift,
+hook layering, and fail-open.
+
 **RFC 040 Phase 4 Slice 3 — Codex rate-limit adapter.** The disabled
 `codex-ratelimits` scaffold now points to a shipped reference adapter
 (`examples/usage-adapters/codex-ratelimits.py`) for the verified local Codex CLI

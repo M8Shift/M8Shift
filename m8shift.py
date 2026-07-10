@@ -16,6 +16,7 @@ import argparse
 import ast
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import math
 import os
@@ -5514,6 +5515,118 @@ _HYGIENE_META_BYTES = b"<>[]^*?(){}|$"
 _HYGIENE_PLACEHOLDER_SEGS = frozenset((b"USERNAME", b"USER", b"NAME", b"HOME"))
 _HYGIENE_STRIP_BYTES = b"`.,;:!?'\")]}>*_ "   # trailing markdown/punctuation
 
+# RFC 052 C3 (#101): operator-confidential denylist — foreign project identities
+# the path lint cannot know (a private project name, an internal program name).
+# OUT-OF-REPO ONLY: committing the list would itself leak the identities it
+# protects. Precedence: $M8SHIFT_DENYLIST -> the documented config path ->
+# missing/empty = silent no-op. Findings are REDACTED by default (file:line + a
+# hashed label — never the term, never the matched line); `--hygiene-verbose`
+# shows the term locally for forensics. A denylist hit is a visible WARNING that
+# does NOT gate `--lint` unless M8SHIFT_SCRUB_ENFORCE=1 (higher false-positive
+# risk than the path lint; posture per RFC 052 Q1). Never auto-discovered:
+# operator-seeded only (auto-discovery would read across projects, violating the
+# rule it enforces).
+HYGIENE_DENYLIST_ENV = "M8SHIFT_DENYLIST"
+HYGIENE_SCRUB_ENFORCE_ENV = "M8SHIFT_SCRUB_ENFORCE"
+HYGIENE_DENYLIST_DEFAULT = os.path.join("~", ".config", "m8shift", "denylist.txt")
+HYGIENE_DENYLIST_MAX_BYTES = 64 * 1024
+HYGIENE_DENYLIST_MAX_TERMS = 256
+HYGIENE_DENYLIST_MIN_LEN = 3               # 1-2 char terms are a false-positive storm
+
+
+def _denylist_label(term):
+    """Confidential display label for a denied term — a short hash, never the term."""
+    return "denylist:" + hashlib.sha256(term.strip().lower().encode("utf-8")).hexdigest()[:10]
+
+
+def _denylist_redact(text, rules):
+    """Redact every denied-term occurrence in a display string (Codex review
+    BLOCKER: a denied term inside a file PATH re-leaked through the
+    supposedly-redacted locator/message/path output). Case-insensitive, all
+    rules, word- and literal-mode alike."""
+    for _label, _term, rx in rules:
+        text = rx.sub("[redacted]", text)
+    return text
+
+
+def _parse_denylist_text(text):
+    """Parse denylist text -> (rules, allows, skipped_count).
+
+    Line format (one entry per line): blank / `# comment` ignored;
+    `allow:<substring>` = exception (a line containing it is never flagged);
+    `word:<term>` = word-boundary match; anything else = literal substring.
+    Matching is case-insensitive (the recorded leak recurrences involved case
+    variants). Terms shorter than HYGIENE_DENYLIST_MIN_LEN are counted and
+    skipped — never echoed. Capped at HYGIENE_DENYLIST_MAX_TERMS rules."""
+    rules, allows, skipped = [], [], 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if len(rules) >= HYGIENE_DENYLIST_MAX_TERMS:
+            break
+        mode, sep, rest = line.partition(":")
+        if sep and mode == "allow" and rest.strip():
+            allows.append(rest.strip().lower())
+            continue
+        if sep and mode == "word" and rest.strip():
+            term = rest.strip()
+            if len(term) < HYGIENE_DENYLIST_MIN_LEN:
+                skipped += 1
+                continue
+            rules.append((_denylist_label(term), term,
+                          re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)))
+            continue
+        if len(line) < HYGIENE_DENYLIST_MIN_LEN:
+            skipped += 1
+            continue
+        rules.append((_denylist_label(line), line,
+                      re.compile(re.escape(line), re.IGNORECASE)))
+    return rules, allows, skipped
+
+
+def _load_denylist(env=None):
+    """Load the operator denylist -> (rules, allows, findings).
+
+    $M8SHIFT_DENYLIST beats the default config path. A missing DEFAULT path is a
+    silent no-op (empty by default = charter-clean); a missing/unreadable
+    EXPLICIT path yields an info finding (the operator asked for it — tell them).
+    Never raises."""
+    env = os.environ if env is None else env
+    explicit = (env.get(HYGIENE_DENYLIST_ENV) or "").strip()
+    path = os.path.expanduser(explicit or HYGIENE_DENYLIST_DEFAULT)
+    base = os.path.basename(path)
+    try:
+        if not os.path.isfile(path):
+            if explicit:
+                return [], [], [doctor_finding(
+                    "hygiene.denylist_unreadable", "info",
+                    "%s points to a missing denylist — hygiene runs without it"
+                    % HYGIENE_DENYLIST_ENV, base,
+                    "create the file or unset the variable")]
+            return [], [], []
+        with open(path, "rb") as fh:
+            raw = fh.read(HYGIENE_DENYLIST_MAX_BYTES + 1)
+    except OSError as exc:
+        return [], [], [doctor_finding(
+            "hygiene.denylist_unreadable", "info",
+            "denylist unreadable (%s) — hygiene runs without it"
+            % exc.__class__.__name__, base)]
+    findings = []
+    if len(raw) > HYGIENE_DENYLIST_MAX_BYTES:
+        raw = raw[:HYGIENE_DENYLIST_MAX_BYTES]
+        findings.append(doctor_finding(
+            "hygiene.denylist_truncated", "info",
+            "denylist larger than %d bytes — extra entries ignored"
+            % HYGIENE_DENYLIST_MAX_BYTES, base))
+    rules, allows, skipped = _parse_denylist_text(raw.decode("utf-8", "replace"))
+    if skipped:
+        findings.append(doctor_finding(
+            "hygiene.denylist_term_skipped", "info",
+            "%d denylist term(s) shorter than %d chars ignored (terms not echoed)"
+            % (skipped, HYGIENE_DENYLIST_MIN_LEN), base))
+    return rules, allows, findings
+
 
 def _hygiene_is_placeholder(seg):
     """True if a captured `/Users/<seg>/`-style segment is a documentation
@@ -5556,15 +5669,19 @@ def _hygiene_tracked_publishable(root):
     return pub
 
 
-def _hygiene_findings(root=None):
-    """RFC 052 C1: `hygiene.foreign_path` findings over tracked publishable files.
-    High-confidence home roots are `warning` (fail `doctor --lint --hygiene`);
-    advisory forms are `info` (shown only at `--severity-min info`, never gate).
+def _hygiene_findings(root=None, verbose=False):
+    """RFC 052 C1+C3: hygiene findings over tracked publishable files.
+    C1 `hygiene.foreign_path`: high-confidence home roots are `warning` (fail
+    `doctor --lint --hygiene`); advisory forms are `info` (never gate).
+    C3 `hygiene.denylist`: operator-confidential identifiers are `warning` but
+    NEVER gate `--lint` unless M8SHIFT_SCRUB_ENFORCE=1; output is redacted
+    (hashed label) unless `verbose` — forensic, local-only.
     Binary/oversize files are skipped with an info finding, never a crash."""
     # Scan the effective COORDINATED project root (honors M8SHIFT_ROOT / an
     # external relay dir), not the script's own directory (Codex review BLOCKER 2).
     root = root or project_root()
-    findings = []
+    deny_rules, deny_allows, findings = _load_denylist()
+    findings = list(findings)
     for rel in _hygiene_tracked_publishable(root):
         path = os.path.join(root, rel)
         try:
@@ -5600,11 +5717,35 @@ def _hygiene_findings(root=None):
                     "hygiene.foreign_path", "info",
                     "%s:%d: possible absolute path — confirm it is a placeholder: %s" % (rel, i, disp),
                     rel, "publishable examples should use placeholders"))
+            if deny_rules:
+                # RFC 052 C3: confidential-identifier scan on the SAME raw line.
+                # The matched line is NEVER echoed (it contains the confidential
+                # term); default output is file:line + hashed label only.
+                text_line = line[:HYGIENE_MAX_LINE_BYTES].decode("utf-8", "replace")
+                lowered = text_line.lower()
+                if any(a in lowered for a in deny_allows):
+                    continue
+                for label, term, rx in deny_rules:
+                    if rx.search(text_line):
+                        detail = (" term=%r" % term) if verbose else ""
+                        # Codex review BLOCKER: the PATH itself can carry the
+                        # denied term — redact it in the message AND the path
+                        # field for the default (pasteable) output; verbose is
+                        # the local forensic mode and keeps the raw locator.
+                        disp_rel = rel if verbose else _denylist_redact(rel, deny_rules)
+                        findings.append(doctor_finding(
+                            "hygiene.denylist", "warning",
+                            "%s:%d: operator-denylisted identifier present (%s)%s"
+                            % (disp_rel, i, label, detail),
+                            disp_rel, "abstract or remove the identifier (RFC 052 "
+                            "compartmentalization); the term is confidential and "
+                            "not echoed — use --hygiene-verbose locally"))
     return findings
 
 
 def collect_doctor_findings(security=False, contracts=False, update_source="",
-                            install_report=None, hygiene=False):
+                            install_report=None, hygiene=False,
+                            hygiene_verbose=False):
     """Read-only health checks. No file_lock, no write, no force recovery."""
     findings = []
     turns = []
@@ -5620,10 +5761,10 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
         if install_report is not None:
             out.extend(_install_doctor_findings(install_report))
         if hygiene:
-            # RFC 052 C1: the data-hygiene lint is repo-scoped (tracked files), not
-            # relay-scoped — it must still run in a project that has no relay yet
-            # (e.g. a pre-push hook in a repo dogfooded via a separate relay dir).
-            out.extend(_hygiene_findings())
+            # RFC 052 C1+C3: the data-hygiene lint is repo-scoped (tracked files),
+            # not relay-scoped — it must still run in a project that has no relay
+            # yet (e.g. a pre-push hook in a repo dogfooded via a separate relay dir).
+            out.extend(_hygiene_findings(verbose=hygiene_verbose))
         return out
     try:
         text = read()
@@ -5930,19 +6071,20 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
             # The core LOCK/relay parse findings above already explain the broken file.
             pass
     if hygiene:
-        # RFC 052 C1: outbound data-hygiene lint (opt-in; raw read, read-only).
-        findings.extend(_hygiene_findings())
+        # RFC 052 C1+C3: outbound data-hygiene lint (opt-in; raw read, read-only).
+        findings.extend(_hygiene_findings(verbose=hygiene_verbose))
     return findings
 
 
 def cmd_doctor(args):
     threshold = SEVERITY_RANK[args.severity_min]
     hygiene_only = getattr(args, "hygiene_only", False)
+    hygiene_verbose = getattr(args, "hygiene_verbose", False)
     if hygiene_only:
         # RFC 052: hygiene-only run — the exit code reflects ONLY the data-hygiene
         # findings, so a pre-push hook is never dominated by relay.missing/adoption.
         install_report = None
-        findings = _hygiene_findings()
+        findings = _hygiene_findings(verbose=hygiene_verbose)
     else:
         # #24: --install computes the read-only snapshot ONCE; findings derive from it.
         install_report = _install_report() if getattr(args, "install", False) else None
@@ -5952,6 +6094,7 @@ def cmd_doctor(args):
             update_source=getattr(args, "source", "") or "",
             install_report=install_report,
             hygiene=getattr(args, "hygiene", False),
+            hygiene_verbose=hygiene_verbose,
         )
     visible = [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
     ok = not visible
@@ -5983,7 +6126,13 @@ def cmd_doctor(args):
                 print(f"{icon.get(f['severity'], '?')} {f['severity']} {f['check']}: {f['message']}")
                 if f.get("fix_hint"):
                     print(f"  fix: {f['fix_hint']}")
-    return 1 if args.lint and not ok else 0
+    # RFC 052 Q1 gating: a `hygiene.denylist` warning is VISIBLE but does not flip
+    # the `--lint` exit code unless M8SHIFT_SCRUB_ENFORCE=1 — the denylist has a
+    # higher false-positive risk than the path lint, so it is advisory-by-default
+    # even in lint mode. Everything else gates exactly as before.
+    enforce = os.environ.get(HYGIENE_SCRUB_ENFORCE_ENV, "") == "1"
+    gating = [f for f in visible if f["check"] != "hygiene.denylist" or enforce]
+    return 1 if args.lint and gating else 0
 
 
 def contract_visible_findings(findings, severity_min):
@@ -7776,6 +7925,13 @@ def main():
                          "exit code on hygiene findings alone — no relay/adoption findings. Intended "
                          "for a pre-push/pre-commit hook (with --lint --json) so relay.missing never "
                          "dominates the gate")
+    dr.add_argument("--hygiene-verbose", action="store_true",
+                    help="RFC 052 C3: local forensic mode — show the matched confidential denylist "
+                         "term in hygiene.denylist findings instead of only its hashed label. "
+                         "Default output is redacted so a pasted doctor report never re-leaks the "
+                         "identifier. The denylist itself is out-of-repo: M8SHIFT_DENYLIST if set, "
+                         "else ~/.config/m8shift/denylist.txt; missing = no-op. A hygiene.denylist "
+                         "warning never fails --lint unless M8SHIFT_SCRUB_ENFORCE=1")
     dr.add_argument("--install", action="store_true",
                     help="include read-only post-install verification (#24): python/script "
                          "versions, local checksum-manifest state, kit companions/runners, generated "

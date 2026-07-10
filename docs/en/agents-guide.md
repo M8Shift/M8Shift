@@ -259,7 +259,12 @@ releasable at all times.
 - **Scrubbed identity.** Commits are authored as the project's public identity, not a
   personal/forge identity.
 - **No leaked traces.** No internal host/forge addresses, local user paths, or legacy
-  project names in committed content or history of public mirrors.
+  project names in committed content or history of public mirrors. Tooling (RFC 052):
+  `./m8shift.py doctor --hygiene-only --lint` lints tracked publishable files (real home
+  paths + the operator's out-of-repo confidential denylist, redacted output);
+  `python3 scripts/scrub-check.py` scans git tip AND history for denylisted identifiers
+  via raw git (never a lossy optimizer); `hooks/pre-push` runs both advisorily —
+  set `M8SHIFT_SCRUB_ENFORCE=1` to block on findings.
 - **Signed-off collaboration.** Commit messages include the agreed
   `Co-Authored-By:` trailer.
 - **Dogfooding provenance — model *and* engine, on every commit.** Each commit

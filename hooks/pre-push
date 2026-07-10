@@ -1,0 +1,67 @@
+#!/bin/sh
+# M8Shift pre-push scrub gate (RFC 052 E2) — the last safe moment before content
+# leaves the machine.
+#
+# ADVISORY and LOCAL by default: findings are printed, the push proceeds. Set
+# M8SHIFT_SCRUB_ENFORCE=1 to BLOCK the push on findings. Scanner ERRORS always
+# fail open (printed, never blocking) — a broken scanner must not freeze pushes.
+# `git push --no-verify` bypasses this hook entirely, by design (git semantics).
+#
+# What runs:
+#   1. `m8shift.py doctor --hygiene-only --lint` — the RFC 052 C1+C3 data-hygiene
+#      lint (real home paths + operator-confidential denylist, redacted output).
+#   2. `scripts/scrub-check.py` (if present) — the denylist over git TIP + HISTORY
+#      via raw git (never a lossy optimizer). rc 1 = hit, rc >= 2 = scanner error.
+#
+# Install (per clone, hooks are not version-controlled by Git):
+#   cp hooks/pre-push <repo>/.git/hooks/pre-push
+#   chmod +x <repo>/.git/hooks/pre-push
+
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '.')"
+
+# Resolve the m8shift.py program (soft: everything here is advisory-by-default).
+m8shift=""
+if [ -n "${M8SHIFT_BIN:-}" ] && [ -x "${M8SHIFT_BIN}" ]; then
+	m8shift="${M8SHIFT_BIN}"
+elif command -v m8shift.py >/dev/null 2>&1; then
+	m8shift="m8shift.py"
+elif [ -x "${repo_root}/m8shift.py" ]; then
+	m8shift="${repo_root}/m8shift.py"
+fi
+
+block=0
+
+# --- 1. data-hygiene lint (C1 paths + C3 denylist, redacted) ---------------------
+if [ -n "${m8shift}" ]; then
+	hygiene_rc=0
+	"${m8shift}" doctor --hygiene-only --lint >&2 || hygiene_rc=$?
+	if [ "${hygiene_rc}" -eq 1 ]; then
+		block=1
+	elif [ "${hygiene_rc}" -gt 1 ]; then
+		printf '%s\n' "m8shift pre-push: hygiene scanner failed (rc ${hygiene_rc}) — continuing without it." >&2
+	fi
+fi
+
+# --- 2. denylist scrub over tip + history (E1) -----------------------------------
+scrub="${repo_root}/scripts/scrub-check.py"
+if [ -f "${scrub}" ]; then
+	scrub_rc=0
+	python3 "${scrub}" --repo "${repo_root}" >&2 || scrub_rc=$?
+	if [ "${scrub_rc}" -eq 1 ]; then
+		block=1
+	elif [ "${scrub_rc}" -ge 2 ]; then
+		printf '%s\n' "m8shift pre-push: scrub-check failed (rc ${scrub_rc}) — continuing without it." >&2
+	fi
+fi
+
+if [ "${block}" -eq 1 ]; then
+	if [ "${M8SHIFT_SCRUB_ENFORCE:-0}" = "1" ]; then
+		printf '%s\n' "m8shift pre-push: scrub findings above and M8SHIFT_SCRUB_ENFORCE=1 — push blocked. Fix the findings or unset the enforce variable." >&2
+		exit 1
+	fi
+	printf '%s\n' "m8shift pre-push: scrub findings above are ADVISORY (set M8SHIFT_SCRUB_ENFORCE=1 to block on them); pushing anyway." >&2
+fi
+
+exit 0

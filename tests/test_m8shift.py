@@ -11373,6 +11373,363 @@ class TestRFC052Hygiene(CLIBase):
         self.assertIn("docs/leak.md", hits)
 
 
+class TestRFC052Denylist(CLIBase):
+    """RFC 052 (#101) PR2 — C3 operator-confidential denylist in `doctor
+    --hygiene`. Every run isolates HOME (a real operator denylist at the default
+    config path must never leak into the suite) and sets M8SHIFT_DENYLIST
+    explicitly unless the test targets the default-path behavior."""
+
+    TERM = "SyntheticSecretProject"
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", *a], cwd=self.d, capture_output=True)
+        self.home = tempfile.mkdtemp(prefix="m8-deny-home-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def _track(self, rel, body):
+        p = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        subprocess.run(["git", "add", rel], cwd=self.d, capture_output=True)
+
+    def _deny(self, text, name="deny.txt"):
+        p = os.path.join(self.home, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def _run(self, *args, denylist=None, enforce=False, home=None):
+        env = dict(os.environ)
+        env["HOME"] = home or self.home                 # isolate ~/.config
+        env.pop("M8SHIFT_DENYLIST", None)
+        env.pop("M8SHIFT_SCRUB_ENFORCE", None)
+        if denylist is not None:
+            env["M8SHIFT_DENYLIST"] = denylist
+        if enforce:
+            env["M8SHIFT_SCRUB_ENFORCE"] = "1"
+        return subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--hygiene-only", "--json",
+             *args],
+            cwd=self.d, capture_output=True, text=True, env=env)
+
+    def _findings(self, r, check="hygiene.denylist"):
+        return [f for f in json.loads(r.stdout)["findings"] if f["check"] == check]
+
+    def test_hit_is_redacted_and_visible_but_does_not_gate_lint(self):
+        self._track("docs/a.md", "The %s pipeline.\n" % self.TERM)
+        dl = self._deny(self.TERM + "\n")
+        r = self._run("--lint", denylist=dl)
+        hits = self._findings(r)
+        self.assertEqual(len(hits), 1, r.stdout)
+        self.assertEqual(hits[0]["severity"], "warning")
+        # Q1 posture: visible warning, but --lint stays rc 0 without enforce.
+        self.assertEqual(r.returncode, 0, r.stdout)
+        # Confidentiality: the TERM never appears anywhere in the output; the
+        # hashed label does.
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)
+        self.assertIn("denylist:", hits[0]["message"])
+
+    def test_enforce_gates_lint_and_verbose_shows_term_locally(self):
+        self._track("docs/a.md", "The %s pipeline.\n" % self.TERM)
+        dl = self._deny(self.TERM + "\n")
+        r = self._run("--lint", denylist=dl, enforce=True)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        rv = self._run("--hygiene-verbose", denylist=dl)
+        self.assertIn(self.TERM, rv.stdout)             # forensic local mode only
+
+    def test_matching_is_case_insensitive_word_mode_and_allow(self):
+        self._track("docs/a.md",
+                    "lower %s here\nword Zebrafish here\nplural Zebrafishes here\n"
+                    "ok: %s (approved sample)\n" % (self.TERM.lower(), self.TERM))
+        dl = self._deny("%s\nword:Zebrafish\nallow:approved sample\n" % self.TERM)
+        r = self._run(denylist=dl)
+        msgs = [f["message"] for f in self._findings(r)]
+        self.assertEqual(len(msgs), 2, r.stdout)         # l.1 case-insensitive + l.2 word
+        self.assertTrue(any(":1:" in m for m in msgs))   # lowercase variant caught
+        self.assertTrue(any(":2:" in m for m in msgs))   # word-boundary caught
+        # l.3 plural not word-matched; l.4 suppressed by allow:
+
+    def test_precedence_env_beats_default_and_default_is_read(self):
+        self._track("docs/a.md", "Only %s here.\n" % self.TERM)
+        cfg = os.path.join(self.home, ".config", "m8shift")
+        os.makedirs(cfg, exist_ok=True)
+        with open(os.path.join(cfg, "denylist.txt"), "w", encoding="utf-8") as fh:
+            fh.write("UnrelatedTermNotInRepo\n")
+        # env set -> env list wins (default decoy would find nothing).
+        dl = self._deny(self.TERM + "\n")
+        self.assertEqual(len(self._findings(self._run(denylist=dl))), 1)
+        # env unset -> the default config path is read (decoy: no hit).
+        self.assertEqual(len(self._findings(self._run())), 0)
+        with open(os.path.join(cfg, "denylist.txt"), "w", encoding="utf-8") as fh:
+            fh.write(self.TERM + "\n")
+        self.assertEqual(len(self._findings(self._run())), 1)
+
+    def test_missing_default_is_silent_noop_and_missing_explicit_is_info(self):
+        self._track("docs/a.md", "clean file\n")
+        r = self._run("--lint")                          # empty HOME, no env
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self._findings(r, "hygiene.denylist_unreadable"), [])
+        r2 = self._run("--severity-min", "info",
+                       denylist=os.path.join(self.home, "absent.txt"))
+        self.assertEqual(len(self._findings(r2, "hygiene.denylist_unreadable")), 1)
+        self.assertEqual(r2.returncode, 0)
+
+    def test_short_terms_skipped_with_info_never_echoed(self):
+        self._track("docs/a.md", "xy everywhere\n")
+        dl = self._deny("xy\n%s\n" % self.TERM)
+        r = self._run("--severity-min", "info", denylist=dl)
+        skipped = self._findings(r, "hygiene.denylist_term_skipped")
+        self.assertEqual(len(skipped), 1, r.stdout)
+        self.assertEqual(self._findings(r), [])          # xy never became a rule
+
+    def test_foreign_path_still_gates_lint_without_enforce(self):
+        self._track("docs/x.md", "cwd /Users/realuser/Documents/x\n")
+        r = self._run("--lint")                          # no denylist at all
+        self.assertEqual(r.returncode, 1, r.stdout)      # C1 gate unchanged by C3
+
+    def test_term_in_path_is_redacted_in_default_output(self):
+        # Codex review BLOCKER: a denied term inside the file PATH re-leaked
+        # through the message and the path field of the default output.
+        self._track("docs/%s/leak.md" % self.TERM, "The %s twice.\n" % self.TERM)
+        dl = self._deny(self.TERM + "\n")
+        r = self._run(denylist=dl)
+        hits = self._findings(r)
+        self.assertEqual(len(hits), 1, r.stdout)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)   # NOWHERE, path included
+        self.assertIn("[redacted]", hits[0]["message"])
+        self.assertIn("[redacted]", hits[0]["path"])
+        rv = self._run("--hygiene-verbose", denylist=dl)   # forensic keeps raw path
+        self.assertIn("docs/%s/leak.md" % self.TERM, rv.stdout)
+
+
+class TestRFC052ScrubCheck(CLIBase):
+    """RFC 052 (#101) PR2 — E1 `scripts/scrub-check.py` (tip + history) and E2
+    hook layering. Fixture repos are built per-test; git runs raw by argv."""
+
+    TERM = "SyntheticSecretProject"
+
+    @staticmethod
+    def _scrub_mod():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "scrub_check", os.path.join(REPO, "scripts", "scrub-check.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def setUp(self):
+        super().setUp()
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", *a], cwd=self.d, capture_output=True)
+        self.home = tempfile.mkdtemp(prefix="m8-scrub-home-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def _commit(self, rel, body, msg="c"):
+        p = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(p) or self.d, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        subprocess.run(["git", "add", rel], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", msg], cwd=self.d,
+                       capture_output=True)
+
+    def _rm_commit(self, rel, msg="rm"):
+        subprocess.run(["git", "rm", "-q", rel], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", msg], cwd=self.d,
+                       capture_output=True)
+
+    def _deny(self, text):
+        p = os.path.join(self.home, "deny.txt")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def _scrub(self, *args, denylist=None, env_extra=None):
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env.pop("M8SHIFT_DENYLIST", None)
+        env.pop("M8SHIFT_SCRUB_ENFORCE", None)
+        if denylist is not None:
+            env["M8SHIFT_DENYLIST"] = denylist
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "scrub-check.py"),
+             "--repo", self.d, *args],
+            capture_output=True, text=True, env=env)
+
+    def test_tip_and_history_hits_redacted_nonzero_exit(self):
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")                 # history-only now
+        self._commit("docs/live.md", "Live %s on tip.\n" % self.TERM)
+        r = self._scrub(denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("TIP hit: HEAD:docs/live.md:1", r.stdout)
+        self.assertIn("HISTORY hit: commit ", r.stdout)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)  # redacted by default
+        self.assertIn("denylist:", r.stdout)
+        rv = self._scrub("--verbose", denylist=self._deny(self.TERM + "\n"))
+        self.assertIn(self.TERM, rv.stdout)               # forensic local mode
+
+    def test_word_mode_hits_exact_word_on_tip_not_substring(self):
+        # Pinned lesson: `git grep -E \\b..\\b` is silently CLEAN on BSD/macOS —
+        # word semantics must come from the in-process post-filter.
+        self._commit("docs/w.md", "standalone Zebrafish here\n")
+        self._commit("docs/sub.md", "plural Zebrafishes here\n")
+        r = self._scrub("--no-history", denylist=self._deny("word:Zebrafish\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("docs/w.md", r.stdout)
+        self.assertNotIn("docs/sub.md", r.stdout)
+
+    def test_allow_suppresses_tip_and_no_history_flag(self):
+        self._commit("docs/ok.md", "%s (approved sample)\n" % self.TERM)
+        dl = self._deny("%s\nallow:approved sample\n" % self.TERM)
+        r = self._scrub("--no-history", denylist=dl)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("HISTORY", self._scrub("--no-history", denylist=dl).stdout)
+
+    def test_clean_repo_missing_denylist_and_error_paths(self):
+        self._commit("docs/c.md", "nothing to see\n")
+        r = self._scrub(denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r2 = self._scrub()                                # no denylist -> no-op
+        self.assertEqual(r2.returncode, 0)
+        self.assertIn("no-op", r2.stdout)
+        outside = tempfile.mkdtemp(prefix="m8-notrepo-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        r3 = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "scrub-check.py"),
+             "--repo", outside],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": self.home,
+                 "M8SHIFT_DENYLIST": self._deny(self.TERM + "\n")})
+        self.assertEqual(r3.returncode, 2, r3.stdout + r3.stderr)  # not a repo
+
+    def test_argument_order_revisions_before_separator(self):
+        # The false negative that let a real leak through: revisions AFTER `--`
+        # silently scan nothing. Pin the composed argv shape itself.
+        mod = self._scrub_mod()
+        rule = ("denylist:abc", self.TERM, "literal")
+        tip = mod.tip_cmd(rule)
+        self.assertIn("HEAD", tip)
+        self.assertIn("--", tip)
+        self.assertLess(tip.index("HEAD"), tip.index("--"))
+        hist = mod.history_cmd(rule, 100, refs_pull=True)
+        self.assertIn("--all", hist)
+        self.assertIn("--glob=refs/pull", hist)
+        self.assertIn("--pickaxe-regex", hist)
+        self.assertIn("-i", hist)
+        self.assertLess(hist.index("--all"), hist.index("--"))
+        self.assertNotIn("--glob=refs/pull",
+                         mod.history_cmd(rule, 100, refs_pull=False))
+
+    def test_parser_drift_scrub_check_matches_core(self):
+        # The script duplicates the core denylist parser (self-contained by
+        # design); this pins both to identical semantics on a shared fixture.
+        mod = self._scrub_mod()
+        fixture = ("# comment\n\n%s\nword:Zebrafish\nallow:approved sample\nxy\n"
+                   "foo:bar-is-a-literal\n" % self.TERM)
+        core_rules, core_allows, core_skipped = cowork._parse_denylist_text(fixture)
+        s_rules, s_allows, s_skipped = mod.parse_denylist_text(fixture)
+        self.assertEqual([(l, t) for l, t, _ in core_rules],
+                         [(l, t) for l, t, _ in s_rules])
+        self.assertEqual(core_allows, s_allows)
+        self.assertEqual(core_skipped, s_skipped)
+        core_word = {t for l, t, rx in core_rules if rx.pattern.startswith("\\b")}
+        s_word = {t for l, t, m in s_rules if m == "word"}
+        self.assertEqual(core_word, s_word)
+
+    def test_term_in_path_redacted_and_allow_in_path_does_not_suppress(self):
+        # Review BLOCKER (locator leak) + MEDIUM 3 (allow matched on the full
+        # git grep line, so an allow substring in the PATH suppressed a real
+        # content hit).
+        self._commit("docs/%s/leak.md" % self.TERM, "content %s here\n" % self.TERM)
+        self._commit("docs/approved sample/leak2.md",
+                     "The %s without approval marker.\n" % self.TERM)
+        dl = self._deny("%s\nallow:approved sample\n" % self.TERM)
+        r = self._scrub("--no-history", denylist=dl)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)   # path redacted too
+        self.assertIn("[redacted]", r.stdout)
+        self.assertIn("leak2.md", r.stdout)                # path-allow must NOT suppress
+        rv = self._scrub("--no-history", "--verbose", denylist=dl)
+        self.assertIn("docs/%s/leak.md" % self.TERM, rv.stdout)  # forensic raw
+
+    def test_non_utf8_tracked_file_never_tracebacks(self):
+        # Review MEDIUM 2: bare text=True made the decode raise
+        # UnicodeDecodeError -> traceback -> rc 1 misread as a hit by the hooks.
+        p = os.path.join(self.d, "docs", "bad.md")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(b"bad byte \xff then " + self.TERM.encode() + b"\n")
+        subprocess.run(["git", "add", "docs/bad.md"], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "bad"], cwd=self.d,
+                       capture_output=True)
+        r = self._scrub("--no-history", denylist=self._deny(self.TERM + "\n"))
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        # errors=replace keeps the ASCII term matchable: a real redacted hit.
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("docs/bad.md", r.stdout)
+
+    def test_hooks_advisory_by_default_enforce_blocks_pen_guard_intact(self):
+        self._commit("docs/a.md", "The %s pipeline.\n" % self.TERM)
+        # Give the fixture repo the E1 script so pre-push exercises BOTH layers
+        # (hygiene lint + tip/history scrub) exactly like an adopting project.
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(self.d, "scripts", "scrub-check.py"))
+        dl = self._deny(self.TERM + "\n")
+
+        def hook(name, **env_extra):
+            env = dict(os.environ)
+            env["HOME"] = self.home
+            env["M8SHIFT_DENYLIST"] = dl
+            env.pop("M8SHIFT_SCRUB_ENFORCE", None)
+            env.pop("M8SHIFT_AGENT", None)
+            env.update(env_extra)
+            return subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
+                                  cwd=self.d, capture_output=True, text=True,
+                                  env=env)
+
+        # pre-push: findings -> advisory (rc 0); enforce -> blocked (rc 1).
+        r = hook("pre-push")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ADVISORY", r.stderr)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)   # hooks stay redacted
+        self.assertEqual(hook("pre-push", M8SHIFT_SCRUB_ENFORCE="1").returncode, 1)
+        # pre-commit: same layering; and the #39 pen guard is UNCHANGED — a
+        # configured agent without the pen is still blocked (fail closed).
+        r = hook("pre-commit")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(hook("pre-commit", M8SHIFT_SCRUB_ENFORCE="1").returncode, 1)
+        self.init()                                        # relay for may-i-write
+        r = hook("pre-commit", M8SHIFT_AGENT="claude")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("does not hold a valid write pen", r.stderr)
+
+    def test_hook_scanner_error_fails_open_visibly(self):
+        self._commit("docs/a.md", "clean\n")
+        stub = os.path.join(self.home, "broken-m8shift")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 3\n")
+        os.chmod(stub, 0o755)
+        env = dict(os.environ)
+        env.update(HOME=self.home, M8SHIFT_BIN=stub)
+        env.pop("M8SHIFT_AGENT", None)
+        env.pop("M8SHIFT_DENYLIST", None)
+        for name in ("pre-commit", "pre-push"):
+            r = subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
+                               cwd=self.d, capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, (name, r.stderr))
+            self.assertIn("continuing without it", r.stderr, name)
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")
