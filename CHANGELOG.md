@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+**RFC 049 PR A — holder liveness core (#104).** A managed producer can now
+prove a WORKING holder is alive: new `heartbeat <agent> --source
+runtime-listener|wrapper --cadence-seconds N` verb (RFC 052-gated,
+validated before any write) records PROTECTIVE beats; force protection uses
+`age <= max(120, min(2*cadence, TTL))`. `claim --refresh` records audit-only
+beats (never protective after expiry). `claim --force` recovery is TWO-PHASE:
+observe + capture the identity tuple under the lock, release, sleep a fixed
+5s grace (never blocking the holder's own refresh), reacquire and revalidate
+— one attempt, three pinned refusal branches (changed identity / refreshed
+TTL / new protective beat); `next --force` clamps its interval to [5s, 60s]
+as its grace. An alive-expired lock (fresh protective beat) refuses ordinary
+force-claim; `--live-override --reason` is the audited human-authorized
+escape. Stale recovery and every explicit forced release are audited as
+session events (prior holder, captured identity, reason, override flag); the
+pinned force + release-back sequence preserves the journal, the pending
+handoff, and the turn number byte-for-byte (asserted twice in a row, with the
+recoverer's own pending incoming turn no obstacle). `status` (human and JSON)
+exposes the liveness sub-state and bounded heartbeat metadata; `wait`/`next`
+distinguish alive-expired (keep waiting, never offer force) from
+ordinary-stale; doctor extends the ONE canonical `lock.stale_working` with
+the liveness sub-state and adds `holder.heartbeat_malformed` /
+`holder.heartbeat_orphaned`; orphan beats are cleaned best-effort on
+`release`/`done`. Documented in the EN reference and all 8 i18n packs; the
+agent-pack gains the refresh-early/checkpoint discipline. 12 tests pin the
+incident-derived families from forge #104 — including the real-time
+contention race (single winner, no double-holder) and a measured 5s grace.
+
 **RFC 052 PR4 — session binding (#101, RFC 038 §9).** A shift now binds
 mechanically to ONE project. A centralized pre-write gate covers every relay
 mutator: when the `M8SHIFT_ROOT`-designated relay and the script-local relay

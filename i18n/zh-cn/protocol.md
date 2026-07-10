@@ -222,6 +222,7 @@ loop:
 ./m8shift.py remember <agent> "<note>"  # 追加一条持久记忆笔记（advisory）
 ./m8shift.py task {add,done,drop,list,show} …  # advisory 任务清单（按代理的待办）
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # 将本班次绑定到唯一的项目中继（RFC 038 §9）；无需持笔；存在歧义且未给出封闭选择器时拒绝
+./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049：WORKING 持有者的保护性存活心跳（托管生产者；窗口 = max(120, min(2*N, TTL))；claim --refresh 仅记录审计心跳）
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
 ./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)

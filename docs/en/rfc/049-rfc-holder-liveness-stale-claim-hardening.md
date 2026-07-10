@@ -1,6 +1,6 @@
 # RFC 049 — Holder liveness and stale-claim hardening
 
-Status: design rev 4 (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, editorial fixes)
+Status: design rev 4 APPROVED / PR A implemented (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, editorial fixes)
 Target: next minor after RFC 052
 Related issues: #6, #104 (incident analysis + recurrences)
 Owner: core relay + runtime/worktree companions
@@ -59,7 +59,9 @@ checked whether any commit had been pushed, found none, recovered the stale
 lock, and RENEWED THE SAME ASSIGNMENT unchanged as a time-boxed checkpoint
 handoff — the same scope stayed recoverable and was eventually resumed (no
 checkpoint existed to lose or save). A session-side 15-minute refresh loop then stopped
-the recurrence: that loop is exactly what this RFC productizes.
+the recurrence: that loop INSPIRED the productized liveness mechanism — but
+only the `heartbeat` verb creates PROTECTIVE evidence; a refresh loop
+prevents expiry without ever proving liveness after it.
 
 **Amendments (each becomes normative below):**
 
@@ -206,9 +208,6 @@ Schema:
 
 Audit beats (`source=claim-refresh`) carry `"protective": false` and
 `"cadence_seconds": null`.
-
-```text
-```
 
 Rules:
 
