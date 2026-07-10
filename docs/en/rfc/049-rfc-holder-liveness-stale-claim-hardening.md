@@ -1,8 +1,8 @@
 # RFC 049 — Holder liveness and stale-claim hardening
 
-Status: draft
-Target: v3.53.0 candidate
-Related issue: #6
+Status: design rev 4 APPROVED / PR A implemented (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, editorial fixes)
+Target: next minor after RFC 052
+Related issues: #6, #104 (incident analysis + recurrences)
 Owner: core relay + runtime/worktree companions
 
 ## Summary
@@ -43,6 +43,95 @@ There are two distinct cases:
 
 The first case can be improved mechanically. The second cannot be proven without
 a producer; it must be documented as an operator/agent discipline boundary.
+
+## Live incident evidence and amendments (forge #104, 2026-07-10)
+
+Three same-session incidents turned this draft's problem statement into
+recorded fact, and the recovery behavior the reviewer improvised is codified
+here as the REQUIRED recovery contract.
+
+**What happened (three times in one shift):** the holder's pen expired mid-work
+during long implementation phases (multi-minute test suites; every wake-up
+consumed by fix work), despite an adopted refresh-on-wakeup discipline. The
+peer's listener flagged the stale lock; the operator had to relay the warning
+by hand. The peer then performed two textbook recoveries (relay turns 425/426):
+checked whether any commit had been pushed, found none, recovered the stale
+lock, and RENEWED THE SAME ASSIGNMENT unchanged as a time-boxed checkpoint
+handoff — the same scope stayed recoverable and was eventually resumed (no
+checkpoint existed to lose or save). A session-side 15-minute refresh loop then stopped
+the recurrence: that loop INSPIRED the productized liveness mechanism — but
+only the `heartbeat` verb creates PROTECTIVE evidence; a refresh loop
+prevents expiry without ever proving liveness after it.
+
+**Amendments (each becomes normative below):**
+
+- **A1 — refresh early, never at the deadline.** The refresh/heartbeat cadence
+  targets ~TTL/2 (minute 15 of a 30-minute pen), not the expiry edge. Listener
+  cadence stays `min(wait_interval, 60s)`; an interactive holder's guidance is
+  "refresh on every wake-up". **A one-time refresh immediately before a long
+  synchronous operation does NOT protect it**: an operation expected to exceed
+  one TTL requires a CONCURRENT managed producer (listener heartbeat or an
+  explicit refresh loop) — a pre-operation refresh alone still expires
+  mid-command.
+- **A2 — two-phase grace recovery (never hold the lock through the grace).**
+  A naive lock-sleep-recheck would BLOCK the holder's own `claim --refresh`
+  and guarantee the theft it exists to prevent. The shared `claim --force` /
+  `next --force` flow is:
+  1. **Phase 1**: acquire `file_lock()`, observe the stale candidate, capture
+     the identity tuple `(session, turn, holder, state, expires)`, then
+     **release the lock**;
+  2. sleep the exact grace duration — direct `claim --force` uses a fixed
+     **5s** constant; `next --force` uses its own interval clamped to
+     **[5s, 60s]**;
+  3. **Phase 2**: reacquire `file_lock()`, reload LOCK + heartbeat, require
+     the identity tuple (EXACT comparison) to still identify the SAME work
+     window AND the TTL to still be expired AND no fresh protective heartbeat;
+  4. only then perform the force transition under that second lock.
+  **Deterministic outcome — one attempt, never a silent loop**: both direct
+  `claim --force` and `next --force` perform exactly ONE two-phase attempt; on
+  a changed identity, a refreshed expiry, or a newly appeared protective
+  heartbeat they refuse with a nonzero not-claimable rc and a next-action hint
+  (three branches pinned separately by tests). `next` WITHOUT `--force` may
+  resume its ordinary waiting behavior (documented); `next --once` never
+  sleeps or retries beyond its single attempt. The grace sleep happens only
+  AFTER phase 1 has released the lock.
+  Concurrent reclaimers serialize on phase 2: after the first transition every
+  other claimant sees a changed identity/non-stale state and refuses. This
+  exact contention path is pinned by tests.
+- **A3 — assignment-preserving recovery (minimal honest core).** The passive
+  core knows nothing of branches, remotes, or assignment identity, and never
+  inspects Git or the network. The mechanical contract is therefore:
+  **recovery preserves the journal and the pending handoff byte-for-byte by
+  construction**, via ONE pinned sequence:
+  1. `claim <recoverer> --force --reason "stale recovery; renew same
+     assignment"` — the stale recovery records a force session event carrying
+     the prior holder, the captured identity tuple, and the reason;
+  2. `release <recoverer> --to <prior-holder> --force --reason "resume pending
+     turn; checkpoint before TTL"` — allowed even when the recoverer itself
+     has an older pending incoming turn; an explicit `--force` release ALWAYS
+     records a recovery-release session event;
+  3. no append, no turn increment: journal and last-handoff bytes unchanged,
+     LOCK becomes `AWAITING_<prior-holder>`. Reason text is sanitized before
+     any LOCK-marker write (no unsanitized free text in markers). The
+  behavioral half — "check for pushed/checkpointed progress before renewing;
+  reference progress you find" — is agent/operator GUIDANCE delivered in the
+  agent-pack, not core policy. Tests assert the journal/pending body is
+  unchanged across repeated force/release cycles.
+- **A4 — checkpoint discipline (guidance, not enforcement).** Long work
+  commits/pushes or records an explicit progress note before the TTL, or
+  refreshes around minute 15. Delivered as agent-pack/stanza text within the
+  existing byte budget.
+- **A5 — observable liveness state (no UI resumption implied).** RFC 035
+  already establishes that a terminal wait cannot wake an interactive UI, and
+  nothing here auto-resumes one. Instead the READ-ONLY surfaces expose one
+  liveness sub-state — `fresh`, `alive-expired`, `ordinary-stale`, or
+  `orphaned/invalid` — in human and JSON `status`, plus heartbeat age, source,
+  and declared cadence (bounded, redacted per RFC 052 §9.5). `wait`/listener
+  report ready/stale accurately from that same state. The test asserts
+  relay/listener/status STATE, never foregrounding.
+- **A6 — no automatic double-holder.** No recovery path may ever produce two
+  `WORKING_*` holders: the A2 grace recheck plus under-lock validation keep the
+  single-pen invariant, and the race is pinned by tests.
 
 ## Goals
 
@@ -111,9 +200,14 @@ Schema:
   "turn": 323,
   "state": "WORKING_CLAUDE",
   "written_at": "2026-07-05T10:00:00Z",
-  "source": "runtime-listener"
+  "source": "runtime-listener",
+  "protective": true,
+  "cadence_seconds": 60
 }
 ```
+
+Audit beats (`source=claim-refresh`) carry `"protective": false` and
+`"cadence_seconds": null`.
 
 Rules:
 
@@ -128,19 +222,36 @@ Rules:
 
 ## Commands
 
-### `heartbeat <agent>`
+### `heartbeat <agent>` (the ONLY protective producer surface)
 
 ```bash
-python3 m8shift.py heartbeat codex
+python3 m8shift.py heartbeat codex --source runtime-listener --cadence-seconds 60
 ```
 
 Semantics:
 
 - allowed only while the relay lock is `WORKING_<agent>`;
-- revalidates the lock under `file_lock()`;
-- writes the holder heartbeat;
-- does not extend `expires`;
-- does not claim, append, release, or repair.
+- an actor-bearing mutator: passes the RFC 052 binding gate and revalidates the
+  lock under `file_lock()`;
+- `--source` is a closed enum (`runtime-listener` | `wrapper`) and
+  `--cadence-seconds N` is REQUIRED, validated to `1..TTL_SECONDS`
+  (`TTL_SECONDS = TTL_MIN * 60`) BEFORE any write;
+- writes the holder heartbeat with `protective=true` and the declared cadence;
+- does not extend `expires`; does not claim, append, release, or repair;
+- runtime/headless producers call THIS VERB — they never write the sidecar
+  directly (RFC 052 binding + file_lock semantics preserved).
+
+**Protective vs audit beats (exact model):**
+
+- protective window = `max(120, min(2 * cadence_seconds, TTL_SECONDS))`,
+  evaluated against the beat's age;
+- `claim --refresh` writes an AUDIT record only: `source=claim-refresh`,
+  `protective=false`, `cadence_seconds=null` — it is NEVER considered by force
+  protection after expiry;
+- a periodic **heartbeat-verb loop** is protective (each beat declares its
+  cadence); a periodic **refresh loop** prevents expiry by extending the TTL
+  but its audit rows never become protective proof;
+- only protective beats require a cadence; audit beats carry `null`.
 
 This command is primarily for wrappers/listeners, not a new manual burden for
 interactive agents.
@@ -149,7 +260,8 @@ interactive agents.
 
 Existing TTL-refresh behavior remains. New behavior:
 
-- after successful refresh, write a heartbeat with `source=claim-refresh`;
+- after successful refresh, write an AUDIT heartbeat (`source=claim-refresh`,
+  `protective=false`, `cadence_seconds=null`) — never force protection;
 - if the heartbeat sidecar write fails, keep the TTL refresh but print/report a
   warning; the sidecar is not the source of pen authority.
 
@@ -249,6 +361,20 @@ recorded, unless `--takeover --reason` is explicit. This is an **advisory
 companion guardrail**: direct `git`, editor, or filesystem writes do not pass
 through the companion and cannot be refused by M8Shift.
 
+## RFC 052 integration (session binding — shipped)
+
+`heartbeat <agent>` and every heartbeat/owner-sidecar mutation are M8Shift-owned
+mutators and MUST pass the shipped RFC 038 §9.2 gate:
+
+- `heartbeat` is an **actor-bearing mutator**: dispatch-level A1/A3 binding gate
+  plus the under-lock recheck, exactly like `claim`/`append`;
+- runtime/worktree heartbeat producers write through the **preflight-resolved
+  bound root** or fail closed under two-candidate ambiguity — a leftover
+  `M8SHIFT_ROOT` must never place a heartbeat in one project to protect another
+  project's pen (two-relay tests required);
+- every liveness/status/doctor surface follows the RFC 052 §9.5 disclosure rule
+  (no raw candidate path; bounded redacted labels).
+
 ## Doctor findings
 
 Reuse the existing `lock.stale_working` condition rather than minting a parallel
@@ -256,10 +382,9 @@ dead-stale ID.
 
 | Check | Severity | Meaning |
 |-------|----------|---------|
-| `lock.stale_working` | warning | existing stale lock finding; extended with liveness sub-state when available |
-| `holder.heartbeat_malformed` | warning | heartbeat sidecar exists but is unreadable or invalid |
-| `holder.ttl_expired_alive` | warning | pen TTL expired, but a matching heartbeat is fresh |
-| `holder.heartbeat_orphaned` | info | heartbeat exists for no current matching `WORKING_*` lock |
+| `lock.stale_working` | warning | THE canonical expired-lock finding, carrying a structured `liveness` sub-state (`alive-expired` / `ordinary-stale`) — one condition, one ID, never two warnings for one expired lock |
+| `holder.heartbeat_malformed` | warning | heartbeat sidecar exists but is unreadable/invalid/out-of-range (sidecar-specific condition) |
+| `holder.heartbeat_orphaned` | info | heartbeat exists for no current matching `WORKING_*` lock (sidecar-specific condition) |
 
 Worktree companion doctor findings:
 
@@ -274,8 +399,9 @@ Worktree companion doctor findings:
 - A stale TTL with no fresh heartbeat remains recoverable.
 - Pre-RFC-049 peers ignore heartbeat files and may force-claim through them; this
   must be called out in generated/reference docs during mixed-version operation.
-- Heartbeat sidecars may remain after release/done; doctor reports orphaned
-  records as info. A later cleanup command may prune them.
+- Cleanup of heartbeat sidecars is ATTEMPTED on `release`/`done` (best-effort,
+  errors suppressed — the sidecar is never authority); a failed cleanup leaves
+  an orphan that doctor reports as info.
 
 ## Security and prompt boundaries
 
@@ -304,12 +430,51 @@ Worktree companion doctor findings:
   cross-owner protection as advisory companion enforcement only.
 - Tests cover malformed, stale, orphaned, fresh, wrong-session, wrong-turn, and
   mixed-version/no-heartbeat behavior.
+- **Incident-derived test families (A1-A6)**:
+  - refresh-vs-reclaim race: the TWO-PHASE flow (observe+capture identity ->
+    release -> grace -> reacquire+revalidate) never steals a lock refreshed
+    during the grace, and never blocks the holder's own refresh during it;
+  - repeated stale windows: two consecutive force+`release --to <prior holder>`
+    recovery cycles leave the journal and pending handoff body byte-for-byte
+    unchanged AND the turn number unmodified, with TWO audit events per cycle
+    (force reclaim + recovery release), a recoverer holding an older pending
+    incoming turn still allowed to release-back, and no unsanitized free text
+    reaching LOCK markers;
+  - protective-vs-audit heartbeats: a periodic producer's beat (declared
+    cadence) protects within `clamp(2*cadence, 120s, TTL)`; a one-shot
+    `claim-refresh` beat does NOT protect after expiry; malformed cadence fails
+    open and is diagnosed;
+  - observable state: human/JSON `status` expose the single liveness sub-state
+    and bounded redacted heartbeat metadata; the assertion targets state, not
+    UI foregrounding;
+  - no-double-holder: concurrent phase-2 recovery attempts under contention
+    never yield two `WORKING_*` states (first transition wins, others refuse);
+  - RFC 052 two-relay: `heartbeat` refuses under unresolved ambiguity; a bound
+    producer writes only the bound root's sidecar.
+- `heartbeat` is classified in the RFC 052 mutator matrix (actor-bearing) and
+  covered by the matrix meta-test; the protocol core stays under its byte
+  budget after the wording update; mixed-version behavior (peer without RFC
+  049) is documented and tested; the agent-pack carries the A1/A4 guidance.
+- **Delivery is staged in three reviewable PRs**: PR A core (heartbeat verb,
+  two-phase force, wait/status/doctor, protocol wording — protective beats are
+  testable in PR A through the manual heartbeat verb, before PR B ships the
+  managed producer); PR B runtime/headless producer + early-refresh cadence;
+  PR C worktree ownership sidecar/guard.
 
-## Open questions for implementation review
+## Resolved questions (rev 4, informed by the live incidents)
 
-- Freshness window: fixed 2 minutes, `2 * listener poll interval`, or explicit
-  config?
-- Should `--live-override` require a human-maintained marker file in addition to
-  `--reason`?
-- Should orphan heartbeat cleanup be automatic on `release`/`done`, or only a
-  doctor/prune concern?
+- **Freshness window (cadence-declared)**: every heartbeat DECLARES its
+  producer's real cadence in a bounded `cadence_seconds` field; protective
+  freshness = `age <= clamp(2 * cadence_seconds, floor=120s, ceiling=TTL)`.
+  A one-shot `claim --refresh` heartbeat is **audit-only and non-protective
+  after TTL expiry** — protection comes ONLY from periodic HEARTBEAT-VERB
+  producers (listener, wrapper), each beat declaring the loop cadence; a
+  refresh loop merely prevents expiry by extending the TTL.
+  Malformed or out-of-range cadence **fails open for claimability** and is
+  diagnosed (`holder.heartbeat_malformed`). Fixed formula, no config knob.
+- **`--live-override`**: `--force --live-override --reason` suffices — the
+  override is audited in session events; a human marker file adds ceremony
+  without proof (the CLI cannot authenticate a human either way).
+- **Orphan heartbeat cleanup**: best-effort removal on `release`/`done`
+  (suppressed errors — the sidecar is never authority), plus the existing
+  doctor info finding; no separate prune command in this RFC.

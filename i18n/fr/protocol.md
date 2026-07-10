@@ -264,6 +264,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py remember <agent> "<note>"  # ajoute une note mémoire durable (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registre de tâches advisory (todos par agent)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # épingle ce shift sur UN relais projet (RFC 038 §9) ; sans stylo ; refuse sous ambiguïté sans le sélecteur fermé
+./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049 : battement de vivacité protecteur d'un porteur WORKING (producteurs managés ; fenêtre = max(120, min(2*N, TTL)) ; claim --refresh n'enregistre que des battements d'audit)
 ./m8shift.py release <agent> --to <autre> [--force --reason "pourquoi"]  # repasser la main sans corps
 ./m8shift.py done <agent> [--force --reason "pourquoi"]  # clore la session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge les vieux tours clôturés (jamais le tour #0)

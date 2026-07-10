@@ -225,6 +225,7 @@ Salvaguarda:
 ./m8shift.py remember <agent> "<note>"  # anexa uma nota de memória durável (advisory)
 ./m8shift.py task {add,done,drop,list,show} …  # registro de tarefas advisory (afazeres por agente)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # fixa este turno a UM relay de projeto (RFC 038 §9); sem caneta; recusa sob ambiguidade sem o seletor fechado
+./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: batimento de vivacidade protetor de um detentor WORKING (produtores geridos; janela = max(120, min(2*N, TTL)); claim --refresh regista apenas batimentos de auditoria)
 ./m8shift.py release <agent> --to <other> [--force]  # passa adiante sem corpo (NÃO re-incrementa o turno)
 ./m8shift.py done <agent> [--force]                 # fecha a sessão (state=DONE)
 ./m8shift.py archive [--keep N]                     # purga turnos fechados antigos (nunca o turno #0)
