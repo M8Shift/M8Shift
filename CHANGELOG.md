@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+**Live-verified usage adapters (#105).** The two reference adapters fold back
+the fixes discovered by running them against the REAL providers (2026-07-10):
+
+- `examples/usage-adapters/claude-oauth-usage.py` now understands the LIVE
+  endpoint shape — top-level `five_hour`/`seven_day` objects carrying a
+  USED-percent `utilization` (no inversion) and an offset-bearing `resets_at`,
+  normalized to the strict-`Z` form the usage schema requires. The documented
+  `windows[]` shape keeps precedence; the live shape is a fallback, degrading
+  per entry (non-dict window, implausible utilization, unparseable reset).
+- `examples/usage-adapters/codex-ratelimits.py` no longer uses a
+  `communicate()`-style write-then-close call: codex-cli 0.144.1's app-server
+  DROPS pending requests when stdin reaches EOF, losing the `id=2` response
+  and hanging to the timeout. stdin now stays OPEN while stdout is read
+  line-by-line until the `id=2` reply or the deadline; the server is then
+  terminated and reaped. Fail-open semantics unchanged.
+
+Both foldbacks ship exactly the copies that have been serving the live relay
+since the fixes landed there; the process-contract tests are re-pinned to the
+held-stdin protocol (including a regression that goes RED if stdin is closed
+before the reply is read) and the live claude shape is pinned with
+mutation-verified tests (inversion and missing-normalization both bite).
+
 **RFC 049 PR C — worktree ownership sidecar and advisory guard (#104).**
 `m8shift-worktree.py claim` now records the claiming agent in
 `.m8shift/worktree-owners/<id>.json` (`m8shift.worktree_owner.v1`) — a SIBLING

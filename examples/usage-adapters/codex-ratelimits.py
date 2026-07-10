@@ -32,6 +32,7 @@ import datetime as dt
 import json
 import math
 import subprocess
+import time
 import sys
 
 APP_SERVER_CMD = ["codex", "app-server", "--stdio"]
@@ -146,7 +147,13 @@ def build_fixture(payload, now_iso):
 
 
 def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_TIMEOUT_S):
-    """Call the local Codex app-server. Any failure returns None."""
+    """Call the local Codex app-server. Any failure returns None.
+
+    LIVE finding (2026-07-10, codex-cli 0.144.1): the app-server DROPS pending
+    requests when stdin reaches EOF, so communicate()-style write-then-close
+    loses the id=2 response and the server never exits on its own (timeout ->
+    None). stdin therefore stays OPEN while stdout is read line-by-line until
+    the id=2 response or the deadline; the server is then terminated."""
     command = list(APP_SERVER_CMD if command is None else command)
     initialize = {
         "id": 1,
@@ -157,33 +164,35 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
         },
     }
     read_limits = {"id": 2, "method": "account/rateLimits/read", "params": None}
-    stdin = json.dumps(initialize, separators=(",", ":")) + "\n" \
-        + json.dumps(read_limits, separators=(",", ":")) + "\n"
     proc = None
-    def kill_reap():
+    try:
+        proc = popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+        proc.stdin.write(json.dumps(initialize, separators=(",", ":")) + "\n")
+        proc.stdin.write(json.dumps(read_limits, separators=(",", ":")) + "\n")
+        proc.stdin.flush()
+        deadline = time.monotonic() + timeout_s
+        result = None
+        while time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break                            # server exited/EOF
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("id") == 2:
+                result = payload
+                break
+        return result
+    except Exception:
+        return None
+    finally:
         if proc is not None:
             with contextlib.suppress(Exception):
                 proc.kill()
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=1)
-    try:
-        proc = popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                     stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
-        stdout, _stderr = proc.communicate(input=stdin, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        kill_reap()
-        return None
-    except Exception:
-        kill_reap()
-        return None
-    for line in (stdout or "").splitlines():
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and payload.get("id") == 2:
-            return payload
-    return None
 
 
 def main(out=None, now=None, read_limits=None):
