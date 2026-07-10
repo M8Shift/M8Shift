@@ -111,7 +111,7 @@ identity within a session).
 - `m8shift-runtime.py` / `m8shift-context.py` / `m8shift-worktree.py` resolve the **same** relay
   namespace without confusing it with the runtime lane id (§5.1).
 
-## 9. Session binding (amendment — RFC 052 PR4, design for review)
+## 9. Session binding (amendment — RFC 052 PR4, design rev 2 after Codex review)
 
 Operator requirement (RFC 052): *a shift is a work session bound to ONE project; if the
 target is ambiguous, the tooling asks the operator instead of guessing; identifiers never
@@ -120,64 +120,122 @@ cross shifts.* PR1 shipped the behavioral rule (agent-pack text). This amendment
 future work). Everything below is **opt-in / triggered state**: with no binding and no
 ambiguity, behavior stays byte-identical.
 
-### 9.1 The ambiguity this closes
+### 9.1 Candidates and physical identity (Codex #4)
 
-`M8SHIFT_ROOT` (RFC 035) silently WINS over a cwd-local relay. A leftover
-`M8SHIFT_ROOT` from a previous shift (shell profile, reused terminal) plus a cd into
-another project that has its own `M8SHIFT.md` is exactly the recorded cross-shift leak
-vector: the agent writes into the WRONG project's relay without any signal.
+- The **two possible relay authorities** are exactly: the relay designated by
+  `M8SHIFT_ROOT` (RFC 035) and the **script-local** relay (`HERE`, the running script's
+  directory — today's local authority). **No cwd parent-walk, no sibling or recursive
+  discovery** (RFC 052 C3: cross-project discovery would violate the rule it enforces).
+- **Ambiguity** exists when BOTH designate an EXISTING relay and they are **physically
+  different**: equality is `os.path.samefile` when both exist (symlinks and
+  case-insensitive filesystems resolve correctly), with a platform-aware fallback
+  (`os.path.normcase` comparison on Windows; exact canonical comparison elsewhere).
+  **Never unconditionally case-fold** — distinct `/Foo` and `/foo` relays are legitimate
+  on case-sensitive filesystems. A symlinked checkout resolving to the same physical
+  root is NOT ambiguous.
+- Binding files store the **canonical realpath** for diagnostics; equality checks use the
+  samefile rule above, never string comparison alone.
 
-- **A1 — ambiguity refusal (write commands).** When the `M8SHIFT_ROOT`-designated relay
-  AND a cwd-local relay BOTH exist and differ, write commands (`claim`, `append`, `next`,
-  `request-turn`, `yield-turn`, `steer-turn`, `resume`, `pause`, `task add/done/drop`,
-  `remember`, …) **refuse before any write**, naming both candidates and asking the
-  operator to disambiguate (unset `M8SHIFT_ROOT`, or bind — A2). Read-only commands
-  (`status`, `doctor`, `log`, `peek`, …) keep working and surface both candidates.
-- **A2 — explicit binding.** `m8shift.py bind <agent>` records the agent's durable choice
-  in the TARGET relay: `.m8shift/bindings/<agent>.json` holding the resolved root
-  identity (realpath), the project name, `bound_at`, and a reserved `relay_session`
-  field (RFC 038 §3 names, default session today). Penless by design — you bind BEFORE
-  claiming (same class as `task add` / `remember`). `bind <agent> --show` and
-  `bind <agent> --clear` round it out. Binding is per-agent, per-relay, operator-visible.
-- **A3 — binding verification (fail-closed when present).** `may-i-write`, `claim` and
-  `append` verify an existing binding: if the binding's root identity does not match the
-  effective root, **refuse** with the bound-elsewhere path (redacted to basename +
-  hash if outside this project — a foreign project path must not leak into this relay's
-  terminal/logs, per RFC 052) and the rebind instruction. A binding that MATCHES one of
-  two ambiguous candidates **resolves A1** to the bound relay. No binding = today's
-  behavior.
-- **A4 — `sessions list` (read-only inventory).** Ships RFC 038 §5's command surface
-  early: enumerates the default relay plus any named session directories under
-  `.m8shift/sessions/` (forward-compatible with §3; today that is normally just the
-  default), each with its state and the agents bound to it. Operator inventory, never
-  routing authority (§7 Q3) — single-project only, never scans sibling projects
-  (RFC 052 C3: auto-discovery across projects would violate the rule it enforces).
-- **A5 — delivery.** The agent-pack Compartmentalization section gains the mechanical
-  line: *"at session start run `./m8shift.py bind <you>`; if a write is refused for
-  ambiguity or a binding mismatch, STOP and ask the operator which project this shift
-  binds to."* Floor-marker addition so stale anchors surface it.
+### 9.2 A1 — centralized pre-write ambiguity/binding policy (Codex #1)
 
-### 9.2 Charter fit
+One **single pre-write gate**, not a per-command check. It runs for EVERY relay/project
+mutator — `claim` (incl. `--refresh`), `append`, `next` (treated as mutating BEFORE it
+polls/claims), `request-turn`, `yield-turn`, `decline-turn`, `steer-turn`, `pause`,
+`cooldown`, `resume`, `release`, `done`, `remember`, `task add/done/drop`, `archive`,
+`decisions target --set`, `decisions scaffold`, and `session report --write`.
+Read-only commands are explicitly excluded: `status`, `doctor`, `log`, `peek`,
+`history`, `recap`, `watch`, `wait`, `claim --check`, `task list/show`,
+`contract validate`, `decisions target` (without `--set`),
+`session list/show/decisions/report` (without `--write`), `update --dry-run`,
+`bind --show` / `bind --list`. They keep working under ambiguity and surface both
+candidates (disclosure per §9.5).
+
+- **Ordering**: the ambiguity refusal happens **before `file_lock` can create any lock
+  file** (a refusal must not leave a lock behind). The **binding verification is
+  re-checked under the selected relay's file lock immediately before the mutation** — an
+  outer preflight alone is TOCTOU-prone.
+- **Special cases**:
+  - `update` carries an **explicit `--target` authority** with command-scoped rebase:
+    ambient `M8SHIFT_ROOT`/local ambiguity must **not** refuse or override that explicit
+    target (its own safety checks still apply).
+  - `init` is bootstrap, not a bound write: initializing a missing local relay stays
+    allowed; the already-documented invalid hybrid (M8SHIFT_ROOT designating a DIFFERENT
+    existing root while initializing locally) is **explicitly refused**; a binding never
+    silently chooses where `init` writes.
+
+### 9.3 A2 — explicit binding with a deterministic target (Codex #2, #3)
+
+`m8shift.py bind <agent>` records the agent's durable choice in the TARGET relay:
+`.m8shift/bindings/<agent>.json` (canonical realpath identity, project name, `bound_at`,
+reserved `relay_session` field — RFC 038 §3 names stay future work). Penless by design
+(you bind BEFORE claiming — `task add`/`remember` class), **but**:
+
+- **Deterministic target selection**: zero or one existing candidate → deterministic.
+  With TWO distinct candidates, `bind` **refuses** unless (a) exactly one existing,
+  self-consistent binding already resolves the choice, or (b) the operator passes an
+  **explicit selector that must equal one of the displayed candidates**
+  (`--root <path-of-candidate>`). `bind` **never silently inherits env-wins**.
+- **Live-pen guard (charter condition for penless writes)**: any binding **mutation**
+  (`bind`, `bind --clear`) takes the target relay's file lock and **refuses while the
+  named agent holds a live `WORKING_<agent>` lock in ANY candidate** — rebinding must
+  not strand a pen or make a pending `append` resolve elsewhere. Recover the stale
+  lock explicitly first (`append`/`release`/`pause`/recovery); rebind never bypasses it.
+  `bind --show` (and `bind --list`, §9.4) stay read-only and lock-free.
+- **Scope honesty**: a binding stored inside a relay is a **local root pin** for this
+  project — it is NOT a claim that the agent holds no binding in some undiscovered
+  sibling project. No sibling scan, no global exclusivity.
+
+### 9.4 A3/A4 — verification and inventory (Codex #1, #6)
+
+- The centralized gate (§9.2) verifies an EXISTING binding for the acting agent:
+  mismatch (per §9.1 identity) → **refuse** with the disclosure rule of §9.5 and the
+  recovery instruction (`bind <agent> --clear` on the bound relay, then rebind). A
+  binding that MATCHES one of two ambiguous candidates resolves A1 to the bound relay.
+  `may-i-write` stays read-only but **reports binding validity** in its output.
+- **`sessions list` is DEFERRED** out of PR4 (Codex #6: the core already has the
+  singular `session list` for HISTORICAL sessions — a plural near-homonym addressing
+  normally-absent namespaces is a two-model trap and a half-RFC-038 API). The useful
+  current capability ships as **`bind --list`**: read-only inventory of the bindings
+  recorded in THIS relay (agent, identity per §9.5, bound_at, relay_session field).
+  The full namespace inventory returns with the RFC 038 resolver itself.
+
+### 9.5 Disclosure rule (Codex #5)
+
+ONE rule for every surface (ambiguity refusals, mismatch refusals, read-only warnings,
+JSON payloads): a candidate/bound root **outside the current project** is shown as
+**basename + stable short hash** (`…/<basename> [root:<sha256-10>]`), never the full
+foreign path — terminal and JSON output is routinely pasted into handoffs (RFC 052).
+The full canonical path lives only in the gitignored binding file; local forensics can
+read it there directly.
+
+### 9.6 Charter fit
 
 Local, stdlib-only, no network, no daemon. Fail-closed refusals trigger only on
-operator/agent-created state (a binding) or true ambiguity (two candidate relays); the
-zero-config path is untouched. The named-namespace resolver (§3) remains unimplemented;
-`relay_session` is recorded but only the default session is addressable until RFC 038
-lands fully.
+operator/agent-created state (a binding) or true ambiguity (two physically-distinct
+candidate relays); the zero-config path is untouched. Penless binding is admissible
+ONLY with the §9.3 serialization + live-pen guard. The named-namespace resolver (§3)
+remains unimplemented; `relay_session` is recorded but only the default session is
+addressable until RFC 038 lands fully.
 
-### 9.3 Acceptance criteria (implementation)
+### 9.7 Acceptance criteria (implementation)
 
 - No binding, no ambiguity → byte-identical behavior (full suite unaffected).
-- `M8SHIFT_ROOT` + differing cwd-local relay → every write verb refuses BEFORE any write,
-  naming both candidates; read-only verbs still work.
-- Binding mismatch → `may-i-write`/`claim`/`append` refuse; foreign path redacted in the
-  message; `bind --clear` + rebind recovers.
+- Two physically-distinct candidates → EVERY mutator in the §9.2 matrix refuses BEFORE
+  any write or lock-file creation, naming both candidates per §9.5; every listed
+  read-only command still works; `update --target` and `init` follow their §9.2
+  special-case rules.
+- Binding verification re-checked under the relay file lock (TOCTOU pin); mismatch →
+  refusal with §9.5 disclosure; `bind --clear` + rebind recovers.
 - Binding match resolves the A1 ambiguity to the bound relay.
-- `bind` is penless, idempotent, safe-name/JSON-shape validated, and never creates a
-  relay (binding to a missing relay is refused).
-- `sessions list` is read-only, single-project, and lists bindings per session.
-- Hygiene: binding files carry the OPERATOR'S OWN paths only (they never leave the
-  machine — gitignored like the rest of `.m8shift/` state).
+- `bind` with two candidates refuses without an explicit `--root` selector equal to a
+  displayed candidate (or a pre-existing resolving binding); it never env-wins silently.
+- `bind`/`bind --clear` refuse while the named agent holds a live WORKING lock in any
+  candidate; a stale lock requires explicit recovery first.
+- Symlinked same-physical-root checkouts are NOT ambiguous (samefile); `/Foo` vs `/foo`
+  on a case-sensitive filesystem ARE distinct.
+- `bind --show`/`--list` are read-only, lock-free, and disclose per §9.5.
+- Hygiene: binding files carry the operator's own paths only, gitignored with the rest
+  of `.m8shift/` state; no foreign full path ever reaches terminal/JSON output.
 
 ## 10. Recommendation
 
