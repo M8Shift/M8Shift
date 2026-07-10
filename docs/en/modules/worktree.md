@@ -42,13 +42,28 @@ Legend:
 
 | Command | Mutates | Reads | Writes | Notes |
 |---------|---------|-------|--------|-------|
-| `claim <id> <agent> --base <b> [--branch <b>]` | local-state | `M8SHIFT.md` (roster), git refs | `.m8shift/worktrees/<id>/` + git worktree admin | Adds a feature worktree; checks out an existing `--branch`, else creates it off `--base`. Refuses if the worktree path already exists. |
-| `done <id> <agent>` | local-state | `M8SHIFT.md` (roster) under `.m8shift.lock` | `.m8shift/done.log` | Dumb completion ledger line only; deliberately does NOT touch `M8SHIFT.tasks.md`. The real handoff is `integrate`. |
-| `integrate <id> <agent> --into <branch> --to <next>` | local-state + repository-code | `M8SHIFT.md` LOCK, git refs, integration tree | `M8SHIFT.md` (LOCK flips + turn), `.m8shift/worktrees/_integration/`, merge commit on `--into` | Serialized `--no-ff --no-commit` merge in the dedicated `_integration` tree; commits only after re-verifying holder+state+sentinel+HEAD under the lock, then hands the pen to `--to`. |
-| `drop <id> <agent> --yes` | local-state | filesystem | removes `.m8shift/worktrees/<id>/` | Never automatic (`--yes` required); `git worktree remove` refuses a dirty tree (no `--force`). |
-| `status [<id>]` | read-only | `M8SHIFT.md` LOCK, `git worktree list` | none | Prints core version, pen state/holder/turn, an in-flight `integrating:` sentinel if any, and the companion worktrees (filter by `<id>`). |
+| `claim <id> <agent> --base <b> [--branch <b>]` | local-state | `M8SHIFT.md` (roster), git refs | `.m8shift/worktrees/<id>/` + git worktree admin, `.m8shift/worktree-owners/<id>.json` | Adds a feature worktree; checks out an existing `--branch`, else creates it off `--base`. Refuses if the worktree path already exists. Records the claiming agent in the owner sidecar (RFC 049 PR C — best-effort: a failed sidecar write warns, never blocks). |
+| `done <id> <agent> [--takeover --reason TEXT]` | local-state | `M8SHIFT.md` (roster) under `.m8shift.lock`, owner sidecar | `.m8shift/done.log` (+ owner sidecar on takeover) | Dumb completion ledger line only; deliberately does NOT touch `M8SHIFT.tasks.md`. The real handoff is `integrate`. Refuses when a DIFFERENT agent owns the worktree unless `--takeover --reason` is explicit. |
+| `integrate <id> <agent> --into <branch> --to <next> [--takeover --reason TEXT]` | local-state + repository-code | `M8SHIFT.md` LOCK, git refs, integration tree, owner sidecar | `M8SHIFT.md` (LOCK flips + turn), `.m8shift/worktrees/_integration/`, merge commit on `--into` (+ owner sidecar on takeover) | Serialized `--no-ff --no-commit` merge in the dedicated `_integration` tree; commits only after re-verifying holder+state+sentinel+HEAD under the lock, then hands the pen to `--to`. The ownership guard runs FIRST — a cross-owner refusal happens before any pen flip. |
+| `drop <id> <agent> --yes [--takeover --reason TEXT]` | local-state | filesystem, owner sidecar | removes `.m8shift/worktrees/<id>/` and its owner sidecar | Never automatic (`--yes` required); `git worktree remove` refuses a dirty tree (no `--force`). Sidecar removal is best-effort (a leftover orphan is a doctor finding, never a failure). |
+| `status [<id>]` | read-only | `M8SHIFT.md` LOCK, `git worktree list`, owner sidecars | none | Prints core version, pen state/holder/turn, an in-flight `integrating:` sentinel if any, and the companion worktrees with their recorded owner (`owner=?` when the sidecar is absent/unusable). |
+| `doctor [--json]` | read-only | `M8SHIFT.md` (roster), `git worktree list`, owner sidecars | none | RFC 049 PR C advisory findings: `worktree.owner_missing` (managed worktree without a USABLE sidecar — absent or malformed) and `worktree.owner_mismatch` (recorded agent/path/branch conflicts with reality, or an orphan sidecar). Never repairs, never gates: rc 0 always. |
 
 `Mutates` classifies FILE mutation only. `local-state` = writes under `M8SHIFT.*` or `.m8shift/`. `integrate` is additionally `repository-code` because a successful merge creates a real merge commit that advances the `--into` branch. No command performs `external` (network) mutation.
+
+### Ownership guard (RFC 049 PR C — advisory, never a security boundary)
+
+`claim` records `{schema: m8shift.worktree_owner.v1, id, agent, created_at, path, branch}`
+in `.m8shift/worktree-owners/<id>.json` — deliberately OUTSIDE the checkout, so a peer
+editing inside the worktree can never rewrite who owns it. `done`/`integrate`/`drop`
+refuse when the recorded owner is a DIFFERENT agent, unless `--takeover --reason TEXT`
+is explicit; a takeover re-stamps the sidecar with an audit trail
+(`taken_over_from`/`takeover_reason`/`takeover_at`) and preserves the original
+`created_at`. The reader is bounded and fail-open (`O_NOFOLLOW`, regular-file only,
+8 KiB cap, tolerant JSON): a malformed, symlinked, or oversized sidecar reads as "no
+recorded owner" — the verb proceeds and `doctor` reports the gap. Direct `git`, editor,
+or filesystem writes never pass through the companion and cannot be refused (RFC 049
+"Security and prompt boundaries").
 
 ## Inputs and outputs
 
@@ -56,11 +71,13 @@ Legend:
 
 - `M8SHIFT.md` — the canonical LOCK block and roster, via the core's `load_or_die` / `get_lock` / `active_agents` helpers.
 - Git repository state — refs, `git worktree list --porcelain`, `MERGE_HEAD`, working-tree status.
+- `.m8shift/worktree-owners/<id>.json` — the ownership sidecar (bounded fail-open read; `status`, `doctor`, and the mutating verbs' advisory guard).
 
 **Files written**
 
 - `.m8shift/worktrees/<id>/` — one linked git worktree per feature lane (`claim`), removed by `drop`.
 - `.m8shift/worktrees/_integration/` — the single dedicated integration checkout, created on demand by `integrate` and kept on the target branch.
+- `.m8shift/worktree-owners/<id>.json` — ownership metadata OUTSIDE the checkout (`claim` records, an explicit `--takeover` re-stamps with an audit trail, `drop` removes best-effort). Advisory, never authority.
 - `.m8shift/done.log` — the degree-2 completion ledger (`done`), created with a header on first append.
 - `M8SHIFT.md` — the LOCK (holder/state/turn/`since`/`expires`/`integrating` sentinel) and an appended immutable turn block, flipped by `integrate` only. All LOCK writes happen under the core `.m8shift.lock` file lock and only around the fast flips — never around `git merge`.
 
@@ -113,10 +130,13 @@ python3 m8shift-worktree.py integrate feat-login alice --into main --to bob
 - **`lost the .m8shift.lock token during the pen claim`** — the file lock was lost before the merge started (no merge began); simply retry.
 - **`not inside a git repository (and $M8SHIFT_ROOT is unset)` / `bare/ambiguous git layout`** — run from inside the repo or set `M8SHIFT_ROOT` to the canonical root.
 - **`drop needs --yes`** — a worktree is never removed automatically; confirm with `--yes` (and note `git worktree remove` still refuses a dirty tree).
+- **`worktree <id> is owned by <agent> (advisory sidecar)`** — another agent claimed this lane (RFC 049 PR C). Coordinate through the relay, or take it over explicitly with `--takeover --reason TEXT` (audited in the sidecar).
+- **`--takeover requires a non-empty --reason`** — the override is deliberate and audited; state why.
 
 ## Related RFCs and tests
 
 - Owning design: [RFC 008 — Worktree companion](../rfc/008-rfc-worktree-companion.md) (the converged v1 contract this script implements).
+- Ownership sidecar/guard + `doctor` findings: [RFC 049 — Holder liveness and stale-claim hardening](../rfc/049-rfc-holder-liveness-stale-claim-hardening.md) (PR C).
 - Module reference: [RFC 045 — Module reference and executable examples](../rfc/045-rfc-module-reference-examples.md).
 - Related: [RFC 009 — Runtime companion](../rfc/009-rfc-runtime-companion.md), [RFC 044 — Complete initialization and companion install](../rfc/044-rfc-complete-init-companion-install.md).
 - Tests: [`tests/test_worktree.py`](../../../tests/test_worktree.py).

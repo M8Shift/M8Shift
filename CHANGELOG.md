@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+**RFC 049 PR C — worktree ownership sidecar and advisory guard (#104).**
+`m8shift-worktree.py claim` now records the claiming agent in
+`.m8shift/worktree-owners/<id>.json` (`m8shift.worktree_owner.v1`) —
+deliberately OUTSIDE the checkout, so a peer editing inside the worktree can
+never rewrite who owns it. `done`/`integrate`/`drop` refuse when a DIFFERENT
+agent owns the worktree unless `--takeover --reason TEXT` is explicit; a
+takeover re-stamps the sidecar with an audit trail (previous owner, reason,
+timestamp) and preserves the original `created_at`; the `integrate` guard runs
+BEFORE any pen flip. `drop` cleans the sidecar best-effort; `status` shows the
+recorded owner per worktree (`owner=?` when unusable). New read-only
+`doctor [--json]` emits the advisory findings `worktree.owner_missing`
+(managed worktree without a USABLE sidecar — absent or malformed, matching the
+fail-open guard) and `worktree.owner_mismatch` (recorded agent/path/branch
+conflicts with reality, or an orphan sidecar) — never repairs, never gates.
+The sidecar read is bounded and fail-open (`O_NOFOLLOW`, regular-file only,
+8 KiB cap, tolerant JSON): a malformed or symlinked sidecar never bricks a
+verb. This is an ADVISORY companion guardrail, never a security boundary —
+direct git/editor/filesystem writes do not pass through the companion
+(RFC 049 "Security and prompt boundaries"). 10 new tests.
+
 **Unified multi-window usage line (#106, RFC 051 amendment E).** The
 `── usage ──` block in `status`/`watch` now renders EVERY plausible
 `windows[]` entry inline — consumed percentage plus its reset —

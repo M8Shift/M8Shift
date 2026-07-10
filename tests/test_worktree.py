@@ -291,6 +291,145 @@ class TestCanonicalRootPinning(WTBase):
         self.assertFalse(os.path.exists(os.path.join(wtdir, "M8SHIFT.md")))   # no worktree-local copy
 
 
+class TestRFC049PRCOwnership(WTBase):
+    """RFC 049 PR C: owner sidecar OUTSIDE the checkout + ADVISORY cross-owner guard on the
+    companion's mutating verbs (`--takeover --reason` = the explicit, audited override) +
+    read-only `doctor` findings. Never a security boundary: a malformed/absent sidecar
+    FAILS OPEN (verbs proceed; doctor reports the gap)."""
+
+    def owner_file(self, idv):
+        return os.path.join(self.d, ".m8shift", "worktree-owners", f"{idv}.json")
+
+    def read_owner(self, idv):
+        import json
+        with open(self.owner_file(idv), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def doctor_findings(self):
+        import json
+        r = self.wt("doctor", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return json.loads(r.stdout)["findings"]
+
+    # ── sidecar lifecycle ─────────────────────────────────────────────────────
+    def test_claim_records_ownership_outside_checkout(self):
+        self.assertEqual(self.wt("claim", "feat-a", "claude", "--base", "main").returncode, 0)
+        doc = self.read_owner("feat-a")
+        self.assertEqual(doc["schema"], "m8shift.worktree_owner.v1")
+        self.assertEqual(doc["agent"], "claude")
+        self.assertEqual(doc["id"], "feat-a")
+        self.assertEqual(doc["branch"], "feat-a")
+        self.assertEqual(doc["path"], os.path.join(".m8shift", "worktrees", "feat-a"))
+        self.assertRegex(doc["created_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        # OUTSIDE the checkout: not under the worktree the peer edits in
+        self.assertFalse(self.owner_file("feat-a").startswith(
+            os.path.join(self.d, ".m8shift", "worktrees", "feat-a") + os.sep))
+
+    def test_drop_by_owner_removes_sidecar(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        self.assertEqual(self.wt("drop", "feat-a", "claude", "--yes").returncode, 0)
+        self.assertFalse(os.path.exists(self.owner_file("feat-a")))
+
+    # ── advisory cross-owner guard ────────────────────────────────────────────
+    def test_cross_owner_verbs_refused_without_takeover(self):
+        self.claim_and_commit("feat-a", "a.txt", "from A\n")
+        for verb in (["done", "feat-a", "codex"],
+                     ["drop", "feat-a", "codex", "--yes"],
+                     ["integrate", "feat-a", "codex", "--into", "main", "--to", "claude"]):
+            r = self.wt(*verb)
+            self.assertNotEqual(r.returncode, 0, verb)
+            self.assertIn("owned by 'claude'", r.stderr)
+        # the integrate refusal happened BEFORE any pen flip
+        lk = self.lock()
+        self.assertEqual(lk["state"], "IDLE")
+        self.assertNotIn("integrating", lk)
+        self.assertTrue(os.path.isdir(os.path.join(self.d, ".m8shift", "worktrees", "feat-a")))
+        self.assertEqual(self.read_owner("feat-a")["agent"], "claude")   # sidecar untouched
+
+    def test_takeover_requires_nonempty_reason(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        for extra in (["--takeover"], ["--takeover", "--reason", "  "]):
+            r = self.wt("done", "feat-a", "codex", *extra)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("--reason", r.stderr)
+        self.assertEqual(self.read_owner("feat-a")["agent"], "claude")
+
+    def test_takeover_audits_and_preserves_created_at(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        before = self.read_owner("feat-a")["created_at"]
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "peer unresponsive")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("takeover", r.stdout)
+        doc = self.read_owner("feat-a")
+        self.assertEqual(doc["agent"], "codex")
+        self.assertEqual(doc["taken_over_from"], "claude")
+        self.assertEqual(doc["takeover_reason"], "peer unresponsive")
+        self.assertEqual(doc["created_at"], before)          # original claim time preserved
+        self.assertRegex(doc["takeover_at"], r"Z$")
+
+    def test_same_owner_never_gated(self):
+        self.claim_and_commit("feat-a", "a.txt", "from A\n")
+        self.assertEqual(self.wt("done", "feat-a", "claude").returncode, 0)
+        r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_malformed_sidecar_fails_open_and_doctor_flags(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        with open(self.owner_file("feat-a"), "w") as fh:
+            fh.write("{not json")
+        # advisory guard fails OPEN — the verb proceeds without --takeover
+        self.assertEqual(self.wt("done", "feat-a", "codex").returncode, 0)
+        found = [f for f in self.doctor_findings() if f["worktree"] == "feat-a"]
+        self.assertEqual([f["id"] for f in found], ["worktree.owner_missing"])
+
+    def test_symlinked_sidecar_ignored(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        real = self.owner_file("feat-a")
+        aside = real + ".real"
+        os.rename(real, aside)
+        os.symlink(aside, real)                              # O_NOFOLLOW must refuse it
+        self.assertEqual(self.wt("done", "feat-a", "codex").returncode, 0)   # fail-open
+        found = [f for f in self.doctor_findings() if f["worktree"] == "feat-a"]
+        self.assertEqual([f["id"] for f in found], ["worktree.owner_missing"])
+
+    # ── doctor matrix ─────────────────────────────────────────────────────────
+    def test_doctor_clean_missing_mismatch_orphan(self):
+        import json
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        self.wt("claim", "feat-b", "codex", "--base", "main")
+        self.assertEqual(self.doctor_findings(), [])         # clean → no findings
+        r = self.wt("doctor")
+        self.assertIn("no findings", r.stdout)
+        # missing: delete feat-a's sidecar
+        os.unlink(self.owner_file("feat-a"))
+        # mismatch: falsify feat-b's branch + a non-roster owner
+        doc = self.read_owner("feat-b")
+        doc["branch"], doc["agent"] = "wrong", "mallory"
+        with open(self.owner_file("feat-b"), "w") as fh:
+            json.dump(doc, fh)
+        # orphan: sidecar for a worktree that does not exist
+        ghost = {"schema": "m8shift.worktree_owner.v1", "id": "ghost", "agent": "claude",
+                 "created_at": "2026-01-01T00:00:00Z", "path": "x", "branch": "x"}
+        with open(self.owner_file("ghost"), "w") as fh:
+            json.dump(ghost, fh)
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+        self.assertEqual(by["feat-b"]["id"], "worktree.owner_mismatch")
+        self.assertIn("mallory", by["feat-b"]["detail"])
+        self.assertIn("wrong", by["feat-b"]["detail"])
+        self.assertEqual(by["ghost"]["id"], "worktree.owner_mismatch")
+        self.assertIn("orphan", by["ghost"]["detail"])
+        # doctor is advisory: findings never flip the exit code
+        self.assertEqual(self.wt("doctor").returncode, 0)
+
+    def test_status_shows_owner_column(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        out = self.wt("status").stdout
+        self.assertIn("owner=claude", out)
+        os.unlink(self.owner_file("feat-a"))
+        self.assertIn("owner=?", self.wt("status").stdout)   # unusable sidecar → honest "?"
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_worktree.py {VERSION}")
