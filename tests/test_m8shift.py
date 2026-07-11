@@ -9299,6 +9299,25 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
             "claude", self.NOW)
         self.assertEqual(fx["used_tokens"], 150)
 
+    def test_zero_valued_parts_leaf_is_recognized_and_shields_breakdown(self):
+        # Review round 2: presence must be explicit, never list/sum
+        # truthiness. A zero-valued recognized leaf counts ZERO (data, not
+        # unknown) and still shields its nested breakdown...
+        mod = self._example()
+        fx = mod.build_fixture(
+            {"inputTokens": 0, "usage": {"inputTokens": 100}},
+            "claude", self.NOW)
+        self.assertEqual(fx["used_tokens"], 0)                 # not 100, not None
+        # ...a container above a zero leaf recurses and stays recognized...
+        fx = mod.build_fixture({"usage": {"inputTokens": 0}}, "claude", self.NOW)
+        self.assertEqual(fx["used_tokens"], 0)
+        # ...an explicit zero total is data too...
+        fx = mod.build_fixture({"totalTokens": 0}, "claude", self.NOW)
+        self.assertEqual(fx["used_tokens"], 0)
+        # ...while NO recognized key anywhere stays unknown (never zero).
+        fx = mod.build_fixture({"noise": {"unrelated": 5}}, "claude", self.NOW)
+        self.assertIsNone(fx["used_tokens"])
+
     def test_never_submit_guard_refuses_before_launch(self):
         mod = self._example()
         launched = []

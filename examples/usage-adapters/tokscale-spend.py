@@ -100,29 +100,44 @@ def _sum_tokens(node, depth=0, budget=None):
          {"inputTokens": 100}} counts 100, not 200);
       3. a container — no total, no parts: recurse into children.
     Unknown fields are ignored. Never raises.
+
+    Returns (tokens, recognized): `recognized` is True only when at least one
+    recognized total/part key converted successfully somewhere — presence is
+    tracked EXPLICITLY (never via list/sum truthiness), so a legitimate
+    zero-valued leaf ({"inputTokens": 0}) is a recognized parts leaf that
+    counts 0 and still shields its nested breakdown, while a payload with no
+    recognized key at all stays unrecognized (unknown, not zero).
     """
     if budget is None:
         budget = [_MAX_NODES]
     if depth > _MAX_DEPTH or budget[0] <= 0:
-        return 0
+        return 0, False
     budget[0] -= 1
     if isinstance(node, list):
-        return sum(_sum_tokens(item, depth + 1, budget) for item in node)
+        subtotal, recognized = 0, False
+        for item in node:
+            tokens, seen = _sum_tokens(item, depth + 1, budget)
+            subtotal += tokens
+            recognized = recognized or seen
+        return subtotal, recognized
     if not isinstance(node, dict):
-        return 0
+        return 0, False
     for key in _TOTAL_KEYS:
         total = _as_count(node.get(key))
         if total is not None:
-            return total
-    parts = [count for count in (_as_count(node.get(key)) for key in _PART_KEYS)
-             if count is not None]
-    if parts:
-        return sum(parts)
-    subtotal = 0
+            return total, True
+    part_counts = [count for count in
+                   (_as_count(node.get(key)) for key in _PART_KEYS)
+                   if count is not None]
+    if len(part_counts) > 0:               # explicit presence, NOT truthiness
+        return sum(part_counts), True
+    subtotal, recognized = 0, False
     for value in node.values():
         if isinstance(value, (dict, list)):
-            subtotal += _sum_tokens(value, depth + 1, budget)
-    return subtotal
+            tokens, seen = _sum_tokens(value, depth + 1, budget)
+            subtotal += tokens
+            recognized = recognized or seen
+    return subtotal, recognized
 
 
 def build_fixture(payload, agent, now_iso):
@@ -132,9 +147,11 @@ def build_fixture(payload, agent, now_iso):
     into the fixture; never invents windows or limits.
     """
     try:
-        total = _sum_tokens(payload)
+        total, recognized = _sum_tokens(payload)
         fixture = _empty_fixture(agent, now_iso)
-        if total > 0:
+        if recognized:
+            # A recognized zero is DATA (0 tokens spent), not unknown; only a
+            # payload with no recognized key at all stays used_tokens null.
             fixture["used_tokens"] = total
         return fixture
     except Exception:
