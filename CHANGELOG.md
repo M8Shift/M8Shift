@@ -2,6 +2,103 @@
 
 ## Unreleased
 
+**RFC 049 PR C — worktree ownership sidecar and advisory guard (#104).**
+`m8shift-worktree.py claim` now records the claiming agent in
+`.m8shift/worktree-owners/<id>.json` (`m8shift.worktree_owner.v1`) — a SIBLING
+of the checkout (not a file inside it), so normal edits confined to the
+worktree do not touch it. `done`/`integrate`/`drop` refuse when a DIFFERENT
+agent owns the worktree unless `--takeover --reason TEXT` is explicit; a
+takeover re-stamps the sidecar with an audit trail (previous owner, reason,
+timestamp) and preserves the original `created_at`. New read-only
+`doctor [--json]` emits `worktree.owner_missing` (managed worktree without a
+USABLE sidecar) and `worktree.owner_mismatch` (well-shaped metadata conflicting
+with roster/path/branch, or an orphan sidecar) — never repairs, never gates.
+This is an ADVISORY companion guardrail, NOT a security boundary (direct
+git/editor/filesystem writes never pass through the companion, RFC 049
+"Security and prompt boundaries"), but the mechanism is hardened:
+
+- **Actor-first.** Every actor is roster-validated BEFORE any owner read/write
+  or destruction — an unknown agent can no longer drop or take over a worktree.
+- **Per-id ownership lock + generation-aware compare-and-swap.** Every
+  ownership mutation for a worktree id — `claim` create, `done`/`integrate`/
+  `drop` takeover, and `drop`'s WHOLE authorize→remove→cleanup span — runs under
+  a per-id lock (`.m8shift/worktree-owners/<id>.lock`), finer-grained than the
+  global core lock so `git worktree remove` never freezes the relay yet no
+  concurrent takeover can slip between a drop's authorization and its removal.
+  Under that lock the takeover ticket (captured beforehand) is an OPTIMISTIC
+  EXPECTATION, not authority: the commit re-reads the current owner and requires
+  it to still equal the ticket's expected prior owner AND its per-claim
+  GENERATION nonce, refusing (writing nothing) otherwise. Each `claim` stamps a
+  fresh nonce and a takeover preserves it, so a drop + re-claim by the SAME
+  agent yields a new generation the stale ticket can never match (agent-name ABA
+  is defeated). `integrate` re-applies a supplied takeover even on the resume
+  path (a sidecar that went foreign mid-integration is never bypassed). A `drop`
+  whose post-removal completion audit cannot be written reports a bounded
+  partial-failure (rc 2) instead of a silent full success. The per-id lock
+  breaks a stale lock ONLY when its recorded holder PID is provably dead and its
+  inode/token is unchanged (a slow-but-live `git worktree add/remove` is never
+  stolen), never reclaims or spins on a directory/non-regular lock (the
+  contender times out BUSY), unlinks only its own unchanged token on release,
+  and FAILS CLOSED on a lock-acquisition error in a SAFE owners directory rather
+  than running a mutation unserialized.
+- **Durable audit + atomic `integrate`.** Every takeover appends to a durable
+  append-only ledger (`.m8shift/worktree-owners/_takeovers.jsonl`) — the audit
+  that survives a `drop` (which destroys the sidecar): drop records `authorized`
+  before the removal and `completed` after, distinguishing an authorized-but-
+  failed drop from a completed one. For `integrate`, the authoritative pen
+  check, the mandatory audit, and the pen flip are ONE serialized phase under
+  the core file lock: a busy pen transfers nothing and a failed audit flips
+  nothing (the become-busy race is closed, not merely narrowed). Every mandatory
+  audit is durable-ledger-first and fails CLOSED — a failed write leaves
+  ownership unchanged and reports failure instead of printing success.
+- **Path-safe writes.** Writes go through the core's unpredictable-temp
+  `+ os.replace` primitive inside a validated real parent (no symlinked
+  `.m8shift`/`worktree-owners` component; contained in ROOT by realpath/
+  commonpath). Precise guarantee: a pre-existing symlinked parent or a
+  preplanted fixed-temp is refused; a live privileged attacker *concurrently*
+  swapping a parent into a symlink between validation and use (classic TOCTOU,
+  no portable stdlib `openat2(RESOLVE_NO_SYMLINKS)` on `makedirs`/`replace`) is
+  the same out-of-scope write class the RFC 049 threat model already excludes —
+  documented, not papered over.
+- **Strict semantic reader + sanitized output.** The reader is bounded,
+  path-safe, and STRICT: schema, exact id, roster-shaped agent, a REAL canonical
+  UTC-Z `created_at` (an impossible `2026-99-99T99:99:99Z` is rejected, not just
+  shape-checked), a bounded relative path, a NON-EMPTY branch, and an all-or-none
+  takeover audit tuple (a partial/ANSI/oversized/impossible-time audit makes the
+  whole doc malformed). A malformed/symlinked/oversized/wrong-shaped sidecar
+  reads as `owner_missing`; well-shaped metadata conflicting with reality
+  (off-roster agent, wrong path, or a recorded branch while the worktree is
+  DETACHED) is `owner_mismatch`. No recorded agent/id/path/reason, orphan
+  filename, or foreign-checkout path is ever echoed raw — every untrusted string
+  (including the `status` worktree name and `integrate` error paths) is reduced
+  to printable ASCII (RFC 052 §9.5). `status` lists a DETACHED-HEAD worktree
+  (marked `(detached)`) and shows `owner=n/a` for the shared `_integration`
+  tree, so it agrees with `doctor`/`_managed_worktrees`.
+
+A self-run adversarial hunt over the ledger + under-lock rework confirmed the
+`integrate` atomicity and closed a robustness asymmetry: the ledger writer now
+mirrors the reader's `O_NONBLOCK` + `S_ISREG` guard, so a FIFO planted at the
+ledger path fails closed instead of BLOCKING a write-only open forever (which
+would freeze the relay under the global lock). Timestamp validation is now
+strictly canonical — the string must equal the re-rendered
+`strftime("%Y-%m-%dT%H:%M:%SZ")` of a real instant, rejecting single-digit
+fields, whitespace padding, and non-ASCII year digits that bare `strptime`
+would accept — and a whitespace-only `takeover_reason` no longer validates.
+
+52 new tests (10 lifecycle/guard/doctor + 42 adversarial hardening: tmp/dir
+symlink escape, FIFO-ledger fail-closed-no-hang, unknown-actor destruction,
+durable drop audit + dirty-tree attempted-vs-completed + no-phantom-on-missing,
+deterministic ledger-dir fail-closed audit, a git-hook race seam proving
+`integrate` atomicity, driver-level compare-and-swap concurrency (stale-ticket
+refusal, truthful `from`, resume re-applies takeover, cmd_drop completed-audit
+failure surfaced rc 2, same-agent drop/reclaim ABA refused by the generation
+nonce, drop authorize↔removal atomic vs a foreign takeover), per-id lock
+robustness (live long-holder not stolen, dead-holder reclaimed, directory-lock
+no-hang, cleanup never unlinks a successor, safe-dir acquisition fails closed, Windows tasklist probe fail-safe, malformed-token no-reclaim),
+impossible/non-canonical-calendar, empty-branch, detached,
+all-or-none-audit-tuple/whitespace-reason schema, ANSI/oversized/traversal,
+detached-HEAD + `_integration` status↔doctor agreement).
+
 **Unified multi-window usage line (#106, RFC 051 amendment E).** The
 `── usage ──` block in `status`/`watch` now renders EVERY plausible
 `windows[]` entry inline — consumed percentage plus its reset —

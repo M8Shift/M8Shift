@@ -8,12 +8,14 @@ re-integrate, conflict-abort + handoff (no stuck WORKING), pen-busy refusal, tar
 refusal, the integrating: sentinel force-guard, committed-but-unhanded retry, path-safety, and
 canonical-root pinning from a linked worktree.
 """
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -289,6 +291,831 @@ class TestCanonicalRootPinning(WTBase):
         # the canonical LOCK (in the root) advanced — proof the linked worktree used it
         self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
         self.assertFalse(os.path.exists(os.path.join(wtdir, "M8SHIFT.md")))   # no worktree-local copy
+
+
+class TestRFC049PRCOwnership(WTBase):
+    """RFC 049 PR C: owner sidecar OUTSIDE the checkout + ADVISORY cross-owner guard on the
+    companion's mutating verbs (`--takeover --reason` = the explicit, audited override) +
+    read-only `doctor` findings. Never a security boundary: a malformed/absent sidecar
+    FAILS OPEN (verbs proceed; doctor reports the gap)."""
+
+    def owner_file(self, idv):
+        return os.path.join(self.d, ".m8shift", "worktree-owners", f"{idv}.json")
+
+    def read_owner(self, idv):
+        with open(self.owner_file(idv), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def doctor_findings(self):
+        r = self.wt("doctor", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return json.loads(r.stdout)["findings"]
+
+    # ── sidecar lifecycle ─────────────────────────────────────────────────────
+    def test_claim_records_ownership_outside_checkout(self):
+        self.assertEqual(self.wt("claim", "feat-a", "claude", "--base", "main").returncode, 0)
+        doc = self.read_owner("feat-a")
+        self.assertEqual(doc["schema"], "m8shift.worktree_owner.v1")
+        self.assertEqual(doc["agent"], "claude")
+        self.assertEqual(doc["id"], "feat-a")
+        self.assertEqual(doc["branch"], "feat-a")
+        self.assertEqual(doc["path"], os.path.join(".m8shift", "worktrees", "feat-a"))
+        self.assertRegex(doc["created_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        # OUTSIDE the checkout: not under the worktree the peer edits in
+        self.assertFalse(self.owner_file("feat-a").startswith(
+            os.path.join(self.d, ".m8shift", "worktrees", "feat-a") + os.sep))
+
+    def test_drop_by_owner_removes_sidecar(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        self.assertEqual(self.wt("drop", "feat-a", "claude", "--yes").returncode, 0)
+        self.assertFalse(os.path.exists(self.owner_file("feat-a")))
+
+    # ── advisory cross-owner guard ────────────────────────────────────────────
+    def test_cross_owner_verbs_refused_without_takeover(self):
+        self.claim_and_commit("feat-a", "a.txt", "from A\n")
+        for verb in (["done", "feat-a", "codex"],
+                     ["drop", "feat-a", "codex", "--yes"],
+                     ["integrate", "feat-a", "codex", "--into", "main", "--to", "claude"]):
+            r = self.wt(*verb)
+            self.assertNotEqual(r.returncode, 0, verb)
+            self.assertIn("owned by 'claude'", r.stderr)
+        # the integrate refusal happened BEFORE any pen flip
+        lk = self.lock()
+        self.assertEqual(lk["state"], "IDLE")
+        self.assertNotIn("integrating", lk)
+        self.assertTrue(os.path.isdir(os.path.join(self.d, ".m8shift", "worktrees", "feat-a")))
+        self.assertEqual(self.read_owner("feat-a")["agent"], "claude")   # sidecar untouched
+
+    def test_takeover_requires_nonempty_reason(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        for extra in (["--takeover"], ["--takeover", "--reason", "  "]):
+            r = self.wt("done", "feat-a", "codex", *extra)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("--reason", r.stderr)
+        self.assertEqual(self.read_owner("feat-a")["agent"], "claude")
+
+    def test_takeover_audits_and_preserves_created_at(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        before = self.read_owner("feat-a")["created_at"]
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "peer unresponsive")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("takeover", r.stdout)
+        doc = self.read_owner("feat-a")
+        self.assertEqual(doc["agent"], "codex")
+        self.assertEqual(doc["taken_over_from"], "claude")
+        self.assertEqual(doc["takeover_reason"], "peer unresponsive")
+        self.assertEqual(doc["created_at"], before)          # original claim time preserved
+        self.assertRegex(doc["takeover_at"], r"Z$")
+
+    def test_same_owner_never_gated(self):
+        self.claim_and_commit("feat-a", "a.txt", "from A\n")
+        self.assertEqual(self.wt("done", "feat-a", "claude").returncode, 0)
+        r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_malformed_sidecar_fails_open_and_doctor_flags(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        with open(self.owner_file("feat-a"), "w") as fh:
+            fh.write("{not json")
+        # advisory guard fails OPEN — the verb proceeds without --takeover
+        self.assertEqual(self.wt("done", "feat-a", "codex").returncode, 0)
+        found = [f for f in self.doctor_findings() if f["worktree"] == "feat-a"]
+        self.assertEqual([f["id"] for f in found], ["worktree.owner_missing"])
+
+    def test_symlinked_sidecar_ignored(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        real = self.owner_file("feat-a")
+        aside = real + ".real"
+        os.rename(real, aside)
+        os.symlink(aside, real)                              # O_NOFOLLOW must refuse it
+        self.assertEqual(self.wt("done", "feat-a", "codex").returncode, 0)   # fail-open
+        found = [f for f in self.doctor_findings() if f["worktree"] == "feat-a"]
+        self.assertEqual([f["id"] for f in found], ["worktree.owner_missing"])
+
+    # ── doctor matrix ─────────────────────────────────────────────────────────
+    def test_doctor_clean_missing_mismatch_orphan(self):
+        import json
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        self.wt("claim", "feat-b", "codex", "--base", "main")
+        self.assertEqual(self.doctor_findings(), [])         # clean → no findings
+        r = self.wt("doctor")
+        self.assertIn("no findings", r.stdout)
+        # missing: delete feat-a's sidecar
+        os.unlink(self.owner_file("feat-a"))
+        # mismatch: falsify feat-b's branch + a non-roster owner
+        doc = self.read_owner("feat-b")
+        doc["branch"], doc["agent"] = "wrong", "mallory"
+        with open(self.owner_file("feat-b"), "w") as fh:
+            json.dump(doc, fh)
+        # orphan: sidecar for a worktree that does not exist
+        ghost = {"schema": "m8shift.worktree_owner.v1", "id": "ghost", "agent": "claude",
+                 "created_at": "2026-01-01T00:00:00Z", "path": "x", "branch": "x"}
+        with open(self.owner_file("ghost"), "w") as fh:
+            json.dump(ghost, fh)
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+        self.assertEqual(by["feat-b"]["id"], "worktree.owner_mismatch")
+        self.assertIn("mallory", by["feat-b"]["detail"])
+        self.assertIn("wrong", by["feat-b"]["detail"])
+        self.assertEqual(by["ghost"]["id"], "worktree.owner_mismatch")
+        self.assertIn("orphan", by["ghost"]["detail"])
+        # doctor is advisory: findings never flip the exit code
+        self.assertEqual(self.wt("doctor").returncode, 0)
+
+    def test_status_shows_owner_column(self):
+        self.wt("claim", "feat-a", "claude", "--base", "main")
+        out = self.wt("status").stdout
+        self.assertIn("owner=claude", out)
+        os.unlink(self.owner_file("feat-a"))
+        self.assertIn("owner=?", self.wt("status").stdout)   # unusable sidecar → honest "?"
+
+
+class TestRFC049PRCHardening(WTBase):
+    """RFC 049 PR C adversarial hardening (Codex PR C review, 6 findings). The owner
+    sidecar is advisory, but its WRITES must not escape the project, its ACTORS must be
+    roster-validated before any read/write/destruction, a mandatory takeover audit must
+    fail CLOSED, hostile recorded metadata must never reach the terminal raw, and status
+    must agree with doctor."""
+
+    OWNERS_REL = os.path.join(".m8shift", "worktree-owners")
+
+    def owner_file(self, idv):
+        return os.path.join(self.d, self.OWNERS_REL, f"{idv}.json")
+
+    def write_raw(self, idv, text):
+        os.makedirs(os.path.join(self.d, self.OWNERS_REL), exist_ok=True)
+        with open(self.owner_file(idv), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    GEN = "a" * 32                                      # a valid 16-byte hex generation nonce
+
+    def doc(self, idv, **over):
+        base = {"schema": "m8shift.worktree_owner.v1", "id": idv, "agent": "claude",
+                "created_at": "2026-01-01T00:00:00Z",
+                "path": os.path.join(".m8shift", "worktrees", idv), "branch": idv,
+                "gen": self.GEN}
+        base.update(over)
+        return base
+
+    def doctor_findings(self):
+        r = self.wt("doctor", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return json.loads(r.stdout)["findings"]
+
+    def read_owner_agent(self, idv):
+        with open(self.owner_file(idv)) as fh:
+            return json.load(fh)["agent"]
+
+    def ledger_records(self):
+        path = os.path.join(self.d, self.OWNERS_REL, "_takeovers.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh if l.strip()]
+
+    _DRIVER_PREAMBLE = (
+        "import importlib.util, os, json, sys\n"
+        "cs=importlib.util.spec_from_file_location('m8shift','m8shift.py')\n"
+        "core=importlib.util.module_from_spec(cs); cs.loader.exec_module(core)\n"
+        "ws=importlib.util.spec_from_file_location('wt','m8shift-worktree.py')\n"
+        "wt=importlib.util.module_from_spec(ws); ws.loader.exec_module(wt)\n"
+        "wt.ROOT=os.getcwd(); core.configure_root(os.getcwd())\n"
+    )
+
+    def driver(self, code):
+        """Run an in-process driver against the copied core+companion (ROOT-configured), so a
+        deterministic concurrency scenario can call the takeover functions directly — no
+        timing/interleaving. Returns the CompletedProcess."""
+        script = os.path.join(self.d, "_driver.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(self._DRIVER_PREAMBLE + code)
+        return run([sys.executable, script], self.d)
+
+    # ── finding 1: writes must never escape the project ───────────────────────
+    def test_takeover_tmp_symlink_does_not_overwrite_external_file(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        external = os.path.join(self.d, "external-sentinel.txt")
+        with open(external, "w") as fh:
+            fh.write("UNTOUCHED")
+        # preplant the OLD fixed temp name as a symlink to the external file
+        os.symlink(external, self.owner_file("feat-a") + ".tmp")
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)          # write goes through a UNIQUE temp
+        with open(external) as fh:
+            self.assertEqual(fh.read(), "UNTOUCHED")         # external bytes intact
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+
+    def test_symlinked_owners_dir_refuses_writes(self):
+        # a symlinked owners directory would let O_NOFOLLOW-on-final escape via the parent
+        m8 = os.path.join(self.d, ".m8shift")
+        os.makedirs(m8, exist_ok=True)
+        target = os.path.join(self.d, "evil-owners")
+        os.makedirs(target)
+        os.symlink(target, os.path.join(m8, "worktree-owners"))
+        r = self.wt("claim", "feat-a", "claude", "--base", "main")
+        self.assertEqual(r.returncode, 0)                    # worktree still created
+        self.assertIn("not recorded", r.stderr)              # sidecar write REFUSED
+        self.assertFalse(os.path.exists(os.path.join(target, "feat-a.json")))  # no escape write
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")  # doctor flags the gap
+
+    # ── finding 2: actor roster-validated before any owner op / destruction ───
+    def test_drop_refuses_unknown_agent_even_with_missing_sidecar(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        os.unlink(self.owner_file("feat-a"))                # malformed/absent → fail-open read
+        r = self.wt("drop", "feat-a", "mallory", "--yes")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("unknown agent", r.stderr)
+        self.assertTrue(os.path.isdir(                       # worktree NOT deleted
+            os.path.join(self.d, ".m8shift", "worktrees", "feat-a")))
+
+    def test_all_verbs_reject_unknown_actor_before_side_effects(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        before = self.read_owner_agent("feat-a")
+        for verb in (["done", "feat-a", "mallory", "--takeover", "--reason", "x"],
+                     ["drop", "feat-a", "mallory", "--yes", "--takeover", "--reason", "x"],
+                     ["integrate", "feat-a", "mallory", "--into", "main", "--to", "claude",
+                      "--takeover", "--reason", "x"]):
+            r = self.wt(*verb)
+            self.assertEqual(r.returncode, 1, verb)
+            self.assertIn("unknown agent", r.stderr, verb)
+            self.assertEqual(self.read_owner_agent("feat-a"), before)   # sidecar unchanged
+            self.assertEqual(self.lock()["state"], "IDLE")              # no pen flip
+        self.assertNotIn("mallory", self.git(
+            "log", "--all", "--oneline", check=False).stdout)
+
+    # ── finding 3: failed audit / failed precondition never transfers ownership ─
+    def test_takeover_fails_closed_when_audit_write_fails(self):
+        # DETERMINISTIC, permission-independent injection (Codex PR C round-2 finding 4:
+        # chmod 0500 is unreliable as root / on some Windows FS): make the durable takeover
+        # ledger path a DIRECTORY so its append fails for every user, and assert the takeover
+        # fails closed with ownership unchanged and no done-ledger line.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        os.makedirs(os.path.join(self.d, self.OWNERS_REL, "_takeovers.jsonl"))
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "x")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("audit", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")     # ownership unchanged
+        self.assertNotIn("done by codex", self._done_log())             # no ledger line either
+
+    def test_integrate_precondition_failure_does_not_transfer_owner(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.wt("integrate", "feat-a", "codex", "--into", "no-such-branch",
+                    "--to", "claude", "--takeover", "--reason", "x")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")     # owner untouched
+        self.assertEqual(self.lock()["state"], "IDLE")                  # pen never flipped
+        self.assertNotIn("integrating", self.lock())
+
+    def _done_log(self):
+        p = os.path.join(self.d, ".m8shift", "done.log")
+        return open(p).read() if os.path.exists(p) else ""
+
+    # ── finding 4: hostile metadata never reaches the terminal; strict schema ──
+    def test_control_chars_in_agent_are_owner_missing_and_never_echoed(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", agent="cl[31maude")))
+        out = self.wt("status").stdout
+        self.assertNotIn("\x1b", out)                        # no raw ESC to the terminal
+        self.assertIn("owner=?", out)                        # not a valid agent → unusable
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")  # bad shape → missing
+
+    def test_strict_schema_incomplete_docs_are_owner_missing(self):
+        import json as _json
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        for bad in (
+            {"schema": "m8shift.worktree_owner.v1", "agent": "claude"},          # no id/path/…
+            self.doc("feat-a", id="other"),                                       # wrong id
+            self.doc("feat-a", created_at="not-a-timestamp"),                     # bad time
+            self.doc("feat-a", path="/etc/passwd"),                              # absolute path
+            self.doc("feat-a", path="../../escape"),                             # traversal
+            self.doc("feat-a", agent="x" * 300),                                 # oversized
+            self.doc("feat-a", branch=123),                                       # non-string
+        ):
+            self.write_raw("feat-a", _json.dumps(bad))
+            by = {f["worktree"]: f for f in self.doctor_findings()}
+            self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing", bad)
+
+    def test_well_shaped_off_roster_is_mismatch_not_missing(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", agent="mallory")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_mismatch")
+        self.assertIn("mallory", by["feat-a"]["detail"])
+
+    def test_hostile_orphan_filename_is_sanitized(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        # an orphan sidecar whose id carries a control char
+        self.write_raw("ghost", json.dumps(self.doc("ghost")))
+        r = self.wt("doctor")                                # human output
+        self.assertNotIn("\x1b", r.stdout)
+        j = self.doctor_findings()
+        self.assertTrue(any(f["id"] == "worktree.owner_mismatch"
+                            and "orphan" in f["detail"] for f in j))
+        self.assertFalse(any("\x1b" in f["worktree"] for f in j))
+
+    # ── finding 5: status and doctor agree on the integration tree ────────────
+    def test_integration_tree_owner_na_and_doctor_clean(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.assertEqual(self.wt("integrate", "feat-a", "claude",
+                                 "--into", "main", "--to", "codex").returncode, 0)
+        out = self.wt("status").stdout
+        integ_line = next(l for l in out.splitlines() if "_integration" in l)
+        self.assertIn("owner=n/a", integ_line)               # not owner=? (finding 5)
+        self.assertNotIn("owner=?", integ_line)
+        self.assertFalse(any(f["worktree"] == "_integration"
+                             for f in self.doctor_findings()))  # doctor excludes it → agree
+
+    # ── round-2 adversarial hunt regressions ──────────────────────────────────
+    def test_integrate_busy_pen_does_not_transfer_ownership(self):
+        # A busy integration pen is the pen's ROUTINE serialization state; a CROSS-OWNER
+        # takeover must not commit and then die on the busy pen, stranding a transferred
+        # ownership. owner=codex, integrator=claude (--takeover), pen held by codex.
+        self.assertEqual(self.wt("claim", "feat-a", "codex", "--base", "main").returncode, 0)
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self._write("a.txt", "x\n", cwd=wtdir)
+        self.git("add", "a.txt", cwd=wtdir)
+        self.git("commit", "-qm", "w", cwd=wtdir)
+        self.assertEqual(self.core("claim", "codex").returncode, 0)   # pen busy: WORKING_CODEX
+        r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex",
+                    "--takeover", "--reason", "hijack")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("pen", (r.stderr + r.stdout).lower())
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")   # ownership NOT transferred
+
+    def test_status_sanitizes_hostile_worktree_basename(self):
+        # a managed worktree whose dir name carries an ANSI escape must not inject it into
+        # the terminal via status (doctor already sanitizes — the two must agree).
+        base = os.path.join(self.d, ".m8shift", "worktrees")
+        os.makedirs(base, exist_ok=True)
+        hostile = os.path.join(base, "x\x1b[31mPWNED")
+        r = self.git("worktree", "add", "-b", "hostilebr", hostile, "main", check=False)
+        if r.returncode != 0:
+            self.skipTest("filesystem/git refuses ESC in a worktree path")
+        out = self.wt("status").stdout
+        self.assertNotIn("\x1b", out)                        # no raw ESC reaches the terminal
+        self.assertIn("PWNED", out)                          # the (sanitized) name still shows
+
+    def test_detached_head_worktree_listed_by_status(self):
+        # a detached-HEAD managed worktree has no porcelain `branch ` line; status must still
+        # list it (agreeing with doctor/_managed_worktrees), marked "(detached)".
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self.git("checkout", "-q", "--detach", cwd=wtdir)
+        out = self.wt("status").stdout
+        line = next((l for l in out.splitlines() if "feat-a" in l), "")
+        self.assertIn("feat-a", line)
+        self.assertIn("(detached)", line)
+        self.assertIn("owner=claude", line)
+
+    def test_takeover_reason_length_bounded(self):
+        # an oversized --reason would push the audit doc past the read cap, so the just-
+        # written audit would read back as owner_missing (silent loss) — reject it instead.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "z" * 9000)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("too long", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")  # ownership unchanged
+        # a normal (bounded) reason still works and reads back
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "peer AWOL")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+
+    def test_non_ascii_timestamp_is_owner_missing(self):
+        # semantic timestamp validation is ASCII-strict: Arabic-Indic digits must not validate.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc(
+            "feat-a", created_at="٢٠٢٦-٠١-"
+                                 "٠١T٠٠:٠٠:٠٠Z")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    # ── round-3 adversarial regressions (Codex PR C round-2 review) ────────────
+    def test_integrate_become_busy_race_is_atomic(self):
+        # finding 1: the become-busy race — a peer claiming the pen AFTER the read-only
+        # precheck but BEFORE claim_pen — must not transfer ownership. Deterministic race
+        # seam: a one-shot git post-checkout hook (fired during integrate's integration-tree
+        # prep, which runs between the precheck and claim_pen) claims the pen as codex.
+        # Because the takeover commit is folded INTO claim_pen under the file lock, claim_pen
+        # sees the now-busy pen and refuses, transferring NOTHING.
+        self.assertEqual(self.wt("claim", "feat-a", "codex", "--base", "main").returncode, 0)
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self._write("a.txt", "x\n", cwd=wtdir)
+        self.git("add", "a.txt", cwd=wtdir)
+        self.git("commit", "-qm", "w", cwd=wtdir)
+        hookdir = os.path.join(self.d, ".git", "hooks")
+        os.makedirs(hookdir, exist_ok=True)
+        sentinel = os.path.join(self.d, ".race-fired")
+        hook = os.path.join(hookdir, "post-checkout")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\n"
+                     f'[ -e "{sentinel}" ] && exit 0\n'
+                     f'touch "{sentinel}"\n'
+                     f'cd "{self.d}" && "{sys.executable}" m8shift.py claim codex '
+                     ">/dev/null 2>&1\nexit 0\n")
+        os.chmod(hook, 0o755)
+        r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex",
+                    "--takeover", "--reason", "race")
+        self.assertTrue(os.path.exists(sentinel), "race seam did not fire")   # hook ran
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")    # ownership NOT transferred
+        self.assertFalse(any(x["verb"] == "integrate" for x in self.ledger_records()))
+        self.assertEqual(self.lock()["state"], "WORKING_CODEX")       # LOCK consistent (codex holds)
+        self.assertNotIn("integrating", self.lock())                  # no stranded sentinel
+
+    def test_integrate_busy_pen_precheck_no_transfer(self):
+        # the read-only precheck also refuses a statically-busy pen (friendly fast-fail).
+        self.assertEqual(self.wt("claim", "feat-a", "codex", "--base", "main").returncode, 0)
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self._write("a.txt", "x\n", cwd=wtdir)
+        self.git("add", "a.txt", cwd=wtdir)
+        self.git("commit", "-qm", "w", cwd=wtdir)
+        self.assertEqual(self.core("claim", "codex").returncode, 0)   # pen busy up front
+        r = self.wt("integrate", "feat-a", "claude", "--into", "main", "--to", "codex",
+                    "--takeover", "--reason", "hijack")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+        self.assertFalse(any(x["verb"] == "integrate" for x in self.ledger_records()))
+
+    def test_drop_takeover_leaves_durable_ledger_audit(self):
+        # finding 2: a cross-owner drop destroys the sidecar, so the durable ledger must
+        # hold the authorized + completed records with the reason.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.wt("drop", "feat-a", "codex", "--yes", "--takeover",
+                    "--reason", "DROP_SENTINEL_9931")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        drops = [x for x in self.ledger_records() if x["verb"] == "drop"]
+        self.assertEqual({x["phase"] for x in drops}, {"authorized", "completed"})
+        self.assertTrue(all(x["from"] == "claude" and x["to"] == "codex" for x in drops))
+        self.assertTrue(any(x["reason"] == "DROP_SENTINEL_9931" for x in drops))
+
+    def test_drop_dirty_tree_records_authorized_not_completed(self):
+        # finding 2: a dirty worktree makes `git worktree remove` fail AFTER the authorized
+        # record — the ledger must truthfully show attempted (authorized) but NOT completed,
+        # and the worktree must survive.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self._write("dirty.txt", "uncommitted\n", cwd=wtdir)       # dirty → remove refuses
+        r = self.wt("drop", "feat-a", "codex", "--yes", "--takeover", "--reason", "r")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(os.path.isdir(wtdir))                     # worktree survived
+        phases = {x["phase"] for x in self.ledger_records() if x["verb"] == "drop"}
+        self.assertIn("authorized", phases)
+        self.assertNotIn("completed", phases)
+
+    def test_same_owner_drop_has_no_bogus_takeover_audit(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.assertEqual(self.wt("drop", "feat-a", "claude", "--yes").returncode, 0)
+        self.assertEqual(self.ledger_records(), [])               # no takeover records at all
+
+    def test_drop_missing_worktree_writes_no_phantom_audit(self):
+        # the worktree-exists precondition runs BEFORE the authorize record, so a drop of a
+        # non-existent (but sidecar-owned) worktree dies without a phantom ledger entry.
+        self.write_raw("ghost", json.dumps(self.doc("ghost")))
+        r = self.wt("drop", "ghost", "codex", "--yes", "--takeover", "--reason", "phantom")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no worktree", r.stderr)
+        self.assertEqual(self.ledger_records(), [])               # no authorized record written
+
+    def test_impossible_calendar_timestamp_is_owner_missing(self):
+        # finding 3: 2026-99-99T99:99:99Z has the right SHAPE but is an impossible instant.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", created_at="2026-99-99T99:99:99Z")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    def test_empty_branch_owner_doc_is_owner_missing(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", branch="")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    def test_detached_head_recorded_branch_is_mismatch(self):
+        # finding 3: a claimed owner branch while the worktree is detached is a mismatch.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        wtdir = os.path.join(self.d, ".m8shift", "worktrees", "feat-a")
+        self.git("checkout", "-q", "--detach", cwd=wtdir)
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_mismatch")
+        self.assertIn("detached", by["feat-a"]["detail"])
+
+    def test_fifo_ledger_path_fails_closed_no_hang(self):
+        # PR C round-3 hunt: a FIFO at the ledger path must NOT block the write-only open
+        # forever (which would freeze the relay under the global lock) — O_NONBLOCK + S_ISREG
+        # make it fail closed. Run under a wall-clock timeout to catch a regression hang.
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no os.mkfifo on this platform")
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        os.makedirs(os.path.join(self.d, self.OWNERS_REL), exist_ok=True)
+        os.mkfifo(os.path.join(self.d, self.OWNERS_REL, "_takeovers.jsonl"))
+        r = subprocess.run([sys.executable, COMPANION, "done", "feat-a", "codex",
+                            "--takeover", "--reason", "x"], cwd=self.d,
+                           capture_output=True, text=True, timeout=30)  # timeout catches a hang
+        self.assertEqual(r.returncode, 1)                  # fail-closed, not a hang
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")   # ownership unchanged
+
+    def test_non_canonical_timestamps_are_owner_missing(self):
+        # PR C round-3 hunt: single-digit fields, whitespace padding, and non-ASCII year all
+        # deviate from the canonical strftime form and must be rejected (owner_missing).
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        for bad in ("2026-2-3T4:5:6Z", "  2026-01-01T00:00:00Z  ",
+                    "٢٠٢٦-01-01T00:00:00Z"):
+            self.write_raw("feat-a", json.dumps(self.doc("feat-a", created_at=bad)))
+            by = {f["worktree"]: f for f in self.doctor_findings()}
+            self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing", bad)
+
+    def test_whitespace_only_takeover_reason_is_owner_missing(self):
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc(
+            "feat-a", taken_over_from="codex", takeover_reason="   ",
+            takeover_at="2026-01-01T00:00:00Z")))
+        by = {f["worktree"]: f for f in self.doctor_findings()}
+        self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing")
+
+    def test_malformed_takeover_tuple_is_owner_missing(self):
+        # finding 3: the optional audit tuple is validated ALL-OR-NONE — a partial, oversized,
+        # ANSI-agent, or bad-time audit makes the whole doc malformed (owner_missing).
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        for bad in (
+            self.doc("feat-a", taken_over_from="mallory"),                 # partial tuple
+            self.doc("feat-a", taken_over_from="x\x1bevil",
+                     takeover_reason="r", takeover_at="2026-01-01T00:00:00Z"),  # ANSI prev
+            self.doc("feat-a", taken_over_from="x", takeover_reason="z" * 300,
+                     takeover_at="2026-01-01T00:00:00Z"),                  # oversized reason
+            self.doc("feat-a", taken_over_from="x", takeover_reason="r",
+                     takeover_at="2026-99-99T00:00:00Z"),                  # impossible time
+        ):
+            self.write_raw("feat-a", json.dumps(bad))
+            by = {f["worktree"]: f for f in self.doctor_findings()}
+            self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing", bad)
+
+    # ── round-4 concurrency regressions (Codex PR C round-3 review) ────────────
+    def test_stale_ticket_cas_refuses_overwriting_a_changed_owner(self):
+        # finding 1: a takeover ticket captured before the lock must NOT overwrite an owner
+        # that changed under the lock. Deterministic driver: current owner is gemini, but the
+        # ticket expects claude → the CAS refuses, writes nothing, leaves gemini + no ledger.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", agent="gemini")))
+        r = self.driver(
+            "tk=dict(prev='claude', reason='x', branch='feat-a',"
+            " created_at='2026-01-01T00:00:00Z', gen='%s')\n" % self.GEN +
+            "rc=1\n"
+            "try:\n"
+            "    with wt.owner_lock('feat-a'):\n"
+            "        wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
+            "    rc=0\n"
+            "except SystemExit as e:\n"
+            "    sys.stderr.write(str(e))\n"
+            "print(rc)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "1", r.stdout + r.stderr)  # died
+        self.assertIn("owner changed", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "gemini")  # NOT overwritten
+        self.assertEqual(self.ledger_records(), [])                  # no stale audit record
+
+    def test_matching_ticket_cas_commits_with_truthful_from(self):
+        # the positive CAS path: when the current owner still equals the ticket's prev, the
+        # takeover applies and the ledger `from` is truthful.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")             # owner=claude
+        r = self.driver(
+            "d=json.load(open('.m8shift/worktree-owners/feat-a.json'))\n"
+            "tk=dict(prev='claude', reason='ok', branch='feat-a',"
+            " created_at=d['created_at'], gen=d['gen'])\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
+            "print('done')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+        recs = self.ledger_records()
+        self.assertEqual([x["from"] for x in recs], ["claude"])      # truthful displaced owner
+        self.assertEqual(recs[0]["to"], "codex")
+
+    def test_resume_reapplies_takeover_not_bypassed(self):
+        # finding 2: on the integration RESUME path (own WORKING sentinel + same id), a supplied
+        # takeover of a sidecar that went foreign mid-flight must STILL be applied, not bypassed.
+        # Driver: set LOCK to our own in-flight sentinel, owner foreign (gemini), call claim_pen
+        # with a matching ticket → returns resume AND applies the takeover.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", agent="gemini")))
+        sha = "a" * 40
+        r = self.driver(
+            "text=core.load_or_die(); lk=core.get_lock(text)\n"
+            "lk.update(holder='codex', state='WORKING_CODEX', integrating='feat-a@%s',\n"
+            "          since=core.iso(core.now()), expires=core.iso(core.now()))\n"
+            "core.write(core.set_lock(text, lk))\n"
+            "tk=dict(prev='gemini', reason='reassert', branch='feat-a',"
+            " created_at='2026-01-01T00:00:00Z', gen='%s')\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    mode,_=wt.claim_pen('codex','feat-a','%s',tk)\n"
+            "print(mode)\n" % (sha, self.GEN, sha))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "resume")
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")   # takeover APPLIED on resume
+        recs = self.ledger_records()
+        self.assertTrue(any(x["verb"] == "integrate" and x["from"] == "gemini" for x in recs))
+
+    def test_completed_drop_audit_failure_is_surfaced_nonzero(self):
+        # finding 3 (round-4): the actual cmd_drop rc-2 branch must be exercised end-to-end.
+        # Driver invokes the REAL cmd_drop with an INJECTED post-removal completion failure
+        # (complete_drop_takeover → (False, err)); assert the worktree WAS removed, rc == 2, and
+        # a bounded warning is printed — never a silent full success.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")   # owner=claude
+        r = self.driver(
+            "import types\n"
+            "wt.complete_drop_takeover = lambda i,a,t: (False, 'injected')\n"
+            "args=types.SimpleNamespace(id='feat-a', agent='codex', yes=True,"
+            " takeover=True, reason='r')\n"
+            "rc=wt.cmd_drop(args)\n"
+            "print('RC', rc)\n"
+            "sys.stderr.write('gone=%s' % (not os.path.exists(wt.wt_path('feat-a'))))\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RC 2", r.stdout)                    # cmd_drop returned 2
+        self.assertIn("could not be recorded", r.stdout + r.stderr)  # bounded warning
+        self.assertIn("gone=True", r.stderr)               # the removal DID happen (not rolled back)
+        drops = [x for x in self.ledger_records() if x["verb"] == "drop"]
+        self.assertEqual({x["phase"] for x in drops}, {"authorized"})  # authorized stands, no completed
+
+    # ── round-5 concurrency regressions (Codex PR C round-4 review) ────────────
+    def test_same_agent_drop_reclaim_aba_refused(self):
+        # finding 1 (ABA): claude owns feat-a; A captures a takeover ticket (gen G1); claude
+        # DROPS the lane then RE-CLAIMS the same id (new gen G2). A's stale ticket, still naming
+        # claude, must be REFUSED by the generation-aware CAS — no overwrite, no ledger record.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        stale_gen = self.read_owner_gen("feat-a")          # G1 captured by "A"
+        self.assertEqual(self.wt("drop", "feat-a", "claude", "--yes").returncode, 0)
+        self.assertEqual(self.wt("claim", "feat-a", "claude", "--base", "main").returncode, 0)
+        new_gen = self.read_owner_gen("feat-a")            # G2 (fresh lane)
+        self.assertNotEqual(stale_gen, new_gen)
+        r = self.driver(
+            "tk=dict(prev='claude', reason='stale', branch='feat-a',"
+            " created_at='2026-01-01T00:00:00Z', gen='%s')\n" % stale_gen +
+            "rc=1\n"
+            "try:\n"
+            "    with wt.owner_lock('feat-a'):\n"
+            "        wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
+            "    rc=0\n"
+            "except SystemExit as e:\n"
+            "    sys.stderr.write(str(e))\n"
+            "print(rc)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "1", r.stdout + r.stderr)  # refused
+        self.assertIn("owner changed", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")  # NOT overwritten
+        self.assertEqual(self.read_owner_gen("feat-a"), new_gen)     # still the fresh lane
+        self.assertEqual(self.ledger_records(), [])                  # no stale audit
+
+    def test_drop_authorize_and_removal_are_atomic_vs_foreign_takeover(self):
+        # finding 2: a foreign takeover must NOT be able to acquire ownership between drop's
+        # authorization and its destructive removal. The per-id owner_lock spans the whole
+        # drop; a competing done --takeover blocks on it. Deterministic proof: hold owner_lock
+        # from the driver, then a `done --takeover` subprocess must FAIL to acquire it (bounded
+        # busy timeout) — it never becomes owner while the drop span holds the lock.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")    # owner=claude
+        # start a driver that ACQUIRES owner_lock and holds it briefly, and while it is held try
+        # a competing takeover in a subprocess — assert the takeover is refused (lock busy).
+        r = self.driver(
+            "import subprocess, sys, os\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    p=subprocess.run([sys.executable, os.path.join(os.getcwd(),'m8shift-worktree.py'),\n"
+            "        'done','feat-a','codex','--takeover','--reason','race'],\n"
+            "        capture_output=True, text=True)\n"
+            "    sys.stderr.write('RC=%d ERR=%s' % (p.returncode, (p.stderr or '')[:80]))\n"
+            "print('held')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RC=1", r.stderr)                    # the competing takeover was refused
+        self.assertIn("ownership lock", r.stderr)          # ...because the per-id lock was busy
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")  # never became codex
+
+    def read_owner_gen(self, idv):
+        with open(self.owner_file(idv)) as fh:
+            return json.load(fh)["gen"]
+
+    def lock_path(self, idv):
+        return os.path.join(self.d, self.OWNERS_REL, f"{idv}.lock")
+
+    # ── round-6 owner_lock robustness regressions (Codex PR C round-5 review) ──
+    def test_live_long_holder_lock_not_stolen(self):
+        # finding 1: an age-only reclaim would STEAL a live long-running holder (a slow
+        # git worktree add/remove can exceed the stale threshold). A driver holds owner_lock
+        # and backdates its mtime past the threshold WHILE its process stays alive; a competing
+        # takeover must time out BUSY, never reclaim it.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "import subprocess, sys, os, time\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    lock=os.path.join('.m8shift','worktree-owners','feat-a.lock')\n"
+            "    old=time.time()-3*wt.OWNER_LOCK_STALE_S\n"     # model a slow op past threshold
+            "    os.utime(lock,(old,old))\n"                    # ...holder still ALIVE
+            "    p=subprocess.run([sys.executable,'m8shift-worktree.py',\n"
+            "        'done','feat-a','codex','--takeover','--reason','steal'],\n"
+            "        capture_output=True, text=True, timeout=25)\n"
+            "    sys.stderr.write('RC=%d %s' % (p.returncode,(p.stderr or '')[:70]))\n"
+            "print('held')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RC=1", r.stderr)                        # the steal was refused (busy)
+        self.assertIn("busy", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")  # never stolen
+
+    def test_dead_holder_regular_lock_is_reclaimed(self):
+        # the flip side: a stale regular lock whose recorded PID is provably DEAD is safely
+        # reclaimed, so a crashed holder never wedges the id forever. Portable dead child:
+        # a python -c pass process (Windows has no guaranteed `true`).
+        self.claim_and_commit("feat-a", "a.txt", "x\n")        # owner=claude
+        p = subprocess.Popen([sys.executable, "-c", "pass"]); p.wait()   # p.pid is now dead
+        with open(self.lock_path("feat-a"), "wb") as fh:
+            fh.write(("%d:123456789" % p.pid).encode())
+        old = time.time() - 3 * 30                             # > OWNER_LOCK_STALE_S
+        os.utime(self.lock_path("feat-a"), (old, old))
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "ok")
+        self.assertEqual(r.returncode, 0, r.stderr)            # dead lock reclaimed → takeover
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+
+    def test_directory_at_lock_path_does_not_hang(self):
+        # finding 2: a non-unlinkable (directory) lock must NOT spin forever — it can never be
+        # reclaimed (not a regular file), so the contender times out BUSY under a wall clock.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        os.mkdir(self.lock_path("feat-a"))                     # a directory at the lock path
+        old = time.time() - 3 * 30
+        os.utime(self.lock_path("feat-a"), (old, old))
+        r = subprocess.run([sys.executable, COMPANION, "done", "feat-a", "codex",
+                            "--takeover", "--reason", "x"], cwd=self.d,
+                           capture_output=True, text=True, timeout=30)  # timeout catches a hang
+        self.assertEqual(r.returncode, 1)                      # busy, not a hang
+        self.assertIn("busy", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")
+
+    def test_cleanup_never_unlinks_a_successor_lock(self):
+        # finding 3: the release must unlink ONLY our own unchanged token, never a successor's.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "lock=os.path.join('.m8shift','worktree-owners','feat-a.lock')\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    open(lock,'wb').write(b'99999:1')\n"           # a 'successor' token replaces ours
+            "sys.stderr.write('exists=%s' % os.path.exists(lock))\n"
+            "print('ok')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("exists=True", r.stderr)                 # cleanup did NOT unlink the successor
+
+    def test_safe_dir_lock_acquisition_failure_fails_closed(self):
+        # finding 4: with a SAFE owners dir, a lock-create OSError must FAIL CLOSED (die), never
+        # silently run an ownership mutation unserialized. Deterministic: inject EACCES on the
+        # lock open.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "orig=os.open\n"
+            "def boom(path,*a,**k):\n"
+            "    if isinstance(path,str) and path.endswith('feat-a.lock'):\n"
+            "        raise OSError(13,'EACCES injected')\n"
+            "    return orig(path,*a,**k)\n"
+            "os.open=boom\n"
+            "rc=1\n"
+            "try:\n"
+            "    with wt.owner_lock('feat-a'): rc=0\n"
+            "except SystemExit as e: sys.stderr.write(str(e))\n"
+            "print(rc)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "1", r.stdout + r.stderr)  # died
+        self.assertIn("could not be acquired", r.stderr)
+
+    # ── round-7 portability regressions (Codex PR C round-6 review) ────────────
+    def test_pid_alive_windows_probe_is_failsafe(self):
+        # finding 1: on the Windows branch, only a SUCCESSFUL tasklist with no matching PID
+        # reads as dead. A nonzero returncode, a timeout, or an OSError must all read as ALIVE
+        # (fail-safe: never steal a live holder because the probe itself failed). Deterministic:
+        # force the nt branch and mock subprocess.run — no real Windows host needed.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "import types, subprocess as sp\n"
+            "os.name='nt'\n"                                    # force the Windows branch
+            "def mk(rc, out): return types.SimpleNamespace(returncode=rc, stdout=out)\n"
+            "cases=[]\n"
+            "wt.subprocess.run=lambda *a,**k: mk(1,'')\n"       # nonzero → alive
+            "cases.append(wt._pid_alive(4242) is True)\n"
+            "def to(*a,**k): raise sp.TimeoutExpired('tasklist',15)\n"
+            "wt.subprocess.run=to\n"                            # timeout → alive
+            "cases.append(wt._pid_alive(4242) is True)\n"
+            "def oe(*a,**k): raise OSError('nope')\n"
+            "wt.subprocess.run=oe\n"                            # OSError → alive
+            "cases.append(wt._pid_alive(4242) is True)\n"
+            "wt.subprocess.run=lambda *a,**k: mk(0,'\\\"proc.exe\\\",\\\"4242\\\",x')\n"
+            "cases.append(wt._pid_alive(4242) is True)\n"       # success + exact PID → alive
+            "wt.subprocess.run=lambda *a,**k: mk(0,'INFO: No tasks')\n"
+            "cases.append(wt._pid_alive(4242) is False)\n"      # success + no PID → dead
+            "print('ALL' if all(cases) else 'FAIL %r' % cases)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "ALL", r.stdout + r.stderr)
+
+    def test_malformed_token_stale_lock_not_reclaimed(self):
+        # finding 1 alignment: an unparseable-PID (malformed) stale lock has UNKNOWN holder
+        # identity → fail safe, never reclaimed (manual recovery), so a corrupt token can't be
+        # abused to steal. Deterministic: call _reclaim_owner_lock directly on such a lock.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        with open(self.lock_path("feat-a"), "wb") as fh:
+            fh.write(b"not-a-pid-token")
+        old = time.time() - 3 * 30                             # past the stale threshold
+        os.utime(self.lock_path("feat-a"), (old, old))
+        r = self.driver(
+            "print(wt._reclaim_owner_lock("
+            "os.path.join('.m8shift','worktree-owners','feat-a.lock')))\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "False")  # not reclaimed (fail-safe)
+        self.assertTrue(os.path.exists(self.lock_path("feat-a")))     # left for manual recovery
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # RFC 049 — Holder liveness and stale-claim hardening
 
-Status: design rev 4 APPROVED / PR A + PR B implemented (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, editorial fixes)
+Status: design rev 4 APPROVED / PR A + PR B + PR C implemented (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, listener liveness producer, worktree ownership sidecar/guard + companion doctor, editorial fixes)
 Target: next minor after RFC 052
 Related issues: #6, #104 (incident analysis + recurrences)
 Owner: core relay + runtime/worktree companions
