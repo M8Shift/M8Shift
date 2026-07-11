@@ -134,7 +134,10 @@ def build_fixture(payload, now_iso):
                         else:
                             resets_at = parsed.astimezone(dt.timezone.utc).strftime(
                                 "%Y-%m-%dT%H:%M:%SZ")
-                    except ValueError:
+                    except (ValueError, OverflowError, OSError):
+                        # a calendar-bound reset (astimezone can OverflowError near
+                        # year 1/9999) degrades ONLY resets_at to null — the valid
+                        # utilization ratio is still recorded (#105 review round 2).
                         resets_at = None
                 windows.append({
                     "kind": kind,

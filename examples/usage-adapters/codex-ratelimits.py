@@ -176,6 +176,7 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
     }
     read_limits = {"id": 2, "method": "account/rateLimits/read", "params": None}
     proc = None
+    reader = None
     try:
         proc = popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
@@ -193,7 +194,8 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
             finally:
                 lines.put(None)                          # EOF/error sentinel
 
-        threading.Thread(target=_pump, daemon=True).start()
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
         deadline = time.monotonic() + timeout_s
         result = None
         while True:
@@ -217,11 +219,22 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
     except Exception:
         return None
     finally:
+        # Cleanup order that never has two readers on stdout at once (#105 review round 2):
+        # ONLY the _pump thread ever reads stdout. kill() closes the child's stdout write-end →
+        # the reader hits EOF and exits; we JOIN it (bounded) BEFORE reaping, and reap with
+        # wait() — which does NOT read stdout — so nothing races the reader. No communicate()
+        # (which would read stdout concurrently). Streams are closed only after the reader joins.
         if proc is not None:
             with contextlib.suppress(Exception):
-                proc.kill()                              # closes the pipes → unblocks the reader
+                proc.kill()                              # child dies → its stdout EOFs the reader
+            if reader is not None:
+                reader.join(timeout=2)                   # bounded; reader exits on the EOF above
             with contextlib.suppress(Exception):
-                proc.communicate(timeout=1)
+                proc.wait(timeout=2)                     # reap the child WITHOUT reading stdout
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                with contextlib.suppress(Exception):
+                    if stream is not None:
+                        stream.close()
 
 
 def main(out=None, now=None, read_limits=None):

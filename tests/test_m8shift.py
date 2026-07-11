@@ -8654,6 +8654,19 @@ class TestRFC040UsageQuota(CLIBase):
                                "2026-01-01T00:00:00Z")
         self.assertEqual(fx["windows"][0]["resets_at"], "2026-01-01T03:00:00Z")
 
+    def test_example_build_fixture_aware_reset_overflow_keeps_ratio(self):
+        # #105 review round 2 finding 2: an aware reset at a calendar bound whose UTC conversion
+        # OverflowErrors must degrade ONLY resets_at to null — the valid utilization ratio is
+        # still recorded, not the whole window dropped.
+        mod = self._example()
+        for extreme in ("9999-12-31T23:59:59-14:00",   # astimezone → year 10000 overflow
+                        "0001-01-01T00:00:00+14:00"):   # astimezone → year 0 underflow
+            fx = mod.build_fixture({"five_hour": {"utilization": 33, "resets_at": extreme}},
+                                   "2026-01-01T00:00:00Z")
+            self.assertEqual(len(fx["windows"]), 1, extreme)      # window NOT dropped
+            self.assertEqual(fx["windows"][0]["used_ratio"], 0.33)  # ratio preserved
+            self.assertIsNone(fx["windows"][0]["resets_at"])        # only the reset degrades
+
     def test_example_build_fixture_windows_list_takes_precedence_over_live_shape(self):
         mod = self._example()
         fx = mod.build_fixture({
@@ -9002,6 +9015,7 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
 
             self.stdin = _Stdin()
             self.stdout = self
+            self.stderr = None
             self.killed = False
 
         def readline(self):
@@ -9011,11 +9025,17 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
                 return ""            # a real 0.144.1 server goes silent after stdin EOF
             return self._lines.pop(0) if self._lines else ""
 
+        def close(self):             # stdout==self; the cleanup closes owned streams
+            pass
+
         def kill(self):
             self.killed = True
 
-        def communicate(self, timeout=None):   # reap after kill (finally block)
-            return "", ""
+        def wait(self, timeout=None):    # reap WITHOUT reading stdout (finally block)
+            return 0
+
+        def poll(self):
+            return 0
 
     def test_call_app_server_holds_stdin_and_reads_until_id2(self):
         mod = self._example()
@@ -9037,9 +9057,14 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertEqual(sent[1]["method"], "account/rateLimits/read")
         self.assertIsNone(sent[1]["params"])
         self.assertTrue(calls.get("flushed"))
-        # THE #105 pin: stdin must never reach EOF before the id=2 reply is read —
-        # the fake would have gone silent (returned "") had close() come first.
-        self.assertIsNone(calls.get("stdin_closed_after_reads"))
+        # THE #105 pin: stdin must never reach EOF BEFORE the id=2 reply is read —
+        # the fake goes silent (returns "") if close() comes first. The reply is the 3rd
+        # scripted line, so the only permitted close is a cleanup close AFTER >= 3 reads
+        # (an early write-then-close mutation closes at read 0 → the reply never arrives →
+        # the `payload == response` assertion above fails).
+        closed_at = calls.get("stdin_closed_after_reads")
+        self.assertTrue(closed_at is None or closed_at >= 3,
+                        "stdin closed before the id=2 reply (at read %r)" % closed_at)
         self.assertEqual(calls["argv"], ["codex", "app-server", "--stdio"])
         self.assertIs(calls["kwargs"]["stdin"], subprocess.PIPE)
         self.assertIs(calls["kwargs"]["stdout"], subprocess.PIPE)
@@ -9067,6 +9092,7 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
 
             self.stdin = _Stdin()
             self.stdout = self
+            self.stderr = None
 
         def readline(self):
             for _ in range(int(self._sleep / 0.02) + 1):
@@ -9075,11 +9101,41 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
                 time.sleep(0.02)
             return ""
 
+        def close(self):
+            pass
+
         def kill(self):
             self.killed = True
 
-        def communicate(self, timeout=None):
-            return "", ""
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0 if self.killed else None
+
+    def test_call_app_server_reaps_real_silent_child_no_race(self):
+        # #105 review round 2: a REAL local child that stays silent with stdin open must be
+        # reaped and the reader joined with NO concurrent stdout read (wait(), not communicate).
+        import threading as _t
+        mod = self._example()
+        captured = {}
+        real_popen = subprocess.Popen
+
+        def cap_popen(argv, **kw):
+            p = real_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kw)
+            captured["proc"] = p
+            return p
+
+        before = _t.active_count()
+        t0 = time.monotonic()
+        result = mod._call_app_server(popen=cap_popen, timeout_s=0.3)
+        elapsed = time.monotonic() - t0
+        self.assertIsNone(result)                        # fail-open
+        self.assertLess(elapsed, 4.0)                    # bounded (timeout + cleanup), not 30s
+        p = captured["proc"]
+        self.assertIsNotNone(p.poll())                   # child REAPED (returncode set)
+        time.sleep(0.1)
+        self.assertLessEqual(_t.active_count(), before)  # reader joined — no leak
 
     def test_call_app_server_bounded_against_silent_live_child(self):
         # finding 1: a blocking readline must not outrun the deadline. A silent live child
@@ -9125,12 +9181,13 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
 
             stdin = _Stdin()
             stdout = None
+            stderr = None
 
             def kill(self):
                 killed.append(True)
 
-            def communicate(self, timeout=None):
-                return "", ""
+            def wait(self, timeout=None):
+                return 0
 
         self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: ErrorProcess()))
         self.assertEqual(killed, [True])

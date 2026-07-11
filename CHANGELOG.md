@@ -11,7 +11,10 @@ the fixes discovered by running them against the REAL providers (2026-07-10):
   normalized to the strict-`Z` form the usage schema requires. A timezone-NAIVE
   reset (no offset) is ambiguous and never invented — `astimezone()` would
   assume the host timezone and make the same payload host-dependent — so a naive
-  reset normalizes to `null`. Fallback precedence is EXACT: any successfully
+  reset normalizes to `null`; likewise a calendar-bound aware reset whose UTC
+  conversion overflows degrades ONLY `resets_at` to `null` while still recording
+  the valid utilization ratio (never dropping the whole window). Fallback
+  precedence is EXACT: any successfully
   normalized `windows[]` entry suppresses the fallback; only an empty normalized
   list (windows[] absent / non-list / empty / all-invalid) attempts the
   top-level live shape, degrading per entry (non-dict window, implausible
@@ -22,10 +25,12 @@ the fixes discovered by running them against the REAL providers (2026-07-10):
   hanging to the timeout. stdin now stays OPEN while stdout is read on a DAEMON
   reader thread feeding a queue; the main thread waits on the queue with the
   remaining monotonic deadline, so even a SILENT-but-live server is bounded (a
-  blocking `readline` can never outrun the deadline). On timeout the function
-  returns None and the finally kill closes the pipes, unblocking the daemon
-  reader (which can never hold the process open). Portable — no `select` on
-  Windows pipes. Fail-open semantics unchanged.
+  blocking `readline` can never outrun the deadline). Cleanup is non-racing:
+  ONLY the reader thread ever touches stdout, and on exit the child is killed,
+  the reader is JOINED (bounded), then the child is reaped with `wait()` — which
+  never reads stdout — instead of `communicate()` (which would read stdout
+  concurrently with the reader). Portable — no `select` on Windows pipes.
+  Fail-open semantics unchanged.
 
 Both foldbacks originate from the copies that served the live relay all day
 (2026-07-10, including the saturation events), further hardened in review
