@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Listener status now reports explicit host-wake capabilities, interactive
+  `wait`/`next` disclose their host-lifecycle limit, and runtime doctor uses one
+  fail-open `runtime.stale_state` advisory for stale awaiting turns and stale
+  usage snapshots. Stale last-known-good usage stays visible and marked stale.
+
 ## v3.58.0 — 2026-07-12
 
 Open-format Agent Skills (RFC 050 Phase 1+1b), the host wake-up guard
