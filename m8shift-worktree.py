@@ -399,9 +399,11 @@ def append_takeover_ledger(record):
 def _pid_alive(pid):
     """Best-effort cross-platform liveness of an owner-lock holder PID (mirrors the runtime
     companion's probe): POSIX signal-0 (PermissionError → alive but not ours), Windows
-    `tasklist`. When liveness CANNOT be proven (unknown error, Windows probe failure) → treat
-    as ALIVE, so we NEVER steal a lock we cannot confidently attribute to a dead process (Codex
-    PR C review round-5 finding 1)."""
+    `tasklist`. FAIL-SAFE contract: whenever liveness CANNOT be POSITIVELY proven dead —
+    unknown error, probe timeout, OR a tasklist run that itself failed (nonzero returncode) —
+    the holder counts as ALIVE, so we NEVER steal a lock we cannot confidently attribute to a
+    dead process (Codex PR C review rounds 5-6). Only a SUCCESSFUL probe with no matching PID
+    reads as dead."""
     if not isinstance(pid, int) or pid <= 0:
         return False
     if os.name == "nt":                                  # pragma: no cover - Windows only
@@ -409,8 +411,10 @@ def _pid_alive(pid):
             probe = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
                                    capture_output=True, text=True, timeout=15)
         except (OSError, subprocess.TimeoutExpired):
-            return True
-        return f'"{pid}"' in (probe.stdout or "")
+            return True                                  # cannot prove dead → alive
+        if probe.returncode != 0:
+            return True                                  # the PROBE failed → unknown → alive
+        return f'"{pid}"' in (probe.stdout or "")        # successful probe: exact-PID match
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -424,12 +428,14 @@ def _pid_alive(pid):
 
 def _reclaim_owner_lock(path):
     """Reclaim the per-id lock ONLY when it is a stale REGULAR-file lock whose recorded holder
-    PID is provably NOT alive AND whose inode/token is unchanged across the check — never
+    PID is POSITIVELY proven dead AND whose inode/token is unchanged across the check — never
     stealing a live long-running holder (a legitimate `git worktree add/remove` may exceed the
-    stale threshold) and never unlinking a fresh successor. Returns True iff exactly that
-    abandoned lock was unlinked. A directory / FIFO / symlink / non-unlinkable lock returns
-    False, so the caller falls to the BOUNDED busy timeout and never spins (Codex PR C review
-    round-5 findings 1-2)."""
+    stale threshold) and never unlinking a fresh successor. A MALFORMED token (unparseable PID)
+    means the holder's identity is UNKNOWN → fail safe, never reclaim (manual recovery: delete
+    the lock by hand after confirming no ownership operation is in flight). Returns True iff
+    exactly that abandoned lock was unlinked. A directory / FIFO / symlink / non-unlinkable
+    lock returns False, so the caller falls to the BOUNDED busy timeout and never spins (Codex
+    PR C review rounds 5-6)."""
     try:
         st1 = os.lstat(path)
         if not stat.S_ISREG(st1.st_mode):                # a dir/FIFO/symlink lock is never reclaimed
@@ -442,9 +448,9 @@ def _reclaim_owner_lock(path):
         try:
             pid = int(raw.split(b":", 1)[0])
         except (ValueError, IndexError):
-            pid = None
-        if pid is not None and _pid_alive(pid):
-            return False                                 # LIVE holder → never steal
+            return False                                 # unknown holder identity → fail safe
+        if _pid_alive(pid):
+            return False                                 # LIVE (or unprovable) holder → never steal
         st3 = os.lstat(path)                             # re-validate immediately before unlink
         if not core._same_file(st2, st3) or time.time() - st3.st_mtime <= OWNER_LOCK_STALE_S:
             return False
@@ -462,12 +468,14 @@ def owner_lock(idv, timeout=10):
     WITHOUT holding the global core lock across slow git (Codex PR C review round-4 finding 2).
     Finer-grained than the core lock (blocks only same-id ownership ops). A stale lock is broken
     ONLY when its holder PID is provably dead and its inode/token is unchanged (`_reclaim_owner_
-    lock`), so a live long-running holder is never stolen. When the owners directory is UNSAFE
-    (symlinked/uncontained) it degrades to a no-op — consistent with the fail-open reader, and
-    harmless because a takeover ticket is None there anyway; but when the directory is SAFE and
-    the lock cannot be acquired it FAILS CLOSED (die), never running an ownership mutation
-    unserialized (Codex PR C review round-5 finding 4). Acquire order everywhere: owner_lock
-    OUTER, core.file_lock INNER — a single order, so no deadlock."""
+    lock`), so a live long-running holder is never stolen. Serialization is GUARANTEED only
+    when the owners namespace is SAFE: an UNSAFE (symlinked/uncontained) directory degrades to
+    a no-op, consistent with the documented advisory fail-open limitation — ownership takeover
+    mutations cannot happen there (the reader yields no ticket), though fail-open verbs like a
+    same-owner `drop` still perform their normal work. When the directory is SAFE and the lock
+    cannot be acquired it FAILS CLOSED (die), never running an ownership mutation unserialized
+    (Codex PR C review round-5 finding 4). Acquire order everywhere: owner_lock OUTER,
+    core.file_lock INNER — a single order, so no deadlock."""
     owners = _owners_dir_safe()
     if owners is None:
         yield False                                      # advisory: unsafe dir → cannot lock

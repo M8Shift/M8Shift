@@ -85,7 +85,7 @@ strictly canonical — the string must equal the re-rendered
 fields, whitespace padding, and non-ASCII year digits that bare `strptime`
 would accept — and a whitespace-only `takeover_reason` no longer validates.
 
-50 new tests (10 lifecycle/guard/doctor + 40 adversarial hardening: tmp/dir
+52 new tests (10 lifecycle/guard/doctor + 42 adversarial hardening: tmp/dir
 symlink escape, FIFO-ledger fail-closed-no-hang, unknown-actor destruction,
 durable drop audit + dirty-tree attempted-vs-completed + no-phantom-on-missing,
 deterministic ledger-dir fail-closed audit, a git-hook race seam proving
@@ -94,7 +94,7 @@ refusal, truthful `from`, resume re-applies takeover, cmd_drop completed-audit
 failure surfaced rc 2, same-agent drop/reclaim ABA refused by the generation
 nonce, drop authorize↔removal atomic vs a foreign takeover), per-id lock
 robustness (live long-holder not stolen, dead-holder reclaimed, directory-lock
-no-hang, cleanup never unlinks a successor, safe-dir acquisition fails closed),
+no-hang, cleanup never unlinks a successor, safe-dir acquisition fails closed, Windows tasklist probe fail-safe, malformed-token no-reclaim),
 impossible/non-canonical-calendar, empty-branch, detached,
 all-or-none-audit-tuple/whitespace-reason schema, ANSI/oversized/traversal,
 detached-HEAD + `_integration` status↔doctor agreement).

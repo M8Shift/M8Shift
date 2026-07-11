@@ -1017,9 +1017,10 @@ class TestRFC049PRCHardening(WTBase):
 
     def test_dead_holder_regular_lock_is_reclaimed(self):
         # the flip side: a stale regular lock whose recorded PID is provably DEAD is safely
-        # reclaimed, so a crashed holder never wedges the id forever.
+        # reclaimed, so a crashed holder never wedges the id forever. Portable dead child:
+        # a python -c pass process (Windows has no guaranteed `true`).
         self.claim_and_commit("feat-a", "a.txt", "x\n")        # owner=claude
-        p = subprocess.Popen(["true"]); p.wait()               # p.pid is now dead
+        p = subprocess.Popen([sys.executable, "-c", "pass"]); p.wait()   # p.pid is now dead
         with open(self.lock_path("feat-a"), "wb") as fh:
             fh.write(("%d:123456789" % p.pid).encode())
         old = time.time() - 3 * 30                             # > OWNER_LOCK_STALE_S
@@ -1073,6 +1074,48 @@ class TestRFC049PRCHardening(WTBase):
             "print(rc)\n")
         self.assertEqual(r.stdout.strip().splitlines()[-1], "1", r.stdout + r.stderr)  # died
         self.assertIn("could not be acquired", r.stderr)
+
+    # ── round-7 portability regressions (Codex PR C round-6 review) ────────────
+    def test_pid_alive_windows_probe_is_failsafe(self):
+        # finding 1: on the Windows branch, only a SUCCESSFUL tasklist with no matching PID
+        # reads as dead. A nonzero returncode, a timeout, or an OSError must all read as ALIVE
+        # (fail-safe: never steal a live holder because the probe itself failed). Deterministic:
+        # force the nt branch and mock subprocess.run — no real Windows host needed.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "import types, subprocess as sp\n"
+            "os.name='nt'\n"                                    # force the Windows branch
+            "def mk(rc, out): return types.SimpleNamespace(returncode=rc, stdout=out)\n"
+            "cases=[]\n"
+            "wt.subprocess.run=lambda *a,**k: mk(1,'')\n"       # nonzero → alive
+            "cases.append(wt._pid_alive(4242) is True)\n"
+            "def to(*a,**k): raise sp.TimeoutExpired('tasklist',15)\n"
+            "wt.subprocess.run=to\n"                            # timeout → alive
+            "cases.append(wt._pid_alive(4242) is True)\n"
+            "def oe(*a,**k): raise OSError('nope')\n"
+            "wt.subprocess.run=oe\n"                            # OSError → alive
+            "cases.append(wt._pid_alive(4242) is True)\n"
+            "wt.subprocess.run=lambda *a,**k: mk(0,'\\\"proc.exe\\\",\\\"4242\\\",x')\n"
+            "cases.append(wt._pid_alive(4242) is True)\n"       # success + exact PID → alive
+            "wt.subprocess.run=lambda *a,**k: mk(0,'INFO: No tasks')\n"
+            "cases.append(wt._pid_alive(4242) is False)\n"      # success + no PID → dead
+            "print('ALL' if all(cases) else 'FAIL %r' % cases)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "ALL", r.stdout + r.stderr)
+
+    def test_malformed_token_stale_lock_not_reclaimed(self):
+        # finding 1 alignment: an unparseable-PID (malformed) stale lock has UNKNOWN holder
+        # identity → fail safe, never reclaimed (manual recovery), so a corrupt token can't be
+        # abused to steal. Deterministic: call _reclaim_owner_lock directly on such a lock.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        with open(self.lock_path("feat-a"), "wb") as fh:
+            fh.write(b"not-a-pid-token")
+        old = time.time() - 3 * 30                             # past the stale threshold
+        os.utime(self.lock_path("feat-a"), (old, old))
+        r = self.driver(
+            "print(wt._reclaim_owner_lock("
+            "os.path.join('.m8shift','worktree-owners','feat-a.lock')))\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "False")  # not reclaimed (fail-safe)
+        self.assertTrue(os.path.exists(self.lock_path("feat-a")))     # left for manual recovery
 
 
 if __name__ == "__main__":
