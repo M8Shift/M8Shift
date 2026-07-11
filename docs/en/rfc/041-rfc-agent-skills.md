@@ -7,6 +7,21 @@
 - Date: 2026-07-01
 - Origin: operator request — codify the recurring competencies used to build M8Shift so any agent can load them consistently. Scope chosen by the operator: **hybrid, docs-first**.
 
+> **Amendment (2026-07-11, operator direction — see RFC 050 rev 2):** the
+> Phase-1 bespoke file shape below (`skills/<id>.md` flat files with
+> `id`/`title`/`applies_to`/`triggers` front-matter plus a generated
+> `skills/index.json`) is **superseded by the open Agent Skills format**
+> ([agentskills.io](https://agentskills.io/specification)): one directory per
+> skill (`skills/<name>/SKILL.md`, `name` matching the directory), YAML
+> frontmatter `name` + `description` (optional `license`, `compatibility`,
+> `metadata`, `allowed-tools`), optional `scripts/`/`references/`/`assets/`.
+> M8Shift-specific properties ride in `metadata:` under `m8shift-*` keys; there
+> is **no index file** — discovery is a bounded frontmatter walk (the format's
+> progressive-disclosure model). The competency catalog, positioning
+> (§Positioning), EN-only rule, and the optional RFC 034 Phase-2 hooks are
+> unchanged. RFC 050 rev 2 §"Specialist definitions" is the normative
+> restatement of the format.
+
 ## Summary
 
 Building M8Shift exercises the same competencies on every cycle — adversarial

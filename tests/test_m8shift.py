@@ -11801,6 +11801,191 @@ class TestRFC052Hygiene(CLIBase):
         self.assertIn("docs/leak.md", hits)
 
 
+class TestRFC050SkillsDoctor(CLIBase):
+    """RFC 050 Phase 1b — advisory open-format Agent Skills validation.
+
+    Pins: subset-clean skills yield no findings; each finding has a
+    deterministic fixture; anything outside the conservative subset degrades
+    the WHOLE file to a sole skills.unvalidated info finding (suppression);
+    skills.* never gates --lint, even under M8SHIFT_SCRUB_ENFORCE."""
+
+    GOOD = ("---\n"
+            "name: {n}\n"
+            "description: A valid demo skill for tests. Use in tests only.\n"
+            "metadata:\n"
+            "  m8shift-lane: advisory-read-only\n"
+            "  m8shift-report: required\n"
+            "---\n"
+            "# body\n")
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+
+    def _skill(self, dirname, text):
+        d = os.path.join(self.d, "skills", dirname)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _findings(self):
+        # info-severity findings (unvalidated/oversized/metadata_unknown_key)
+        # are below the default warning threshold — lower it for the scan.
+        r = self.cw("doctor", "--json", "--severity-min", "info")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return [f for f in json.loads(r.stdout)["findings"]
+                if f["check"].startswith("skills.")]
+
+    def test_no_skills_dir_yields_no_findings(self):
+        self.assertEqual(self._findings(), [])
+
+    def test_subset_clean_skill_yields_no_findings(self):
+        self._skill("demo-skill", self.GOOD.format(n="demo-skill"))
+        self.assertEqual(self._findings(), [])
+
+    def test_repo_seed_skills_validate_cleanly(self):
+        # The shipped seeds must stay subset-clean on the real validator.
+        shutil.copytree(os.path.join(REPO, "skills"),
+                        os.path.join(self.d, "skills"))
+        self.assertEqual(self._findings(), [])
+
+    def test_name_charset_and_dir_mismatch_and_missing_keys(self):
+        self._skill("dir-a", self.GOOD.format(n="dir-b"))            # != dirname
+        self._skill("bad-name", self.GOOD.format(n="Bad--Name"))     # charset
+        self._skill("no-keys", "---\nlicense: MIT\n---\nbody\n")     # both missing
+        f = self._findings()
+        self.assertEqual({x["check"] for x in f}, {"skills.frontmatter_invalid"})
+        msgs = "\n".join(x["message"] for x in f)
+        self.assertIn("does not match its directory", msgs)
+        self.assertIn("breaks the open-format rules", msgs)
+        self.assertIn("`name` is missing", msgs)
+        self.assertIn("`description` is missing", msgs)
+
+    def test_description_overlength_flagged(self):
+        text = ("---\nname: long-desc\ndescription: " + "x" * 1025 +
+                "\n---\nbody\n")
+        self._skill("long-desc", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.frontmatter_invalid"])
+        self.assertIn("1024", f[0]["message"])
+
+    def test_unknown_lane_flagged(self):
+        text = self.GOOD.format(n="odd-lane").replace(
+            "advisory-read-only", "swarm-autonomous")
+        self._skill("odd-lane", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.lane_unknown"])
+
+    def test_unknown_m8shift_meta_key_flagged_foreign_keys_ignored(self):
+        text = ("---\nname: meta-keys\n"
+                "description: Demo skill with extra metadata keys.\n"
+                "metadata:\n"
+                "  m8shift-lane: advisory-read-only\n"
+                "  m8shift-autolaunch: please\n"
+                "  author: example-org\n"
+                "---\nbody\n")
+        self._skill("meta-keys", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.metadata_unknown_key"])
+        self.assertIn("m8shift-autolaunch", f[0]["message"])
+
+    def test_unsupported_yaml_degrades_to_sole_unvalidated(self):
+        # Folded description AND broken name AND unknown lane in one file:
+        # the whole file must yield exactly ONE skills.unvalidated info
+        # finding — suppression is the pinned contract.
+        text = ("---\n"
+                "name: Broken--NAME\n"
+                "description: >\n"
+                "  folded scalar outside the subset\n"
+                "metadata:\n"
+                "  m8shift-lane: swarm-autonomous\n"
+                "---\nbody\n")
+        self._skill("weird-skill", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.unvalidated"])
+        self.assertEqual(f[0]["severity"], "info")
+        self.assertIn("NOT a format error", f[0]["message"])
+
+    def test_quoted_scalar_is_outside_the_subset(self):
+        self._skill("quoted-desc",
+                    '---\nname: quoted-desc\ndescription: "quoted"\n---\nbody\n')
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.unvalidated"])
+
+    def test_second_metadata_block_degrades_to_sole_unvalidated(self):
+        # The RFC grammar permits ONE metadata: block; a repeated block is
+        # outside the subset — whole-file unvalidated, nothing else.
+        text = ("---\n"
+                "name: two-meta\n"
+                "description: Demo skill with a repeated metadata block.\n"
+                "metadata:\n"
+                "  m8shift-lane: advisory-read-only\n"
+                "metadata:\n"
+                "  m8shift-report: required\n"
+                "---\nbody\n")
+        self._skill("two-meta", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.unvalidated"])
+
+    def test_empty_description_is_frontmatter_invalid_not_unvalidated(self):
+        # A bare `description:` parses as the EMPTY scalar within the subset:
+        # required-key emptiness is provable -> frontmatter_invalid (never
+        # unvalidated).
+        self._skill("empty-desc", "---\nname: empty-desc\ndescription:\n---\nbody\n")
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.frontmatter_invalid"])
+        self.assertIn("empty", f[0]["message"])
+
+    def test_missing_frontmatter_block_flagged(self):
+        self._skill("no-frontmatter", "# just a body\n")
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.frontmatter_invalid"])
+        self.assertIn("no leading", f[0]["message"])
+
+    def test_missing_skill_md_flagged(self):
+        os.makedirs(os.path.join(self.d, "skills", "empty-dir"))
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.frontmatter_invalid"])
+        self.assertIn("is missing", f[0]["message"])
+
+    def test_oversized_body_is_an_advisory_nudge(self):
+        text = self.GOOD.format(n="long-body") + ("line\n" * 501)
+        self._skill("long-body", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.oversized"])
+        self.assertEqual(f[0]["severity"], "info")
+
+    def test_oversized_file_degrades_to_unvalidated(self):
+        text = self.GOOD.format(n="huge-file") + ("x" * (64 * 1024 + 10))
+        self._skill("huge-file", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.unvalidated"])
+        self.assertIn("KiB", f[0]["message"])
+
+    @unittest.skipUnless(os.name == "posix", "symlink semantics")
+    def test_symlinked_skill_md_degrades_to_unvalidated(self):
+        target = os.path.join(self.d, "real.md")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(self.GOOD.format(n="sym-skill"))
+        d = os.path.join(self.d, "skills", "sym-skill")
+        os.makedirs(d)
+        os.symlink(target, os.path.join(d, "SKILL.md"))
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.unvalidated"])
+        self.assertIn("could not be read", f[0]["message"])
+
+    def test_skills_findings_never_gate_lint_even_enforced(self):
+        self._skill("dir-a", self.GOOD.format(n="dir-b"))  # real warning finding
+        env = dict(os.environ, M8SHIFT_SCRUB_ENFORCE="1")
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--lint", "--json"],
+            cwd=self.d, capture_output=True, text=True, env=env)
+        payload = json.loads(r.stdout)
+        self.assertTrue(any(f["check"] == "skills.frontmatter_invalid"
+                            for f in payload["findings"]))  # visible…
+        self.assertEqual(r.returncode, 0, r.stdout)          # …but never gating
+
+
 class TestRFC052Denylist(CLIBase):
     """RFC 052 (#101) PR2 — C3 operator-confidential denylist in `doctor
     --hygiene`. Every run isolates HOME (a real operator denylist at the default

@@ -94,6 +94,19 @@ The same agent does not have to keep the same role across tasks. A healthy task 
 **one implementer and one independent reviewer**: the author never green-lights their
 own work.
 
+### Skills — reusable competency and specialist definitions
+
+The repository's `skills/` directory is the **source of truth** for reusable
+competencies and RFC 050 specialist profiles, in the open **Agent Skills**
+format (one directory per skill, `SKILL.md` with `name` + `description`
+frontmatter; M8Shift lane properties under namespaced `metadata:` keys). Any
+agent product that speaks the format can be wired to load them — see
+`examples/skills-wiring.md` (discovery is product- and version-specific and
+explicitly operator-wired; M8Shift itself never executes skill content).
+`doctor` validates the frontmatter subset advisorily (`skills.*` findings,
+never gating). RFC 041 (competencies) and RFC 050 (specialist lanes) define
+the details.
+
 ### Reviewer neutrality and objectivity
 
 M8Shift has no model of its own, so it cannot debias an agent's reasoning. What it can
