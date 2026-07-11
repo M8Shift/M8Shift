@@ -32,7 +32,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.56.0"
+VERSION = "3.57.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -3108,6 +3108,7 @@ class TestAuditFixes(CLIBase):
         scripts = [
             "m8shift-context.py",
             "m8shift-e2e.py",
+            "m8shift-headroom.py",
             "m8shift-i18n.py",
             "m8shift-runtime.py",
             "m8shift-worktree.py",
