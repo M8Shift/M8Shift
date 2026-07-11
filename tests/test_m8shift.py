@@ -9284,6 +9284,21 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
             self.assertIsNone(fx["used_tokens"], payload)
             self.assertEqual(fx["windows"], [])
 
+    def test_parts_leaf_never_double_counts_its_nested_breakdown(self):
+        # Review round 1 blocker: a summary-plus-breakdown shape must count
+        # ONCE — a node carrying recognized part keys is a counting leaf and
+        # its child containers are its own breakdown, not extra spend.
+        mod = self._example()
+        fx = mod.build_fixture(
+            {"inputTokens": 100, "usage": {"inputTokens": 100}},
+            "claude", self.NOW)
+        self.assertEqual(fx["used_tokens"], 100)               # not 200
+        # containers without their own counts still recurse normally
+        fx = mod.build_fixture(
+            {"usage": {"inputTokens": 100, "outputTokens": 50}},
+            "claude", self.NOW)
+        self.assertEqual(fx["used_tokens"], 150)
+
     def test_never_submit_guard_refuses_before_launch(self):
         mod = self._example()
         launched = []
@@ -9296,6 +9311,17 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
                     ["tokscale", "login"]):
             self.assertIsNone(mod._run_tokscale(cmd, run=fake_run))
         self.assertEqual(launched, [])                          # guard fired first
+
+    def test_guard_is_exact_token_not_substring(self):
+        # Review round 1: substring matching made benign paths/args merely
+        # CONTAINING a verb fail open (availability trap). Exact-token only.
+        mod = self._example()
+        class P:
+            returncode, stdout = 0, "{}"
+        for cmd in (["/opt/logins/tokscale", "usage", "--json"],
+                    ["tokscale", "usage", "--note", "submitted"]):
+            self.assertEqual(mod._run_tokscale(cmd, run=lambda *a, **k: P()), {},
+                             cmd)                               # allowed to run
 
     def test_run_rejects_nonzero_oversized_and_non_json(self):
         mod = self._example()

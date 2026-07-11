@@ -89,9 +89,17 @@ def _as_count(value):
 def _sum_tokens(node, depth=0, budget=None):
     """Bounded, version-tolerant token sum over an unknown tokscale JSON shape.
 
-    Prefers an explicit total key at each object (never adding its parts on
-    top — no double counting); otherwise sums recognized part keys, then
-    recurses into child containers. Unknown fields are ignored. Never raises.
+    Every object is exactly ONE of (no mixing — that is what prevents double
+    counting a summary-plus-breakdown shape):
+      1. an explicit-total leaf — a recognized total key wins outright (its
+         part keys and children are NEVER added on top);
+      2. a parts leaf — recognized part keys are summed and its child
+         containers are NOT entered (a node carrying its own counts is a
+         counting leaf; nested objects under it are treated as its breakdown
+         of the same spend, e.g. {"inputTokens": 100, "usage":
+         {"inputTokens": 100}} counts 100, not 200);
+      3. a container — no total, no parts: recurse into children.
+    Unknown fields are ignored. Never raises.
     """
     if budget is None:
         budget = [_MAX_NODES]
@@ -106,11 +114,11 @@ def _sum_tokens(node, depth=0, budget=None):
         total = _as_count(node.get(key))
         if total is not None:
             return total
+    parts = [count for count in (_as_count(node.get(key)) for key in _PART_KEYS)
+             if count is not None]
+    if parts:
+        return sum(parts)
     subtotal = 0
-    for key in _PART_KEYS:
-        part = _as_count(node.get(key))
-        if part is not None:
-            subtotal += part
     for value in node.values():
         if isinstance(value, (dict, list)):
             subtotal += _sum_tokens(value, depth + 1, budget)
@@ -134,9 +142,16 @@ def build_fixture(payload, agent, now_iso):
 
 
 def _forbidden(command):
-    """True when the argv mentions a leaderboard/cloud verb (RFC 052 guard)."""
-    return any(verb in str(part).lower() for part in command
-               for verb in FORBIDDEN_VERBS)
+    """True when an argv TOKEN is exactly a leaderboard/cloud verb (RFC 052).
+
+    Exact per-token, case-insensitive matching: tokscale's dangerous verbs
+    are subcommands, so they appear as whole argv tokens (`tokscale submit`,
+    `tokscale autosubmit status`). Substring matching would make a benign
+    path or argument merely CONTAINING such a word (e.g.
+    `/opt/logins/tokscale`, `--note submitted`) fail open — an availability
+    trap, not a safety gain. The guard still fires BEFORE any launch.
+    """
+    return any(str(part).lower() in FORBIDDEN_VERBS for part in command)
 
 
 def _run_tokscale(command=None, run=subprocess.run, timeout_s=TOKSCALE_TIMEOUT_S):
