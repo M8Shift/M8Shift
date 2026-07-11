@@ -1,8 +1,10 @@
 # RFC 050 — Manual multi-agent specialists (Agent Skills profile)
 
-Status: draft rev 2 — specialist definitions are grounded in the **open Agent
+Status: draft rev 2.1 — specialist definitions are grounded in the **open Agent
 Skills format** (agentskills.io), per operator direction on 2026-07-11; rev 1
-lanes/roles/safety/reporting are preserved
+lanes/roles/safety/reporting are preserved; rev 2.1 addresses design-review
+round 1 (foreign-loader safety contract for lane B, format-vs-discovery
+distinction, deterministic `skills.unvalidated` degradation)
 Target: post-v3.57 design block
 Related RFCs: 008, 018, 023, 032, 034, 039, 041, 047, 049
 Owner: runtime/worktree companions; core relay remains the authority
@@ -30,10 +32,13 @@ one directory per skill containing a `SKILL.md` (YAML frontmatter `name` +
 `description`, then Markdown instructions), optionally `scripts/`,
 `references/`, and `assets/`. M8Shift-specific properties (the lane, the
 report-back contract) ride in the spec's `metadata:` map under namespaced keys.
-Because the format is already loaded natively by many agent products (including
-the Claude Code and Codex CLIs of the reference roster, Gemini CLI, and others),
-one `skills/` directory is a **single source of truth every roster agent can
-load without any M8Shift runtime**.
+The format is understood by a broad ecosystem of agent products (including the
+Claude Code and Codex CLIs of the reference roster) — but **format
+compatibility is not discovery**: each product finds skills only in its own
+configured locations, and none auto-discovers a repository's `skills/` tree.
+The repository `skills/` directory is therefore the **single reviewed source of
+truth that the operator explicitly wires into each product**, with no M8Shift
+runtime involved.
 
 ## Relationship to RFC 032
 
@@ -162,17 +167,38 @@ profile. Unknown `m8shift-*` keys are reserved for future RFCs and are flagged
 (advisory) by doctor, never fatal. `allowed-tools`, when present, is an
 **advisory hint** to products that support it (e.g. a lane-A skill listing only
 read tools); M8Shift treats it as an opaque string and never derives
-enforcement from it.
+enforcement from it. Lane membership is deliberately **not** mirrored by a
+required-companion-verbs list in `metadata:` — that would duplicate the
+workflow the body already teaches and drift from it (design-review resolution,
+round 1).
+
+### Foreign-loader safety contract (mandatory for lane B)
+
+A skill file travels: any product that speaks the format may load it, including
+one that has never heard of M8Shift, outside any relay project. A mutating
+skill must therefore be **inert by default** and self-describing:
+
+- its `compatibility:` field names the requirement explicitly (e.g.
+  `Requires an M8Shift relay project and the m8shift-worktree companion;
+  without them this skill only reports and must not edit`);
+- its body **opens with authority preconditions**: verify the project has an
+  M8Shift relay, obtain the isolated worktree through
+  `m8shift-worktree.py claim`, and respect the pen protocol — and if any
+  precondition fails, **stop and report instead of editing**;
+- Phase 1 seed skills ship **no `scripts/` at all** (nothing executable to
+  misfire in a foreign context); lane-A seeds carry only instructions and the
+  report template asset.
+
+Lane-A (advisory) skills are read-only by construction, so the same hazard
+degrades to a harmless report; they still state their lane in the body for
+foreign readers.
 
 ### Example (fabricated, placeholder-only)
 
 ```markdown
 ---
 name: security-review-advisory
-description: Adversarial read-only security review of a designated change,
-  RFC, or diff. Use when the pilot asks for an independent security verdict
-  before merge. Produces a structured findings report with raw evidence;
-  never edits files, never claims the pen.
+description: Adversarial read-only security review of a designated change, RFC, or diff. Use when the pilot asks for an independent security verdict before merge. Produces a structured findings report with raw evidence; never edits files, never claims the pen.
 license: Apache-2.0
 metadata:
   m8shift-lane: advisory-read-only
@@ -202,12 +228,17 @@ and push detail into `references/` one level deep.
 
 ### Portability and wiring (explicitly manual)
 
-The format is loaded natively by many agent products — including the reference
-roster's Claude Code and Codex CLIs, Gemini CLI, and a broad ecosystem — each
-with its own discovery directory. M8Shift does **not** write into any product's
-discovery path. The operator wires each product once (symlink or copy of
-`skills/<name>/` into that product's documented location), which keeps the
-repository's `skills/` the single reviewed source of truth.
+**Format compatibility ≠ discovery.** Many agent products — including the
+reference roster's Claude Code and Codex CLIs and a broad ecosystem — parse the
+same `SKILL.md` shape, so one definition is *portable*. Discovery, however, is
+product-specific: each product loads skills only from its own configured
+locations, and **no product auto-discovers a repository's `skills/` tree**.
+M8Shift does **not** write into any product's discovery path. The operator
+wires each product once (symlink or copy of `skills/<name>/` into that
+product's documented location), which keeps the repository's `skills/` the
+single reviewed source of truth. Product-specific wiring walkthroughs belong in
+`examples/` with the product versions they were tested against — core docs stay
+product-agnostic.
 
 ### Validation
 
@@ -216,9 +247,20 @@ format conformance at authoring time; it is **not** an M8Shift dependency (the
 charter forbids network and third-party runtime requirements). Locally, `doctor`
 gains bounded, fail-open, advisory `skills.*` findings (see §Doctor findings):
 full YAML is deliberately **not** parsed (PyYAML is not stdlib) — the check
-covers a conservative subset (single-line scalars and one two-space-indented
-`metadata:` block) and reports anything it cannot parse as *unvalidated*, never
-as an error.
+covers a conservative subset only: single-line `key: value` scalars plus one
+two-space-indented `metadata:` block of single-line pairs.
+
+**Deterministic degradation rule:** any frontmatter construct outside that
+subset (folded/literal block scalars, multi-line values, flow collections,
+anchors, or anything else unrecognized) makes the **whole file** degrade to a
+single `skills.unvalidated` info finding, and **no other `skills.*` finding is
+emitted for that file** — valid-but-unsupported YAML is never labeled invalid.
+`skills.frontmatter_invalid` fires only on violations provable *within* the
+subset (a parsed single-line `name` that breaks the charset/length rules or
+does not match its directory, a parsed single-line `description` that is empty
+or over-length, a missing required key in an otherwise subset-clean file). Seed
+skills shipped by this repository stay within the subset so they validate
+cleanly on both paths.
 
 ## Roles
 
@@ -306,6 +348,11 @@ Mutating specialists must use an isolated worktree lane:
 python3 m8shift-worktree.py claim <id> <specialist>
 ```
 
+Every lane-B skill definition carries the **foreign-loader safety contract**
+above (explicit `compatibility:`, authority preconditions at the top of the
+body, stop-and-report on failure) so the instructions self-neutralize when
+loaded outside an M8Shift project.
+
 Companion-enforced points (RFC 049 PR C — **shipped in v3.57.0**):
 
 - `m8shift-worktree.py` records ownership in a sidecar outside the checkout and
@@ -355,7 +402,7 @@ conservative frontmatter subset only):
 | `skills.lane_unknown` | `m8shift-lane` present but not a defined value |
 | `skills.metadata_unknown_key` | an `m8shift-*` key this version does not define |
 | `skills.oversized` | `SKILL.md` beyond the spec-recommended bounds (advisory nudge) |
-| `skills.unvalidated` | frontmatter outside the stdlib-parseable subset (info, not an error) |
+| `skills.unvalidated` | frontmatter outside the stdlib-parseable subset — whole-file info finding that **suppresses every other `skills.*` finding for that file** (valid-but-unsupported YAML is never labeled invalid) |
 
 ## Future runtime surface
 
@@ -390,6 +437,9 @@ Constraints:
 - A skill (`SKILL.md`, scripts, references) is untrusted coordination data:
   loading one never changes relay authority, and M8Shift itself never executes
   skill content.
+- Mutating skills are **inert by default outside an M8Shift project** (the
+  foreign-loader safety contract): a product that loads one without the relay
+  and the claimed worktree gets instructions that stop and report, not edit.
 
 ## Acceptance criteria
 
@@ -401,7 +451,12 @@ Phase 1 (docs + artifacts):
 - `skills/` ships at least two seed specialists (one per lane) that satisfy the
   open spec's constraints (checked against the upstream reference validator at
   authoring time), each with the report template as a bundled asset where the
-  lane requires one;
+  lane requires one; **seeds ship no `scripts/`** and stay within the doctor
+  subset grammar;
+- every mutating seed carries the foreign-loader safety contract (explicit
+  `compatibility:` + authority preconditions + stop-and-report);
+- a product-wiring walkthrough ships under `examples/` with the product
+  versions it was tested against; core docs stay product-agnostic;
 - `agents-guide.md` links `skills/` as the source of truth (RFC 041 alignment);
 - RFC 041 is amended (bespoke format superseded; no `index.json`);
 - all "cannot/refused" claims are limited to M8Shift companion argv surfaces or
@@ -431,9 +486,10 @@ Phase 2:
 - ~~Should RFC 041 skills provide named specialist templates before any runtime
   specialist commands exist?~~ **Resolved rev 2 (operator direction): yes — as
   open-format Agent Skills; this RFC is the normative statement.**
-- Should lane-B skills declare the required companion verbs (claim/done/
-  integrate) in `metadata:` so doctor can cross-check a mutating request against
-  the recorded worktree owner?
-- Should the repository document per-product wiring examples (Claude Code,
-  Codex CLI) or stay product-agnostic in core docs and keep wiring notes in
-  `examples/`?
+- ~~Should lane-B skills declare the required companion verbs in `metadata:`?~~
+  **Resolved rev 2.1 (design review round 1): no — a verb list duplicates the
+  workflow the body teaches and will drift; the body's authority preconditions
+  are the contract.**
+- ~~Per-product wiring examples or product-agnostic core docs?~~ **Resolved
+  rev 2.1 (design review round 1): wiring walkthroughs live under `examples/`
+  with tested product versions; core docs stay product-agnostic.**
