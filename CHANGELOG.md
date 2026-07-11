@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v3.57.0 — 2026-07-11
+
+RFC 049 holder-liveness completion, a unified multi-window usage display, and
+live-verified usage adapters.
+
 **Live-verified usage adapters (#105).** The two reference adapters fold back
 the fixes discovered by running them against the REAL providers (2026-07-10):
 
