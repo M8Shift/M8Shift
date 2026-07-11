@@ -6649,7 +6649,7 @@ def _skill_frontmatter_subset(text):
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return "missing", {}, {}, len(lines)
-    fields, meta, in_meta = {}, {}, False
+    fields, meta, in_meta, meta_seen = {}, {}, False, False
     for i in range(1, len(lines)):
         line = lines[i]
         if line.strip() == "---" and not line.startswith(" "):
@@ -6670,12 +6670,18 @@ def _skill_frontmatter_subset(text):
             return "unsupported", {}, {}, 0
         key, val = m.group(1), m.group(2)
         if key == "metadata" and (val is None or not val.strip()):
-            in_meta = True
+            if meta_seen:
+                # The RFC grammar permits ONE metadata: block — a repeated
+                # block is outside the subset (whole-file unvalidated).
+                return "unsupported", {}, {}, 0
+            in_meta = meta_seen = True
             continue
-        if val is None:
-            return "unsupported", {}, {}, 0
-        val = val.strip()
-        if not val or val.startswith(_SKILL_PLAIN_UNSAFE):
+        # A bare `key:` (or `key: ` with only whitespace) parses as the EMPTY
+        # single-line scalar — required-key emptiness must be provable within
+        # the subset (RFC 050: an empty parsed description is
+        # skills.frontmatter_invalid, never skills.unvalidated).
+        val = "" if val is None else val.strip()
+        if val.startswith(_SKILL_PLAIN_UNSAFE):
             return "unsupported", {}, {}, 0
         fields[key] = val
     return "unsupported", {}, {}, 0   # unterminated frontmatter block
@@ -6754,6 +6760,11 @@ def _skills_findings():
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
                     "%s: required frontmatter key `description` is missing." % rel, rel))
+            elif not desc:
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s: `description` is empty (the open format requires 1-1024 "
+                    "chars)." % rel, rel))
             elif len(desc) > SKILL_DESC_MAX:
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",

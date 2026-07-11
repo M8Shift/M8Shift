@@ -11912,6 +11912,30 @@ class TestRFC050SkillsDoctor(CLIBase):
         f = self._findings()
         self.assertEqual([x["check"] for x in f], ["skills.unvalidated"])
 
+    def test_second_metadata_block_degrades_to_sole_unvalidated(self):
+        # The RFC grammar permits ONE metadata: block; a repeated block is
+        # outside the subset — whole-file unvalidated, nothing else.
+        text = ("---\n"
+                "name: two-meta\n"
+                "description: Demo skill with a repeated metadata block.\n"
+                "metadata:\n"
+                "  m8shift-lane: advisory-read-only\n"
+                "metadata:\n"
+                "  m8shift-report: required\n"
+                "---\nbody\n")
+        self._skill("two-meta", text)
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.unvalidated"])
+
+    def test_empty_description_is_frontmatter_invalid_not_unvalidated(self):
+        # A bare `description:` parses as the EMPTY scalar within the subset:
+        # required-key emptiness is provable -> frontmatter_invalid (never
+        # unvalidated).
+        self._skill("empty-desc", "---\nname: empty-desc\ndescription:\n---\nbody\n")
+        f = self._findings()
+        self.assertEqual([x["check"] for x in f], ["skills.frontmatter_invalid"])
+        self.assertIn("empty", f[0]["message"])
+
     def test_missing_frontmatter_block_flagged(self):
         self._skill("no-frontmatter", "# just a body\n")
         f = self._findings()
