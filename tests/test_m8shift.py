@@ -8635,6 +8635,25 @@ class TestRFC040UsageQuota(CLIBase):
         self.assertEqual(by["weekly"]["resets_at"], "2026-01-06T21:45:03Z")
         self.assertEqual(fx["provenance"], "official")
 
+    def test_example_build_fixture_live_shape_rejects_naive_reset(self):
+        # #105 review round 1 finding 2: a timezone-NAIVE reset (no offset) must NOT be
+        # coerced via the host timezone — the same payload would then be host-dependent. It
+        # normalizes to null; only an OFFSET-bearing reset yields a strict-Z string.
+        mod = self._example()
+        fx = mod.build_fixture({
+            "five_hour": {"utilization": 30, "resets_at": "2026-01-01T05:00:00"},   # naive
+            "seven_day": {"utilization": 40, "resets_at": "2026-01-01"},            # naive date
+        }, "2026-01-01T00:00:00Z")
+        by = {w["kind"]: w for w in fx["windows"]}
+        self.assertEqual(by["session_5h"]["used_ratio"], 0.30)     # ratio still recorded
+        self.assertIsNone(by["session_5h"]["resets_at"])           # naive reset → null (not host-tz)
+        self.assertIsNone(by["weekly"]["resets_at"])
+        # an aware reset (offset OR Z) still normalizes to strict Z, host-independently
+        fx = mod.build_fixture({"five_hour": {"utilization": 30,
+                                              "resets_at": "2026-01-01T05:00:00+02:00"}},
+                               "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["windows"][0]["resets_at"], "2026-01-01T03:00:00Z")
+
     def test_example_build_fixture_windows_list_takes_precedence_over_live_shape(self):
         mod = self._example()
         fx = mod.build_fixture({
@@ -8643,6 +8662,31 @@ class TestRFC040UsageQuota(CLIBase):
             "five_hour": {"utilization": 99, "resets_at": "2026-01-01T05:00:00Z"},
         }, "2026-01-01T00:00:00Z")
         self.assertEqual([w["used_ratio"] for w in fx["windows"]], [0.75])  # windows[] wins
+
+    def test_example_build_fixture_fallback_precedence_is_exact(self):
+        # #105 review round 1 finding 3: the EXACT fallback rule — any successfully normalized
+        # windows[] entry suppresses the live-shape fallback; an EMPTY/all-invalid windows[]
+        # (or absent/non-list) attempts it.
+        mod = self._example()
+        # windows[] present but ALL-INVALID → normalized list empty → fallback attempted
+        fx = mod.build_fixture({
+            "windows": [{"kind": "unknown_window", "remainingPercent": 10},   # unmapped → dropped
+                        {"kind": "five_hour", "remainingPercent": float("nan")}],  # bad → dropped
+            "five_hour": {"utilization": 55, "resets_at": "2026-01-01T05:00:00Z"},
+        }, "2026-01-01T00:00:00Z")
+        self.assertEqual([w["used_ratio"] for w in fx["windows"]], [0.55])  # fallback used
+        # windows[] present and EMPTY → fallback attempted
+        fx = mod.build_fixture({"windows": [],
+                                "seven_day": {"utilization": 44, "resets_at": "2026-01-06T21:45:03Z"}},
+                               "2026-01-01T00:00:00Z")
+        self.assertEqual([w["kind"] for w in fx["windows"]], ["weekly"])
+        # windows[] with ONE valid entry → fallback SUPPRESSED (even if a live key is present)
+        fx = mod.build_fixture({
+            "windows": [{"kind": "five_hour", "remainingPercent": 25,
+                         "resetsAt": "2026-01-01T05:00:00Z"}],
+            "seven_day": {"utilization": 99, "resets_at": "2026-01-06T21:45:03Z"},
+        }, "2026-01-01T00:00:00Z")
+        self.assertEqual([w["kind"] for w in fx["windows"]], ["session_5h"])  # no weekly fallback
 
     def test_example_build_fixture_live_shape_degrades_per_entry(self):
         mod = self._example()
@@ -9003,6 +9047,56 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertEqual(calls["kwargs"]["encoding"], "utf-8")
         self.assertEqual(calls["kwargs"]["errors"], "replace")
         self.assertTrue(procs[0].killed)         # server terminated after the answer
+
+    class _SilentLiveProcess:
+        """A LIVE app-server that stays up with stdin open and emits NOTHING (#105 review
+        round 1): its readline blocks, and only `kill()` (closing the pipe) unblocks it —
+        modelling the real kill-closes-stdout behavior so the daemon reader can never leak."""
+
+        def __init__(self, sleep_s=5.0):
+            self._sleep = sleep_s
+            self.killed = False
+            outer = self
+
+            class _Stdin:
+                def write(self, text):
+                    pass
+
+                def flush(self):
+                    pass
+
+            self.stdin = _Stdin()
+            self.stdout = self
+
+        def readline(self):
+            for _ in range(int(self._sleep / 0.02) + 1):
+                if self.killed:                 # kill() closed stdout → EOF unblocks the reader
+                    return ""
+                time.sleep(0.02)
+            return ""
+
+        def kill(self):
+            self.killed = True
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def test_call_app_server_bounded_against_silent_live_child(self):
+        # finding 1: a blocking readline must not outrun the deadline. A silent live child
+        # emitting nothing for 5s must be abandoned within ~timeout + cleanup, not 5s, with the
+        # child killed and the daemon reader unblocked (no thread leak).
+        import threading as _t
+        mod = self._example()
+        proc = self._SilentLiveProcess(sleep_s=5.0)
+        before = _t.active_count()
+        t0 = time.monotonic()
+        result = mod._call_app_server(popen=lambda *a, **k: proc, timeout_s=0.1)
+        elapsed = time.monotonic() - t0
+        self.assertIsNone(result)                        # fail-open, not a value
+        self.assertTrue(proc.killed)                     # child terminated
+        self.assertLess(elapsed, 2.0)                    # bounded — NOT the 5s silent window
+        time.sleep(0.1)                                  # let the killed reader unwind
+        self.assertLessEqual(_t.active_count(), before)  # no leaked reader thread
 
     def test_call_app_server_fail_opens_on_eof_deadline_and_non_json(self):
         mod = self._example()

@@ -31,7 +31,9 @@ import contextlib
 import datetime as dt
 import json
 import math
+import queue
 import subprocess
+import threading
 import time
 import sys
 
@@ -153,7 +155,16 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
     requests when stdin reaches EOF, so communicate()-style write-then-close
     loses the id=2 response and the server never exits on its own (timeout ->
     None). stdin therefore stays OPEN while stdout is read line-by-line until
-    the id=2 response or the deadline; the server is then terminated."""
+    the id=2 response or the deadline; the server is then terminated.
+
+    Bounded even against a SILENT LIVE server (#105 review round 1): a blocking
+    readline would never return to a deadline check, so the reads happen on a
+    DAEMON reader thread feeding a queue, and the main thread waits on the queue
+    with the remaining deadline (portable — no select on Windows pipes). On
+    timeout the function returns None and the finally kill closes the pipes,
+    unblocking the reader; being a daemon thread it can never hold the process
+    open. Total return time is bounded by timeout_s plus a small cleanup
+    allowance (the 1s reap)."""
     command = list(APP_SERVER_CMD if command is None else command)
     initialize = {
         "id": 1,
@@ -171,12 +182,30 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
         proc.stdin.write(json.dumps(initialize, separators=(",", ":")) + "\n")
         proc.stdin.write(json.dumps(read_limits, separators=(",", ":")) + "\n")
         proc.stdin.flush()
+        lines = queue.Queue()
+
+        def _pump(stdout=proc.stdout):
+            try:
+                for line in iter(stdout.readline, ""):
+                    lines.put(line)
+            except Exception:
+                pass                                     # reader error → sentinel below
+            finally:
+                lines.put(None)                          # EOF/error sentinel
+
+        threading.Thread(target=_pump, daemon=True).start()
         deadline = time.monotonic() + timeout_s
         result = None
-        while time.monotonic() < deadline:
-            line = proc.stdout.readline()
-            if not line:
-                break                            # server exited/EOF
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break                                    # deadline: silent live server bounded
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                break                                    # deadline while blocked on the queue
+            if line is None:
+                break                                    # server exited / reader error (EOF)
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
@@ -190,7 +219,7 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
     finally:
         if proc is not None:
             with contextlib.suppress(Exception):
-                proc.kill()
+                proc.kill()                              # closes the pipes → unblocks the reader
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=1)
 

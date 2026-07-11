@@ -7,22 +7,33 @@ the fixes discovered by running them against the REAL providers (2026-07-10):
 
 - `examples/usage-adapters/claude-oauth-usage.py` now understands the LIVE
   endpoint shape — top-level `five_hour`/`seven_day` objects carrying a
-  USED-percent `utilization` (no inversion) and an offset-bearing `resets_at`,
-  normalized to the strict-`Z` form the usage schema requires. The documented
-  `windows[]` shape keeps precedence; the live shape is a fallback, degrading
-  per entry (non-dict window, implausible utilization, unparseable reset).
+  USED-percent `utilization` (no inversion) and an OFFSET-BEARING `resets_at`,
+  normalized to the strict-`Z` form the usage schema requires. A timezone-NAIVE
+  reset (no offset) is ambiguous and never invented — `astimezone()` would
+  assume the host timezone and make the same payload host-dependent — so a naive
+  reset normalizes to `null`. Fallback precedence is EXACT: any successfully
+  normalized `windows[]` entry suppresses the fallback; only an empty normalized
+  list (windows[] absent / non-list / empty / all-invalid) attempts the
+  top-level live shape, degrading per entry (non-dict window, implausible
+  utilization, unparseable/naive reset).
 - `examples/usage-adapters/codex-ratelimits.py` no longer uses a
   `communicate()`-style write-then-close call: codex-cli 0.144.1's app-server
-  DROPS pending requests when stdin reaches EOF, losing the `id=2` response
-  and hanging to the timeout. stdin now stays OPEN while stdout is read
-  line-by-line until the `id=2` reply or the deadline; the server is then
-  terminated and reaped. Fail-open semantics unchanged.
+  DROPS pending requests when stdin reaches EOF, losing the `id=2` response and
+  hanging to the timeout. stdin now stays OPEN while stdout is read on a DAEMON
+  reader thread feeding a queue; the main thread waits on the queue with the
+  remaining monotonic deadline, so even a SILENT-but-live server is bounded (a
+  blocking `readline` can never outrun the deadline). On timeout the function
+  returns None and the finally kill closes the pipes, unblocking the daemon
+  reader (which can never hold the process open). Portable — no `select` on
+  Windows pipes. Fail-open semantics unchanged.
 
-Both foldbacks ship exactly the copies that have been serving the live relay
-since the fixes landed there; the process-contract tests are re-pinned to the
-held-stdin protocol (including a regression that goes RED if stdin is closed
-before the reply is read) and the live claude shape is pinned with
-mutation-verified tests (inversion and missing-normalization both bite).
+Both foldbacks originate from the copies that served the live relay all day
+(2026-07-10, including the saturation events), further hardened in review
+(bounded silent-child deadline, aware-only resets). The process-contract tests
+are re-pinned to the held-stdin protocol (including a regression that goes RED
+if stdin is closed before the reply is read, plus a silent-live-child deadline
+bound) and the live claude shape is pinned with mutation-verified tests
+(inversion, missing-normalization, and naive-reset all bite).
 
 **RFC 049 PR C — worktree ownership sidecar and advisory guard (#104).**
 `m8shift-worktree.py claim` now records the claiming agent in

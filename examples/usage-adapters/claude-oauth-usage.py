@@ -104,7 +104,11 @@ def build_fixture(payload, now_iso):
     if not windows and isinstance(payload, dict):
         # LIVE endpoint shape (observed 2026-07-10): top-level window objects
         # {"five_hour": {"utilization": <used %>, "resets_at": ISO}, ...} —
-        # utilization is USED percent (no inversion), resets_at is already ISO.
+        # utilization is USED percent (no inversion), resets_at is ISO WITH an
+        # explicit offset. FALLBACK PRECEDENCE (exact contract, #105 review):
+        # any successfully NORMALIZED windows[] entry suppresses this fallback;
+        # only when the normalized list is empty (windows[] absent, non-list,
+        # empty, or all-invalid) is the top-level live shape attempted.
         for key, kind in (("five_hour", "session_5h"), ("seven_day", "weekly")):
             try:
                 win = payload.get(key)
@@ -121,8 +125,15 @@ def build_fixture(payload, now_iso):
                 if isinstance(resets, str) and resets:
                     try:
                         parsed = dt.datetime.fromisoformat(resets.replace("Z", "+00:00"))
-                        resets_at = parsed.astimezone(dt.timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")
+                        # A NAIVE datetime (no offset) is ambiguous — astimezone()
+                        # would assume the HOST local timezone and make the same
+                        # provider payload host-dependent (#105 review round 1).
+                        # Never invent an offset: aware-only normalization.
+                        if parsed.tzinfo is None:
+                            resets_at = None
+                        else:
+                            resets_at = parsed.astimezone(dt.timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ")
                     except ValueError:
                         resets_at = None
                 windows.append({
