@@ -105,10 +105,12 @@ class TestPureFunctions(unittest.TestCase):
 
     def test_stanza_does_not_overpromise_autonomy(self):
         """The stanza read by the agent no longer overpromises full autonomy and
-        carries the UI caveat: `wait` does not wake the chat UI."""
+        carries the host wake-up caveat (#108): waiters detect, they never
+        launch — a human must reactivate the agent absent host wake-up."""
         s = cowork.stanza_for("claude")
         self.assertNotIn("no human help required", s)
-        self.assertIn("does not wake your UI", s)
+        self.assertIn("waiters detect, never", s)
+        self.assertIn("must reactivate you", s)
 
     def test_prompt_guardrails_are_present_in_core_and_packs(self):
         self.assertIn("untrusted coordination data", cowork.PROTOCOL["en"])
@@ -9888,6 +9890,28 @@ class TestRFC048PRA(CLIBase):
         cowork.ROSTER = ("claude", "codex")
         n = len(cowork.stanza_for("claude").encode("utf-8"))
         self.assertLess(n, 2048, f"rendered stanza is {n} bytes (target <1536)")
+
+    def test_incident_108_host_wakeup_guard_pinned(self):
+        # Incident #108: a waiter (`wait`) was described as an autonomous
+        # listener; the handoff stalled until a human reactivated the chat.
+        # The guard lives in BOTH generated surfaces:
+        # (a) stanza floor — waiter-vs-launcher line + disclosure duty;
+        s = cowork.stanza_for("claude")
+        self.assertIn("waiters detect, never", s)
+        self.assertIn("say a human must reactivate you", s)
+        self.assertIn("wake-up", s)          # STANZA_FLOOR_MARKERS needle
+        # (b) agent pack — full guard: terminology + decision rule + the
+        # detection-vs-invocation rule.
+        pack = cowork.AGENT_PACK_EN
+        self.assertIn("Host wake-up guard", pack)
+        for term in ("**poll**", "**waiter**", "**listener**", "**chat wait**"):
+            self.assertIn(term, pack)
+        self.assertIn("listener status --agent <you>", pack)
+        self.assertIn("waiters, not agent launchers", pack)
+        self.assertIn("never equate successful turn DETECTION "
+                      "with successful agent INVOCATION",
+                      pack.replace("\n", " "))
+        self.assertIn("autonomous, persistent, or headless", pack)
 
     def test_existing_anchor_keeps_user_content_and_gets_floor_stanza(self):
         old_stanza = (cowork.STANZA_BEGIN

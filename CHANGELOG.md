@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+**Host wake-up guard (#108).** A live incident stalled a handoff in
+`AWAITING_<agent>`: a shell waiter (`wait --interval 300`) had been described
+as an autonomous loop, but waiters DETECT a turn and exit — they cannot wake a
+completed chat/model turn, and no resident listener existed. The generated
+guidance now carries the guard on both surfaces: the stanza floor states
+"waiters detect, never launch — without host wake-up, say a human must
+reactivate you" (a new `wake-up` floor marker pins it), and the agent pack
+gains a full "Host wake-up guard" section (poll / waiter / listener /
+chat-wait terminology, the `listener status --agent <you>` decision rule with
+ALIVE = resident process + valid invocation backend, disclosure duty, and the
+detection-is-not-invocation rule). agents-guide documents the same
+terminology for contributors. Runtime improvements (listener status
+`can_invoke_agent`/`survives_parent_exit`, `wait` interactive notice,
+stale-AWAITING notifier) remain #108 slice 2, designed jointly with #107.
+
 **RFC 050 — manual multi-agent specialists as open-format Agent Skills
 (Phase 1 + 1b).** Specialist definitions adopt the open Agent Skills format
 (agentskills.io): one directory per skill under `skills/` with a `SKILL.md`

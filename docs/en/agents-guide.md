@@ -367,6 +367,28 @@ ledger (`m8shift.py task add …`) and reconcile to a forge issue when possible.
 
 ## 7. Dogfooding — building M8Shift with M8Shift
 
+### Waiter vs listener — the host wake-up guard (incident #108)
+
+Four terms, used precisely, prevent a stalled relay:
+
+- **poll** — inspect relay state once (`status`, `peek`).
+- **waiter** — one process that blocks until your turn arrives, then exits
+  (`wait`, `next`, `append --wait`). A waiter **detects**; it never launches.
+- **listener** — a resident supervisor that can **invoke** an agent run
+  (`m8shift-runtime.py listener …` with a valid backend).
+- **chat wait** — non-autonomous: after a waiter fires, a human must
+  reactivate the chat/model turn unless the host itself provides wake-up
+  support (some harnesses re-invoke the agent on background events; plain
+  chat UIs do not).
+
+Decision rule when the operator asks for continuous/autonomous operation:
+check `listener status --agent <you>`; `ALIVE` requires a resident process
+with a valid invocation backend — a running waiter does not qualify. If no
+listener (and no host wake-up) exists, arm the waiter as a detector and say
+plainly that manual reactivation is required. Never call a foreground waiter
+autonomous, persistent, or headless; never equate turn detection with agent
+invocation.
+
 M8Shift is developed through its own relay (the agents coordinate via a `M8SHIFT.md`).
 That relay runs a *frozen* copy of the engine, so it can lag the code under
 development. When a version is **stabilized** (tests green, merged to `main`, tagged):
