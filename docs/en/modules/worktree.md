@@ -109,6 +109,9 @@ is the same class of write the RFC 049 threat model already excludes.
 - `.m8shift/worktrees/_integration/` — the single dedicated integration checkout, created on demand by `integrate` and kept on the target branch.
 - `.m8shift/worktree-owners/<id>.json` — ownership metadata OUTSIDE the checkout (`claim` records, an explicit `--takeover` re-stamps with an audit trail, `drop` removes best-effort). Advisory, never authority.
 - `.m8shift/worktree-owners/_takeovers.jsonl` — durable append-only takeover audit; every `--takeover` appends a bounded JSON record (`done`/`integrate`: `applied`; `drop`: `authorized` before removal + `completed` after). This is the audit that survives the sidecar's deletion on `drop`.
+- `.m8shift/worktree-owners/<id>.lock` — a transient per-id ownership lock (`O_CREAT\|O_EXCL` + token, bounded stale reclaim) held across each id's ownership mutation (claim create, takeover, and the whole drop span) so those serialize without holding the global core lock across git.
+
+The owner sidecar additionally carries a per-claim `gen` (generation nonce): `claim` stamps a fresh one, a takeover preserves it, and the compare-and-swap requires the current `gen` to match the captured ticket — so a drop + re-claim by the same agent cannot be overwritten by a stale ticket (ABA).
 - `.m8shift/done.log` — the degree-2 completion ledger (`done`), created with a header on first append.
 - `M8SHIFT.md` — the LOCK (holder/state/turn/`since`/`expires`/`integrating` sentinel) and an appended immutable turn block, flipped by `integrate` only. All LOCK writes happen under the core `.m8shift.lock` file lock and only around the fast flips — never around `git merge`.
 

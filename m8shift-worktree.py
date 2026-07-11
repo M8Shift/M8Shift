@@ -29,6 +29,7 @@ reclaim mid-merge; the merge is committed only after re-verifying holder+state+s
 the lock; every non-crash post-claim path hands off via `--to` (no stuck WORKING).
 """
 import argparse
+import contextlib
 import datetime as dt
 import importlib.util
 import json
@@ -37,6 +38,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = None        # canonical repo root (set in main, before any core read/write)
@@ -173,9 +175,20 @@ OWNER_SCHEMA = "m8shift.worktree_owner.v1"
 OWNER_MAX_BYTES = 8192           # an owner doc is ~200 bytes; anything larger is not ours
 OWNER_FIELD_MAX = 256            # bound every recorded string field (defeats oversized echo)
 TAKEOVER_LEDGER = "_takeovers.jsonl"  # durable append-only takeover audit (survives sidecar delete)
+OWNER_LOCK_STALE_S = 30          # s: a per-id ownership lock older than this is a crashed holder
 _AGENT_RE = re.compile(core.AGENT_RE + r"\Z", re.ASCII)   # anchored ASCII roster-agent shape
 _UNSAFE = re.compile(r"[^\x20-\x7e]")                      # printable-ASCII whitelist for echo
+_GEN_RE = re.compile(r"[0-9a-f]{16,64}\Z", re.ASCII)      # per-claim generation nonce shape
 _TAKEOVER_KEYS = ("taken_over_from", "takeover_reason", "takeover_at")
+
+
+def _new_gen():
+    """A per-claim GENERATION nonce (Codex PR C review round-4 finding 1): a fresh 128-bit
+    random hex stamped by every `claim`, PRESERVED across takeovers of the same lane, and
+    RENEWED on every re-claim. The CAS checks it so a stale ticket cannot overwrite a lane
+    that was dropped and re-claimed by the SAME agent (agent-name ABA) — a drop+reclaim
+    yields a new gen the old ticket can no longer match, even byte-identical same-second."""
+    return os.urandom(16).hex()
 
 
 def _valid_ts(value):
@@ -258,6 +271,9 @@ def validate_owner_doc(idv, doc):
         return None
     if not _bounded_str(doc.get("branch")):                 # a claimed owner always has a branch
         return None
+    gen = doc.get("gen")                                    # per-claim generation nonce (ABA guard)
+    if not isinstance(gen, str) or not _GEN_RE.match(gen):
+        return None
     present = [k for k in _TAKEOVER_KEYS if k in doc]        # optional audit tuple: all-or-none
     if present:
         if len(present) != len(_TAKEOVER_KEYS):
@@ -301,12 +317,15 @@ def read_owner(idv):
     return validate_owner_doc(idv, doc)
 
 
-def write_owner(idv, agent, branch, *, created_at=None, takeover_from=None, reason=None):
+def write_owner(idv, agent, branch, *, created_at=None, gen=None,
+                takeover_from=None, reason=None):
     """Record ownership and return `(ok: bool, err: str|None)`. Path-hardened: refuses when
     the owners directory is missing/uncontained/symlinked, and writes through the core's
     UNIQUE-temp `+ os.replace` primitive (an unpredictable `.m8shift-*.tmp` name inside the
-    validated real directory — the fixed `<id>.json.tmp` preplant is defused). The CALLER
-    decides fail-open (claim/cleanup) vs fail-closed (a mandatory takeover audit)."""
+    validated real directory — the fixed `<id>.json.tmp` preplant is defused). `gen` is the
+    per-claim generation nonce: a fresh one on a claim (`gen=None` → minted), the ticket's
+    captured gen PRESERVED on a takeover. The CALLER decides fail-open (claim/cleanup) vs
+    fail-closed (a mandatory takeover audit)."""
     owners = _owners_dir_safe()
     if owners is None:
         return False, "owners directory missing, uncontained, or symlinked"
@@ -316,6 +335,7 @@ def write_owner(idv, agent, branch, *, created_at=None, takeover_from=None, reas
         "created_at": created_at or t,
         "path": os.path.relpath(wt_path(idv), ROOT),
         "branch": branch,
+        "gen": gen or _new_gen(),
     }
     if takeover_from is not None:
         doc.update(taken_over_from=takeover_from, takeover_reason=reason, takeover_at=t)
@@ -376,6 +396,64 @@ def append_takeover_ledger(record):
         return False, str(e)
 
 
+@contextlib.contextmanager
+def owner_lock(idv, timeout=10):
+    """A PER-ID ownership lock (`.m8shift/worktree-owners/<id>.lock`, `O_CREAT|O_EXCL`)
+    serializing EVERY ownership mutation for one worktree id — `claim` create, `done`/
+    `integrate`/`drop` takeover, and `drop`'s authorize→remove→cleanup span — WITHOUT holding
+    the global core lock across slow git (Codex PR C review round-4 finding 2: drop must not
+    release serialization before the destructive removal, or a foreign takeover slips into the
+    gap). It is finer-grained than the core lock (blocks only same-id ownership ops), carries an
+    ownership token so a crashed holder's stale lock (older than OWNER_LOCK_STALE_S) is broken
+    exactly once, and — being advisory, not a security boundary — degrades to a no-op when the
+    owners directory is unsafe. Acquire order everywhere: owner_lock OUTER, core.file_lock
+    INNER (integrate/done also take the core lock for the pen / done ledger) — a single order,
+    so no deadlock."""
+    owners = _owners_dir_safe()
+    if owners is None:
+        yield                                            # advisory: cannot lock → proceed
+        return
+    os.makedirs(owners, exist_ok=True)
+    path = os.path.join(owners, f"{idv}.lock")
+    token = f"{os.getpid()}:{time.time_ns()}".encode()
+    start = time.monotonic()
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                os.write(fd, token)
+            finally:
+                os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - os.lstat(path).st_mtime
+            except OSError:
+                age = 0.0
+            if age > OWNER_LOCK_STALE_S:                  # crashed holder → break its stale lock
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+                continue
+            if time.monotonic() - start > timeout:
+                die(f"ownership lock for {_safe(idv)!r} is busy — another ownership operation "
+                    f"is in flight; retry")
+            time.sleep(0.02)
+        except OSError:
+            yield                                        # cannot create the lock → advisory no-op
+            return
+    try:
+        yield
+    finally:
+        try:                                             # remove ONLY our own token (never a successor's)
+            got, _ = core._read_regular_file_token(path)
+            if got == token:
+                os.unlink(path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+
+
 def _takeover_record(idv, actor, ticket, verb, phase):
     return {"ts": core.iso(core.now()), "verb": verb, "phase": phase, "id": idv,
             "from": ticket["prev"], "to": actor, "reason": ticket["reason"]}
@@ -402,40 +480,43 @@ def require_takeover_or_die(idv, actor, args):
         die("--takeover requires a non-empty --reason")
     if len(reason) > OWNER_FIELD_MAX:                    # keep the written doc under the read cap
         die(f"--reason too long (max {OWNER_FIELD_MAX} chars) — the audit must stay readable")
-    return {"prev": prev, "reason": reason,
-            "branch": owner["branch"], "created_at": owner["created_at"]}
+    return {"prev": prev, "reason": reason, "branch": owner["branch"],
+            "created_at": owner["created_at"], "gen": owner["gen"]}
 
 
 def _cas_owner_or_die(idv, ticket):
-    """Optimistic-concurrency check (Codex PR C review round-3 finding 1): the ticket was
-    captured BEFORE the serialization lock, so under the lock the CURRENT usable owner must
-    STILL be the one the ticket expects — otherwise a concurrent `done`/`integrate`/`drop
-    --takeover` changed it, and applying our stale ticket would silently overwrite a
-    now-different owner AND write an audit naming the wrong displaced owner. On a mismatch we
-    refuse and write NOTHING. Callers hold the core file lock, and every takeover write is
-    serialized under it, so this compare-and-swap is authoritative."""
+    """Optimistic-concurrency check (Codex PR C review round-3 finding 1 + round-4 ABA): the
+    ticket was captured BEFORE the ownership lock, so under the lock the CURRENT usable owner
+    must STILL be the exact lane the ticket expects — SAME agent AND SAME per-claim generation
+    nonce. The nonce defeats agent-name ABA (drop + reclaim by the SAME agent yields a new gen
+    the stale ticket can never match). On a mismatch we refuse and write NOTHING. Callers hold
+    the per-id ownership lock, under which every ownership write is serialized, so this
+    compare-and-swap is authoritative."""
     current = read_owner(idv)
-    if current is None or current.get("agent") != ticket["prev"]:
+    if current is None or current.get("agent") != ticket["prev"] \
+            or current.get("gen") != ticket["gen"]:
         cur = _safe(current["agent"]) if current else "none"
-        die(f"owner changed under the lock (now {cur!r}, expected {_safe(ticket['prev'])!r}) "
-            f"— retry the takeover")
+        die(f"owner changed under the lock (now {cur!r}, expected {_safe(ticket['prev'])!r} "
+            f"same generation) — retry the takeover")
 
 
 def commit_takeover_or_die(idv, actor, ticket, verb):
     """COMMIT phase for `done`/`integrate` (the sidecar SURVIVES, so it holds the re-stamped
-    audit). MUST run under the core file lock (the CAS below is only authoritative when every
-    takeover write is serialized): re-read + require the current owner still equals the
-    ticket's expected prior owner (optimistic CAS), then durable-audit-first append the ledger
-    record, re-stamp the sidecar from the CAPTURED ticket (no data re-read), and verify it
-    reads back as this actor's ownership — each step fails CLOSED. Over-records (a ledger line
-    for a takeover whose sidecar apply then failed) rather than under-records."""
+    audit). MUST run under the PER-ID ownership lock (`owner_lock(idv)`), the serialization
+    under which every ownership write happens and the CAS is authoritative: re-read + require
+    the current owner still equals the ticket's expected prior owner AND generation nonce
+    (optimistic CAS, defeats agent-name ABA), then durable-audit-first append the ledger record,
+    re-stamp the sidecar from the CAPTURED ticket (no data re-read, PRESERVING the gen), and
+    verify it reads back as this actor's ownership — each step fails CLOSED. Over-records (a
+    ledger line for a takeover whose sidecar apply then failed) rather than under-records."""
     if ticket is None:
         return
-    _cas_owner_or_die(idv, ticket)                       # CAS: current owner == ticket['prev']
+    _cas_owner_or_die(idv, ticket)                       # CAS: same agent AND same generation
     ok, err = append_takeover_ledger(_takeover_record(idv, actor, ticket, verb, "applied"))
     if not ok:
         die(f"takeover audit ledger write failed ({_safe(err)}) — refusing (ownership unchanged)")
     ok, err = write_owner(idv, actor, ticket["branch"], created_at=ticket["created_at"],
+                          gen=ticket["gen"],           # PRESERVE the lane generation across takeover
                           takeover_from=ticket["prev"], reason=ticket["reason"])
     if not ok:
         die(f"takeover sidecar write failed ({_safe(err)}) — refusing (ownership unverified)")
@@ -448,11 +529,13 @@ def commit_takeover_or_die(idv, actor, ticket, verb):
 
 def authorize_drop_takeover_or_die(idv, actor, ticket):
     """`drop` COMMIT phase 1: the worktree AND its sidecar are about to be removed, so the
-    durable ledger is the ONLY surviving audit. MUST run under the core file lock: CAS the
-    current owner against the ticket, then record `phase=authorized` BEFORE the destructive
-    `git worktree remove`, failing CLOSED if either the owner changed or the record cannot be
-    persisted — a cross-owner drop must never destroy against a stale owner or without a
-    durable record (Codex PR C review round-2 finding 2 + round-3 finding 1)."""
+    durable ledger is the ONLY surviving audit. MUST run under the PER-ID ownership lock, which
+    `cmd_drop` holds across the WHOLE authorize→remove→cleanup span: CAS the current owner
+    (agent AND generation) against the ticket, then record `phase=authorized` BEFORE the
+    destructive `git worktree remove`, failing CLOSED if either the owner changed or the record
+    cannot be persisted — a cross-owner drop must never destroy against a stale owner, without a
+    durable record, or let a concurrent takeover slip between authorization and removal (Codex
+    PR C review round-2 finding 2 + round-3/4 finding 1-2)."""
     if ticket is None:
         return
     _cas_owner_or_die(idv, ticket)                       # CAS under the same serialization lock
@@ -599,19 +682,23 @@ def cmd_claim(args):
     roster_or_die(lk, args.agent)
     branch = safe_branch_name(args.branch or idv)
     ftree = wt_path(idv)
-    if os.path.exists(ftree):
-        die(f"worktree {idv!r} already exists at {ftree}")
     if not resolves(args.base):
         die(f"--base {args.base!r} does not resolve to a commit")
-    if local_branch_exists(branch):
-        git(["worktree", "add", ftree, branch])              # check out an existing branch
-    else:
-        git(["worktree", "add", "-b", branch, ftree, args.base])  # new branch off --base
-    # RFC 049 PR C: a fresh claim owns the worktree — record it beside the checkout.
-    # Creation is best-effort (the worktree already exists; a failed sidecar is a doctor
-    # owner_missing, not a claim failure). A stale sidecar for a since-removed worktree is
-    # moot: the claimer owns the new tree.
-    ok, err = write_owner(idv, args.agent, branch)
+    # Hold the PER-ID ownership lock across the exists-check + worktree create + sidecar write,
+    # so a claim serializes with a concurrent takeover/drop of the same id and stamps a FRESH
+    # generation nonce (Codex PR C review round-4: a drop+reclaim must not let a stale ticket
+    # match the new lane).
+    with owner_lock(idv):
+        if os.path.exists(ftree):
+            die(f"worktree {idv!r} already exists at {ftree}")
+        if local_branch_exists(branch):
+            git(["worktree", "add", ftree, branch])          # check out an existing branch
+        else:
+            git(["worktree", "add", "-b", branch, ftree, args.base])  # new branch off --base
+        # A fresh claim owns the worktree — record it beside the checkout with a NEW gen.
+        # Creation is best-effort (the worktree already exists; a failed sidecar is a doctor
+        # owner_missing, not a claim failure).
+        ok, err = write_owner(idv, args.agent, branch)       # gen=None → minted fresh
     if not ok:
         print(f"⚠ owner sidecar not recorded ({_safe(err)}) — advisory only, continuing",
               file=sys.stderr)
@@ -628,14 +715,15 @@ def cmd_done(args):
     idv = safe_id(args.id)
     roster_or_die(core.get_lock(core.load_or_die()), args.agent)   # actor BEFORE any owner op
     ticket = require_takeover_or_die(idv, args.agent, args)         # validate (no write yet)
-    with core.file_lock() as guard:
-        roster_or_die(core.get_lock(core.load_or_die()), args.agent)  # re-check under the lock
-        commit_takeover_or_die(idv, args.agent, ticket, "done")    # persist AFTER the re-check
-        log = os.path.join(ROOT, ".m8shift", "done.log")
-        os.makedirs(os.path.dirname(log), exist_ok=True)
-        prev_log = core.read(log) if os.path.exists(log) else "# m8shift-worktree done ledger (degree-2)\n"
-        guard.require_owned()
-        core.write(prev_log + f"- {idv} done by {args.agent} @ {core.iso(core.now())}\n", log)
+    with owner_lock(idv):                                # per-id serialization (CAS authority)
+        with core.file_lock() as guard:                 # inner: the done.log ledger
+            roster_or_die(core.get_lock(core.load_or_die()), args.agent)  # re-check under the lock
+            commit_takeover_or_die(idv, args.agent, ticket, "done")   # CAS + persist
+            log = os.path.join(ROOT, ".m8shift", "done.log")
+            os.makedirs(os.path.dirname(log), exist_ok=True)
+            prev_log = core.read(log) if os.path.exists(log) else "# m8shift-worktree done ledger (degree-2)\n"
+            guard.require_owned()
+            core.write(prev_log + f"- {idv} done by {args.agent} @ {core.iso(core.now())}\n", log)
     print(f"✓ noted worktree {idv} done by {args.agent}")
     return 0
 
@@ -647,20 +735,20 @@ def cmd_drop(args):
     roster_or_die(core.get_lock(core.load_or_die()), args.agent)   # actor BEFORE any destruction
     ticket = require_takeover_or_die(idv, args.agent, args)         # INTENT gate (no write yet)
     ftree = wt_path(idv)
-    if not os.path.exists(ftree):                            # precondition BEFORE the audit, so a
-        die(f"no worktree {idv!r} at {ftree}")               # missing tree writes no phantom record
     # A cross-owner drop destroys both the worktree AND its sidecar, so the DURABLE ledger is
-    # the only surviving audit. Under the SAME core file lock every other takeover writer uses,
-    # CAS the current owner against the ticket and record `phase=authorized` BEFORE the
-    # destructive removal — failing CLOSED on a stale owner or an unwritable ledger (Codex PR C
-    # review round-2 finding 2 + round-3 finding 1). The slow `git worktree remove` runs OUTSIDE
-    # the lock (never hold the canonical lock across git).
-    with core.file_lock():
-        roster_or_die(core.get_lock(core.load_or_die()), args.agent)  # re-check under the lock
-        authorize_drop_takeover_or_die(idv, args.agent, ticket)
-    git(["worktree", "remove", ftree])                       # git refuses if dirty (no --force)
-    remove_owner(idv)                                        # best-effort cleanup (RFC 049 PR C)
-    ok, err = complete_drop_takeover(idv, args.agent, ticket)  # phase=completed tombstone
+    # the only surviving audit. The ENTIRE span — exists-check, CAS + `authorized` record, the
+    # destructive `git worktree remove`, and the sidecar cleanup — runs under the PER-ID
+    # ownership lock, so no concurrent `done`/`integrate` takeover can slip into the gap between
+    # authorization and removal and have its new lane deleted (Codex PR C review round-4 finding
+    # 2). The per-id lock (not the global core lock) means git runs serialized only against
+    # same-id ownership ops, never freezing the relay.
+    with owner_lock(idv):
+        if not os.path.exists(ftree):                        # precondition BEFORE the audit, so a
+            die(f"no worktree {idv!r} at {ftree}")           # missing tree writes no phantom record
+        authorize_drop_takeover_or_die(idv, args.agent, ticket)   # CAS (agent+gen) + authorized
+        git(["worktree", "remove", ftree])                   # git refuses if dirty (no --force)
+        remove_owner(idv)                                    # best-effort cleanup (RFC 049 PR C)
+        ok, err = complete_drop_takeover(idv, args.agent, ticket)  # phase=completed tombstone
     print(f"✓ dropped worktree {idv}")
     if not ok:
         # the removal cannot be rolled back, but a failed completion audit must NOT be reported
@@ -857,9 +945,12 @@ def cmd_integrate(args):
         die(f"integration tree {integ} is not clean — refusing (pre-flip precondition)")
     target_sha = git_out(["rev-parse", "HEAD"], integ)
 
-    # ---- take the pen + commit the takeover + stamp the sentinel, ALL under one file
-    #      lock (claim_pen): a busy pen transfers nothing, a failed audit flips nothing ----
-    mode, sentinel = claim_pen(agent, idv, target_sha, ticket)
+    # ---- take the pen + commit the takeover + stamp the sentinel. claim_pen holds the CORE
+    #      file lock (pen atomicity); we wrap it in the PER-ID ownership lock (OUTER — the single
+    #      acquire order) so the takeover CAS serializes with a concurrent done/drop of this id
+    #      too. A busy pen transfers nothing, a failed audit flips nothing. ----
+    with owner_lock(idv):
+        mode, sentinel = claim_pen(agent, idv, target_sha, ticket)
 
     # ---- merge (OUTSIDE the lock) or detect already-integrated -----------------
     already = git(["merge-base", "--is-ancestor", feature_ref, "HEAD"], integ, check=False).returncode == 0

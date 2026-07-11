@@ -446,10 +446,13 @@ class TestRFC049PRCHardening(WTBase):
         with open(self.owner_file(idv), "w", encoding="utf-8") as fh:
             fh.write(text)
 
+    GEN = "a" * 32                                      # a valid 16-byte hex generation nonce
+
     def doc(self, idv, **over):
         base = {"schema": "m8shift.worktree_owner.v1", "id": idv, "agent": "claude",
                 "created_at": "2026-01-01T00:00:00Z",
-                "path": os.path.join(".m8shift", "worktrees", idv), "branch": idv}
+                "path": os.path.join(".m8shift", "worktrees", idv), "branch": idv,
+                "gen": self.GEN}
         base.update(over)
         return base
 
@@ -854,12 +857,11 @@ class TestRFC049PRCHardening(WTBase):
         self.claim_and_commit("feat-a", "a.txt", "x\n")
         self.write_raw("feat-a", json.dumps(self.doc("feat-a", agent="gemini")))
         r = self.driver(
-            "json.dump(dict(prev='claude', reason='x', branch='feat-a',"
-            " created_at='2026-01-01T00:00:00Z'), open('_ticket.json','w'))\n"
-            "tk=json.load(open('_ticket.json'))\n"
+            "tk=dict(prev='claude', reason='x', branch='feat-a',"
+            " created_at='2026-01-01T00:00:00Z', gen='%s')\n" % self.GEN +
             "rc=1\n"
             "try:\n"
-            "    with core.file_lock():\n"
+            "    with wt.owner_lock('feat-a'):\n"
             "        wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
             "    rc=0\n"
             "except SystemExit as e:\n"
@@ -875,9 +877,10 @@ class TestRFC049PRCHardening(WTBase):
         # takeover applies and the ledger `from` is truthful.
         self.claim_and_commit("feat-a", "a.txt", "x\n")             # owner=claude
         r = self.driver(
+            "d=json.load(open('.m8shift/worktree-owners/feat-a.json'))\n"
             "tk=dict(prev='claude', reason='ok', branch='feat-a',"
-            " created_at=json.load(open('.m8shift/worktree-owners/feat-a.json'))['created_at'])\n"
-            "with core.file_lock():\n"
+            " created_at=d['created_at'], gen=d['gen'])\n"
+            "with wt.owner_lock('feat-a'):\n"
             "    wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
             "print('done')\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -900,9 +903,10 @@ class TestRFC049PRCHardening(WTBase):
             "          since=core.iso(core.now()), expires=core.iso(core.now()))\n"
             "core.write(core.set_lock(text, lk))\n"
             "tk=dict(prev='gemini', reason='reassert', branch='feat-a',"
-            " created_at='2026-01-01T00:00:00Z')\n"
-            "mode,_=wt.claim_pen('codex','feat-a','%s',tk)\n"
-            "print(mode)\n" % (sha, sha))
+            " created_at='2026-01-01T00:00:00Z', gen='%s')\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    mode,_=wt.claim_pen('codex','feat-a','%s',tk)\n"
+            "print(mode)\n" % (sha, self.GEN, sha))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stdout.strip().splitlines()[-1], "resume")
         self.assertEqual(self.read_owner_agent("feat-a"), "codex")   # takeover APPLIED on resume
@@ -910,26 +914,79 @@ class TestRFC049PRCHardening(WTBase):
         self.assertTrue(any(x["verb"] == "integrate" and x["from"] == "gemini" for x in recs))
 
     def test_completed_drop_audit_failure_is_surfaced_nonzero(self):
-        # finding 3: if the post-removal `completed` ledger append fails, the drop is reported
-        # as a bounded partial-failure (rc 2), never a silent full success. Deterministic
-        # driver: run authorize → remove → (ledger swapped to a directory) → complete, and
-        # assert complete returns not-ok and cmd_drop's return-2 branch is taken.
-        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        # finding 3 (round-4): the actual cmd_drop rc-2 branch must be exercised end-to-end.
+        # Driver invokes the REAL cmd_drop with an INJECTED post-removal completion failure
+        # (complete_drop_takeover → (False, err)); assert the worktree WAS removed, rc == 2, and
+        # a bounded warning is printed — never a silent full success.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")   # owner=claude
         r = self.driver(
-            "tk=dict(prev='claude', reason='r', branch='feat-a',"
-            " created_at=json.load(open('.m8shift/worktree-owners/feat-a.json'))['created_at'])\n"
-            "with core.file_lock():\n"
-            "    wt.authorize_drop_takeover_or_die('feat-a','codex',tk)\n"
-            "wt.git(['worktree','remove', wt.wt_path('feat-a')])\n"
-            "wt.remove_owner('feat-a')\n"
-            "led=os.path.join('.m8shift','worktree-owners','_takeovers.jsonl')\n"
-            "os.remove(led); os.mkdir(led)\n"           # ledger now a directory → append fails
-            "ok,err=wt.complete_drop_takeover('feat-a','codex',tk)\n"
-            "print('OK' if ok else 'FAILCLOSED')\n")
+            "import types\n"
+            "wt.complete_drop_takeover = lambda i,a,t: (False, 'injected')\n"
+            "args=types.SimpleNamespace(id='feat-a', agent='codex', yes=True,"
+            " takeover=True, reason='r')\n"
+            "rc=wt.cmd_drop(args)\n"
+            "print('RC', rc)\n"
+            "sys.stderr.write('gone=%s' % (not os.path.exists(wt.wt_path('feat-a'))))\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(r.stdout.strip().splitlines()[-1], "FAILCLOSED")  # complete surfaced not-ok
-        # and the end-to-end path returns rc 2 with the warning (ledger dir from the start makes
-        # authorize fail; here we prove the helper contract that cmd_drop's rc-2 branch consumes)
+        self.assertIn("RC 2", r.stdout)                    # cmd_drop returned 2
+        self.assertIn("could not be recorded", r.stdout + r.stderr)  # bounded warning
+        self.assertIn("gone=True", r.stderr)               # the removal DID happen (not rolled back)
+        drops = [x for x in self.ledger_records() if x["verb"] == "drop"]
+        self.assertEqual({x["phase"] for x in drops}, {"authorized"})  # authorized stands, no completed
+
+    # ── round-5 concurrency regressions (Codex PR C round-4 review) ────────────
+    def test_same_agent_drop_reclaim_aba_refused(self):
+        # finding 1 (ABA): claude owns feat-a; A captures a takeover ticket (gen G1); claude
+        # DROPS the lane then RE-CLAIMS the same id (new gen G2). A's stale ticket, still naming
+        # claude, must be REFUSED by the generation-aware CAS — no overwrite, no ledger record.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        stale_gen = self.read_owner_gen("feat-a")          # G1 captured by "A"
+        self.assertEqual(self.wt("drop", "feat-a", "claude", "--yes").returncode, 0)
+        self.assertEqual(self.wt("claim", "feat-a", "claude", "--base", "main").returncode, 0)
+        new_gen = self.read_owner_gen("feat-a")            # G2 (fresh lane)
+        self.assertNotEqual(stale_gen, new_gen)
+        r = self.driver(
+            "tk=dict(prev='claude', reason='stale', branch='feat-a',"
+            " created_at='2026-01-01T00:00:00Z', gen='%s')\n" % stale_gen +
+            "rc=1\n"
+            "try:\n"
+            "    with wt.owner_lock('feat-a'):\n"
+            "        wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
+            "    rc=0\n"
+            "except SystemExit as e:\n"
+            "    sys.stderr.write(str(e))\n"
+            "print(rc)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "1", r.stdout + r.stderr)  # refused
+        self.assertIn("owner changed", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")  # NOT overwritten
+        self.assertEqual(self.read_owner_gen("feat-a"), new_gen)     # still the fresh lane
+        self.assertEqual(self.ledger_records(), [])                  # no stale audit
+
+    def test_drop_authorize_and_removal_are_atomic_vs_foreign_takeover(self):
+        # finding 2: a foreign takeover must NOT be able to acquire ownership between drop's
+        # authorization and its destructive removal. The per-id owner_lock spans the whole
+        # drop; a competing done --takeover blocks on it. Deterministic proof: hold owner_lock
+        # from the driver, then a `done --takeover` subprocess must FAIL to acquire it (bounded
+        # busy timeout) — it never becomes owner while the drop span holds the lock.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")    # owner=claude
+        # start a driver that ACQUIRES owner_lock and holds it briefly, and while it is held try
+        # a competing takeover in a subprocess — assert the takeover is refused (lock busy).
+        r = self.driver(
+            "import subprocess, sys, os\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    p=subprocess.run([sys.executable, os.path.join(os.getcwd(),'m8shift-worktree.py'),\n"
+            "        'done','feat-a','codex','--takeover','--reason','race'],\n"
+            "        capture_output=True, text=True)\n"
+            "    sys.stderr.write('RC=%d ERR=%s' % (p.returncode, (p.stderr or '')[:80]))\n"
+            "print('held')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RC=1", r.stderr)                    # the competing takeover was refused
+        self.assertIn("ownership lock", r.stderr)          # ...because the per-id lock was busy
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")  # never became codex
+
+    def read_owner_gen(self, idv):
+        with open(self.owner_file(idv)) as fh:
+            return json.load(fh)["gen"]
 
 
 if __name__ == "__main__":
