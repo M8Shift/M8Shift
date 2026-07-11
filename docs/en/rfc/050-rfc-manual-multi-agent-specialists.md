@@ -1,10 +1,15 @@
 # RFC 050 — Manual multi-agent specialists (Agent Skills profile)
 
-Status: draft rev 2.1 — specialist definitions are grounded in the **open Agent
-Skills format** (agentskills.io), per operator direction on 2026-07-11; rev 1
-lanes/roles/safety/reporting are preserved; rev 2.1 addresses design-review
-round 1 (foreign-loader safety contract for lane B, format-vs-discovery
-distinction, deterministic `skills.unvalidated` degradation)
+Status: rev 2.2 APPROVED (design review rounds 1+2) / **Phase 1 + 1b
+implemented** (2026-07-11) — specialist definitions are grounded in the **open
+Agent Skills format** (agentskills.io), per operator direction on 2026-07-11;
+rev 1 lanes/roles/safety/reporting preserved; rev 2.1 added the foreign-loader
+safety contract for lane B, the format-vs-discovery distinction, and the
+deterministic `skills.unvalidated` degradation; rev 2.2 made the discovery
+wording capability-neutral. Shipped: `skills/` seeds (one per lane, no
+`scripts/`), `examples/skills-wiring.md`, the agents-guide link, the RFC 041
+amendment, and the advisory `doctor` `skills.*` validation. Phase 2 (runtime
+request/report indexing, RFC 034 hooks) remains future work.
 Target: post-v3.57 design block
 Related RFCs: 008, 018, 023, 032, 034, 039, 041, 047, 049
 Owner: runtime/worktree companions; core relay remains the authority

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+**RFC 050 — manual multi-agent specialists as open-format Agent Skills
+(Phase 1 + 1b).** Specialist definitions adopt the open Agent Skills format
+(agentskills.io): one directory per skill under `skills/` with a `SKILL.md`
+(`name`/`description` frontmatter; M8Shift lane properties under namespaced
+`metadata:` keys — `m8shift-lane`, `m8shift-report`). Ships two seed
+specialists (advisory `security-review-advisory` with a bundled report
+template; mutating `worktree-implementer` carrying the foreign-loader safety
+contract: explicit `compatibility`, authority preconditions, stop-and-report,
+inert outside an M8Shift project), no executable `scripts/` in seeds, a
+product-wiring walkthrough (`examples/skills-wiring.md` — discovery is
+product- and version-specific and explicitly operator-wired), the
+agents-guide source-of-truth link, and the RFC 041 amendment (bespoke format
++ `index.json` superseded). `doctor` gains bounded, fail-open, advisory
+`skills.*` findings (`frontmatter_invalid`, `lane_unknown`,
+`metadata_unknown_key`, `oversized`, `unvalidated`): a conservative stdlib
+frontmatter subset is validated (single-line plain scalars + one indented
+`metadata:` block); anything outside the subset deterministically degrades
+the whole file to a single `skills.unvalidated` info finding (valid-but-
+unsupported YAML is never labeled invalid), and skills.* findings never gate
+`--lint`, even under `M8SHIFT_SCRUB_ENFORCE`.
+
 ## v3.57.0 — 2026-07-11
 
 RFC 049 holder-liveness completion, a unified multi-window usage display, and

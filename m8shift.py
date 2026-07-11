@@ -6579,6 +6579,209 @@ def _dispatch_binding_gate(args):
                   % (amb["env"], amb["script"]), file=sys.stderr)
 
 
+# ── RFC 050 Phase 1b — advisory `skills/` validation ────────────────────────
+# A specialist/competency definition is an OPEN-FORMAT Agent Skill
+# (agentskills.io): `skills/<name>/SKILL.md` with YAML frontmatter + Markdown
+# body. Full YAML is deliberately NOT parsed (PyYAML is not stdlib): only a
+# conservative subset is validated — single-line `key: value` PLAIN scalars
+# plus two-space-indented single-line pairs under `metadata:`. ANY construct
+# outside that subset (folded/literal/quoted scalars, flow collections,
+# anchors, comments, continuation lines) degrades the WHOLE file to a single
+# `skills.unvalidated` info finding and suppresses every other skills.*
+# finding for that file — valid-but-unsupported YAML is never labeled invalid
+# (RFC 050 deterministic-degradation rule). All skills.* findings are advisory
+# and never gate `--lint`, even under M8SHIFT_SCRUB_ENFORCE (see cmd_doctor).
+
+SKILLS_DIR = "skills"
+SKILL_MD_MAX_BYTES = 64 * 1024        # bounded read cap (above it: unvalidated)
+SKILL_NAME_MAX = 64                   # open spec: 1-64 chars
+SKILL_DESC_MAX = 1024                 # open spec: 1-1024 chars
+SKILL_BODY_LINE_BUDGET = 500          # open-spec recommendation (advisory nudge)
+# open spec: lowercase a-z/0-9 + hyphens, no leading/trailing/consecutive "-"
+SKILL_NAME_RE = re.compile(r"[a-z0-9](?:-?[a-z0-9])*")
+SKILL_LANES = ("advisory-read-only", "mutating-worktree")
+SKILL_M8SHIFT_META_KEYS = ("m8shift-lane", "m8shift-report")
+_SKILL_TOP_RE = re.compile(r"([A-Za-z0-9_-]+):(?: (.*))?")
+_SKILL_META_RE = re.compile(r"  ([A-Za-z0-9_.-]+): (.*)")
+# a plain single-line scalar must not START with one of these (block/flow/
+# anchor/comment/quote introducers) — anything else is outside the subset
+_SKILL_PLAIN_UNSAFE = ("|", ">", "&", "*", "{", "[", '"', "'", "#", "- ", "%")
+
+
+def _read_skill_md(path):
+    """Bounded tri-state read -> (status, payload): "ok"/text,
+    "oversized"/"", "unreadable"/reason. fd-based O_NOFOLLOW|O_NONBLOCK +
+    fstat regular-file check (no TOCTOU symlink follow), size cap. Never
+    raises."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        return "unreadable", ("symlink" if getattr(exc, "errno", None) == errno.ELOOP
+                              else exc.__class__.__name__)
+    try:
+        st_ = os.fstat(fd)
+        if not stat.S_ISREG(st_.st_mode):
+            return "unreadable", "not a regular file"
+        if st_.st_size > SKILL_MD_MAX_BYTES:
+            return "oversized", ""
+        with os.fdopen(fd, "rb") as fh:
+            fd = None
+            raw = fh.read(SKILL_MD_MAX_BYTES + 1)
+    except OSError as exc:
+        return "unreadable", exc.__class__.__name__
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    return "ok", raw.decode("utf-8", "replace")
+
+
+def _skill_frontmatter_subset(text):
+    """Parse the conservative frontmatter subset.
+
+    Returns (status, fields, meta, body_lines): status is "ok" (subset-clean),
+    "missing" (no leading `---` block), or "unsupported" (anything outside the
+    subset — the caller degrades the whole file to skills.unvalidated).
+    fields/meta hold single-line plain scalars only; body_lines counts the
+    lines after the closing fence (spec-recommendation nudge).
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return "missing", {}, {}, len(lines)
+    fields, meta, in_meta = {}, {}, False
+    for i in range(1, len(lines)):
+        line = lines[i]
+        if line.strip() == "---" and not line.startswith(" "):
+            return "ok", fields, meta, len(lines) - i - 1
+        if not line.strip():
+            in_meta = False
+            continue
+        if in_meta and line.startswith("  "):
+            m = _SKILL_META_RE.fullmatch(line)
+            if (m and m.group(2).strip()
+                    and not m.group(2).strip().startswith(_SKILL_PLAIN_UNSAFE)):
+                meta[m.group(1)] = m.group(2).strip()
+                continue
+            return "unsupported", {}, {}, 0
+        in_meta = False
+        m = _SKILL_TOP_RE.fullmatch(line)
+        if not m:
+            return "unsupported", {}, {}, 0
+        key, val = m.group(1), m.group(2)
+        if key == "metadata" and (val is None or not val.strip()):
+            in_meta = True
+            continue
+        if val is None:
+            return "unsupported", {}, {}, 0
+        val = val.strip()
+        if not val or val.startswith(_SKILL_PLAIN_UNSAFE):
+            return "unsupported", {}, {}, 0
+        fields[key] = val
+    return "unsupported", {}, {}, 0   # unterminated frontmatter block
+
+
+def _skills_findings():
+    """RFC 050 Phase 1b: advisory validation of `skills/*/SKILL.md`.
+
+    Read-only, bounded, FAIL-OPEN: a scan bug or unreadable entry never bricks
+    doctor and never raises. The unvalidated degradation is whole-file: no
+    other skills.* finding is emitted for a file outside the subset.
+    """
+    findings = []
+    try:
+        if os.path.islink(SKILLS_DIR) or not os.path.isdir(SKILLS_DIR):
+            return findings
+        for entry in sorted(os.listdir(SKILLS_DIR)):
+            d = os.path.join(SKILLS_DIR, entry)
+            if os.path.islink(d) or not os.path.isdir(d):
+                continue
+            rel = os.path.join(SKILLS_DIR, entry, "SKILL.md")
+            if not os.path.lexists(rel):
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s is missing — an Agent Skill directory requires a SKILL.md." % rel,
+                    rel, "add a SKILL.md with `name` and `description` frontmatter"))
+                continue
+            status, payload = _read_skill_md(rel)
+            if status == "oversized":
+                findings.append(doctor_finding(
+                    "skills.unvalidated", "info",
+                    "%s exceeds the %d KiB validation cap — not validated (advisory)."
+                    % (rel, SKILL_MD_MAX_BYTES // 1024),
+                    rel, "keep SKILL.md small; move detail into references/"))
+                continue
+            if status != "ok":
+                findings.append(doctor_finding(
+                    "skills.unvalidated", "info",
+                    "%s could not be read for validation (%s) — not validated (advisory)."
+                    % (rel, payload), rel))
+                continue
+            fstatus, fields, meta, body_lines = _skill_frontmatter_subset(payload)
+            if fstatus == "unsupported":
+                # Deterministic degradation: sole finding for this file.
+                findings.append(doctor_finding(
+                    "skills.unvalidated", "info",
+                    "%s uses YAML outside the conservative validation subset — "
+                    "not validated (advisory; this is NOT a format error)." % rel,
+                    rel, "single-line `key: value` scalars validate locally; "
+                         "`skills-ref validate` remains the format authority"))
+                continue
+            if fstatus == "missing":
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s has no leading `---` frontmatter block." % rel,
+                    rel, "start SKILL.md with `---`, `name:`, `description:`, `---`"))
+                continue
+            name = fields.get("name")
+            if name is None:
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s: required frontmatter key `name` is missing." % rel, rel))
+            elif len(name) > SKILL_NAME_MAX or not SKILL_NAME_RE.fullmatch(name):
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s: `name: %s` breaks the open-format rules (1-64 chars, "
+                    "lowercase a-z/0-9/hyphens, no leading/trailing/consecutive "
+                    "hyphen)." % (rel, name), rel))
+            elif name != entry:
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s: `name: %s` does not match its directory `%s` (the open "
+                    "format requires them equal)." % (rel, name, entry), rel))
+            desc = fields.get("description")
+            if desc is None:
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s: required frontmatter key `description` is missing." % rel, rel))
+            elif len(desc) > SKILL_DESC_MAX:
+                findings.append(doctor_finding(
+                    "skills.frontmatter_invalid", "warning",
+                    "%s: `description` exceeds the open-format 1024-char bound." % rel,
+                    rel))
+            lane = meta.get("m8shift-lane")
+            if lane is not None and lane not in SKILL_LANES:
+                findings.append(doctor_finding(
+                    "skills.lane_unknown", "warning",
+                    "%s: `m8shift-lane: %s` is not a defined lane (%s)."
+                    % (rel, lane, " | ".join(SKILL_LANES)), rel))
+            for k in sorted(meta):
+                if k.startswith("m8shift-") and k not in SKILL_M8SHIFT_META_KEYS:
+                    findings.append(doctor_finding(
+                        "skills.metadata_unknown_key", "info",
+                        "%s: metadata key `%s` is not defined by this version "
+                        "(reserved for future RFCs)." % (rel, k), rel))
+            if body_lines > SKILL_BODY_LINE_BUDGET:
+                findings.append(doctor_finding(
+                    "skills.oversized", "info",
+                    "%s: body is %d lines (> %d recommended by the open spec) — "
+                    "consider moving detail into references/."
+                    % (rel, body_lines, SKILL_BODY_LINE_BUDGET), rel))
+    except Exception:
+        return findings               # fail-open: never brick doctor
+    return findings
+
+
 def collect_doctor_findings(security=False, contracts=False, update_source="",
                             install_report=None, hygiene=False,
                             hygiene_verbose=False, hygiene_anchors=False):
@@ -6603,6 +6806,9 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
             out.extend(_hygiene_findings(verbose=hygiene_verbose))
             if hygiene_anchors:
                 out.extend(_hygiene_anchor_findings(verbose=hygiene_verbose))
+        # RFC 050 Phase 1b: skills/ validation is repo-scoped like hygiene —
+        # it runs with or without a relay (advisory, fail-open, bounded).
+        out.extend(_skills_findings())
         return out
     try:
         text = read()
@@ -6953,6 +7159,9 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
         if hygiene_anchors:
             # RFC 052 PR3: opt-in anchor mode (explicit allowed roots, advisory).
             findings.extend(_hygiene_anchor_findings(verbose=hygiene_verbose))
+    # RFC 050 Phase 1b: advisory open-format skill validation (always-on when a
+    # skills/ directory exists; bounded, fail-open, never gates --lint).
+    findings.extend(_skills_findings())
     return findings
 
 
@@ -7019,7 +7228,11 @@ def cmd_doctor(args):
     enforce = os.environ.get(HYGIENE_SCRUB_ENFORCE_ENV, "") == "1"
     advisory_checks = ("hygiene.denylist", "hygiene.anchor_foreign_path",
                        "hygiene.anchor_roots_unset")
-    gating = [f for f in visible if f["check"] not in advisory_checks or enforce]
+    # RFC 050: skills.* findings are advisory ALWAYS — they never flip the
+    # --lint exit code, even under M8SHIFT_SCRUB_ENFORCE (rc 0 contract).
+    gating = [f for f in visible
+              if not f["check"].startswith("skills.")
+              and (f["check"] not in advisory_checks or enforce)]
     return 1 if args.lint and gating else 0
 
 
