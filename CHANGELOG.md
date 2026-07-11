@@ -5,7 +5,7 @@
 - Listener status now reports explicit host-wake capabilities, interactive
   `wait`/`next` disclose their host-lifecycle limit, and runtime doctor uses one
   fail-open `runtime.stale_state` advisory for stale awaiting turns and stale
-  usage snapshots. Stale last-known-good usage stays visible and marked stale.
+  usage snapshots. Stale recorded usage with usable windows stays visible and marked stale.
 
 ## v3.58.0 — 2026-07-12
 

@@ -3135,10 +3135,18 @@ def cmd_doctor(args):
 
 def stale_state_findings(stale_after_seconds):
     """One fail-open advisory for unattended relay and usage state; never gates."""
+    def parse_timestamp(value):
+        if not isinstance(value, str) or not value or value == "-":
+            return None
+        try:
+            return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
     findings = []
     status = run_core_json("status", "--json")
     state = status.get("state", "")
-    since = parse_iso(status.get("since"))
+    since = parse_timestamp(status.get("since"))
     if state.startswith("AWAITING_") and since:
         agent = state[len("AWAITING_"):].lower()
         _exists, pid = read_listener_pid(agent)
@@ -3147,13 +3155,18 @@ def stale_state_findings(stale_after_seconds):
             findings.append({"severity": "info", "check": "runtime.stale_state",
                              "message": f"{state} is stale and {agent} has no live listener; a human wake-up may be required"})
     rows, _problems = read_usage_ledger_diagnostic()
-    snapshots = [row.get("snapshot") for row in rows if isinstance(row.get("snapshot"), dict)]
+    snapshots = []
+    for row in rows:
+        payload = row.get("payload") if isinstance(row, dict) else None
+        snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+        if isinstance(snapshot, dict):
+            snapshots.append(snapshot)
     if snapshots:
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=stale_after_seconds)
-        if not any((parse_iso(row.get("captured_at")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= cutoff
+        if not any((parse_timestamp(row.get("captured_at")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= cutoff
                    for row in snapshots):
             findings.append({"severity": "info", "check": "runtime.stale_state",
-                             "message": "usage snapshots exist but none are fresh; last-known-good values remain visible and marked stale"})
+                             "message": "usage snapshots exist but none are fresh; recorded values with usable windows are shown and marked stale"})
     return findings
 
 
@@ -4696,7 +4709,9 @@ def cmd_listener_status(args):
     backend = record.get("backend", "") if record else "local"
     service_state = backend_service_state(record) if record else ""
     backend_configured = bool(record) or bool(doc)
-    survives_parent_exit = bool(record) or alive
+    # A resident foreground/local process says nothing about what happens when its
+    # parent exits. Only an installed lifecycle backend carries that guarantee.
+    survives_parent_exit = bool(record)
     can_invoke_agent = bool(alive and doc and not halted)
     last_successful_run = doc.get("last_successful_run", "")
     payload = {
