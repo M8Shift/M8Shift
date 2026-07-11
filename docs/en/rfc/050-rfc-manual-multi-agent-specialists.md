@@ -34,11 +34,12 @@ one directory per skill containing a `SKILL.md` (YAML frontmatter `name` +
 report-back contract) ride in the spec's `metadata:` map under namespaced keys.
 The format is understood by a broad ecosystem of agent products (including the
 Claude Code and Codex CLIs of the reference roster) — but **format
-compatibility is not discovery**: each product finds skills only in its own
-configured locations, and none auto-discovers a repository's `skills/` tree.
-The repository `skills/` directory is therefore the **single reviewed source of
-truth that the operator explicitly wires into each product**, with no M8Shift
-runtime involved.
+compatibility is not discovery**: M8Shift does not assume repository-root
+discovery; where each product looks for skills is product- and version-specific
+and must be explicitly verified and wired by the operator. The repository
+`skills/` directory is therefore the **single reviewed source of truth that the
+operator explicitly wires into each product**, with no M8Shift runtime
+involved.
 
 ## Relationship to RFC 032
 
@@ -231,9 +232,10 @@ and push detail into `references/` one level deep.
 **Format compatibility ≠ discovery.** Many agent products — including the
 reference roster's Claude Code and Codex CLIs and a broad ecosystem — parse the
 same `SKILL.md` shape, so one definition is *portable*. Discovery, however, is
-product-specific: each product loads skills only from its own configured
-locations, and **no product auto-discovers a repository's `skills/` tree**.
-M8Shift does **not** write into any product's discovery path. The operator
+a separate, product- and version-specific behavior: **M8Shift does not assume
+repository-root discovery** — whether and where a given product picks up skills
+must be explicitly verified and wired by the operator for that product and
+version. M8Shift does **not** write into any product's discovery path. The operator
 wires each product once (symlink or copy of `skills/<name>/` into that
 product's documented location), which keeps the repository's `skills/` the
 single reviewed source of truth. Product-specific wiring walkthroughs belong in
