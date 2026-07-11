@@ -412,6 +412,9 @@ Verified by the tests and by multi-agent review:
 > by itself.
 >
 > An example runner is provided: [`examples/headless_runner.py`](examples/headless_runner.py).
+> Want to SEE a relay exchange first? [`examples/shift-demos/`](examples/shift-demos/) ships
+> four tiny deterministic two-agent exercises (pinned oracles, ~4-6 turns each) you can run
+> in minutes (#102).
 > It supports `--once`, manual TTL refresh (`claim <agent> --refresh` — extends your own `WORKING` lock only and records an audit-only beat; PROTECTIVE liveness comes from the `heartbeat` verb emitted by managed producers, RFC 049), `M8SHIFT_RUN_ID`, immutable local run
 > plans, post-run `LOCK` verification, and local `.m8shift/runtime/runs.jsonl`
 > lifecycle/finding events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)

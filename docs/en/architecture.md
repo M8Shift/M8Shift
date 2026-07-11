@@ -1,6 +1,6 @@
 # 🏛️ Architecture Document — M8Shift
 
-> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-07-11 (v3.57.0)
+> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-07-12 (v3.58.0)
 >
 > This architecture reflects the current v3 model: active roster of ≥2 agents, one
 > core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
