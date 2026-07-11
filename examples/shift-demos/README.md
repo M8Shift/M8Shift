@@ -9,11 +9,16 @@ pinned test) is the same for every agent pair. The reference pair is
 ## Quickstart (same for every demo)
 
 ```bash
-cd examples/shift-demos/<demo>       # pick one below
-python3 ../../../m8shift.py init     # creates the relay in THIS directory
+cd examples/shift-demos/<demo>                            # pick one below
+python3 ../../../m8shift.py init --agents agent-a,agent-b # relay in THIS dir
 # agent A (first turn):   python3 ../../../m8shift.py claim agent-a
 # agent B (waits):        python3 ../../../m8shift.py wait agent-b
 ```
+
+The `--agents` flag matters: a bare `init` creates the default
+`claude,codex` roster, which would reject the neutral `agent-a`/`agent-b`
+identities shown here. Substitute your real agent names freely
+(e.g. `--agents claude,codex` and `claim claude`) — the oracles do not care.
 
 Run each agent from its own terminal/session in this directory, roles as per
 the demo README. Relay artifacts (`M8SHIFT.*`) are runtime state — the demo

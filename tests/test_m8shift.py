@@ -12063,6 +12063,38 @@ class TestShiftDemos(unittest.TestCase):
         self.assertIn("100", claim)
         self.assertIn("number 41", claim)
 
+    QUICKSTART_INIT = "init --agents agent-a,agent-b"
+
+    def test_documented_quickstart_init_and_claim_path_works(self):
+        # The parent README's exact init line must create a roster that
+        # ACCEPTS the agent identities the very next commands use (#102
+        # review round 1: a bare init creates claude,codex and rejects them).
+        with open(os.path.join(self.DEMOS, "README.md"), encoding="utf-8") as fh:
+            self.assertIn(self.QUICKSTART_INIT, fh.read())
+        d = tempfile.mkdtemp(prefix="m8shift-demo-quickstart-")
+        self.addCleanup(shutil.rmtree, d, True)
+        shutil.copy(SCRIPT, os.path.join(d, "m8shift.py"))
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", *self.QUICKSTART_INIT.split()],
+            cwd=d, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "agent-a"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # the original mismatch: a default-roster identity must be refused
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_demo_oracles_are_never_collected_by_repo_pytest(self):
+        # Collection-integrity pin (#102 review round 1): the conftest glob
+        # is implementation-dependent — assert the OUTCOME instead.
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+            cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout[-800:])  # rc!=0 on collection error
+        self.assertNotIn("shift-demos", r.stdout)
+
 
 class TestRFC052Denylist(CLIBase):
     """RFC 052 (#101) PR2 — C3 operator-confidential denylist in `doctor
