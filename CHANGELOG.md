@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+**Opt-in tokscale spend adapter example (#103).** `usage init` scaffolds a
+fifth DISABLED adapter entry, `tokscale-spend` (`cli_json`, placeholder
+command the operator points at their local tokscale install), and
+`examples/usage-adapters/tokscale-spend.py` ships as reference material
+(not in checksums): it runs tokscale's local non-interactive JSON output
+via argv, sums token counts with a bounded version-tolerant reader
+(explicit totals preferred — never double-counted), and emits a SPEND
+fixture (`used_tokens` only, `limit_tokens` null, NO invented windows,
+provenance `local_estimate` — official windows stay with the
+Keychain/app-server adapters; gating only through the explicit budget.json
+bridge). Costs and identity fields are never copied. A hard never-submit
+guard refuses any argv mentioning submit/autosubmit/login BEFORE launching
+anything (RFC 052: usage data never leaves the machine through M8Shift).
+Fail-open everywhere; injectable main; mutation-gated tests.
+
 **Shift demos (#102).** `examples/shift-demos/` ships four tiny,
 self-contained two-agent exercises (reference pair claude ↔ codex, any pair
 works) with deterministic oracles: compute-and-verify (pinned SHA-256),

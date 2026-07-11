@@ -7768,7 +7768,7 @@ class TestRFC040UsagePRA(CLIBase):
         by_name = {a["name"]: a for a in doc["adapters"]}
         self.assertEqual(set(by_name), {
             "claude-jsonl-scan", "claude-quota-keychain",
-            "codex-jsonl-scan", "codex-ratelimits",
+            "codex-jsonl-scan", "codex-ratelimits", "tokscale-spend",
         })
         for entry in by_name.values():
             self.assertFalse(entry["enabled"])          # DISABLED examples
@@ -8200,7 +8200,8 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         rows = {a["name"]: a for a in json.loads(r.stdout)["adapters"]}
         self.assertEqual(set(rows), {"claude-jsonl-scan", "claude-quota-keychain",
-                                     "codex-jsonl-scan", "codex-ratelimits"})
+                                     "codex-jsonl-scan", "codex-ratelimits",
+                                     "tokscale-spend"})
         for row in rows.values():
             self.assertFalse(row["enabled"])            # every scaffold example ships disabled
             self.assertFalse(row["identity_pinned"])
@@ -9233,6 +9234,100 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         out = io.StringIO()
         out.close()
         self.assertEqual(mod.main(out=out, read_limits=lambda: None), 0)
+
+
+class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
+    """#103 — disabled tokscale local SPEND adapter: used_tokens only, no
+    invented windows/limits, provenance local_estimate, fail-open everywhere,
+    and a hard never-submit guard (RFC 052 boundary)."""
+
+    EXAMPLE_REL = os.path.join("examples", "usage-adapters", "tokscale-spend.py")
+
+    def _example(self):
+        import importlib.util
+        rp = os.path.join(REPO, self.EXAMPLE_REL)
+        spec = importlib.util.spec_from_file_location("tokscale_spend", rp)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    NOW = "2026-07-11T12:00:00Z"
+
+    def test_build_fixture_prefers_explicit_total_no_double_count(self):
+        mod = self._example()
+        payload = {"totalTokens": 1200,
+                   "inputTokens": 1000, "outputTokens": 900}   # parts must NOT add
+        fx = mod.build_fixture(payload, "claude", self.NOW)
+        self.assertEqual(fx["used_tokens"], 1200)
+        self.assertEqual(fx["provenance"], "local_estimate")
+        self.assertIsNone(fx["limit_tokens"])
+        self.assertEqual(fx["windows"], [])                    # spend, not quota
+
+    def test_build_fixture_sums_parts_and_nested_entries(self):
+        mod = self._example()
+        payload = {"models": [
+            {"model": "placeholder-a", "input_tokens": 100, "output_tokens": 50},
+            {"model": "placeholder-b", "total_tokens": 200},
+        ], "costUSD": "9.99", "user": "SECRET_SHOULD_NOT_LEAK"}
+        fx = mod.build_fixture(payload, "claude", self.NOW)
+        self.assertEqual(fx["used_tokens"], 350)
+        self.assertNotIn("SECRET_SHOULD_NOT_LEAK", json.dumps(fx))
+        self.assertNotIn("9.99", json.dumps(fx))               # costs never copied
+
+    def test_build_fixture_malformed_and_empty_fail_open(self):
+        mod = self._example()
+        for payload in (None, [], {}, {"totalTokens": "many"},
+                        {"totalTokens": -5}, {"totalTokens": True},
+                        {"deep": {"deep": {"deep": {"deep": {"deep":
+                            {"totalTokens": 7}}}}}}):          # beyond depth cap
+            fx = mod.build_fixture(payload, "claude", self.NOW)
+            self.assertIsNone(fx["used_tokens"], payload)
+            self.assertEqual(fx["windows"], [])
+
+    def test_never_submit_guard_refuses_before_launch(self):
+        mod = self._example()
+        launched = []
+        def fake_run(*a, **k):
+            launched.append(a)
+            raise AssertionError("must never be reached")
+        for cmd in (["tokscale", "submit"],
+                    ["tokscale", "autosubmit", "status"],
+                    ["bunx", "tokscale@latest", "SUBMIT"],
+                    ["tokscale", "login"]):
+            self.assertIsNone(mod._run_tokscale(cmd, run=fake_run))
+        self.assertEqual(launched, [])                          # guard fired first
+
+    def test_run_rejects_nonzero_oversized_and_non_json(self):
+        mod = self._example()
+        class P:
+            def __init__(self, rc=0, out="{}"):
+                self.returncode, self.stdout = rc, out
+        self.assertIsNone(mod._run_tokscale(["tokscale"], run=lambda *a, **k: P(rc=3)))
+        self.assertIsNone(mod._run_tokscale(["tokscale"], run=lambda *a, **k: P(out="")))
+        self.assertIsNone(mod._run_tokscale(
+            ["tokscale"], run=lambda *a, **k: P(out="x" * (1024 * 1024 + 1))))
+        self.assertIsNone(mod._run_tokscale(["tokscale"], run=lambda *a, **k: P(out="not json")))
+        self.assertIsNone(mod._run_tokscale(
+            ["tokscale"], run=lambda *a, **k: (_ for _ in ()).throw(OSError("no binary"))))
+
+    def test_main_is_injectable_and_fail_open(self):
+        mod = self._example()
+        import io as _io
+        out = _io.StringIO()
+        self.assertEqual(mod.main(out=out, read_spend=lambda: {"totalTokens": 42},
+                                  agent="agent-a"), 0)
+        fx = json.loads(out.getvalue())
+        self.assertEqual((fx["agent"], fx["used_tokens"]), ("agent-a", 42))
+        # any reader explosion (custom Exception subtype) -> empty fixture, rc 0
+        class Boom(Exception):
+            pass
+        out = _io.StringIO()
+        def explode():
+            raise Boom("SECRET_IN_ERROR_SHOULD_NOT_LEAK")
+        self.assertEqual(mod.main(out=out, read_spend=explode), 0)
+        fx = json.loads(out.getvalue())
+        self.assertIsNone(fx["used_tokens"])
+        self.assertNotIn("SECRET_IN_ERROR", out.getvalue())
 
 
 class TestRFC040UsageBudget(CLIBase):
