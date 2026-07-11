@@ -4906,6 +4906,23 @@ def default_usage_adapters():
                 "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
                 "enabled": False,
             },
+            {
+                "//": ("Disabled by default (#103): tokscale local SPEND aggregation. "
+                       "Point the placeholder command at YOUR local tokscale install "
+                       "(non-interactive JSON, e.g. `tokscale usage --json`). Spend "
+                       "reporting only: used_tokens, no windows/limits, provenance "
+                       "local_estimate — never an official quota gate; may gate only "
+                       "through the explicit budget.json bridge. The reference script "
+                       "REFUSES submit/autosubmit/login argv (RFC 052: usage data "
+                       "never leaves the machine through M8Shift)."),
+                "name": "tokscale-spend",
+                "agent": "claude",
+                "provider": "tokscale-local",
+                "kind": "cli_json",
+                "command": ["python3", "examples/usage-adapters/tokscale-spend.py"],
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
         ],
     }
 
