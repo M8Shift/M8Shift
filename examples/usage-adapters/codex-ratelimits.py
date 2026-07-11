@@ -31,7 +31,10 @@ import contextlib
 import datetime as dt
 import json
 import math
+import queue
 import subprocess
+import threading
+import time
 import sys
 
 APP_SERVER_CMD = ["codex", "app-server", "--stdio"]
@@ -146,7 +149,22 @@ def build_fixture(payload, now_iso):
 
 
 def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_TIMEOUT_S):
-    """Call the local Codex app-server. Any failure returns None."""
+    """Call the local Codex app-server. Any failure returns None.
+
+    LIVE finding (2026-07-10, codex-cli 0.144.1): the app-server DROPS pending
+    requests when stdin reaches EOF, so communicate()-style write-then-close
+    loses the id=2 response and the server never exits on its own (timeout ->
+    None). stdin therefore stays OPEN while stdout is read line-by-line until
+    the id=2 response or the deadline; the server is then terminated.
+
+    Bounded even against a SILENT LIVE server (#105 review round 1): a blocking
+    readline would never return to a deadline check, so the reads happen on a
+    DAEMON reader thread feeding a queue, and the main thread waits on the queue
+    with the remaining deadline (portable — no select on Windows pipes). On
+    timeout the function returns None and the finally kill closes the pipes,
+    unblocking the reader; being a daemon thread it can never hold the process
+    open. Total return time is bounded by timeout_s plus a small cleanup
+    allowance (the 1s reap)."""
     command = list(APP_SERVER_CMD if command is None else command)
     initialize = {
         "id": 1,
@@ -157,33 +175,66 @@ def _call_app_server(command=None, popen=subprocess.Popen, timeout_s=APP_SERVER_
         },
     }
     read_limits = {"id": 2, "method": "account/rateLimits/read", "params": None}
-    stdin = json.dumps(initialize, separators=(",", ":")) + "\n" \
-        + json.dumps(read_limits, separators=(",", ":")) + "\n"
     proc = None
-    def kill_reap():
-        if proc is not None:
-            with contextlib.suppress(Exception):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                proc.communicate(timeout=1)
+    reader = None
     try:
         proc = popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                     stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
-        stdout, _stderr = proc.communicate(input=stdin, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        kill_reap()
-        return None
+                     stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+        proc.stdin.write(json.dumps(initialize, separators=(",", ":")) + "\n")
+        proc.stdin.write(json.dumps(read_limits, separators=(",", ":")) + "\n")
+        proc.stdin.flush()
+        lines = queue.Queue()
+
+        def _pump(stdout=proc.stdout):
+            try:
+                for line in iter(stdout.readline, ""):
+                    lines.put(line)
+            except Exception:
+                pass                                     # reader error → sentinel below
+            finally:
+                lines.put(None)                          # EOF/error sentinel
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + timeout_s
+        result = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break                                    # deadline: silent live server bounded
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                break                                    # deadline while blocked on the queue
+            if line is None:
+                break                                    # server exited / reader error (EOF)
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("id") == 2:
+                result = payload
+                break
+        return result
     except Exception:
-        kill_reap()
         return None
-    for line in (stdout or "").splitlines():
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and payload.get("id") == 2:
-            return payload
-    return None
+    finally:
+        # Cleanup order that never has two readers on stdout at once (#105 review round 2):
+        # ONLY the _pump thread ever reads stdout. kill() closes the child's stdout write-end →
+        # the reader hits EOF and exits; we JOIN it (bounded) BEFORE reaping, and reap with
+        # wait() — which does NOT read stdout — so nothing races the reader. No communicate()
+        # (which would read stdout concurrently). Streams are closed only after the reader joins.
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.kill()                              # child dies → its stdout EOFs the reader
+            if reader is not None:
+                reader.join(timeout=2)                   # bounded; reader exits on the EOF above
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2)                     # reap the child WITHOUT reading stdout
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                with contextlib.suppress(Exception):
+                    if stream is not None:
+                        stream.close()
 
 
 def main(out=None, now=None, read_limits=None):

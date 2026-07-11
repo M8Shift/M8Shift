@@ -8619,6 +8619,106 @@ class TestRFC040UsageQuota(CLIBase):
         }])
         self.assertEqual(mod.build_fixture({"windows": 5}, "2026-01-01T00:00:00Z")["windows"], [])
 
+    # ── #105: LIVE endpoint shape (observed 2026-07-10) — top-level five_hour /
+    # seven_day objects with USED-percent `utilization` and offset-bearing resets ──
+    def test_example_build_fixture_live_top_level_shape(self):
+        mod = self._example()
+        fx = mod.build_fixture({
+            "five_hour": {"utilization": 62, "resets_at": "2026-01-01T05:00:00+02:00"},
+            "seven_day": {"utilization": 41.5, "resets_at": "2026-01-06T21:45:03Z"},
+        }, "2026-01-01T00:00:00Z")
+        by = {w["kind"]: w for w in fx["windows"]}
+        self.assertEqual(by["session_5h"]["used_ratio"], 0.62)    # USED percent, no inversion
+        self.assertEqual(by["weekly"]["used_ratio"], 0.415)
+        # offset-bearing reset normalized to strict Z (the usage.normalize contract)
+        self.assertEqual(by["session_5h"]["resets_at"], "2026-01-01T03:00:00Z")
+        self.assertEqual(by["weekly"]["resets_at"], "2026-01-06T21:45:03Z")
+        self.assertEqual(fx["provenance"], "official")
+
+    def test_example_build_fixture_live_shape_rejects_naive_reset(self):
+        # #105 review round 1 finding 2: a timezone-NAIVE reset (no offset) must NOT be
+        # coerced via the host timezone — the same payload would then be host-dependent. It
+        # normalizes to null; only an OFFSET-bearing reset yields a strict-Z string.
+        mod = self._example()
+        fx = mod.build_fixture({
+            "five_hour": {"utilization": 30, "resets_at": "2026-01-01T05:00:00"},   # naive
+            "seven_day": {"utilization": 40, "resets_at": "2026-01-01"},            # naive date
+        }, "2026-01-01T00:00:00Z")
+        by = {w["kind"]: w for w in fx["windows"]}
+        self.assertEqual(by["session_5h"]["used_ratio"], 0.30)     # ratio still recorded
+        self.assertIsNone(by["session_5h"]["resets_at"])           # naive reset → null (not host-tz)
+        self.assertIsNone(by["weekly"]["resets_at"])
+        # an aware reset (offset OR Z) still normalizes to strict Z, host-independently
+        fx = mod.build_fixture({"five_hour": {"utilization": 30,
+                                              "resets_at": "2026-01-01T05:00:00+02:00"}},
+                               "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["windows"][0]["resets_at"], "2026-01-01T03:00:00Z")
+
+    def test_example_build_fixture_aware_reset_overflow_keeps_ratio(self):
+        # #105 review round 2 finding 2: an aware reset at a calendar bound whose UTC conversion
+        # OverflowErrors must degrade ONLY resets_at to null — the valid utilization ratio is
+        # still recorded, not the whole window dropped.
+        mod = self._example()
+        for extreme in ("9999-12-31T23:59:59-14:00",   # astimezone → year 10000 overflow
+                        "0001-01-01T00:00:00+14:00"):   # astimezone → year 0 underflow
+            fx = mod.build_fixture({"five_hour": {"utilization": 33, "resets_at": extreme}},
+                                   "2026-01-01T00:00:00Z")
+            self.assertEqual(len(fx["windows"]), 1, extreme)      # window NOT dropped
+            self.assertEqual(fx["windows"][0]["used_ratio"], 0.33)  # ratio preserved
+            self.assertIsNone(fx["windows"][0]["resets_at"])        # only the reset degrades
+
+    def test_example_build_fixture_windows_list_takes_precedence_over_live_shape(self):
+        mod = self._example()
+        fx = mod.build_fixture({
+            "windows": [{"kind": "five_hour", "remainingPercent": 25,
+                         "resetsAt": "2026-01-01T05:00:00Z"}],
+            "five_hour": {"utilization": 99, "resets_at": "2026-01-01T05:00:00Z"},
+        }, "2026-01-01T00:00:00Z")
+        self.assertEqual([w["used_ratio"] for w in fx["windows"]], [0.75])  # windows[] wins
+
+    def test_example_build_fixture_fallback_precedence_is_exact(self):
+        # #105 review round 1 finding 3: the EXACT fallback rule — any successfully normalized
+        # windows[] entry suppresses the live-shape fallback; an EMPTY/all-invalid windows[]
+        # (or absent/non-list) attempts it.
+        mod = self._example()
+        # windows[] present but ALL-INVALID → normalized list empty → fallback attempted
+        fx = mod.build_fixture({
+            "windows": [{"kind": "unknown_window", "remainingPercent": 10},   # unmapped → dropped
+                        {"kind": "five_hour", "remainingPercent": float("nan")}],  # bad → dropped
+            "five_hour": {"utilization": 55, "resets_at": "2026-01-01T05:00:00Z"},
+        }, "2026-01-01T00:00:00Z")
+        self.assertEqual([w["used_ratio"] for w in fx["windows"]], [0.55])  # fallback used
+        # windows[] present and EMPTY → fallback attempted
+        fx = mod.build_fixture({"windows": [],
+                                "seven_day": {"utilization": 44, "resets_at": "2026-01-06T21:45:03Z"}},
+                               "2026-01-01T00:00:00Z")
+        self.assertEqual([w["kind"] for w in fx["windows"]], ["weekly"])
+        # windows[] with ONE valid entry → fallback SUPPRESSED (even if a live key is present)
+        fx = mod.build_fixture({
+            "windows": [{"kind": "five_hour", "remainingPercent": 25,
+                         "resetsAt": "2026-01-01T05:00:00Z"}],
+            "seven_day": {"utilization": 99, "resets_at": "2026-01-06T21:45:03Z"},
+        }, "2026-01-01T00:00:00Z")
+        self.assertEqual([w["kind"] for w in fx["windows"]], ["session_5h"])  # no weekly fallback
+
+    def test_example_build_fixture_live_shape_degrades_per_entry(self):
+        mod = self._example()
+        fx = mod.build_fixture({
+            "five_hour": "not-a-dict",
+            "seven_day": {"utilization": 41, "resets_at": "garbage"},
+        }, "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["windows"], [{
+            "kind": "weekly", "used_ratio": 0.41, "resets_at": None,   # bad reset → None, entry kept
+        }])
+        for bad in (True, float("nan"), float("inf"), "62", None):
+            fx = mod.build_fixture({"five_hour": {"utilization": bad}},
+                                   "2026-01-01T00:00:00Z")
+            self.assertEqual(fx["windows"], [], bad)                   # implausible → dropped
+        fx = mod.build_fixture({"five_hour": {"utilization": 150},
+                                "seven_day": {"utilization": -10}},
+                               "2026-01-01T00:00:00Z")
+        self.assertEqual([w["used_ratio"] for w in fx["windows"]], [1.0, 0.0])  # clamped
+
     def _run_example(self, creds_text):
         cred = os.path.join(self.d, "creds.json")
         with open(cred, "w", encoding="utf-8") as fh:
@@ -8890,72 +8990,204 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
             self.assertEqual(fx["provenance"], "official")
             self.assertEqual(fx["windows"], [])
 
-    def test_call_app_server_sends_initialize_before_rate_limit_read(self):
+    # ── held-stdin RPC contract (#105: app-server 0.144.1 drops pending requests
+    # on stdin EOF, so communicate()-style write-then-close loses the id=2 reply) ──
+    class _HeldStdinProcess:
+        """Fake app-server honoring the held-stdin contract: stdin captures writes,
+        stdout serves scripted lines via readline, and the fake records whether
+        stdin was closed BEFORE the id=2 line was consumed (the live bug)."""
+
+        def __init__(self, lines, record):
+            self._lines = list(lines)
+            self._record = record
+            outer = self
+
+            class _Stdin:
+                def write(self, text):
+                    outer._record.setdefault("writes", []).append(text)
+
+                def flush(self):
+                    outer._record["flushed"] = True
+
+                def close(self):
+                    outer._record.setdefault("stdin_closed_after_reads",
+                                             len(outer._record.get("reads", [])))
+
+            self.stdin = _Stdin()
+            self.stdout = self
+            self.stderr = None
+            self.killed = False
+
+        def readline(self):
+            self._record.setdefault("reads", []).append(True)
+            if self._record.get("stdin_closed_after_reads") is not None \
+                    and self._record["stdin_closed_after_reads"] < len(self._record["reads"]):
+                return ""            # a real 0.144.1 server goes silent after stdin EOF
+            return self._lines.pop(0) if self._lines else ""
+
+        def close(self):             # stdout==self; the cleanup closes owned streams
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):    # reap WITHOUT reading stdout (finally block)
+            return 0
+
+        def poll(self):
+            return 0
+
+    def test_call_app_server_holds_stdin_and_reads_until_id2(self):
         mod = self._example()
         calls = {}
-
-        class FakeProcess:
-            def communicate(self, input=None, timeout=None):
-                calls["input"] = input
-                calls["timeout"] = timeout
-                response = "\n".join([
-                    json.dumps({"id": 1, "result": {}}),
-                    json.dumps(self_response),
-                ]) + "\n"
-                return response, "SECRET_STDERR_SHOULD_NOT_LEAK"
-
-        self_response = self._rpc_response(include_bucket=False)
+        response = self._rpc_response(include_bucket=False)
+        lines = ["not-json\n", json.dumps({"id": 1, "result": {}}) + "\n",
+                 json.dumps(response) + "\n"]
+        procs = []
 
         def fake_popen(argv, **kwargs):
-            calls["argv"] = argv
-            calls["kwargs"] = kwargs
-            return FakeProcess()
+            calls["argv"], calls["kwargs"] = argv, kwargs
+            procs.append(self._HeldStdinProcess(lines, calls))
+            return procs[-1]
 
         payload = mod._call_app_server(popen=fake_popen, timeout_s=3)
-        self.assertEqual(payload, self_response)
-        sent = [json.loads(line) for line in calls["input"].splitlines()]
+        self.assertEqual(payload, response)
+        sent = [json.loads(t) for t in calls["writes"]]
         self.assertEqual(sent[0]["method"], "initialize")
         self.assertEqual(sent[1]["method"], "account/rateLimits/read")
         self.assertIsNone(sent[1]["params"])
+        self.assertTrue(calls.get("flushed"))
+        # THE #105 pin: stdin must never reach EOF BEFORE the id=2 reply is read —
+        # the fake goes silent (returns "") if close() comes first. The reply is the 3rd
+        # scripted line, so the only permitted close is a cleanup close AFTER >= 3 reads
+        # (an early write-then-close mutation closes at read 0 → the reply never arrives →
+        # the `payload == response` assertion above fails).
+        closed_at = calls.get("stdin_closed_after_reads")
+        self.assertTrue(closed_at is None or closed_at >= 3,
+                        "stdin closed before the id=2 reply (at read %r)" % closed_at)
         self.assertEqual(calls["argv"], ["codex", "app-server", "--stdio"])
-        self.assertEqual(calls["timeout"], 3)
         self.assertIs(calls["kwargs"]["stdin"], subprocess.PIPE)
         self.assertIs(calls["kwargs"]["stdout"], subprocess.PIPE)
         self.assertIs(calls["kwargs"]["stderr"], subprocess.PIPE)
-        self.assertTrue(calls["kwargs"]["text"])
         self.assertEqual(calls["kwargs"]["encoding"], "utf-8")
         self.assertEqual(calls["kwargs"]["errors"], "replace")
+        self.assertTrue(procs[0].killed)         # server terminated after the answer
 
-    def test_call_app_server_fail_opens_on_timeout_and_non_json(self):
+    class _SilentLiveProcess:
+        """A LIVE app-server that stays up with stdin open and emits NOTHING (#105 review
+        round 1): its readline blocks, and only `kill()` (closing the pipe) unblocks it —
+        modelling the real kill-closes-stdout behavior so the daemon reader can never leak."""
+
+        def __init__(self, sleep_s=5.0):
+            self._sleep = sleep_s
+            self.killed = False
+            outer = self
+
+            class _Stdin:
+                def write(self, text):
+                    pass
+
+                def flush(self):
+                    pass
+
+            self.stdin = _Stdin()
+            self.stdout = self
+            self.stderr = None
+
+        def readline(self):
+            for _ in range(int(self._sleep / 0.02) + 1):
+                if self.killed:                 # kill() closed stdout → EOF unblocks the reader
+                    return ""
+                time.sleep(0.02)
+            return ""
+
+        def close(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0 if self.killed else None
+
+    def test_call_app_server_reaps_real_silent_child_no_race(self):
+        # #105 review round 2: a REAL local child that stays silent with stdin open must be
+        # reaped and the reader joined with NO concurrent stdout read (wait(), not communicate).
+        import threading as _t
         mod = self._example()
-        killed = []
+        captured = {}
+        real_popen = subprocess.Popen
 
-        class TimeoutProcess:
-            def communicate(self, input=None, timeout=None):
-                raise subprocess.TimeoutExpired(["codex"], timeout)
+        def cap_popen(argv, **kw):
+            p = real_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kw)
+            captured["proc"] = p
+            return p
 
-            def kill(self):
-                killed.append(True)
+        before = _t.active_count()
+        t0 = time.monotonic()
+        result = mod._call_app_server(popen=cap_popen, timeout_s=0.3)
+        elapsed = time.monotonic() - t0
+        self.assertIsNone(result)                        # fail-open
+        self.assertLess(elapsed, 4.0)                    # bounded (timeout + cleanup), not 30s
+        p = captured["proc"]
+        self.assertIsNotNone(p.poll())                   # child REAPED (returncode set)
+        time.sleep(0.1)
+        self.assertLessEqual(_t.active_count(), before)  # reader joined — no leak
 
-        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: TimeoutProcess()))
-        self.assertEqual(killed, [True])
+    def test_call_app_server_bounded_against_silent_live_child(self):
+        # finding 1: a blocking readline must not outrun the deadline. A silent live child
+        # emitting nothing for 5s must be abandoned within ~timeout + cleanup, not 5s, with the
+        # child killed and the daemon reader unblocked (no thread leak).
+        import threading as _t
+        mod = self._example()
+        proc = self._SilentLiveProcess(sleep_s=5.0)
+        before = _t.active_count()
+        t0 = time.monotonic()
+        result = mod._call_app_server(popen=lambda *a, **k: proc, timeout_s=0.1)
+        elapsed = time.monotonic() - t0
+        self.assertIsNone(result)                        # fail-open, not a value
+        self.assertTrue(proc.killed)                     # child terminated
+        self.assertLess(elapsed, 2.0)                    # bounded — NOT the 5s silent window
+        time.sleep(0.1)                                  # let the killed reader unwind
+        self.assertLessEqual(_t.active_count(), before)  # no leaked reader thread
 
-        class BadJsonProcess:
-            def communicate(self, input=None, timeout=None):
-                return "not-json\n" + json.dumps({"id": 1, "result": {}}) + "\n", ""
+    def test_call_app_server_fail_opens_on_eof_deadline_and_non_json(self):
+        mod = self._example()
+        # EOF before id=2 (server exited): None, child still reaped
+        rec = {}
+        proc_eof = self._HeldStdinProcess(["not-json\n"], rec)
+        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: proc_eof, timeout_s=3))
+        self.assertTrue(proc_eof.killed)
+        # already-expired deadline: the read loop never runs → None, child killed
+        rec2 = {}
+        proc_dead = self._HeldStdinProcess([json.dumps({"id": 2}) + "\n"], rec2)
+        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: proc_dead, timeout_s=0))
+        self.assertTrue(proc_dead.killed)
 
-        self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: BadJsonProcess()))
-
-    def test_call_app_server_kills_child_on_generic_communicate_error(self):
+    def test_call_app_server_kills_child_on_generic_stream_error(self):
         mod = self._example()
         killed = []
 
         class ErrorProcess:
-            def communicate(self, input=None, timeout=None):
-                raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")
+            class _Stdin:
+                def write(self, text):
+                    raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")
+
+                def flush(self):
+                    pass
+
+            stdin = _Stdin()
+            stdout = None
+            stderr = None
 
             def kill(self):
                 killed.append(True)
+
+            def wait(self, timeout=None):
+                return 0
 
         self.assertIsNone(mod._call_app_server(popen=lambda *a, **k: ErrorProcess()))
         self.assertEqual(killed, [True])

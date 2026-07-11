@@ -101,6 +101,51 @@ def build_fixture(payload, now_iso):
                             "resets_at": resets_at})
         except Exception:
             continue
+    if not windows and isinstance(payload, dict):
+        # LIVE endpoint shape (observed 2026-07-10): top-level window objects
+        # {"five_hour": {"utilization": <used %>, "resets_at": ISO}, ...} —
+        # utilization is USED percent (no inversion), resets_at is ISO WITH an
+        # explicit offset. FALLBACK PRECEDENCE (exact contract, #105 review):
+        # any successfully NORMALIZED windows[] entry suppresses this fallback;
+        # only when the normalized list is empty (windows[] absent, non-list,
+        # empty, or all-invalid) is the top-level live shape attempted.
+        for key, kind in (("five_hour", "session_5h"), ("seven_day", "weekly")):
+            try:
+                win = payload.get(key)
+                if not isinstance(win, dict):
+                    continue
+                used = win.get("utilization")
+                if isinstance(used, bool) or not isinstance(used, (int, float)):
+                    continue
+                percent = float(used)
+                if not math.isfinite(percent):
+                    continue
+                resets = win.get("resets_at")
+                resets_at = None
+                if isinstance(resets, str) and resets:
+                    try:
+                        parsed = dt.datetime.fromisoformat(resets.replace("Z", "+00:00"))
+                        # A NAIVE datetime (no offset) is ambiguous — astimezone()
+                        # would assume the HOST local timezone and make the same
+                        # provider payload host-dependent (#105 review round 1).
+                        # Never invent an offset: aware-only normalization.
+                        if parsed.tzinfo is None:
+                            resets_at = None
+                        else:
+                            resets_at = parsed.astimezone(dt.timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ")
+                    except (ValueError, OverflowError, OSError):
+                        # a calendar-bound reset (astimezone can OverflowError near
+                        # year 1/9999) degrades ONLY resets_at to null — the valid
+                        # utilization ratio is still recorded (#105 review round 2).
+                        resets_at = None
+                windows.append({
+                    "kind": kind,
+                    "used_ratio": round(max(0.0, min(100.0, percent)) / 100.0, 4),
+                    "resets_at": resets_at,
+                })
+            except Exception:
+                continue
     return {
         "schema": "m8shift.usage.fixture.v1",
         "agent": "claude",
