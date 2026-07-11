@@ -406,16 +406,32 @@ def require_takeover_or_die(idv, actor, args):
             "branch": owner["branch"], "created_at": owner["created_at"]}
 
 
+def _cas_owner_or_die(idv, ticket):
+    """Optimistic-concurrency check (Codex PR C review round-3 finding 1): the ticket was
+    captured BEFORE the serialization lock, so under the lock the CURRENT usable owner must
+    STILL be the one the ticket expects — otherwise a concurrent `done`/`integrate`/`drop
+    --takeover` changed it, and applying our stale ticket would silently overwrite a
+    now-different owner AND write an audit naming the wrong displaced owner. On a mismatch we
+    refuse and write NOTHING. Callers hold the core file lock, and every takeover write is
+    serialized under it, so this compare-and-swap is authoritative."""
+    current = read_owner(idv)
+    if current is None or current.get("agent") != ticket["prev"]:
+        cur = _safe(current["agent"]) if current else "none"
+        die(f"owner changed under the lock (now {cur!r}, expected {_safe(ticket['prev'])!r}) "
+            f"— retry the takeover")
+
+
 def commit_takeover_or_die(idv, actor, ticket, verb):
     """COMMIT phase for `done`/`integrate` (the sidecar SURVIVES, so it holds the re-stamped
-    audit). Order is DURABLE-audit-first: append the ledger record, FAILING CLOSED before any
-    ownership change; then re-stamp the sidecar from the captured ticket (no re-read) and
-    verify it reads back as this actor's ownership, failing closed otherwise. Over-records
-    (a ledger line for a takeover whose sidecar apply then failed) rather than under-records
-    (an applied change with no audit). Callable UNDER a file lock (writes only sidecar files,
-    not the LOCK)."""
+    audit). MUST run under the core file lock (the CAS below is only authoritative when every
+    takeover write is serialized): re-read + require the current owner still equals the
+    ticket's expected prior owner (optimistic CAS), then durable-audit-first append the ledger
+    record, re-stamp the sidecar from the CAPTURED ticket (no data re-read), and verify it
+    reads back as this actor's ownership — each step fails CLOSED. Over-records (a ledger line
+    for a takeover whose sidecar apply then failed) rather than under-records."""
     if ticket is None:
         return
+    _cas_owner_or_die(idv, ticket)                       # CAS: current owner == ticket['prev']
     ok, err = append_takeover_ledger(_takeover_record(idv, actor, ticket, verb, "applied"))
     if not ok:
         die(f"takeover audit ledger write failed ({_safe(err)}) — refusing (ownership unchanged)")
@@ -432,12 +448,14 @@ def commit_takeover_or_die(idv, actor, ticket, verb):
 
 def authorize_drop_takeover_or_die(idv, actor, ticket):
     """`drop` COMMIT phase 1: the worktree AND its sidecar are about to be removed, so the
-    durable ledger is the ONLY surviving audit. Record `phase=authorized` BEFORE the
-    destructive `git worktree remove`, failing CLOSED if it cannot be persisted — a
-    cross-owner drop must never destroy without a durable record (Codex PR C review round-2
-    finding 2)."""
+    durable ledger is the ONLY surviving audit. MUST run under the core file lock: CAS the
+    current owner against the ticket, then record `phase=authorized` BEFORE the destructive
+    `git worktree remove`, failing CLOSED if either the owner changed or the record cannot be
+    persisted — a cross-owner drop must never destroy against a stale owner or without a
+    durable record (Codex PR C review round-2 finding 2 + round-3 finding 1)."""
     if ticket is None:
         return
+    _cas_owner_or_die(idv, ticket)                       # CAS under the same serialization lock
     ok, err = append_takeover_ledger(_takeover_record(idv, actor, ticket, "drop", "authorized"))
     if not ok:
         die(f"takeover audit ledger write failed ({_safe(err)}) — refusing (worktree untouched)")
@@ -446,12 +464,14 @@ def authorize_drop_takeover_or_die(idv, actor, ticket):
 
 
 def complete_drop_takeover(idv, actor, ticket):
-    """`drop` COMMIT phase 2: best-effort `phase=completed` tombstone AFTER a successful
-    removal, so the ledger truthfully distinguishes an authorized-but-failed drop (dirty
-    tree) from a completed one."""
+    """`drop` COMMIT phase 2: `phase=completed` tombstone AFTER a successful removal, so the
+    ledger truthfully distinguishes an authorized-but-failed drop (dirty tree) from a completed
+    one. Returns `(ok, err)` — the removal cannot be rolled back, but a failed completion audit
+    is surfaced by the caller (nonzero rc), never reported as a full success (Codex PR C review
+    round-3 finding 3)."""
     if ticket is None:
-        return
-    append_takeover_ledger(_takeover_record(idv, actor, ticket, "drop", "completed"))
+        return True, None
+    return append_takeover_ledger(_takeover_record(idv, actor, ticket, "drop", "completed"))
 
 
 # ───────────────────────────── pen flips (file_lock) ───────────────────────────
@@ -494,7 +514,12 @@ def claim_pen(agent, idv, target_sha, ticket=None):
         st, held = lk.get("state", ""), lk.get("integrating")
         if held:
             if st == working_self and held.split("@", 1)[0] == idv:
-                return "resume", held                        # resume OUR integration of this id
+                # RESUME our own in-flight integration. Any supplied takeover must STILL be
+                # applied here (Codex PR C review round-3 finding 2): if the sidecar became
+                # foreign while the integration was in flight, resuming must not bypass the
+                # re-stamp + ledger + CAS. commit_takeover_or_die no-ops on ticket=None.
+                commit_takeover_or_die(idv, agent, ticket, "integrate")
+                return "resume", held
             die(f"integration pen busy: {lk.get('holder')} is integrating {held}")
         if st not in ("IDLE", f"AWAITING_{agent.upper()}", working_self):
             die(f"integration pen not free: state={st}, holder={lk.get('holder')}")
@@ -625,13 +650,24 @@ def cmd_drop(args):
     if not os.path.exists(ftree):                            # precondition BEFORE the audit, so a
         die(f"no worktree {idv!r} at {ftree}")               # missing tree writes no phantom record
     # A cross-owner drop destroys both the worktree AND its sidecar, so the DURABLE ledger is
-    # the only surviving audit: record `phase=authorized` BEFORE the destructive removal,
-    # failing CLOSED if it cannot persist (Codex PR C review round-2 finding 2).
-    authorize_drop_takeover_or_die(idv, args.agent, ticket)
+    # the only surviving audit. Under the SAME core file lock every other takeover writer uses,
+    # CAS the current owner against the ticket and record `phase=authorized` BEFORE the
+    # destructive removal — failing CLOSED on a stale owner or an unwritable ledger (Codex PR C
+    # review round-2 finding 2 + round-3 finding 1). The slow `git worktree remove` runs OUTSIDE
+    # the lock (never hold the canonical lock across git).
+    with core.file_lock():
+        roster_or_die(core.get_lock(core.load_or_die()), args.agent)  # re-check under the lock
+        authorize_drop_takeover_or_die(idv, args.agent, ticket)
     git(["worktree", "remove", ftree])                       # git refuses if dirty (no --force)
     remove_owner(idv)                                        # best-effort cleanup (RFC 049 PR C)
-    complete_drop_takeover(idv, args.agent, ticket)          # phase=completed tombstone (truthful)
+    ok, err = complete_drop_takeover(idv, args.agent, ticket)  # phase=completed tombstone
     print(f"✓ dropped worktree {idv}")
+    if not ok:
+        # the removal cannot be rolled back, but a failed completion audit must NOT be reported
+        # as a full success (Codex PR C review round-3 finding 3): surface it and exit nonzero.
+        print(f"⚠ drop completed but the completion audit could not be recorded ({_safe(err)}); "
+              f"the `authorized` ledger record stands as the durable audit", file=sys.stderr)
+        return 2
     return 0
 
 

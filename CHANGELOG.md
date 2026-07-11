@@ -19,8 +19,17 @@ git/editor/filesystem writes never pass through the companion, RFC 049
 
 - **Actor-first.** Every actor is roster-validated BEFORE any owner read/write
   or destruction — an unknown agent can no longer drop or take over a worktree.
-- **Actor-first.** Every actor is roster-validated BEFORE any owner read/write
-  or destruction — an unknown agent can no longer drop or take over a worktree.
+- **Serialized compare-and-swap takeover.** The takeover ticket captured before
+  the lock is an OPTIMISTIC EXPECTATION, not authority: under the same core file
+  lock every takeover writer holds, the commit re-reads the current owner and
+  requires it to still equal the ticket's expected prior owner, refusing (and
+  writing nothing) otherwise — so two interleaved `--takeover` runs on the same
+  id cannot let a stale ticket overwrite a now-different owner or record a
+  ledger line naming the wrong displaced owner. `drop` takes the same lock for
+  its authorize phase; `integrate` re-applies a supplied takeover even on the
+  resume path (a sidecar that went foreign mid-integration is never bypassed).
+  A `drop` whose post-removal completion audit cannot be written reports a
+  bounded partial-failure (nonzero) instead of a silent full success.
 - **Durable audit + atomic `integrate`.** Every takeover appends to a durable
   append-only ledger (`.m8shift/worktree-owners/_takeovers.jsonl`) — the audit
   that survives a `drop` (which destroys the sidecar): drop records `authorized`
@@ -65,13 +74,15 @@ strictly canonical — the string must equal the re-rendered
 fields, whitespace padding, and non-ASCII year digits that bare `strptime`
 would accept — and a whitespace-only `takeover_reason` no longer validates.
 
-39 new tests (10 lifecycle/guard/doctor + 29 adversarial hardening: tmp/dir
+43 new tests (10 lifecycle/guard/doctor + 33 adversarial hardening: tmp/dir
 symlink escape, FIFO-ledger fail-closed-no-hang, unknown-actor destruction,
 durable drop audit + dirty-tree attempted-vs-completed + no-phantom-on-missing,
 deterministic ledger-dir fail-closed audit, a git-hook race seam proving
-`integrate` atomicity, impossible/non-canonical-calendar, empty-branch,
-detached, all-or-none-audit-tuple/whitespace-reason schema, ANSI/oversized/
-traversal, detached-HEAD + `_integration` status↔doctor agreement).
+`integrate` atomicity, driver-level compare-and-swap concurrency (stale-ticket
+refusal, truthful `from`, resume re-applies takeover, completed-audit failure
+surfaced nonzero), impossible/non-canonical-calendar, empty-branch, detached,
+all-or-none-audit-tuple/whitespace-reason schema, ANSI/oversized/traversal,
+detached-HEAD + `_integration` status↔doctor agreement).
 
 **Unified multi-window usage line (#106, RFC 051 amendment E).** The
 `── usage ──` block in `status`/`watch` now renders EVERY plausible

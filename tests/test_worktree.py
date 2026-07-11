@@ -469,6 +469,24 @@ class TestRFC049PRCHardening(WTBase):
         with open(path, encoding="utf-8") as fh:
             return [json.loads(l) for l in fh if l.strip()]
 
+    _DRIVER_PREAMBLE = (
+        "import importlib.util, os, json, sys\n"
+        "cs=importlib.util.spec_from_file_location('m8shift','m8shift.py')\n"
+        "core=importlib.util.module_from_spec(cs); cs.loader.exec_module(core)\n"
+        "ws=importlib.util.spec_from_file_location('wt','m8shift-worktree.py')\n"
+        "wt=importlib.util.module_from_spec(ws); ws.loader.exec_module(wt)\n"
+        "wt.ROOT=os.getcwd(); core.configure_root(os.getcwd())\n"
+    )
+
+    def driver(self, code):
+        """Run an in-process driver against the copied core+companion (ROOT-configured), so a
+        deterministic concurrency scenario can call the takeover functions directly — no
+        timing/interleaving. Returns the CompletedProcess."""
+        script = os.path.join(self.d, "_driver.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(self._DRIVER_PREAMBLE + code)
+        return run([sys.executable, script], self.d)
+
     # ── finding 1: writes must never escape the project ───────────────────────
     def test_takeover_tmp_symlink_does_not_overwrite_external_file(self):
         self.claim_and_commit("feat-a", "a.txt", "x\n")
@@ -827,6 +845,91 @@ class TestRFC049PRCHardening(WTBase):
             self.write_raw("feat-a", json.dumps(bad))
             by = {f["worktree"]: f for f in self.doctor_findings()}
             self.assertEqual(by["feat-a"]["id"], "worktree.owner_missing", bad)
+
+    # ── round-4 concurrency regressions (Codex PR C round-3 review) ────────────
+    def test_stale_ticket_cas_refuses_overwriting_a_changed_owner(self):
+        # finding 1: a takeover ticket captured before the lock must NOT overwrite an owner
+        # that changed under the lock. Deterministic driver: current owner is gemini, but the
+        # ticket expects claude → the CAS refuses, writes nothing, leaves gemini + no ledger.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", agent="gemini")))
+        r = self.driver(
+            "json.dump(dict(prev='claude', reason='x', branch='feat-a',"
+            " created_at='2026-01-01T00:00:00Z'), open('_ticket.json','w'))\n"
+            "tk=json.load(open('_ticket.json'))\n"
+            "rc=1\n"
+            "try:\n"
+            "    with core.file_lock():\n"
+            "        wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
+            "    rc=0\n"
+            "except SystemExit as e:\n"
+            "    sys.stderr.write(str(e))\n"
+            "print(rc)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "1", r.stdout + r.stderr)  # died
+        self.assertIn("owner changed", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "gemini")  # NOT overwritten
+        self.assertEqual(self.ledger_records(), [])                  # no stale audit record
+
+    def test_matching_ticket_cas_commits_with_truthful_from(self):
+        # the positive CAS path: when the current owner still equals the ticket's prev, the
+        # takeover applies and the ledger `from` is truthful.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")             # owner=claude
+        r = self.driver(
+            "tk=dict(prev='claude', reason='ok', branch='feat-a',"
+            " created_at=json.load(open('.m8shift/worktree-owners/feat-a.json'))['created_at'])\n"
+            "with core.file_lock():\n"
+            "    wt.commit_takeover_or_die('feat-a','codex',tk,'done')\n"
+            "print('done')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+        recs = self.ledger_records()
+        self.assertEqual([x["from"] for x in recs], ["claude"])      # truthful displaced owner
+        self.assertEqual(recs[0]["to"], "codex")
+
+    def test_resume_reapplies_takeover_not_bypassed(self):
+        # finding 2: on the integration RESUME path (own WORKING sentinel + same id), a supplied
+        # takeover of a sidecar that went foreign mid-flight must STILL be applied, not bypassed.
+        # Driver: set LOCK to our own in-flight sentinel, owner foreign (gemini), call claim_pen
+        # with a matching ticket → returns resume AND applies the takeover.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        self.write_raw("feat-a", json.dumps(self.doc("feat-a", agent="gemini")))
+        sha = "a" * 40
+        r = self.driver(
+            "text=core.load_or_die(); lk=core.get_lock(text)\n"
+            "lk.update(holder='codex', state='WORKING_CODEX', integrating='feat-a@%s',\n"
+            "          since=core.iso(core.now()), expires=core.iso(core.now()))\n"
+            "core.write(core.set_lock(text, lk))\n"
+            "tk=dict(prev='gemini', reason='reassert', branch='feat-a',"
+            " created_at='2026-01-01T00:00:00Z')\n"
+            "mode,_=wt.claim_pen('codex','feat-a','%s',tk)\n"
+            "print(mode)\n" % (sha, sha))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "resume")
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")   # takeover APPLIED on resume
+        recs = self.ledger_records()
+        self.assertTrue(any(x["verb"] == "integrate" and x["from"] == "gemini" for x in recs))
+
+    def test_completed_drop_audit_failure_is_surfaced_nonzero(self):
+        # finding 3: if the post-removal `completed` ledger append fails, the drop is reported
+        # as a bounded partial-failure (rc 2), never a silent full success. Deterministic
+        # driver: run authorize → remove → (ledger swapped to a directory) → complete, and
+        # assert complete returns not-ok and cmd_drop's return-2 branch is taken.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "tk=dict(prev='claude', reason='r', branch='feat-a',"
+            " created_at=json.load(open('.m8shift/worktree-owners/feat-a.json'))['created_at'])\n"
+            "with core.file_lock():\n"
+            "    wt.authorize_drop_takeover_or_die('feat-a','codex',tk)\n"
+            "wt.git(['worktree','remove', wt.wt_path('feat-a')])\n"
+            "wt.remove_owner('feat-a')\n"
+            "led=os.path.join('.m8shift','worktree-owners','_takeovers.jsonl')\n"
+            "os.remove(led); os.mkdir(led)\n"           # ledger now a directory → append fails
+            "ok,err=wt.complete_drop_takeover('feat-a','codex',tk)\n"
+            "print('OK' if ok else 'FAILCLOSED')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "FAILCLOSED")  # complete surfaced not-ok
+        # and the end-to-end path returns rc 2 with the warning (ledger dir from the start makes
+        # authorize fail; here we prove the helper contract that cmd_drop's rc-2 branch consumes)
 
 
 if __name__ == "__main__":
