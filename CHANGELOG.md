@@ -34,7 +34,13 @@ git/editor/filesystem writes never pass through the companion, RFC 049
   is defeated). `integrate` re-applies a supplied takeover even on the resume
   path (a sidecar that went foreign mid-integration is never bypassed). A `drop`
   whose post-removal completion audit cannot be written reports a bounded
-  partial-failure (rc 2) instead of a silent full success.
+  partial-failure (rc 2) instead of a silent full success. The per-id lock
+  breaks a stale lock ONLY when its recorded holder PID is provably dead and its
+  inode/token is unchanged (a slow-but-live `git worktree add/remove` is never
+  stolen), never reclaims or spins on a directory/non-regular lock (the
+  contender times out BUSY), unlinks only its own unchanged token on release,
+  and FAILS CLOSED on a lock-acquisition error in a SAFE owners directory rather
+  than running a mutation unserialized.
 - **Durable audit + atomic `integrate`.** Every takeover appends to a durable
   append-only ledger (`.m8shift/worktree-owners/_takeovers.jsonl`) — the audit
   that survives a `drop` (which destroys the sidecar): drop records `authorized`
@@ -79,14 +85,16 @@ strictly canonical — the string must equal the re-rendered
 fields, whitespace padding, and non-ASCII year digits that bare `strptime`
 would accept — and a whitespace-only `takeover_reason` no longer validates.
 
-45 new tests (10 lifecycle/guard/doctor + 35 adversarial hardening: tmp/dir
+50 new tests (10 lifecycle/guard/doctor + 40 adversarial hardening: tmp/dir
 symlink escape, FIFO-ledger fail-closed-no-hang, unknown-actor destruction,
 durable drop audit + dirty-tree attempted-vs-completed + no-phantom-on-missing,
 deterministic ledger-dir fail-closed audit, a git-hook race seam proving
 `integrate` atomicity, driver-level compare-and-swap concurrency (stale-ticket
 refusal, truthful `from`, resume re-applies takeover, cmd_drop completed-audit
 failure surfaced rc 2, same-agent drop/reclaim ABA refused by the generation
-nonce, drop authorize↔removal atomic vs a foreign takeover),
+nonce, drop authorize↔removal atomic vs a foreign takeover), per-id lock
+robustness (live long-holder not stolen, dead-holder reclaimed, directory-lock
+no-hang, cleanup never unlinks a successor, safe-dir acquisition fails closed),
 impossible/non-canonical-calendar, empty-branch, detached,
 all-or-none-audit-tuple/whitespace-reason schema, ANSI/oversized/traversal,
 detached-HEAD + `_integration` status↔doctor agreement).

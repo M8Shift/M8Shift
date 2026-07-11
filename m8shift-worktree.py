@@ -396,22 +396,81 @@ def append_takeover_ledger(record):
         return False, str(e)
 
 
+def _pid_alive(pid):
+    """Best-effort cross-platform liveness of an owner-lock holder PID (mirrors the runtime
+    companion's probe): POSIX signal-0 (PermissionError → alive but not ours), Windows
+    `tasklist`. When liveness CANNOT be proven (unknown error, Windows probe failure) → treat
+    as ALIVE, so we NEVER steal a lock we cannot confidently attribute to a dead process (Codex
+    PR C review round-5 finding 1)."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":                                  # pragma: no cover - Windows only
+        try:
+            probe = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                                   capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        return f'"{pid}"' in (probe.stdout or "")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                                      # alive, just not ours
+    except OSError:
+        return True                                      # cannot prove dead → don't steal
+    return True
+
+
+def _reclaim_owner_lock(path):
+    """Reclaim the per-id lock ONLY when it is a stale REGULAR-file lock whose recorded holder
+    PID is provably NOT alive AND whose inode/token is unchanged across the check — never
+    stealing a live long-running holder (a legitimate `git worktree add/remove` may exceed the
+    stale threshold) and never unlinking a fresh successor. Returns True iff exactly that
+    abandoned lock was unlinked. A directory / FIFO / symlink / non-unlinkable lock returns
+    False, so the caller falls to the BOUNDED busy timeout and never spins (Codex PR C review
+    round-5 findings 1-2)."""
+    try:
+        st1 = os.lstat(path)
+        if not stat.S_ISREG(st1.st_mode):                # a dir/FIFO/symlink lock is never reclaimed
+            return False
+        if time.time() - st1.st_mtime <= OWNER_LOCK_STALE_S:
+            return False                                 # not old enough
+        raw, st2 = core._read_regular_file_token(path)   # raises unless a regular file
+        if not core._same_file(st1, st2):
+            return False                                 # inode changed under us
+        try:
+            pid = int(raw.split(b":", 1)[0])
+        except (ValueError, IndexError):
+            pid = None
+        if pid is not None and _pid_alive(pid):
+            return False                                 # LIVE holder → never steal
+        st3 = os.lstat(path)                             # re-validate immediately before unlink
+        if not core._same_file(st2, st3) or time.time() - st3.st_mtime <= OWNER_LOCK_STALE_S:
+            return False
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
 @contextlib.contextmanager
 def owner_lock(idv, timeout=10):
-    """A PER-ID ownership lock (`.m8shift/worktree-owners/<id>.lock`, `O_CREAT|O_EXCL`)
-    serializing EVERY ownership mutation for one worktree id — `claim` create, `done`/
-    `integrate`/`drop` takeover, and `drop`'s authorize→remove→cleanup span — WITHOUT holding
-    the global core lock across slow git (Codex PR C review round-4 finding 2: drop must not
-    release serialization before the destructive removal, or a foreign takeover slips into the
-    gap). It is finer-grained than the core lock (blocks only same-id ownership ops), carries an
-    ownership token so a crashed holder's stale lock (older than OWNER_LOCK_STALE_S) is broken
-    exactly once, and — being advisory, not a security boundary — degrades to a no-op when the
-    owners directory is unsafe. Acquire order everywhere: owner_lock OUTER, core.file_lock
-    INNER (integrate/done also take the core lock for the pen / done ledger) — a single order,
-    so no deadlock."""
+    """A PER-ID ownership lock (`.m8shift/worktree-owners/<id>.lock`, `O_CREAT|O_EXCL` + a
+    `<pid>:<ns>` token) serializing EVERY ownership mutation for one worktree id — `claim`
+    create, `done`/`integrate`/`drop` takeover, and `drop`'s authorize→remove→cleanup span —
+    WITHOUT holding the global core lock across slow git (Codex PR C review round-4 finding 2).
+    Finer-grained than the core lock (blocks only same-id ownership ops). A stale lock is broken
+    ONLY when its holder PID is provably dead and its inode/token is unchanged (`_reclaim_owner_
+    lock`), so a live long-running holder is never stolen. When the owners directory is UNSAFE
+    (symlinked/uncontained) it degrades to a no-op — consistent with the fail-open reader, and
+    harmless because a takeover ticket is None there anyway; but when the directory is SAFE and
+    the lock cannot be acquired it FAILS CLOSED (die), never running an ownership mutation
+    unserialized (Codex PR C review round-5 finding 4). Acquire order everywhere: owner_lock
+    OUTER, core.file_lock INNER — a single order, so no deadlock."""
     owners = _owners_dir_safe()
     if owners is None:
-        yield                                            # advisory: cannot lock → proceed
+        yield False                                      # advisory: unsafe dir → cannot lock
         return
     os.makedirs(owners, exist_ok=True)
     path = os.path.join(owners, f"{idv}.lock")
@@ -427,30 +486,21 @@ def owner_lock(idv, timeout=10):
                 os.close(fd)
             break
         except FileExistsError:
-            try:
-                age = time.time() - os.lstat(path).st_mtime
-            except OSError:
-                age = 0.0
-            if age > OWNER_LOCK_STALE_S:                  # crashed holder → break its stale lock
-                with contextlib.suppress(OSError):
-                    os.unlink(path)
-                continue
-            if time.monotonic() - start > timeout:
+            if _reclaim_owner_lock(path):                # only a proven-dead, unchanged, regular lock
+                continue                                 # reclaimed → retry the create at once
+            if time.monotonic() - start > timeout:       # a live/held or non-reclaimable lock → busy
                 die(f"ownership lock for {_safe(idv)!r} is busy — another ownership operation "
                     f"is in flight; retry")
             time.sleep(0.02)
-        except OSError:
-            yield                                        # cannot create the lock → advisory no-op
-            return
+        except OSError as e:                             # SAFE dir but acquisition failed → fail closed
+            die(f"ownership lock for {_safe(idv)!r} could not be acquired ({_safe(str(e))}) — "
+                f"refusing to run an ownership mutation unserialized")
     try:
-        yield
-    finally:
-        try:                                             # remove ONLY our own token (never a successor's)
-            got, _ = core._read_regular_file_token(path)
+        yield True
+    finally:                                             # unlink ONLY our own unchanged token,
+        with contextlib.suppress(OSError):               # NEVER a successor's (finding 3): a read
+            got, _ = core._read_regular_file_token(path)  # failure suppresses → no unlink at all
             if got == token:
-                os.unlink(path)
-        except Exception:
-            with contextlib.suppress(OSError):
                 os.unlink(path)
 
 

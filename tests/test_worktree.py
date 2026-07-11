@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -987,6 +988,91 @@ class TestRFC049PRCHardening(WTBase):
     def read_owner_gen(self, idv):
         with open(self.owner_file(idv)) as fh:
             return json.load(fh)["gen"]
+
+    def lock_path(self, idv):
+        return os.path.join(self.d, self.OWNERS_REL, f"{idv}.lock")
+
+    # ── round-6 owner_lock robustness regressions (Codex PR C round-5 review) ──
+    def test_live_long_holder_lock_not_stolen(self):
+        # finding 1: an age-only reclaim would STEAL a live long-running holder (a slow
+        # git worktree add/remove can exceed the stale threshold). A driver holds owner_lock
+        # and backdates its mtime past the threshold WHILE its process stays alive; a competing
+        # takeover must time out BUSY, never reclaim it.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "import subprocess, sys, os, time\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    lock=os.path.join('.m8shift','worktree-owners','feat-a.lock')\n"
+            "    old=time.time()-3*wt.OWNER_LOCK_STALE_S\n"     # model a slow op past threshold
+            "    os.utime(lock,(old,old))\n"                    # ...holder still ALIVE
+            "    p=subprocess.run([sys.executable,'m8shift-worktree.py',\n"
+            "        'done','feat-a','codex','--takeover','--reason','steal'],\n"
+            "        capture_output=True, text=True, timeout=25)\n"
+            "    sys.stderr.write('RC=%d %s' % (p.returncode,(p.stderr or '')[:70]))\n"
+            "print('held')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RC=1", r.stderr)                        # the steal was refused (busy)
+        self.assertIn("busy", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")  # never stolen
+
+    def test_dead_holder_regular_lock_is_reclaimed(self):
+        # the flip side: a stale regular lock whose recorded PID is provably DEAD is safely
+        # reclaimed, so a crashed holder never wedges the id forever.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")        # owner=claude
+        p = subprocess.Popen(["true"]); p.wait()               # p.pid is now dead
+        with open(self.lock_path("feat-a"), "wb") as fh:
+            fh.write(("%d:123456789" % p.pid).encode())
+        old = time.time() - 3 * 30                             # > OWNER_LOCK_STALE_S
+        os.utime(self.lock_path("feat-a"), (old, old))
+        r = self.wt("done", "feat-a", "codex", "--takeover", "--reason", "ok")
+        self.assertEqual(r.returncode, 0, r.stderr)            # dead lock reclaimed → takeover
+        self.assertEqual(self.read_owner_agent("feat-a"), "codex")
+
+    def test_directory_at_lock_path_does_not_hang(self):
+        # finding 2: a non-unlinkable (directory) lock must NOT spin forever — it can never be
+        # reclaimed (not a regular file), so the contender times out BUSY under a wall clock.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        os.mkdir(self.lock_path("feat-a"))                     # a directory at the lock path
+        old = time.time() - 3 * 30
+        os.utime(self.lock_path("feat-a"), (old, old))
+        r = subprocess.run([sys.executable, COMPANION, "done", "feat-a", "codex",
+                            "--takeover", "--reason", "x"], cwd=self.d,
+                           capture_output=True, text=True, timeout=30)  # timeout catches a hang
+        self.assertEqual(r.returncode, 1)                      # busy, not a hang
+        self.assertIn("busy", r.stderr)
+        self.assertEqual(self.read_owner_agent("feat-a"), "claude")
+
+    def test_cleanup_never_unlinks_a_successor_lock(self):
+        # finding 3: the release must unlink ONLY our own unchanged token, never a successor's.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "lock=os.path.join('.m8shift','worktree-owners','feat-a.lock')\n"
+            "with wt.owner_lock('feat-a'):\n"
+            "    open(lock,'wb').write(b'99999:1')\n"           # a 'successor' token replaces ours
+            "sys.stderr.write('exists=%s' % os.path.exists(lock))\n"
+            "print('ok')\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("exists=True", r.stderr)                 # cleanup did NOT unlink the successor
+
+    def test_safe_dir_lock_acquisition_failure_fails_closed(self):
+        # finding 4: with a SAFE owners dir, a lock-create OSError must FAIL CLOSED (die), never
+        # silently run an ownership mutation unserialized. Deterministic: inject EACCES on the
+        # lock open.
+        self.claim_and_commit("feat-a", "a.txt", "x\n")
+        r = self.driver(
+            "orig=os.open\n"
+            "def boom(path,*a,**k):\n"
+            "    if isinstance(path,str) and path.endswith('feat-a.lock'):\n"
+            "        raise OSError(13,'EACCES injected')\n"
+            "    return orig(path,*a,**k)\n"
+            "os.open=boom\n"
+            "rc=1\n"
+            "try:\n"
+            "    with wt.owner_lock('feat-a'): rc=0\n"
+            "except SystemExit as e: sys.stderr.write(str(e))\n"
+            "print(rc)\n")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "1", r.stdout + r.stderr)  # died
+        self.assertIn("could not be acquired", r.stderr)
 
 
 if __name__ == "__main__":
