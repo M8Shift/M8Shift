@@ -1,0 +1,7 @@
+# relay runtime artifacts created by `m8shift.py init` inside each demo dir
+*/M8SHIFT*
+*/.m8shift*
+*/AGENTS.md
+*/CLAUDE.md
+*/reverse_words.py
+*/__pycache__/

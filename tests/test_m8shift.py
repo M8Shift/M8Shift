@@ -12010,6 +12010,92 @@ class TestRFC050SkillsDoctor(CLIBase):
         self.assertEqual(r.returncode, 0, r.stdout)          # …but never gating
 
 
+class TestShiftDemos(unittest.TestCase):
+    """#102 — examples/shift-demos must stay deterministic: every demo's
+    oracle is pinned here WITHOUT spoiling the exercises."""
+
+    DEMOS = os.path.join(REPO, "examples", "shift-demos")
+
+    def test_layout_and_readmes(self):
+        self.assertTrue(os.path.isfile(os.path.join(self.DEMOS, "README.md")))
+        for demo in ("compute-and-verify", "fix-and-review",
+                     "spec-implement-verify", "adversarial-verify"):
+            self.assertTrue(
+                os.path.isfile(os.path.join(self.DEMOS, demo, "README.md")),
+                demo + " misses its one-paragraph README")
+
+    def test_compute_and_verify_expected_digest_is_true(self):
+        d = os.path.join(self.DEMOS, "compute-and-verify")
+        with open(os.path.join(d, "input.txt"), "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        with open(os.path.join(d, "EXPECTED.sha256"), encoding="utf-8") as fh:
+            expected = fh.read().strip()
+        self.assertEqual(digest, expected)
+
+    def test_fix_and_review_ships_exactly_the_documented_red(self):
+        # The pinned oracle must fail on the shipped bug — and ONLY on the
+        # spaces case (one failure), so the exercise starts deterministically red.
+        d = os.path.join(self.DEMOS, "fix-and-review")
+        r = subprocess.run([sys.executable, "test_palindrome.py"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0, "oracle must start RED")
+        self.assertIn("test_spaces_ignored", r.stderr)
+        self.assertIn("failures=1", r.stderr)
+
+    def test_spec_implement_verify_starts_unimplemented(self):
+        d = os.path.join(self.DEMOS, "spec-implement-verify")
+        self.assertFalse(os.path.exists(os.path.join(d, "reverse_words.py")),
+                         "the solution must not be committed")
+        r = subprocess.run([sys.executable, "test_reverse_words.py"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("reverse_words", r.stderr)  # import error names the gap
+
+    def test_adversarial_claim_is_wrong_on_both_parts(self):
+        d = os.path.join(self.DEMOS, "adversarial-verify")
+        with open(os.path.join(d, "facts.txt"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 99)            # claim says 100
+        self.assertEqual(lines[41], "fact 042: placeholder statement number 42")
+        # claim quotes "...number 41" for line 42 — wrong as designed
+        with open(os.path.join(d, "CLAIM.md"), encoding="utf-8") as fh:
+            claim = fh.read()
+        self.assertIn("100", claim)
+        self.assertIn("number 41", claim)
+
+    QUICKSTART_INIT = "init --agents agent-a,agent-b"
+
+    def test_documented_quickstart_init_and_claim_path_works(self):
+        # The parent README's exact init line must create a roster that
+        # ACCEPTS the agent identities the very next commands use (#102
+        # review round 1: a bare init creates claude,codex and rejects them).
+        with open(os.path.join(self.DEMOS, "README.md"), encoding="utf-8") as fh:
+            self.assertIn(self.QUICKSTART_INIT, fh.read())
+        d = tempfile.mkdtemp(prefix="m8shift-demo-quickstart-")
+        self.addCleanup(shutil.rmtree, d, True)
+        shutil.copy(SCRIPT, os.path.join(d, "m8shift.py"))
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", *self.QUICKSTART_INIT.split()],
+            cwd=d, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "agent-a"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # the original mismatch: a default-roster identity must be refused
+        r = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
+                           cwd=d, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_demo_oracles_are_never_collected_by_repo_pytest(self):
+        # Collection-integrity pin (#102 review round 1): the conftest glob
+        # is implementation-dependent — assert the OUTCOME instead.
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+            cwd=REPO, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout[-800:])  # rc!=0 on collection error
+        self.assertNotIn("shift-demos", r.stdout)
+
+
 class TestRFC052Denylist(CLIBase):
     """RFC 052 (#101) PR2 — C3 operator-confidential denylist in `doctor
     --hygiene`. Every run isolates HOME (a real operator denylist at the default
