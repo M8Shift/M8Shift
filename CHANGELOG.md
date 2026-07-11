@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v3.58.0 — 2026-07-12
+
+Open-format Agent Skills (RFC 050 Phase 1+1b), the host wake-up guard
+(#108 slice 1), deterministic shift demos (#102), and the opt-in tokscale
+spend adapter (#103).
+
 **Opt-in tokscale spend adapter example (#103).** `usage init` scaffolds a
 fifth DISABLED adapter entry, `tokscale-spend` (`cli_json`, placeholder
 command the operator points at their local tokscale install), and
