@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**Shift demos (#102).** `examples/shift-demos/` ships four tiny,
+self-contained two-agent exercises (reference pair claude ↔ codex, any pair
+works) with deterministic oracles: compute-and-verify (pinned SHA-256),
+fix-and-review (pinned failing test turns green), spec-implement-verify
+(pinned test file, solution gitignored), and adversarial-verify (a
+plausible-but-wrong claim refuted against a fixed file). Each demo has a
+one-paragraph README and initializes its own relay in place; runtime
+artifacts stay gitignored. A repo test class pins every oracle without
+spoiling the exercises (true digest, exactly-one-red start, unimplemented
+start, both claim parts wrong).
+
 **Host wake-up guard (#108).** A live incident stalled a handoff in
 `AWAITING_<agent>`: a shell waiter (`wait --interval 300`) had been described
 as an autonomous loop, but waiters DETECT a turn and exit — they cannot wake a

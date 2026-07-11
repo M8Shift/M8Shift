@@ -1,0 +1,3 @@
+M8Shift demo corpus — fixed input, do not edit.
+Line two anchors the checksum.
+agent-a and agent-b exchange turns over this file.
