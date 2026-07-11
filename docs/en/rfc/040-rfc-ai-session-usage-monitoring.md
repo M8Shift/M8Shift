@@ -1,6 +1,6 @@
 # RFC 040 — AI Session Usage Monitoring and Usage-Limit Cooldowns
 
-Status: draft; Phase 2/3 refined toward implementation on 2026-07-03; Phase 4 amendment drafted for review on 2026-07-08
+Status: Phase 2/3 and Phase 4 implemented; Phase 4 provider adapters live-verified and hardened through #105 (2026-07-10)
 Target stage: optional runtime companion  
 Authors: M8Shift maintainers  
 Date: 2026-06-30  
@@ -1582,16 +1582,19 @@ mandatory) and rule 9 (official data wins over estimates).
   raising a `usage.scan` schema-drift finding (vendor JSONL is undocumented
   internals and will drift). Pure filesystem read: no network, no subprocess,
   never follows symlinks, never writes.
-- **`claude-quota-keychain`** (remaining; gating; **ratio-native**). A disabled
-  argv-only reference script reuses the Claude Code OAuth access token from the
-  macOS Keychain service `Claude Code-credentials` to call the client's own usage
-  endpoint (`GET https://api.anthropic.com/api/oauth/usage`), which returns a
-  **`remainingPercent`** (a ratio, not an absolute token count) and `resetsAt`
-  for the session (5h) and weekly windows. This is a **ratio-native** source: it
-  maps onto `windows[]` with `used_ratio = 1 - remainingPercent/100` and
-  `resets_at`, leaving `used`/`limit` **`null`** — the token counts are genuinely
-  unknown, and a percent must never be written into a token-named field (see
-  "Schema extension for ratio-native quota" below). `provenance: official`.
+- **`claude-quota-keychain`** (implemented; disabled by default; **ratio-native**).
+  A disabled argv-only reference script reuses the Claude Code OAuth access token
+  from the macOS Keychain service `Claude Code-credentials` to call the client's
+  own usage endpoint (`GET https://api.anthropic.com/api/oauth/usage`). The
+  live-verified response exposes top-level `five_hour` / `seven_day` objects with
+  **`utilization` as used percent** and an offset-bearing `resets_at`; the adapter
+  maps these without inversion to `windows[].used_ratio` and normalizes aware
+  reset timestamps to strict UTC `Z` (a timezone-naive reset degrades to `null`).
+  For compatibility it also accepts the earlier normalized `windows[]` form with
+  `remainingPercent` / `resetsAt`, where `used_ratio = 1 - remainingPercent/100`.
+  Both paths leave `used`/`limit` **`null`** — token counts are genuinely unknown,
+  and a percent must never be written into a token-named field (see "Schema
+  extension for ratio-native quota" below). `provenance: official`.
   **M8Shift never opens the socket** — the operator's script performs the
   request; M8Shift runs the argv through the RFC 034 hardened runner and ingests
   stdout, exactly like every other adapter. A worked reference lives at
@@ -1604,9 +1607,12 @@ mandatory) and rule 9 (official data wins over estimates).
   catalogued above), preferred when the operator does not want to maintain a
   script — and when it exposes absolute `rate_limits` tokens, the token fields may
   be filled instead.
-- **`codex-ratelimits`** (remaining; gating). The `account/rateLimits/read` RPC
-  (already catalogued) → `primary_window` / `secondary_window` / reset
-  timestamps → `windows[]`, `provenance: official`.
+- **`codex-ratelimits`** (implemented; disabled by default; gating-capable). The
+  live-verified local Codex app-server sequence (`initialize`, then
+  `account/rateLimits/read`) maps `primary_window` / `secondary_window` and reset
+  timestamps to `windows[]`, `provenance: official`. The reference adapter keeps
+  stdin open while a daemon reader thread waits under a monotonic deadline, then
+  fails open to an empty official fixture on any CLI/auth/schema/timeout error.
 - **`codex-jsonl-scan`** (spent; reporting). The Claude scan's twin (same built-in
   `jsonl_scan` kind, `provider: "codex"`) over operator `scan_roots` such as
   `~/.codex/sessions` and `~/.codex/archived_sessions`. The Codex per-row shape is
@@ -1760,9 +1766,9 @@ Each Phase-1 adapter declares `official` (endpoint / RPC / fresh statusline
 
 ---
 
-## Phase 4 — first-class Claude + Codex usage adapters (#100 draft)
+## Phase 4 — first-class Claude + Codex usage adapters (#100, implemented)
 
-Status: **draft for review**. This is an amendment to RFC 040, not a new RFC:
+Status: **implemented and live-verified**. This is an amendment to RFC 040, not a new RFC:
 the normalized snapshot schema, runtime sidecars, adapter manifest, hardened
 runner, and cooldown semantics already exist here. Phase 4 changes the shipped
 adapter catalog and credential policy; it does **not** add provider/network
@@ -1775,9 +1781,9 @@ therefore needs usable, reusable adapters for both agents out of the box:
 
 - `m8shift-runtime.py usage init` scaffolds disabled entries for Claude **and**
   Codex by default;
-- `examples/usage-adapters/` ships a reference adapter for Claude's official
-  OAuth/subscription quota endpoint; Codex starts with the real local scan and a
-  disabled rate-limit TODO scaffold until the official RPC shape is verified;
+- `examples/usage-adapters/` ships reference adapters for Claude's official
+  OAuth/subscription quota endpoint and the verified local Codex app-server
+  rate-limit RPC; both official adapters remain disabled until operator opt-in;
 - local JSONL scans remain reporting/estimate sources, never authoritative
   quota gates unless paired with an explicit operator budget.
 
@@ -1888,21 +1894,18 @@ Claude Code. Phase 4 updates the adapter contract:
   override (or a custom downstream adapter command), but there is no plaintext
   credential-file default.
 
-The reference script should keep the Phase 3 behavior that maps provider
-remaining-percent data to `windows[].used_ratio` and leaves token-named fields
-`null`. A percent is never written into `used`, `limit`, `used_tokens`, or
-`limit_tokens`.
+The reference script implements both the live top-level used-percent shape and
+the earlier normalized remaining-percent compatibility shape described above.
+Both map to `windows[].used_ratio` and leave token-named fields `null`: a percent
+is never written into `used`, `limit`, `used_tokens`, or `limit_tokens`.
 
-### Codex usage adapters — local scan first, official rate-limit TODO
+### Codex usage adapters — local scan plus live-verified official rate limits
 
-The Codex official rate-limit surface is not verified yet. Phase 4 therefore
-starts Codex with a real `codex-jsonl-scan` reporting adapter and scaffolds
-`codex-ratelimits` only as a disabled TODO entry. It must not be documented as a
-working official quota gate until the local Codex RPC shape is confirmed against
-a live Codex install.
-
-When verified, the expected `codex-ratelimits` adapter is a reference script
-such as `examples/usage-adapters/codex-ratelimits.py` that:
+Phase 4 originally staged `codex-ratelimits` as a disabled TODO until the local
+RPC shape could be confirmed. That gate is now satisfied: the shipped
+`examples/usage-adapters/codex-ratelimits.py` was verified against the local
+Codex app-server protocol and remains disabled by default until operator review.
+It:
 
 1. launches the local Codex CLI in its read-only app-server/RPC mode using an
    argv array, never a shell string;
@@ -1913,9 +1916,10 @@ such as `examples/usage-adapters/codex-ratelimits.py` that:
 5. emits an empty official fixture on any unsupported CLI, malformed response,
    timeout, or missing account state.
 
-Until then, local Codex transcript/log scans remain the supported Codex source:
+Local Codex transcript/log scans remain a separate supported source:
 `local_estimate` consumption, useful for reporting and budget-backed estimates,
-but not an official quota gate by itself.
+but not an official quota gate by itself. The rate-limit adapter is the official
+ratio source; neither adapter is enabled automatically.
 
 ### Credential and subprocess policy
 
@@ -1950,34 +1954,33 @@ RFC 052 applies to this phase:
 
 ### Implementation slices
 
-Recommended Phase 4 implementation order:
+Implemented Phase 4 delivery order:
 
-1. **Docs + scaffolds** — update `usage init` so both Claude and Codex disabled
-   entries are present by default; document that all adapters are off until the
+1. **Docs + scaffolds** — `usage init` scaffolds both Claude and Codex disabled
+   entries by default; the docs state that all adapters are off until the
    operator enables them. Each entry includes placeholder config fields (`scan_roots`,
    `command`, `timeout_s`) so enabling is one deliberate edit, not a research task.
-2. **Claude Keychain example** — update or replace
-   `examples/usage-adapters/claude-oauth-usage.py` so macOS Keychain is the
+2. **Claude Keychain example** —
+   `examples/usage-adapters/claude-oauth-usage.py` uses macOS Keychain as the
    default credential source, with fail-open behavior and no plaintext credential
    default.
-3. **Codex rate-limit TODO scaffold** — keep the disabled `codex-ratelimits`
-   manifest entry, but implement a working
-   `examples/usage-adapters/codex-ratelimits.py` only after the local Codex
-   rate-limit RPC shape is verified live. Until then, `codex-jsonl-scan` remains
-   the real Codex source: reporting/local-estimate only unless the operator adds a
-   budget.
-4. **Validation tests** — prove disabled adapters do not execute, enabled
+3. **Codex rate-limit adapter** — keep the `codex-ratelimits` manifest entry
+   disabled by default and ship `examples/usage-adapters/codex-ratelimits.py`
+   after live verification of the local app-server RPC. `codex-jsonl-scan`
+   remains the reporting/local-estimate source unless the operator supplies a
+   budget; `codex-ratelimits` supplies the opt-in official ratio source.
+4. **Validation tests** — tests prove disabled adapters do not execute, enabled
    adapters normalize fixtures correctly, credential material is not printed, and
    unsupported provider state yields `unknown` rather than a pause.
 
-### Slice 4 draft — validation and contract tests
+### Slice 4 — validation and contract tests (implemented)
 
 Slice 4 is a test-hardening slice. It should not add a new provider integration
 and should not enable any adapter by default. Its value is to pin the Phase 4
 contract so later provider work cannot quietly weaken privacy, fail-open, or
 disabled-by-default behavior.
 
-Recommended test surface:
+Pinned test surface:
 
 1. **Default adapter manifest contract**
    - Fresh `usage init` creates exactly the four Phase-4 default adapters:
@@ -1995,8 +1998,8 @@ Recommended test surface:
    - Tests must prove disabled defaults do not perform filesystem scans, Keychain
      reads, Codex CLI launches, subprocess adapter calls, or network access. Use
      synthetic monkeypatches/stubs only; never touch a real Keychain or provider.
-   - The disabled `codex-ratelimits` placeholder remains a TODO scaffold, not an
-     attempted RPC probe.
+   - The disabled `codex-ratelimits` entry remains inert until operator opt-in;
+     initialization never launches an RPC probe.
 
 3. **Fixture schema conformance**
    - Every enabled synthetic adapter used in tests emits or normalizes to
@@ -2072,8 +2075,8 @@ Coverage note for `codex-jsonl-scan`:
   prompt timeout/denial and API-key/no-OAuth setups.
 - The Codex `jsonl_scan` scaffold is the first real Codex source and remains
   reporting/local-estimate by default.
-- The Codex official rate-limit scaffold is clearly marked unverified/disabled
-  and does not claim to gate until the RPC shape is confirmed.
+- The Codex official rate-limit adapter is clearly marked disabled by default;
+  its verified RPC mapping may gate only after explicit operator opt-in.
 - Both examples use `used_ratio` for ratio-native quota and never encode a
   percent as token counts.
 - Local JSONL scans for Claude/Codex remain `local_estimate` and never gate

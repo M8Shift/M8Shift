@@ -3108,6 +3108,7 @@ class TestAuditFixes(CLIBase):
         scripts = [
             "m8shift-context.py",
             "m8shift-e2e.py",
+            "m8shift-headroom.py",
             "m8shift-i18n.py",
             "m8shift-runtime.py",
             "m8shift-worktree.py",

@@ -1,11 +1,14 @@
 # 🏛️ Architecture Document — M8Shift
 
-> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-06-24
+> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-07-11 (v3.57.0)
 >
 > This architecture reflects the current v3 model: active roster of ≥2 agents, one
 > core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
-> the opt-in [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md) companion for degree-2 isolated worktree
-> concurrency, and the local `m8shift-runtime.py` companion for presence/inbox/progress sidecars.
+> holder liveness (RFC 049: protective `heartbeat` beats + two-phase force recovery),
+> a read-only usage advisory in the core display (RFC 051), the opt-in
+> [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md) companion for degree-2 isolated worktree
+> concurrency (with an advisory ownership sidecar since RFC 049 PR C), and the local
+> `m8shift-runtime.py` companion for presence/inbox/progress/listener/usage sidecars.
 > For command-level rules, see [protocol.md](protocol.md) and
 > [specification.md](specification.md).
 
@@ -109,21 +112,39 @@ by read-only or append-only commands; (f) the optional
 
 ```mermaid
 stateDiagram-v2
+    classDef holder fill:#0b3d5c,stroke:#38bdf8,color:#e0f2fe
+    classDef awaiting fill:#14432f,stroke:#4ade80,color:#dcfce7
+    classDef parked fill:#4a3410,stroke:#fbbf24,color:#fef3c7
+    classDef closed fill:#3a1f4d,stroke:#c084fc,color:#f3e8ff
+
     [*] --> IDLE
     IDLE --> WORKING_X: X claims
     WORKING_X --> AWAITING_Y: X appends to Y
     AWAITING_Y --> WORKING_Y: Y claims
     WORKING_Y --> AWAITING_X: Y appends to X
     AWAITING_X --> WORKING_X: X claims
-    WORKING_X --> WORKING_X: X re-claims (refresh TTL)
-    WORKING_X --> WORKING_Y: Y force-claims (X stale)
+    WORKING_X --> WORKING_X: X re-claims (refresh TTL, audit beat) / heartbeat (protective beat)
+    WORKING_X --> WORKING_Y: Y force-claims (X stale AND not live — two-phase RFC 049 recovery)
     WORKING_X --> PAUSED: X pauses (no assigned work)
     AWAITING_X --> PAUSED: X pauses (no assigned work)
     PAUSED --> AWAITING_X: resume X
     WORKING_X --> DONE: done
     PAUSED --> DONE: done
     DONE --> [*]
+
+    class WORKING_X, WORKING_Y holder
+    class AWAITING_X, AWAITING_Y awaiting
+    class IDLE, PAUSED parked
+    class DONE closed
 ```
+
+Legend: blue = an agent holds the pen (`WORKING_*`), green = a handed-off turn
+awaits an agent (`AWAITING_*`), amber = no holder (`IDLE`/`PAUSED`), purple =
+session closed (`DONE`). Since RFC 049, a `claim --force` on an expired lock is a
+**two-phase recovery**: the taker records the stale identity tuple, waits a grace
+period outside the lock, and force-claims only if the holder emitted no protective
+`heartbeat` beat in its liveness window (`--live-override --reason` is the audited
+human escape hatch).
 
 **Degree-2 opt-in companion**:
 
@@ -188,9 +209,9 @@ flowchart TB
     class LOCK,LEDG,INIT,DEC,HOOK core
 
     subgraph COMP["🧩 Advisory companions — no pen · never write M8SHIFT.md / LOCK"]
-        RT["m8shift-runtime.py<br/>presence · runs · progress · inbox · reports<br/>status-runtime · doctor · retention prune/apply<br/>notify (tiers 0–4) · usage-cooldown guard"]
+        RT["m8shift-runtime.py<br/>presence · runs · progress · inbox · reports<br/>status-runtime · doctor · retention prune/apply<br/>notify (tiers 0–4) · listener (RFC 047; RFC 049 liveness producer)<br/>usage adapters/snapshot/guard (RFC 040) · usage-cooldown guard"]
         CX["m8shift-context.py<br/>context packs · identity-pinned adapters"]
-        WT["m8shift-worktree.py<br/>degree-2 worktrees · serialized integration pen"]
+        WT["m8shift-worktree.py<br/>degree-2 worktrees · serialized integration pen<br/>ownership sidecar + advisory takeover guard (RFC 049 PR C)"]
         I18["m8shift-i18n.py<br/>language packs"]
         HR["examples/headless_runner.py<br/>immutable run plans · post-run LOCK verify"]
     end
@@ -373,8 +394,9 @@ afterwards. Decisions and their contradictions are recorded through the **forge 
 | `m8shift.py init` / `done` | `M8SHIFT.sessions.jsonl` | local file system | W (append) |
 | agent | `M8SHIFT.memory.md`, `M8SHIFT.tasks.md` | local file system | W (append), R for recap/list/show |
 | agent/operator | `M8SHIFT.requests.md` | local file system | W (append), R for status/next hints |
-| `m8shift-worktree.py` | `.m8shift/worktrees/*`, canonical `M8SHIFT.md` | local file system + Git | W, serialized integration |
-| `m8shift-runtime.py` | `.m8shift/runtime/*` | local file system | W (advisory sidecars only) |
+| agent wrapper / listener | `.m8shift/holder-heartbeats/<agent>.json` (via `heartbeat` verb) | local file system | W (protective liveness beats, RFC 049) |
+| `m8shift-worktree.py` | `.m8shift/worktrees/*`, `.m8shift/worktree-owners/*` (ownership sidecars + takeover ledger), canonical `M8SHIFT.md` | local file system + Git | W, serialized integration |
+| `m8shift-runtime.py` | `.m8shift/runtime/*`, `.m8shift/usage/*` (adapter registry + snapshot ledger) | local file system | W (advisory sidecars only) |
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
 
@@ -390,7 +412,7 @@ on **two levels**.
 |-----------------|-----------|
 | **OS mutex** (low level) | `.m8shift.lock` opened with `O_CREAT\|O_EXCL`: a real OS lock that serializes the **critical section** = the read-modify-write of `M8SHIFT.md`. The *enforced* technical mutex. |
 | **Owned application lock** (high level) | the `WORKING_<agent>` state in the LOCK block: a **named, owned** lock held across the whole **work window** (not just during a single command). The *semantic* mutex protecting the shared resource (the repo). |
-| **Lease / TTL** (anti-deadlock) | `expires` (30-min TTL) + ownership token: the **lease-based distributed-lock** pattern (ZooKeeper ephemeral nodes, Redlock). If the holder dies, the lease expires → `claim --force`. If the holder is alive during a long turn, a wrapper should refresh with `claim <me>` at T-5 min. |
+| **Lease / TTL** (anti-deadlock) | `expires` (30-min TTL) + ownership token: the **lease-based distributed-lock** pattern (ZooKeeper ephemeral nodes, Redlock). If the holder dies, the lease expires → `claim --force` — since RFC 049 a **two-phase, liveness-gated** recovery (identity tuple + grace outside the lock; refused if a protective `heartbeat` beat is fresh). A live holder's wrapper refreshes with `claim <me> --refresh` (audit-only beat) at T-5 min; a managed producer (listener/wrapper) additionally emits the protective `heartbeat` verb. |
 | **Monitor / condition variable + baton** | `wait <agent>` polls until `AWAITING_<self>` (a **condition wait**); the explicit handoff `--to <other>` is **token-passing** (a baton / token ring). |
 
 Two properties set it apart from a strict in-process mutex:
