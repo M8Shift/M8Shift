@@ -40,6 +40,7 @@ import datetime as dt
 import json
 import subprocess
 import sys
+import threading
 
 # Placeholder — the operator points this at their local install (see the
 # scaffold entry in .m8shift/usage/adapters.json). Never a network fetch.
@@ -171,27 +172,71 @@ def _forbidden(command):
     return any(str(part).lower() in FORBIDDEN_VERBS for part in command)
 
 
-def _run_tokscale(command=None, run=subprocess.run, timeout_s=TOKSCALE_TIMEOUT_S):
-    """Launch the local tokscale CLI (argv, bounded). Any failure returns None.
+def _run_tokscale(command=None, popen=subprocess.Popen, timeout_s=TOKSCALE_TIMEOUT_S):
+    """Launch the local tokscale CLI (argv, MEMORY-bounded). Any failure returns None.
 
     The never-submit guard fires BEFORE any process is launched: a command
     that mentions submit/autosubmit/login is refused outright.
+
+    SECURITY (v3.58.0 adversarial hunt, LOW): the earlier `subprocess.run`
+    materialized the child's ENTIRE stdout in memory and only checked the size
+    cap AFTER — a post-hoc discard, not a bound, so a fast-writing tokscale
+    could OOM the adapter before the cap or the timeout fired. This reader
+    NEVER holds more than STDOUT_CAP_BYTES + one chunk: a daemon thread reads
+    stdout chunk-by-chunk and STOPS at the cap; the main thread joins with the
+    deadline (portable — no select on Windows pipes), and a timeout or overflow
+    kills the child and returns None. Mirrors the runtime's own
+    run_usage_adapter_bounded discipline.
     """
     command = list(TOKSCALE_CMD if command is None else command)
     if _forbidden(command):
         return None
+    proc = None
+    reader = None
     try:
-        proc = run(command, capture_output=True, text=True, timeout=timeout_s)
-    except Exception:
-        return None
-    if proc.returncode != 0 or not proc.stdout:
-        return None
-    if len(proc.stdout) > STDOUT_CAP_BYTES:
-        return None
-    try:
-        return json.loads(proc.stdout)
+        proc = popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                     stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace")
+        state = {"chunks": [], "total": 0, "overflow": False}
+
+        def _pump(stdout=proc.stdout):
+            try:
+                while state["total"] <= STDOUT_CAP_BYTES:
+                    chunk = stdout.read(65536)      # bounded per-read
+                    if not chunk:
+                        return                       # EOF
+                    state["chunks"].append(chunk)
+                    state["total"] += len(chunk)
+                state["overflow"] = True             # exceeded the cap → stop
+            except Exception:
+                pass                                 # reader error → treated as failure
+
+        reader = threading.Thread(target=_pump, daemon=True)
+        reader.start()
+        reader.join(timeout=timeout_s)
+        if reader.is_alive() or state["overflow"]:
+            return None                              # deadline or overflow: bounded, discard
+        rc = proc.wait(timeout=2)                    # does NOT read stdout — no race
+        if rc != 0:
+            return None
+        data = "".join(state["chunks"])
+        if not data or len(data) > STDOUT_CAP_BYTES:
+            return None
+        return json.loads(data)
     except (ValueError, RecursionError):
         return None
+    except Exception:
+        return None
+    finally:
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.kill()                          # unblock a hung/overflowing reader
+            if reader is not None:
+                reader.join(timeout=2)
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2)
+            with contextlib.suppress(Exception):
+                if proc.stdout is not None:
+                    proc.stdout.close()
 
 
 def main(out=None, now=None, read_spend=None, agent="claude"):

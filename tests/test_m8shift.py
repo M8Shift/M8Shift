@@ -9410,42 +9410,80 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
         fx = mod.build_fixture({"noise": {"unrelated": 5}}, "claude", self.NOW)
         self.assertIsNone(fx["used_tokens"])
 
+    @staticmethod
+    def _fake_popen(out="{}", rc=0, chunks=None):
+        """A minimal Popen stand-in for _run_tokscale's bounded reader."""
+        class _Reader:
+            def __init__(self):
+                self._q = list(chunks) if chunks is not None else ([out] if out else [])
+            def read(self, _n=-1):
+                return self._q.pop(0) if self._q else ""     # then EOF
+            def close(self):
+                pass
+        class _Proc:
+            def __init__(self):
+                self.stdout = _Reader()
+                self.stdin = self.stderr = None
+            def wait(self, timeout=None):
+                return rc
+            def kill(self):
+                pass
+        return lambda *a, **k: _Proc()
+
     def test_never_submit_guard_refuses_before_launch(self):
         mod = self._example()
         launched = []
-        def fake_run(*a, **k):
+        def fake_popen(*a, **k):
             launched.append(a)
             raise AssertionError("must never be reached")
         for cmd in (["tokscale", "submit"],
                     ["tokscale", "autosubmit", "status"],
                     ["bunx", "tokscale@latest", "SUBMIT"],
                     ["tokscale", "login"]):
-            self.assertIsNone(mod._run_tokscale(cmd, run=fake_run))
+            self.assertIsNone(mod._run_tokscale(cmd, popen=fake_popen))
         self.assertEqual(launched, [])                          # guard fired first
 
     def test_guard_is_exact_token_not_substring(self):
         # Review round 1: substring matching made benign paths/args merely
         # CONTAINING a verb fail open (availability trap). Exact-token only.
         mod = self._example()
-        class P:
-            returncode, stdout = 0, "{}"
         for cmd in (["/opt/logins/tokscale", "usage", "--json"],
                     ["tokscale", "usage", "--note", "submitted"]):
-            self.assertEqual(mod._run_tokscale(cmd, run=lambda *a, **k: P()), {},
+            self.assertEqual(mod._run_tokscale(cmd, popen=self._fake_popen("{}")), {},
                              cmd)                               # allowed to run
 
     def test_run_rejects_nonzero_oversized_and_non_json(self):
         mod = self._example()
-        class P:
-            def __init__(self, rc=0, out="{}"):
-                self.returncode, self.stdout = rc, out
-        self.assertIsNone(mod._run_tokscale(["tokscale"], run=lambda *a, **k: P(rc=3)))
-        self.assertIsNone(mod._run_tokscale(["tokscale"], run=lambda *a, **k: P(out="")))
+        self.assertIsNone(mod._run_tokscale(["tokscale"], popen=self._fake_popen(rc=3)))
+        self.assertIsNone(mod._run_tokscale(["tokscale"], popen=self._fake_popen(out="")))
         self.assertIsNone(mod._run_tokscale(
-            ["tokscale"], run=lambda *a, **k: P(out="x" * (1024 * 1024 + 1))))
-        self.assertIsNone(mod._run_tokscale(["tokscale"], run=lambda *a, **k: P(out="not json")))
+            ["tokscale"], popen=self._fake_popen(out="x" * (1024 * 1024 + 1))))
+        self.assertIsNone(mod._run_tokscale(["tokscale"], popen=self._fake_popen(out="not json")))
         self.assertIsNone(mod._run_tokscale(
-            ["tokscale"], run=lambda *a, **k: (_ for _ in ()).throw(OSError("no binary"))))
+            ["tokscale"], popen=lambda *a, **k: (_ for _ in ()).throw(OSError("no binary"))))
+
+    def test_stdout_is_memory_bounded_not_post_hoc(self):
+        # SECURITY (v3.58.0 hunt, LOW): the reader must STOP at the cap, never
+        # materialize an unbounded child stdout. An infinite stream returns None
+        # after a bounded number of reads (~cap/65536), not after OOM.
+        mod = self._example()
+        reads = {"n": 0}
+        class _Inf:
+            def read(self, _n=-1):
+                reads["n"] += 1
+                return "x" * 65536                            # never EOFs
+            def close(self):
+                pass
+        class _Proc:
+            def __init__(self):
+                self.stdout = _Inf()
+                self.stdin = self.stderr = None
+            def wait(self, timeout=None):
+                return 0
+            def kill(self):
+                pass
+        self.assertIsNone(mod._run_tokscale(["tokscale"], popen=lambda *a, **k: _Proc()))
+        self.assertLess(reads["n"], (1024 * 1024) // 65536 + 5)   # bounded, not infinite
 
     def test_main_is_injectable_and_fail_open(self):
         mod = self._example()
@@ -12091,6 +12129,34 @@ class TestRFC050SkillsDoctor(CLIBase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return [f for f in json.loads(r.stdout)["findings"]
                 if f["check"].startswith("skills.")]
+
+    def test_untrusted_values_never_inject_terminal_escapes(self):
+        # SECURITY (v3.58.0 adversarial hunt, MEDIUM): skills/ is third-party
+        # content. Attacker-authored name/lane/dir values must NOT carry ESC/C0
+        # bytes into the human doctor output (terminal-escape injection).
+        esc = "\x1b"
+        self._skill("evilname",
+                    "---\nname: %s[31mPWNED%s[7mREV\ndescription: x\n---\nbody\n"
+                    % (esc, esc))
+        self._skill("evillane",
+                    "---\nname: evillane\ndescription: x\nmetadata:\n"
+                    "  m8shift-lane: %s[5mBLINK\n---\nbody\n" % esc)
+        # a directory name carrying control bytes taints `rel` in every message
+        os.makedirs(os.path.join(self.d, "skills", "evil\x1b[0mdir"), exist_ok=True)
+        with open(os.path.join(self.d, "skills", "evil\x1b[0mdir", "SKILL.md"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("---\nname: x\ndescription: x\n---\nbody\n")
+        # HUMAN output is the injection surface (default branch, not --json).
+        r = self.cw("doctor", "--severity-min", "info")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        combined = r.stdout + r.stderr
+        # no ESC and no other C0 control byte (allow \n and \t) survives
+        for ch in combined:
+            self.assertFalse(ord(ch) < 0x20 and ch not in "\n\t",
+                             "control byte %r reached the terminal" % ch)
+        self.assertNotIn("\x1b", combined)
+        # the printable residue is still shown so the operator sees the problem
+        self.assertIn("PWNED", combined)
 
     def test_no_skills_dir_yields_no_findings(self):
         self.assertEqual(self._findings(), [])

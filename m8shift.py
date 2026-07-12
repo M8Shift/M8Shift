@@ -6705,6 +6705,18 @@ def _skill_frontmatter_subset(text):
     return "unsupported", {}, {}, 0   # unterminated frontmatter block
 
 
+def _skill_display(value, cap=120):
+    """SECURITY (v3.58.0 adversarial hunt, MEDIUM): skills/ is third-party
+    content on a cloned/shared repo. Directory names, `name`, and `m8shift-lane`
+    are attacker-authorable and were interpolated verbatim into the human
+    `doctor` output, letting ESC/C0 bytes inject terminal escape sequences
+    (finding spoofing / OSC hyperlinks). Every untrusted value rendered into a
+    finding MESSAGE is reduced to a short printable token first (reusing the
+    RFC 051 display whitelist). The real `rel` path still drives filesystem ops
+    and the `path` field (never printed on the human branch; JSON-escaped)."""
+    return _usage_sanitize(value, cap=cap, fallback="?")
+
+
 def _skills_findings():
     """RFC 050 Phase 1b: advisory validation of `skills/*/SKILL.md`.
 
@@ -6721,10 +6733,11 @@ def _skills_findings():
             if os.path.islink(d) or not os.path.isdir(d):
                 continue
             rel = os.path.join(SKILLS_DIR, entry, "SKILL.md")
+            srel = _skill_display(rel)          # sanitized for MESSAGES (rel embeds entry)
             if not os.path.lexists(rel):
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
-                    "%s is missing — an Agent Skill directory requires a SKILL.md." % rel,
+                    "%s is missing — an Agent Skill directory requires a SKILL.md." % srel,
                     rel, "add a SKILL.md with `name` and `description` frontmatter"))
                 continue
             status, payload = _read_skill_md(rel)
@@ -6732,14 +6745,14 @@ def _skills_findings():
                 findings.append(doctor_finding(
                     "skills.unvalidated", "info",
                     "%s exceeds the %d KiB validation cap — not validated (advisory)."
-                    % (rel, SKILL_MD_MAX_BYTES // 1024),
+                    % (srel, SKILL_MD_MAX_BYTES // 1024),
                     rel, "keep SKILL.md small; move detail into references/"))
                 continue
             if status != "ok":
                 findings.append(doctor_finding(
                     "skills.unvalidated", "info",
                     "%s could not be read for validation (%s) — not validated (advisory)."
-                    % (rel, payload), rel))
+                    % (srel, _skill_display(payload, cap=40)), rel))
                 continue
             fstatus, fields, meta, body_lines = _skill_frontmatter_subset(payload)
             if fstatus == "unsupported":
@@ -6747,59 +6760,61 @@ def _skills_findings():
                 findings.append(doctor_finding(
                     "skills.unvalidated", "info",
                     "%s uses YAML outside the conservative validation subset — "
-                    "not validated (advisory; this is NOT a format error)." % rel,
+                    "not validated (advisory; this is NOT a format error)." % srel,
                     rel, "single-line `key: value` scalars validate locally; "
                          "`skills-ref validate` remains the format authority"))
                 continue
             if fstatus == "missing":
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
-                    "%s has no leading `---` frontmatter block." % rel,
+                    "%s has no leading `---` frontmatter block." % srel,
                     rel, "start SKILL.md with `---`, `name:`, `description:`, `---`"))
                 continue
             name = fields.get("name")
             if name is None:
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
-                    "%s: required frontmatter key `name` is missing." % rel, rel))
+                    "%s: required frontmatter key `name` is missing." % srel, rel))
             elif len(name) > SKILL_NAME_MAX or not SKILL_NAME_RE.fullmatch(name):
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
                     "%s: `name: %s` breaks the open-format rules (1-64 chars, "
                     "lowercase a-z/0-9/hyphens, no leading/trailing/consecutive "
-                    "hyphen)." % (rel, name), rel))
+                    "hyphen)." % (srel, _skill_display(name, cap=64)), rel))
             elif name != entry:
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
                     "%s: `name: %s` does not match its directory `%s` (the open "
-                    "format requires them equal)." % (rel, name, entry), rel))
+                    "format requires them equal)."
+                    % (srel, _skill_display(name, cap=64), _skill_display(entry, cap=64)),
+                    rel))
             desc = fields.get("description")
             if desc is None:
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
-                    "%s: required frontmatter key `description` is missing." % rel, rel))
+                    "%s: required frontmatter key `description` is missing." % srel, rel))
             elif not desc:
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
                     "%s: `description` is empty (the open format requires 1-1024 "
-                    "chars)." % rel, rel))
+                    "chars)." % srel, rel))
             elif len(desc) > SKILL_DESC_MAX:
                 findings.append(doctor_finding(
                     "skills.frontmatter_invalid", "warning",
-                    "%s: `description` exceeds the open-format 1024-char bound." % rel,
+                    "%s: `description` exceeds the open-format 1024-char bound." % srel,
                     rel))
             lane = meta.get("m8shift-lane")
             if lane is not None and lane not in SKILL_LANES:
                 findings.append(doctor_finding(
                     "skills.lane_unknown", "warning",
                     "%s: `m8shift-lane: %s` is not a defined lane (%s)."
-                    % (rel, lane, " | ".join(SKILL_LANES)), rel))
+                    % (srel, _skill_display(lane, cap=64), " | ".join(SKILL_LANES)), rel))
             for k in sorted(meta):
                 if k.startswith("m8shift-") and k not in SKILL_M8SHIFT_META_KEYS:
                     findings.append(doctor_finding(
                         "skills.metadata_unknown_key", "info",
                         "%s: metadata key `%s` is not defined by this version "
-                        "(reserved for future RFCs)." % (rel, k), rel))
+                        "(reserved for future RFCs)." % (srel, _skill_display(k, cap=64)), rel))
             if body_lines > SKILL_BODY_LINE_BUDGET:
                 findings.append(doctor_finding(
                     "skills.oversized", "info",
