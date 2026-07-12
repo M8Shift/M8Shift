@@ -2,10 +2,44 @@
 
 ## Unreleased
 
-- Listener status now reports explicit host-wake capabilities, interactive
-  `wait`/`next` disclose their host-lifecycle limit, and runtime doctor uses one
-  fail-open `runtime.stale_state` advisory for stale awaiting turns and stale
-  usage snapshots. Stale recorded usage with usable windows stays visible and marked stale.
+- **#108 slice 2 + #107 — usage/listener liveness surface.** Listener status
+  reports explicit host-wake capabilities (`can_invoke_agent`,
+  `survives_parent_exit` — backend-only, no residency conflation —
+  `backend_configured`, `last_successful_run`); interactive `wait`/`next`
+  disclose their host-lifecycle limit (TTY-only); runtime doctor gains one
+  fail-open `runtime.stale_state` advisory for a stale AWAITING turn without a
+  live listener and for stale usage snapshots. **#107:** when the newest usage
+  snapshot has no usable windows (a transient empty official fixture at a watch
+  tick), the core display falls back to the newest snapshot WITH usable
+  windows, explicitly marked stale (a clean public `last_known` boolean in
+  `status --json`; no underscore-prefixed internal keys leak); the em-dash is
+  byte-identical when no usable snapshot exists at all.
+- **#92 — compression pending-file hardening.** Exclusive
+  `O_CREAT|O_EXCL|O_NOFOLLOW` temporary writers (symlink/clobber resistant),
+  pending cleanup on backend abort and via `finally`, the record published
+  through pending-replace-last, and a `doctor` `compression.stale_pending`
+  sweep of leftover `*.pending.*`/`*.tmp.*` under `context/compression/`.
+- **#96 — RTK routing-adoption advisory.** Runtime `doctor` derives a per-agent
+  RTK adoption ratio from the pinned local `rtk discover --format json`
+  (bounded subprocess), warns below a configurable threshold
+  (`M8SHIFT_RTK_ADOPTION_THRESHOLD`, clamped), and reports an explicit
+  `unavailable` state for non-Claude lanes or missing/disabled RTK. Advisory,
+  fail-open, never gates.
+- **Security (v3.58.0 adversarial hunt).** Two confirmed findings fixed:
+  `doctor` no longer renders attacker-authorable `skills/*/SKILL.md` values
+  (directory names, `name`, `m8shift-lane`, oversized-body path) into human
+  output without stripping terminal-escape / control bytes (RFC 050 skills
+  path now reuses the RFC 051 display whitelist); and the opt-in
+  `examples/usage-adapters/tokscale-spend.py` reader is now memory-bounded
+  (daemon reader capped at the size limit + kill-on-overflow) instead of
+  materializing the child's entire stdout before the post-hoc cap check.
+- **RFC 053 (draft) — shared rules and governed habits.** A design-only RFC for
+  a governed project-local normative-rules layer distinct from memory (RFC 004),
+  skills (RFC 041), and preferences; quarantine→candidate→proposed→active
+  lifecycle, ≥2 human-scrutinized evidence + explicit human validation,
+  pen-gated mutations when a relay governs, gitignored-by-default artifact, and
+  a hard reserved-authority boundary (learned content never touches the
+  mutex/pen/permissions/security floors). No code.
 
 ## v3.58.0 — 2026-07-12
 
