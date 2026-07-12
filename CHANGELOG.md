@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+## v3.60.0 — 2026-07-13
+
+- **Operational advisory skills.** Four open-format skills ship under `skills/`:
+  `release-manager` (verified-release checks), `adversarial-verifier` (mutation
+  discipline + false-evidence catalog), `ci-triage`, and `leak-warden`
+  (scan/activation half; the compartmentalization invariants land as
+  agents-guide rules a skill cannot relax).
+- **Init capability profiles + machine bootstrap.** `init --profile
+  bare|headless|ops|full` (and `--capabilities`) render additive, idempotent,
+  no-clobber capability artifacts and a machine-readable `.m8shift/bootstrap.json`
+  (+ `BOOTSTRAP.md`); actions are argv arrays with an operator/agent approval
+  class and are never executed by init. `doctor` gains `bootstrap.stale` keyed on
+  the bootstrap-schema/registry version.
+- **Status snapshot schema v1 + `m8shift-top`.** `status --json` gains one
+  additive, namespaced `snapshot` object (`m8shift.status/1`; legacy flat keys
+  byte-frozen): `agents[]` with `role_state` and honest two-window usage,
+  `activity[]` bounded event feed, `pen`, `last_turn` (sanitized `ask_excerpt`),
+  `ledger`, `listeners`. New read-only `m8shift-top` companion renders it as a
+  top-like alt-screen dashboard with guaranteed terminal restore and byte-
+  compatible non-TTY fallback to `watch`.
+- **Usage honesty — `5h N/A`.** When an agent's provider stops returning a
+  standard window it previously reported (e.g. Codex `account/rateLimits`
+  returns only weekly when idle), the human usage line shows `5h N/A (Reset
+  <last-known>)` instead of silently omitting it — absence is unambiguous. A
+  never-seen window stays silent; no percentage is invented; the private
+  last-known history never leaks into the frozen `--json`.
+- **Adopter engine upgrade (generation-safe).** `install.sh --upgrade`
+  (`install.ps1 -Upgrade`) stages and checksum-verifies the full engine +
+  companion set from `--source-dir` or a pinned HTTPS release, then delegates to
+  `m8shift.py update`. `update` refuses a cross-**Generation** (major) change
+  unless `--allow-generation-change`, preserving `M8SHIFT.md`/relay state
+  byte-identical (RFC 048). The retro-compat guarantee is the Generation gate;
+  predictable failures abort before any write (a mixed-version partial companion
+  update is reported as `partial`, not rolled back).
+- **Scrub performance.** The per-term `git log -S` history walks run in a
+  bounded stdlib thread pool with denylist-ordered output — byte-identical to
+  the sequential scan (detection semantics untouched), ~2–3× faster on the
+  full-history audit path. The interactive pre-push already scans only the
+  pushed range.
+- **CI / supply-chain hardening.** Hash-pinned CI tool installs
+  (`--require-hashes` closures) + Dependabot `pip`; the pre-push gate also
+  verifies `checksums.sha256`; behavioral, mutation-gated pre-release contracts
+  (scrub fail-closed, CI hash-closure, snapshot role-state matrix, skill
+  packaging, semantic Generation boundary).
+- **Fixes.** Parallel scrub no longer uses `ThreadPoolExecutor.shutdown(cancel_futures=…)`
+  (Python 3.9+; crashed the 3.8 floor); an unhashable usage-window `kind`
+  degrades at field level instead of crashing the agent's line.
+
 ## v3.59.0 — 2026-07-12
 
 - **Security baseline and local anti-leak enforcement (RFC 052).** Advanced

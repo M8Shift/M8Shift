@@ -89,7 +89,7 @@ left the changed number.
   as an incompatible relay format or a removed/renamed command or flag. It
   resets R and C and requires a migration note (for example, `v4.0.0`).
 - **Révision** is the normal feature release: a backwards-compatible RFC,
-  command, flag, module, or companion. It resets C (for example, `v3.59.0`).
+  command, flag, module, or companion. It resets C (for example, `v3.60.0`).
 - **Correction** fixes a bug, documentation, or hardening issue without adding
   a capability beyond the fix (for example, `v3.50.1`). Corrections are
   intentionally rarer than Révisions in the existing tag history.

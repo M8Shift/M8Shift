@@ -178,7 +178,7 @@ def _run_tokscale(command=None, popen=subprocess.Popen, timeout_s=TOKSCALE_TIMEO
     The never-submit guard fires BEFORE any process is launched: a command
     that mentions submit/autosubmit/login is refused outright.
 
-    SECURITY (v3.59.0 adversarial hunt, LOW): the earlier `subprocess.run`
+    SECURITY (v3.60.0 adversarial hunt, LOW): the earlier `subprocess.run`
     materialized the child's ENTIRE stdout in memory and only checked the size
     cap AFTER — a post-hoc discard, not a bound, so a fast-writing tokscale
     could OOM the adapter before the cap or the timeout fired. This reader
