@@ -1393,6 +1393,45 @@ class TestReadCommands(CLIBase):
         self.assertGreaterEqual(d["session_duration_seconds"], 0)
         self.assertRegex(d["session_duration"], r"(\d+d )?\d\dh \d\dm \d\ds")
         self.assertNotIn(" local ", r.stdout)  # machine output stays canonical UTC
+        self.assertEqual(d["snapshot"]["schema"], "m8shift.status/1")
+        self.assertEqual([a["role_state"] for a in d["snapshot"]["agents"]],
+                         ["awaiting", "idle"])
+        self.assertEqual(set(d["snapshot"]),
+                         {"schema", "agents", "listeners", "last_turn", "ledger", "pen", "activity"})
+        self.assertIsInstance(d["snapshot"]["activity"], list)
+        self.assertLessEqual(len(d["snapshot"]["activity"]), 8)
+        self.assertEqual(d["snapshot"]["last_turn"]["to"], "claude")
+        self.assertIsInstance(d["snapshot"]["last_turn"]["ask_excerpt"], str)
+        ledger = d["snapshot"]["ledger"]
+        self.assertEqual(set(("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
+                         <= set(ledger), True)
+
+    def test_status_snapshot_tasks_open_tracks_task_event_log(self):
+        self.init()
+        self.assertEqual(0, self.cw("task", "add", "claude", "real task").returncode)
+        d = json.loads(self.cw("status", "--json").stdout)
+        self.assertEqual(d["snapshot"]["ledger"]["tasks_open"], 1)
+
+        self.assertEqual(0, self.cw("task", "done", "claude", "1").returncode)
+        d = json.loads(self.cw("status", "--json").stdout)
+        self.assertEqual(d["snapshot"]["ledger"]["tasks_open"], 0)
+
+    def test_status_snapshot_usage_keeps_absent_window_explicit(self):
+        self.init()
+        path = os.path.join(self.d, ".m8shift", "runtime", "usage.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        snap = {"schema": "m8shift.usage.snapshot.v1", "agent": "codex",
+                "captured_at": "2026-01-01T00:00:00Z", "decision_ratio": .4,
+                "windows": [{"kind": "weekly", "used_ratio": .4,
+                             "resets_at": "2026-01-08T00:00:00Z"}]}
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"agent": "codex", "payload": {"snapshot": snap}}) + "\n")
+        d = json.loads(self.cw("status", "--json").stdout)
+        codex = next(a for a in d["snapshot"]["agents"] if a["id"] == "codex")
+        windows = codex["usage"]["windows"]
+        self.assertEqual(windows["session_5h"], {"available": False, "used_ratio": None,
+                                                  "resets_at": None, "last_known": False})
+        self.assertTrue(windows["weekly"]["available"])
 
     def test_status_and_recap_show_timezone_prefixed_local_time(self):
         self.init()

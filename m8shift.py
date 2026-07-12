@@ -8210,6 +8210,119 @@ def _usage_signature(lk):
     ]
 
 
+STATUS_SNAPSHOT_SCHEMA = "m8shift.status/1"
+STATUS_SNAPSHOT_TEXT_MAX = 120
+
+
+def _status_snapshot_text(value):
+    """Bounded terminal-neutral text for the additive status snapshot contract."""
+    if not isinstance(value, str):
+        return None
+    value = "".join(ch for ch in value if not (ord(ch) < 32 or 127 <= ord(ch) <= 159))
+    return value[:STATUS_SNAPSHOT_TEXT_MAX]
+
+
+def _status_role_state(lk, agent):
+    state = lk.get("state", "")
+    if state == "DONE":
+        return "done"
+    if state == "PAUSED":
+        return "paused"
+    if state == f"WORKING_{agent.upper()}":
+        return "working"
+    if state == f"AWAITING_{agent.upper()}":
+        return "awaiting"
+    return "idle"
+
+
+def _status_usage_windows(snapshot, last_known=False):
+    """Stable two-window projection: absence is data, never a dropped field."""
+    by_kind = {}
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("windows"), list):
+        by_kind = {w.get("kind"): w for w in snapshot["windows"] if isinstance(w, dict)}
+    out = {}
+    for public, kind in (("session_5h", "session_5h"), ("weekly", "weekly")):
+        row = by_kind.get(kind)
+        ratio = row.get("used_ratio") if isinstance(row, dict) else None
+        available = _usage_window_pct(ratio) is not None
+        out[public] = {
+            "available": available,
+            "used_ratio": ratio if available else None,
+            "resets_at": _status_snapshot_text(row.get("resets_at")) if available else None,
+            "last_known": bool(last_known),
+        }
+    return out
+
+
+def _status_activity(turns, limit=8):
+    """Bounded recent relay events; malformed inputs degrade to an empty panel."""
+    if not isinstance(turns, list):
+        return []
+    out = []
+    for turn in turns[-limit:]:
+        if not isinstance(turn, dict):
+            continue
+        fields = turn.get("fields") if isinstance(turn.get("fields"), dict) else {}
+        out.append({
+            "ts": None,
+            "kind": "turn",
+            "agent": _status_snapshot_text(turn.get("agent")),
+            "summary": _status_snapshot_text(fields.get("done")),
+        })
+    return out
+
+
+def _status_ledger_counts():
+    """Cheap, fail-open counters. Unknown sources stay explicit rather than guessed."""
+    tasks_open = 0
+    try:
+        if os.path.exists(TASKS):
+            tasks_open = sum(1 for event in fold_tasks(parse_tasks(read(TASKS))).values()
+                             if event["verb"] == "add")
+    except (OSError, UnicodeError):
+        tasks_open = None
+    return {"tasks_open": tasks_open, "decisions_pending": None,
+            "doctor_findings": None, "gate_armed": "unknown"}
+
+
+def status_snapshot_v1(lk, last, session_info, turns=None):
+    """One additive, namespaced snapshot; legacy status keys remain untouched."""
+    usage = {r["agent"]: r for r in _usage_rows(lk)}
+    agents = []
+    for agent in active_agents(lk):
+        row = usage.get(agent)
+        snap = row.get("snapshot") if row else None
+        last_known = bool(snap and snap.get("_m8shift_last_known"))
+        agents.append({
+            "id": agent,
+            "role_state": _status_role_state(lk, agent),
+            "usage": {
+                "available": snap is not None,
+                "last_known": last_known,
+                "windows": _status_usage_windows(snap, last_known),
+            },
+        })
+    return {
+        "schema": STATUS_SNAPSHOT_SCHEMA,
+        "agents": agents,
+        "listeners": None,
+        "last_turn": ({"n": last.get("n"), "agent": _status_snapshot_text(last.get("agent")),
+                       "to": _status_snapshot_text((last.get("fields") or {}).get("to")),
+                       "ask_excerpt": _status_snapshot_text((last.get("fields") or {}).get("ask"))}
+                      if isinstance(last, dict) else None),
+        "ledger": {
+            "session_started_at": (None if session_info["started_at"] == "-" else session_info["started_at"]),
+            "session_duration_seconds": session_info["duration_seconds"],
+            **_status_ledger_counts(),
+        },
+        "pen": {
+            "note": _status_snapshot_text(lk.get("note")),
+            "heartbeat": heartbeat_meta(lk),
+        },
+        "activity": _status_activity(turns),
+    }
+
+
 def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False):
     session_info = session_info or current_session_info(lk)
     print(f"m8shift.py v{VERSION}")
@@ -8305,7 +8418,8 @@ def _status_signature(lk, stale, last, for_agent=""):
 def cmd_status(args):
     text = load_or_die()
     lk, stale, last = _status_info(text)
-    session_info = current_session_info(lk, parse_turns(text))
+    parsed_turns = parse_turns(text)
+    session_info = current_session_info(lk, parsed_turns)
     if getattr(args, "json", False):
         out = dict(lk)                       # raw LOCK fields…
         out["agents_active"] = active_agents(lk)  # full active roster (N)
@@ -8340,6 +8454,8 @@ def cmd_status(args):
         usage = _usage_json(lk)              # RFC 051: OMIT the key entirely when no usable snapshot
         if usage is not None:
             out["usage"] = usage
+        snapshot_last = parsed_turns[-1] if parsed_turns else None
+        out["snapshot"] = status_snapshot_v1(lk, snapshot_last, session_info, parsed_turns)
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""),
