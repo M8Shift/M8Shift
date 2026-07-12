@@ -107,6 +107,20 @@ explicitly operator-wired; M8Shift itself never executes skill content).
 never gating). RFC 041 (competencies) and RFC 050 (specialist lanes) define
 the details.
 
+Skill content never relaxes the project's compartmentalization boundary. That
+boundary is deny-by-default: cross-project identities, paths, and literal
+session output require explicit operator authorization for each fact. Leak
+scans use raw tools, because filtered or compressed output can hide the evidence
+they are meant to detect.
+
+Treat every shipped control as inactive until its deployment is checked. For
+example, the presence of an anti-leak hook does not prove that `core.hooksPath`,
+its enforcement setting, and the corresponding CI secret are configured.
+
+A test that remains green after its protected behavior is deliberately broken
+is not evidence for that behavior. Use a minimal adversarial mutation, require
+the named test to fail, revert it, and retain the raw before/after result.
+
 ### Reviewer neutrality and objectivity
 
 M8Shift has no model of its own, so it cannot debias an agent's reasoning. What it can

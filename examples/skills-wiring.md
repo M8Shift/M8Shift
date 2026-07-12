@@ -20,6 +20,10 @@ documentation is the authority for where it looks.
          <product-skills-dir>/security-review-advisory
    ```
 
+   Repeat for the bundled `worktree-implementer`, `release-manager`,
+   `adversarial-verifier`, `ci-triage`, and `leak-warden` directories. Wire only
+   the skills you intend the product to offer.
+
 3. **Verify with the product itself**: restart or reload it, then use its own
    skill listing (or ask its agent "which skills are available?") and confirm
    the skill's name and description appear. Do not assume discovery worked —
