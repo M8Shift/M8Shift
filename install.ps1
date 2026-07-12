@@ -27,6 +27,8 @@ param(
     [string]$Name = "",
     [string]$Lang = "",
     [switch]$Force,
+    [switch]$Upgrade,
+    [string]$SourceDir = $(if ($env:M8SHIFT_INSTALL_SOURCE_DIR) { $env:M8SHIFT_INSTALL_SOURCE_DIR } else { "" }),
     [switch]$NoInit,
     [switch]$NoWorktree,
     [switch]$NoRuntime,
@@ -66,6 +68,8 @@ Options:
   -Name NAME           Project name passed to m8shift.py init --name.
   -Lang CODE           Language passed to m8shift.py init --lang when bundled.
   -Force               Pass --force to init (reinitialize M8SHIFT.md).
+  -Upgrade             Stage, verify, and delegate an existing-project update.
+  -SourceDir DIR       Read release files from DIR instead of HTTPS.
   -NoInit              Download files only; do not run init.
   -NoWorktree          Do not download m8shift-worktree.py.
   -NoRuntime           Do not download m8shift-runtime.py.
@@ -299,7 +303,11 @@ function Install-File([string]$Name, [string]$BaseUrl, [string]$TargetDir, [bool
         Remove-Item -LiteralPath $tmp -Force
     }
     Write-Host "-> downloading $Name"
-    Invoke-DownloadFile $url $tmp
+    if (-not [string]::IsNullOrWhiteSpace($SourceDir)) {
+        Copy-Item -LiteralPath (Join-Path $SourceDir $Name) -Destination $tmp
+    } else {
+        Invoke-DownloadFile $url $tmp
+    }
     Test-DownloadedFile $Name $tmp $VerifyDownloads
     Move-Item -LiteralPath $tmp -Destination $dest -Force
 }
@@ -327,7 +335,7 @@ if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
 $BaseUrl = $BaseUrl.TrimEnd("/")
 
 if ([string]::IsNullOrWhiteSpace($Checksums)) {
-    $Checksums = "$BaseUrl/checksums.sha256"
+    $Checksums = $(if ($SourceDir) { Join-Path $SourceDir "checksums.sha256" } else { "$BaseUrl/checksums.sha256" })
 }
 
 if ($DryRun) {
@@ -369,19 +377,39 @@ if ($VerifyDownloads) {
 
 $Python = Resolve-Python
 
-Install-File "m8shift.py" $BaseUrl $TargetDir $VerifyDownloads
-Install-File "m8shift-top.py" $BaseUrl $TargetDir $VerifyDownloads
-if (-not $NoWorktree) {
-    Install-File "m8shift-worktree.py" $BaseUrl $TargetDir $VerifyDownloads
-}
-if (-not $NoRuntime) {
-    Install-File "m8shift-runtime.py" $BaseUrl $TargetDir $VerifyDownloads
-}
-if (-not $NoContext) {
-    Install-File "m8shift-context.py" $BaseUrl $TargetDir $VerifyDownloads
+if ($Upgrade) {
+    if ($NoInit -or $Force) { Fail "-Upgrade cannot be combined with -NoInit or -Force" }
+    $StageDir = Join-Path ([System.IO.Path]::GetTempPath()) ("m8shift-upgrade-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $StageDir | Out-Null
+    $DownloadDir = $StageDir
+} else {
+    $DownloadDir = $TargetDir
 }
 
-if (-not $NoInit) {
+Install-File "m8shift.py" $BaseUrl $DownloadDir $VerifyDownloads
+Install-File "m8shift-top.py" $BaseUrl $DownloadDir $VerifyDownloads
+if ($Upgrade -or -not $NoWorktree) {
+    Install-File "m8shift-worktree.py" $BaseUrl $DownloadDir $VerifyDownloads
+}
+if ($Upgrade -or -not $NoRuntime) {
+    Install-File "m8shift-runtime.py" $BaseUrl $DownloadDir $VerifyDownloads
+}
+if ($Upgrade -or -not $NoContext) {
+    Install-File "m8shift-context.py" $BaseUrl $DownloadDir $VerifyDownloads
+}
+if ($Upgrade) {
+    Install-File "m8shift-e2e.py" $BaseUrl $DownloadDir $VerifyDownloads
+    Install-File "m8shift-headroom.py" $BaseUrl $DownloadDir $VerifyDownloads
+    Install-File "m8shift-i18n.py" $BaseUrl $DownloadDir $VerifyDownloads
+}
+
+if ($Upgrade) {
+    try {
+        Invoke-Python $Python @((Join-Path $StageDir "m8shift.py"), "update", "--target", $TargetDir, "--source", $StageDir, "--companions", "context,e2e,headroom,i18n,runtime,worktree") $TargetDir
+    } finally {
+        Remove-Item -LiteralPath $StageDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+} elseif (-not $NoInit) {
     $initArgs = @(".\m8shift.py", "init", "--agents", $Agents)
     if (-not [string]::IsNullOrEmpty($Name)) {
         $initArgs += @("--name", $Name)

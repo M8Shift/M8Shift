@@ -2168,6 +2168,11 @@ def selected_companions(args):
     for name in (n.strip() for n in (getattr(args, "companions", "") or "").split(",")):
         if not name:
             continue
+        if name == "all":
+            for key in COMPANION_REGISTRY:
+                if key not in sel:
+                    sel.append(key)
+            continue
         if name not in COMPANION_REGISTRY:
             return None, ("unknown companion %r; valid: %s"
                           % (name, ", ".join(sorted(COMPANION_REGISTRY))))
@@ -3117,6 +3122,20 @@ def cmd_update(args):
                                "invoke the update via the source copy itself: "
                                "python3 SOURCE/m8shift.py update --target TARGET --source SOURCE"
                                % (src_version, VERSION))
+
+    # A major version is a protocol Generation.  Crossing that boundary is a
+    # migration, not a routine in-place refresh, and therefore needs an
+    # explicit operator override before any target write is rebased.
+    target_version = _parse_script_version(os.path.join(target_root, "m8shift.py"))
+    source_vt = _version_tuple(src_version)
+    target_vt = _version_tuple(target_version)
+    if (target_vt and source_vt and target_vt[0] != source_vt[0]
+            and not getattr(args, "allow_generation_change", False)):
+        return _update_refusal(
+            args, "manual_review_required",
+            "Generation change refused (v%s -> v%s); follow the GoRoCo migration procedure, "
+            "or re-run with --allow-generation-change after review"
+            % (target_version, src_version))
 
     # Rebase EVERY generated write onto the target. This is an explicit,
     # command-scoped rebase (configure_root + HERE), not the $M8SHIFT_ROOT
@@ -9565,6 +9584,8 @@ def main():
     up.add_argument("--allow-downgrade", action="store_true",
                     help="allow replacing a NEWER target with an older source (refused by default; "
                          "the source version authority decides)")
+    up.add_argument("--allow-generation-change", action="store_true",
+                    help="allow a major-version (Generation) change after GoRoCo migration review")
     up.add_argument("--allow-working", action="store_true",
                     help="allow updating while the target relay is WORKING_* (refused by default; "
                          "prefer IDLE/PAUSED/DONE or before a turn starts)")

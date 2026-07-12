@@ -6502,7 +6502,7 @@ class TestInstallerVerifyDefault(unittest.TestCase):
     def setUp(self):
         self.src = tempfile.mkdtemp(prefix="m8shift-isrc-")
         self.addCleanup(shutil.rmtree, self.src, True)
-        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py", "m8shift-headroom.py", "checksums.sha256"):
+        for f in ("m8shift.py", "m8shift-top.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py", "m8shift-headroom.py", "checksums.sha256"):
             shutil.copy(os.path.join(REPO, f), self.src)
         with open(os.path.join(self.src, "m8shift.py"), "a") as fh:
             fh.write("\n# tampered\n")              # hash no longer matches the manifest
@@ -6551,6 +6551,89 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+
+class _InstallerUpgradeDelegateTests(unittest.TestCase):
+    FILES = ("m8shift.py", "m8shift-top.py", "m8shift-worktree.py",
+             "m8shift-runtime.py", "m8shift-context.py", "m8shift-e2e.py",
+             "m8shift-headroom.py", "m8shift-i18n.py")
+
+    def setUp(self):
+        self.src = tempfile.mkdtemp(prefix="m8shift-upgrade-src-")
+        self.target = tempfile.mkdtemp(prefix="m8shift-upgrade-target-")
+        self.addCleanup(shutil.rmtree, self.src, True)
+        self.addCleanup(shutil.rmtree, self.target, True)
+        for name in self.FILES:
+            shutil.copy(os.path.join(REPO, name), self.src)
+            shutil.copy(os.path.join(REPO, name), self.target)
+        clean_env = {k: v for k, v in os.environ.items() if k != "M8SHIFT_ROOT"}
+        subprocess.run([sys.executable, os.path.join(self.target, "m8shift.py"),
+                        "init", "--agents", "claude,codex"], cwd=self.target,
+                       check=True, capture_output=True, text=True, env=clean_env)
+        self._reversion(os.path.join(self.target, "m8shift.py"), "3.57.0")
+        self._manifest()
+
+    @staticmethod
+    def _reversion(path, version):
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        body = re.sub(r'^VERSION = "[^"]+"', 'VERSION = "%s"' % version,
+                      body, count=1, flags=re.M)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def _manifest(self):
+        with open(os.path.join(self.src, "checksums.sha256"), "w", encoding="utf-8") as out:
+            for name in self.FILES:
+                with open(os.path.join(self.src, name), "rb") as fh:
+                    out.write("%s  %s\n" % (hashlib.sha256(fh.read()).hexdigest(), name))
+
+    def _run(self):
+        return subprocess.run(
+            ["bash", os.path.join(REPO, "install.sh"), "--upgrade",
+             "--dir", self.target, "--source-dir", self.src, "--no-rtk"],
+            capture_output=True, text=True,
+            env={**{k: v for k, v in os.environ.items() if k != "M8SHIFT_ROOT"},
+                 "PYTHON": sys.executable})
+
+    def _snapshot(self):
+        result = {}
+        for root, dirs, files in os.walk(self.target):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for name in files:
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, self.target)
+                with open(path, "rb") as fh:
+                    result[rel] = fh.read()
+        return result
+
+    def test_minor_upgrade_delegates_and_preserves_relay_bytes(self):
+        relay = open(os.path.join(self.target, "M8SHIFT.md"), "rb").read()
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(open(os.path.join(self.target, "M8SHIFT.md"), "rb").read(), relay)
+        for name in self.FILES:
+            self.assertEqual(open(os.path.join(self.target, name), "rb").read(),
+                             open(os.path.join(self.src, name), "rb").read())
+
+    def test_generation_change_is_refused_without_target_mutation(self):
+        self._reversion(os.path.join(self.src, "m8shift.py"), "4.0.0")
+        self._manifest()
+        before = self._snapshot()
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Generation change refused", result.stderr)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_checksum_mismatch_aborts_before_delegation(self):
+        with open(os.path.join(self.src, "m8shift.py"), "a", encoding="utf-8") as fh:
+            fh.write("\n# tampered\n")
+        before = self._snapshot()
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum mismatch", result.stderr)
+        self.assertEqual(self._snapshot(), before)
+
+class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
     def test_dry_run_lists_multios_prereqs_and_does_not_write(self):
         parent = tempfile.mkdtemp(prefix="m8shift-dry-parent-")
         self.addCleanup(shutil.rmtree, parent, True)
@@ -6617,8 +6700,11 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         bare = tempfile.mkdtemp(prefix="m8shift-bare-")
         self.addCleanup(shutil.rmtree, bare, True)
         shutil.copy(os.path.join(REPO, "m8shift.py"), bare)   # original, untampered
+        shutil.copy(os.path.join(REPO, "m8shift-top.py"), bare)
         with open(os.path.join(bare, "m8shift.py"), "rb") as fh:
             good = hashlib.sha256(fh.read()).hexdigest()
+        with open(os.path.join(bare, "m8shift-top.py"), "rb") as fh:
+            top_good = hashlib.sha256(fh.read()).hexdigest()
 
         def rc(extra):
             target = tempfile.mkdtemp(prefix="m8shift-bd-")
@@ -6628,7 +6714,8 @@ class TestInstallerVerifyDefault(unittest.TestCase):
                  "--base-url", "file://" + bare, "--no-worktree", "--no-runtime", "--no-context", "--no-init", *extra],
                 capture_output=True, text=True).returncode
 
-        self.assertEqual(rc(["--sha256", "m8shift.py:" + good]), 0)
+        self.assertEqual(rc(["--sha256", "m8shift.py:" + good,
+                             "--sha256", "m8shift-top.py:" + top_good]), 0)
         self.assertNotEqual(rc(["--sha256", "m8shift.py:" + "0" * 64]), 0)
         self.assertNotEqual(rc([]), 0)
 
@@ -6776,6 +6863,8 @@ class TestInstallerVerifyDefault(unittest.TestCase):
             calls = fh.read()
         self.assertIn("install --git https://github.com/rtk-ai/rtk --tag v0.43.0 --locked rtk", calls)
 
+
+TestInstallerUpgradeDelegate = _InstallerUpgradeDelegateTests
 
 # ───────────────────────── multi-OS core install (#24) ──────────────────────
 
@@ -7054,7 +7143,7 @@ class TestInstallerPs1Parity(unittest.TestCase):
         self.assertIn("headroom: skipped", self.ps1)
         self.assertIn("Git Bash", self.ps1)
         self.assertNotIn('Install-File "rtk', self.ps1)
-        self.assertNotIn('Install-File "m8shift-headroom.py"', self.ps1)
+        self.assertRegex(self.ps1, r'if \(\$Upgrade\) \{[\s\S]*Install-File "m8shift-headroom\.py"')
         for forbidden in ("cargo", "pip install"):
             self.assertNotIn(forbidden, self.ps1.lower())
         # -DryRun stays mutation-free: the telemetry disable is DryRun-guarded
@@ -10622,7 +10711,7 @@ class TestRFC048PRB(CLIBase):
         self._reversion(os.path.join(self.d, "m8shift.py"), "3.41.0")
         self._set_banner("3.41.0")
         relay_before = self._snapshot(self.d)["M8SHIFT.md"]
-        r = self.update()
+        r = self.update("--allow-generation-change")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         after = self._snapshot(self.d)
         self.assertEqual(after["M8SHIFT.md"], relay_before)      # relay untouched
@@ -10635,11 +10724,23 @@ class TestRFC048PRB(CLIBase):
         self.assertEqual(os.listdir(self.src), ["m8shift.py"])
         self.assertTrue(os.path.exists(os.path.join(self.d, self.AUDIT_REL)))
 
+    def test_generation_change_requires_explicit_migration_override(self):
+        self.init()
+        self._reversion(os.path.join(self.d, "m8shift.py"), "2.99.0")
+        before = self._snapshot(self.d)
+        refused = self.update()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Generation change refused", refused.stderr)
+        self.assertIn("GoRoCo", refused.stderr)
+        self.assertEqual(self._snapshot(self.d), before)
+        allowed = self.update("--allow-generation-change")
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
     def test_generated_stamps_use_source_version_not_target(self):
         self.init()
         self._reversion(os.path.join(self.src, "m8shift.py"), "9.9.9")
         relay_before = self._snapshot(self.d)["M8SHIFT.md"]
-        r = self.update()
+        r = self.update("--allow-generation-change")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("version: 9.9.9", self.read_target(self.PACK))
         self.assertIn('VERSION = "9.9.9"', self.read_target("m8shift.py"))
@@ -10698,11 +10799,11 @@ class TestRFC048PRB(CLIBase):
     def test_downgrade_refused_without_allow_downgrade(self):
         self.init()
         self._reversion(os.path.join(self.d, "m8shift.py"), "99.0.0")
-        r = self.update()
+        r = self.update("--allow-generation-change")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("downgrade", r.stderr + r.stdout)
         self.assertIn('VERSION = "99.0.0"', self.read_target("m8shift.py"))  # untouched
-        r = self.update("--allow-downgrade")
+        r = self.update("--allow-downgrade", "--allow-generation-change")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('VERSION = "%s"' % cowork.VERSION, self.read_target("m8shift.py"))
 

@@ -31,6 +31,8 @@ WITH_WORKTREE=1
 WITH_RUNTIME=1
 WITH_CONTEXT=1
 FORCE_INIT=0
+UPGRADE=0
+SOURCE_DIR="${M8SHIFT_INSTALL_SOURCE_DIR:-}"
 RTK_CHOICE="${M8SHIFT_INSTALL_RTK:-ask}"  # ask|yes|no
 HEADROOM_CHOICE="${M8SHIFT_INSTALL_HEADROOM:-no}"  # yes|no (experimental, explicit opt-in)
 DRY_RUN=0
@@ -62,6 +64,8 @@ Options:
   --name NAME          Project name passed to `m8shift.py init --name`.
   --lang CODE          Language passed to `m8shift.py init --lang` when bundled.
   --force             Pass `--force` to init (reinitialize M8SHIFT.md).
+  --upgrade           Transactionally upgrade an existing project (never reinitializes it).
+  --source-dir DIR    Read release files from DIR (offline/testable alternative to HTTPS).
   --no-init           Download files only; do not run init.
   --no-worktree       Do not download m8shift-worktree.py.
   --no-runtime        Do not download m8shift-runtime.py.
@@ -371,6 +375,15 @@ while [ "$#" -gt 0 ]; do
       FORCE_INIT=1
       shift
       ;;
+    --upgrade)
+      UPGRADE=1
+      shift
+      ;;
+    --source-dir)
+      need_value "$1" "${2:-}"
+      SOURCE_DIR="$2"
+      shift 2
+      ;;
     --no-init)
       RUN_INIT=0
       shift
@@ -506,7 +519,11 @@ if [ -z "$RTK_BASE_URL" ]; then
 fi
 RTK_BASE_URL="${RTK_BASE_URL%/}"
 if [ -z "$CHECKSUMS_URL" ]; then
-  CHECKSUMS_URL="$BASE_URL/checksums.sha256"
+  if [ -n "$SOURCE_DIR" ]; then
+    CHECKSUMS_URL="$SOURCE_DIR/checksums.sha256"
+  else
+    CHECKSUMS_URL="$BASE_URL/checksums.sha256"
+  fi
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -538,6 +555,7 @@ fi
 
 mkdir -p "$TARGET_DIR"
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+[ -z "$SOURCE_DIR" ] || SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
 print_prerequisites
 print_capabilities
 
@@ -984,11 +1002,31 @@ download_file() {
   rm -f "$tmp"
 
   printf '→ downloading %s\n' "$name"
-  download_to "$url" "$tmp"
+  if [ -n "$SOURCE_DIR" ]; then
+    [ -f "$SOURCE_DIR/$name" ] || die "source file missing: $name"
+    cp "$SOURCE_DIR/$name" "$tmp"
+  else
+    download_to "$url" "$tmp"
+  fi
   verify_file "$name" "$tmp"
   chmod +x "$tmp"
   mv "$tmp" "$dest"
 }
+
+# Upgrade only stages verified release inputs.  The staged core then owns the
+# transaction and Generation policy; the wrapper never mutates the adopter.
+if [ "$UPGRADE" -eq 1 ]; then
+  [ "$RUN_INIT" -eq 1 ] || die "--upgrade cannot be combined with --no-init"
+  [ "$FORCE_INIT" -eq 0 ] || die "--upgrade cannot be combined with --force"
+  TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/m8shift-upgrade.XXXXXX")"
+  STAGE_DIR="$TRANSACTION_DIR/stage"
+  mkdir -p "$STAGE_DIR"
+  cleanup_upgrade() { rm -rf "$TRANSACTION_DIR"; }
+  trap cleanup_upgrade EXIT
+  old_target="$TARGET_DIR"; TARGET_DIR="$STAGE_DIR"
+  WITH_WORKTREE=1; WITH_RUNTIME=1; WITH_CONTEXT=1
+  RTK_CHOICE=no; HEADROOM_CHOICE=no
+fi
 
 download_file "m8shift.py"
 download_file "m8shift-top.py"
@@ -1001,12 +1039,29 @@ fi
 if [ "$WITH_CONTEXT" -eq 1 ]; then
   download_file "m8shift-context.py"
 fi
+if [ "$UPGRADE" -eq 1 ]; then
+  download_file "m8shift-e2e.py"
+  download_file "m8shift-headroom.py"
+  download_file "m8shift-i18n.py"
+fi
 if [ "$HEADROOM_CHOICE" = "yes" ] || [ "$HEADROOM_CHOICE" = "YES" ] || [ "$HEADROOM_CHOICE" = "1" ] || [ "$HEADROOM_CHOICE" = "true" ] || [ "$HEADROOM_CHOICE" = "True" ] || [ "$HEADROOM_CHOICE" = "TRUE" ]; then
   download_file "m8shift-headroom.py"
 fi
 
 offer_rtk
 offer_headroom
+
+if [ "$RUN_INIT" -eq 1 ]; then
+  if [ "$UPGRADE" -eq 1 ]; then
+    TARGET_DIR="$old_target"
+    "$PYTHON_BIN" "$STAGE_DIR/m8shift.py" update \
+      --target "$TARGET_DIR" --source "$STAGE_DIR" \
+      --companions context,e2e,headroom,i18n,runtime,worktree \
+      || die "upgrade refused; adopter left unchanged"
+    cleanup_upgrade; trap - EXIT
+    RUN_INIT=0
+  fi
+fi
 
 if [ "$RUN_INIT" -eq 1 ]; then
   init_cmd=("$PYTHON_BIN" "./m8shift.py" "init" "--agents" "$AGENTS")
