@@ -7804,14 +7804,20 @@ def _usage_pct(dr):
 
 
 def _usage_json_safe(obj):
-    """Deep copy `obj`, replacing any non-finite float (NaN/Infinity) with None so the
-    result is standard JSON (amendment C). json.loads() parses bare NaN/Infinity into
-    Python floats by default, so a hostile sidecar can smuggle them into an echoed
-    snapshot; this guarantees json.dumps() emits only finite numbers."""
+    """Deep copy public fields from `obj`, replacing non-finite floats with None.
+
+    Underscore-prefixed keys are implementation details, not part of the status JSON
+    contract.  Filter them at every depth so neither a core marker nor an adapter's
+    private metadata can leak through the echoed snapshot.
+    """
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
-        return {k: _usage_json_safe(v) for k, v in obj.items()}
+        return {
+            k: _usage_json_safe(v)
+            for k, v in obj.items()
+            if not (isinstance(k, str) and k.startswith("_"))
+        }
     if isinstance(obj, list):
         return [_usage_json_safe(v) for v in obj]
     return obj
@@ -8064,6 +8070,7 @@ def _usage_json(lk, ref=None):
             entry = _usage_json_safe(row["snapshot"])   # echo recorded values, non-finite → null
             dr = row["snapshot"].get("decision_ratio")
             entry["decision_ratio"] = dr if _usage_ratio_valid(dr) else None
+            entry["last_known"] = bool(row["snapshot"].get("_m8shift_last_known"))
             entry["stale"] = row["stale"]
             entry["age_seconds"] = row["age_seconds"]
             out.append(entry)

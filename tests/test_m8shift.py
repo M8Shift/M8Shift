@@ -11322,6 +11322,29 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertIn("73%", line)
         self.assertIn("stale", line)
 
+        usage = json.loads(self.status_out("--json"))["usage"]
+        row = next(item for item in usage if item["agent"] == "claude")
+        self.assertTrue(row["last_known"])
+
+    def test_status_json_usage_rows_never_expose_private_keys(self):
+        snap = self.snapshot(decision_ratio=0.73, _adapter_private="secret")
+        snap["source"]["_nested_private"] = "secret"
+        self.write_sidecar([self.event(snap)])
+
+        usage = json.loads(self.status_out("--json"))["usage"]
+
+        def assert_public(value):
+            if isinstance(value, dict):
+                self.assertFalse(any(isinstance(k, str) and k.startswith("_") for k in value))
+                for child in value.values():
+                    assert_public(child)
+            elif isinstance(value, list):
+                for child in value:
+                    assert_public(child)
+
+        for row in usage:
+            assert_public(row)
+
     def test_all_empty_snapshots_keep_em_dash(self):
         self.write_sidecar([self.event(self.snapshot(decision_ratio=None))])
         line = self._agent_line(self.status_out(), "claude")
