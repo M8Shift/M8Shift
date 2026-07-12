@@ -23,12 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           # scrub-check scans history + PR refs; give it the full history.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.x"
 
@@ -41,7 +41,7 @@ jobs:
       - name: Data-hygiene lint (real home paths / identity)
         # Repo-scoped; exits 1 on high-confidence outbound-path hits. This is
         # the gate that catches a real `/Users/<name>/…` path in a tracked file.
-        run: python m8shift.py doctor --hygiene --lint
+        run: python m8shift.py doctor --hygiene-only --lint
 
       - name: Confidential-denylist scrub (opt-in via secret)
         # RFC 052 E1: catches specific confidential project identifiers across
@@ -56,10 +56,10 @@ jobs:
             exit 0
           fi
           umask 077
+          trap 'rm -f "$RUNNER_TEMP/denylist.txt"' EXIT   # cleanup even on failure
           printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
           python scripts/scrub-check.py \
             --denylist "$RUNNER_TEMP/denylist.txt" --refs-pull
-          rm -f "$RUNNER_TEMP/denylist.txt"
 
   test:
     name: Test (py${{ matrix.python }})
@@ -71,8 +71,8 @@ jobs:
         # The supported floor (3.8) and a current interpreter.
         python: ["3.8", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
       - name: Run the full test suite
