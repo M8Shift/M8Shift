@@ -3110,6 +3110,11 @@ def cmd_doctor(args):
         findings.extend(usage_doctor_findings())
     except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
         findings.append({"severity": "warning", "check": "runtime.usage", "message": str(e)})
+    try:
+        findings.extend(stale_state_findings(args.stale_after))
+    except Exception as e:  # fail-open: stale notification is advisory only
+        findings.append({"severity": "info", "check": "runtime.stale_state",
+                         "message": f"stale-state advisory unavailable: {e}"})
     ok = not any(f["severity"] == "error" for f in findings)
     if args.json:
         print(json.dumps({
@@ -3126,6 +3131,43 @@ def cmd_doctor(args):
         for f in findings:
             print(f"{f['severity']} {f['check']}: {f['message']}")
     return 0 if ok else 1
+
+
+def stale_state_findings(stale_after_seconds):
+    """One fail-open advisory for unattended relay and usage state; never gates."""
+    def parse_timestamp(value):
+        if not isinstance(value, str) or not value or value == "-":
+            return None
+        try:
+            return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    findings = []
+    status = run_core_json("status", "--json")
+    state = status.get("state", "")
+    since = parse_timestamp(status.get("since"))
+    if state.startswith("AWAITING_") and since:
+        agent = state[len("AWAITING_"):].lower()
+        _exists, pid = read_listener_pid(agent)
+        if ((dt.datetime.now(dt.timezone.utc) - since).total_seconds() > stale_after_seconds
+                and not (pid and listener_pid_alive(pid))):
+            findings.append({"severity": "info", "check": "runtime.stale_state",
+                             "message": f"{state} is stale and {agent} has no live listener; a human wake-up may be required"})
+    rows, _problems = read_usage_ledger_diagnostic()
+    snapshots = []
+    for row in rows:
+        payload = row.get("payload") if isinstance(row, dict) else None
+        snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+        if isinstance(snapshot, dict):
+            snapshots.append(snapshot)
+    if snapshots:
+        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=stale_after_seconds)
+        if not any((parse_timestamp(row.get("captured_at")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= cutoff
+                   for row in snapshots):
+            findings.append({"severity": "info", "check": "runtime.stale_state",
+                             "message": "usage snapshots exist but none are fresh; recorded values with usable windows are shown and marked stale"})
+    return findings
 
 
 # ── RFC 047 — listener lifecycle companion (Phases B–E, all backends) ──
@@ -4112,6 +4154,10 @@ def write_listener_state(agent, *, phase, consecutive_failures,
                          last_run_id="", last_classification="", reason="",
                          start_on_idle=False):
     os.makedirs(LISTENERS_DIR, exist_ok=True)
+    previous = read_listener_state(agent)
+    last_successful_run = previous.get("last_successful_run", "")
+    if last_classification == "success" and last_run_id:
+        last_successful_run = last_run_id
     doc = {
         "schema": LISTENER_STATE_SCHEMA,
         "agent": agent,
@@ -4119,6 +4165,7 @@ def write_listener_state(agent, *, phase, consecutive_failures,
         "consecutive_failures": consecutive_failures,
         "last_run_id": last_run_id,
         "last_classification": last_classification,
+        "last_successful_run": last_successful_run,
         # start_on_idle is persisted so listener_starters()/doctor can enforce the
         # at-most-one-starter rule; runtime_version feeds listener.version_skew.
         "start_on_idle": bool(start_on_idle),
@@ -4661,6 +4708,12 @@ def cmd_listener_status(args):
     record = read_listener_backend_record(agent)
     backend = record.get("backend", "") if record else "local"
     service_state = backend_service_state(record) if record else ""
+    backend_configured = bool(record) or bool(doc)
+    # A resident foreground/local process says nothing about what happens when its
+    # parent exits. Only an installed lifecycle backend carries that guarantee.
+    survives_parent_exit = bool(record)
+    can_invoke_agent = bool(alive and doc and not halted)
+    last_successful_run = doc.get("last_successful_run", "")
     payload = {
         "agent": agent,
         "status": status_label,
@@ -4674,6 +4727,10 @@ def cmd_listener_status(args):
         "service_label": record.get("label", "") if record else "",
         "service_file": record.get("service_file", "") if record else "",
         "service_error": record.get("last_error", "") if record else "",
+        "backend_configured": backend_configured,
+        "survives_parent_exit": survives_parent_exit,
+        "can_invoke_agent": can_invoke_agent,
+        "last_successful_run": last_successful_run,
         "consecutive_failures": fails,
         "last_run_id": doc.get("last_run_id", ""),
         "last_classification": doc.get("last_classification", ""),
@@ -4690,6 +4747,10 @@ def cmd_listener_status(args):
         return 0
     where = f" (pid {pid}, process {'resident' if alive else 'gone'})" if exists else ""
     print(f"listener {agent}: {status_label}{where}")
+    print(f"  capability: can_invoke_agent={str(can_invoke_agent).lower()} "
+          f"survives_parent_exit={str(survives_parent_exit).lower()} "
+          f"backend_configured={str(backend_configured).lower()} "
+          f"last_successful_run={last_successful_run or '-'}")
     if record:
         line = f"  backend: {backend}  service: {service_state or 'unknown'} ({record.get('label', '')})"
         print(line)

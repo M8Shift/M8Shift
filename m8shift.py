@@ -8211,6 +8211,8 @@ def cmd_watch(args):
 
 
 def cmd_wait(args):
+    if sys.stdout.isatty():
+        print("host lifecycle: wait detects relay changes and exits; it cannot reactivate a completed agent session — use a resident listener or a human wake-up.")
     if not args.once and args.interval < 1:
         sys.exit(tr("bad_interval"))
     last_state = None
@@ -8282,6 +8284,8 @@ def _claim_and_print_handoff(agent, force=False, grace_s=0):
 
 def cmd_next(args):
     """Single safe resumption step: wait if needed, then claim + print handoff."""
+    if sys.stdout.isatty():
+        print("host lifecycle: next detects and claims a ready turn; it cannot reactivate a completed agent session — use a resident listener or a human wake-up.")
     resume_reason = clean_field("--reason", getattr(args, "reason", "")) if getattr(args, "resume", False) else ""
     if getattr(args, "resume", False) and not resume_reason:
         sys.exit("refused: --resume requires --reason.")

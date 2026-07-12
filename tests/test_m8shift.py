@@ -5019,10 +5019,20 @@ class TestRuntimeCompanion(CLIBase):
         super().setUp()
         shutil.copy(os.path.join(REPO, "m8shift-runtime.py"), os.path.join(self.d, "m8shift-runtime.py"))
 
+    @staticmethod
+    def clean_env():
+        env = os.environ.copy()
+        env.pop("M8SHIFT_ROOT", None)
+        return env
+
+    def cw(self, *args, stdin=None):
+        return subprocess.run([sys.executable, "m8shift.py", *args], cwd=self.d,
+                              env=self.clean_env(), capture_output=True, text=True, input=stdin)
+
     def rt(self, *args):
         return subprocess.run(
             [sys.executable, "m8shift-runtime.py", *args],
-            cwd=self.d, capture_output=True, text=True,
+            cwd=self.d, env=self.clean_env(), capture_output=True, text=True,
         )
 
     def rt_env(self, env_overrides, *args):
@@ -5032,6 +5042,88 @@ class TestRuntimeCompanion(CLIBase):
             [sys.executable, "m8shift-runtime.py", *args],
             cwd=self.d, env=env, capture_output=True, text=True,
         )
+
+    def test_listener_status_json_capabilities_do_not_conflate_residency_with_detachment(self):
+        self.init()
+        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        with open(os.path.join(listeners, "claude.pid"), "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({"phase": "watching"}, fh)
+        r = self.rt("listener", "status", "--agent", "claude", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertTrue(payload["process_resident"])
+        self.assertTrue(payload["can_invoke_agent"])
+        self.assertTrue(payload["backend_configured"])
+        self.assertFalse(payload["survives_parent_exit"])
+
+    def test_doctor_reports_stale_awaiting_without_listener_and_stale_usage(self):
+        self.init()
+        relay = os.path.join(self.d, "M8SHIFT.md")
+        with open(relay, encoding="utf-8") as fh:
+            text = fh.read()
+        old = "2020-01-01T00:00:00Z"
+        text = re.sub(r"(?m)^holder:.*$", "holder:   claude", text, count=1)
+        text = re.sub(r"(?m)^state:.*$", "state:    AWAITING_CLAUDE", text, count=1)
+        text = re.sub(r"(?m)^since:.*$", "since:    " + old, text, count=1)
+        with open(relay, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        ledger = os.path.join(self.d, ".m8shift", "runtime", "usage.jsonl")
+        os.makedirs(os.path.dirname(ledger), exist_ok=True)
+        event = {"type": "usage.snapshot", "payload": {"snapshot": {
+            "schema": "m8shift.usage.snapshot.v1", "agent": "claude",
+            "captured_at": old, "windows": [{"kind": "session_5h", "used": 1, "limit": 2}],
+        }}}
+        with open(ledger, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(event) + "\n")
+        r = self.rt("doctor", "--json", "--stale-after", "60")
+        self.assertIn(r.returncode, (0, 1), r.stdout + r.stderr)
+        messages = [f["message"] for f in json.loads(r.stdout)["findings"]
+                    if f["check"] == "runtime.stale_state"]
+        self.assertTrue(any("no live listener" in m for m in messages), messages)
+        self.assertTrue(any("none are fresh" in m for m in messages), messages)
+        self.assertFalse(any("advisory unavailable" in m for m in messages), messages)
+
+    def test_wait_and_next_lifecycle_notice_is_tty_only(self):
+        notice = "host lifecycle:"
+        for command in ("wait", "next"):
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory(prefix="m8shift-tty-") as work:
+                    shutil.copy(SCRIPT, os.path.join(work, "m8shift.py"))
+                    init = subprocess.run([sys.executable, "m8shift.py", "init"], cwd=work,
+                                          env=self.clean_env(),
+                                          capture_output=True, text=True)
+                    self.assertEqual(init.returncode, 0, init.stderr)
+                    plain = subprocess.run(
+                        [sys.executable, "m8shift.py", command, "claude", "--once"],
+                        cwd=work, env=self.clean_env(), capture_output=True, text=True)
+                    self.assertNotIn(notice, plain.stdout + plain.stderr)
+
+                with tempfile.TemporaryDirectory(prefix="m8shift-tty-") as work:
+                    shutil.copy(SCRIPT, os.path.join(work, "m8shift.py"))
+                    subprocess.run([sys.executable, "m8shift.py", "init"], cwd=work,
+                                   env=self.clean_env(),
+                                   check=True, capture_output=True, text=True)
+                    master, slave = os.openpty()
+                    proc = subprocess.Popen(
+                        [sys.executable, "m8shift.py", command, "claude", "--once"], cwd=work,
+                        env=self.clean_env(), stdin=slave, stdout=slave, stderr=slave,
+                        close_fds=True)
+                    os.close(slave)
+                    chunks = []
+                    while True:
+                        try:
+                            chunk = os.read(master, 4096)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    os.close(master)
+                    self.assertEqual(proc.wait(), 0)
+                    self.assertIn(notice, b"".join(chunks).decode("utf-8", "replace"))
 
     def write_context_rtk_state(self, *, pinned=True):
         context_dir = os.path.join(self.d, ".m8shift", "context")
