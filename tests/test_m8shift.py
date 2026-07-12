@@ -10986,6 +10986,19 @@ class TestRFC048PRB(CLIBase):
             names = sorted(c["name"] for c in json.load(fh)["companions"])
         self.assertEqual(names, ["runtime"])
 
+    def test_upgrade_refreshes_installed_top_dashboard(self):
+        shutil.copy(os.path.join(REPO, "m8shift-top.py"), self.src)
+        self.init("--companions", "top", "--companion-source", REPO)
+        top = os.path.join(self.d, "m8shift-top.py")
+        with open(top, "a", encoding="utf-8") as fh:
+            fh.write("\n# STALE TOP MARKER\n")
+        r = self.update("--components", "companions", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _, comps = self._components(r)
+        self.assertEqual(comps["companions"], "updated")
+        with open(top, encoding="utf-8") as fh:
+            self.assertNotIn("# STALE TOP MARKER", fh.read())
+
     def test_explicitly_selected_companion_is_added(self):
         shutil.copy(os.path.join(REPO, "m8shift-context.py"), self.src)
         self.init()

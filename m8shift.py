@@ -159,6 +159,7 @@ DECISION_TARGETS = ("forge", "github", "both", "git", "md")
 
 # --- RFC 044: complete init / companion install ------------------------------
 COMPANION_REGISTRY = {
+    "top": "m8shift-top.py",
     "runtime": "m8shift-runtime.py",
     "context": "m8shift-context.py",
     "worktree": "m8shift-worktree.py",
@@ -167,7 +168,7 @@ COMPANION_REGISTRY = {
     "e2e": "m8shift-e2e.py",
 }
 # --full installs the operational companions; e2e is a release test tool (explicit-only).
-COMPANION_FULL = ("runtime", "context", "worktree", "headroom", "i18n")
+COMPANION_FULL = ("top", "runtime", "context", "worktree", "headroom", "i18n")
 KIT_MANIFEST_REL = os.path.join(".m8shift", "kit.json")
 _SCRIPT_VERSION_RE = re.compile(r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
 RUNNER_REGISTRY = {

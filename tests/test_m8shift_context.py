@@ -630,6 +630,21 @@ class TestContextCompression(ContextBase):
         self.assertIn("compression.config_unreadable", {row["check"] for row in payload["findings"]})
         self.assertNotIn("abc123secret", json.dumps(payload))
 
+    def test_github_stateless_tokens_are_redacted_without_adjacent_prose(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        base62 = "ghs_" + ("Ab9" * 174)[:520]
+        base64url = "ghs_" + (("Ab9-_" * 104)[:519] + "-")
+        tail = "and the rest here"
+        result = self.ctx(
+            "compress", "--id", "github-stateless", "--stdin", "--json",
+            stdin="see %s %s\nsee %s %s\n" % (base62, tail, base64url, tail),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(base62, result.stdout)
+        self.assertNotIn(base64url, result.stdout)
+        self.assertEqual(result.stdout.count("[REDACTED_GITHUB_TOKEN]"), 2)
+        self.assertEqual(result.stdout.count(tail), 2)
+
     def test_backend_error_falls_back_to_reference_only_not_raw(self):
         self.assertEqual(self.ctx("init").returncode, 0)
         result = self.ctx(

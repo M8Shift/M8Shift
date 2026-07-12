@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 
+VERSION = "3.60.0"
 ALT_ON = "\x1b[?1049h\x1b[?25l"
 ALT_OFF = "\x1b[?25h\x1b[?1049l"
 HOME = "\x1b[H"

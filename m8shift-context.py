@@ -203,7 +203,7 @@ SECRET_PATTERNS = (
     ),
     (
         "github_token",
-        re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+        re.compile(r"\bgh[pousr]_[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"),
         "[REDACTED_GITHUB_TOKEN]",
     ),
     (
