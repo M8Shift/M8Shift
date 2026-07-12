@@ -35,6 +35,7 @@ M8SHIFT_SCRUB_ENFORCE=1, and treat 2 as fail-open (printed, never blocking).
 """
 
 import argparse
+import concurrent.futures
 import hashlib
 import os
 import re
@@ -48,6 +49,7 @@ DENYLIST_MAX_TERMS = 256
 DENYLIST_MIN_LEN = 3
 GIT_TIMEOUT_S = 60
 HISTORY_MAX_COMMITS = 5000
+SCRUB_MAX_WORKERS = 8
 # Hex-only rev specs: `A..B` or a bare SHA. Rejecting anything else keeps a
 # hostile/typoed value from ever reaching the git argv as an option.
 RANGE_RX = re.compile(r"^[0-9a-fA-F]{4,64}(\.\.[0-9a-fA-F]{4,64})?$")
@@ -176,6 +178,15 @@ def run_git(cmd, repo):
                           timeout=GIT_TIMEOUT_S)
 
 
+def run_history(rule, history_runs, args, run):
+    """Run one rule's unchanged pickaxe walks; return results in range order."""
+    results = []
+    for range_args in history_runs:
+        results.append(run(history_cmd(rule, args.max_commits, args.refs_pull,
+                                       range_args=range_args), args.repo))
+    return results
+
+
 def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     ap = argparse.ArgumentParser(
         prog="scrub-check.py",
@@ -225,8 +236,21 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     if not rules:
         return 0
 
+    # Start the independent pickaxe walks early, but consume futures strictly in
+    # denylist order below.  This changes scheduling only: argv, interpretation,
+    # and byte ordering remain identical to the sequential implementation.
+    history_futures = {}
+    history_pool = None
+    if not args.no_history:
+        workers = min(len(rules), max(1, min(SCRUB_MAX_WORKERS,
+                                             os.cpu_count() or 1)))
+        history_pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        for index, rule in enumerate(rules):
+            history_futures[index] = history_pool.submit(
+                run_history, rule, history_runs, args, run)
+
     hits = 0
-    for rule in rules:
+    for rule_index, rule in enumerate(rules):
         label, term, mode = rule
         shown = "%s term=%r" % (label, term) if args.verbose else label
         # TIP — revision(s) before `--`; rc 0 = match, 1 = clean, >1 = error.
@@ -269,21 +293,27 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         # reported).
         if args.no_history:
             continue
-        for range_args in history_runs:
-            try:
-                r = run(history_cmd(rule, args.max_commits, args.refs_pull,
-                                    range_args=range_args), args.repo)
-            except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
-                print("scrub-check: ERROR running git log (%s)" % exc.__class__.__name__,
-                      file=err)
-                return 2
+        try:
+            history_results = history_futures[rule_index].result()
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+            if history_pool is not None:
+                history_pool.shutdown(wait=False, cancel_futures=True)
+            print("scrub-check: ERROR running git log (%s)" % exc.__class__.__name__,
+                  file=err)
+            return 2
+        for r in history_results:
             if r.returncode != 0:
+                if history_pool is not None:
+                    history_pool.shutdown(wait=False, cancel_futures=True)
                 print("scrub-check: ERROR git log rc=%d: %s"
                       % (r.returncode, (r.stderr or "").strip()[:200]), file=err)
                 return 2
             for sha in r.stdout.split():
                 hits += 1
                 print("HISTORY hit: commit %s [%s]" % (sha[:12], shown), file=out)
+
+    if history_pool is not None:
+        history_pool.shutdown()
 
     if hits:
         print("scrub-check: %d hit(s) — the identifier(s) above are present on "
