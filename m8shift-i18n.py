@@ -50,7 +50,8 @@ def safe_output_name(name):
 
 
 def load_core():
-    src = open(CORE, encoding="utf-8").read()
+    with open(CORE, encoding="utf-8") as f:
+        src = f.read()
     spec = importlib.util.spec_from_file_location("_m8core", CORE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -73,7 +74,8 @@ def check_pack(lang, en_keys):
         msgs = {}
     else:
         try:
-            msgs = json.loads(open(mpath, encoding="utf-8").read())
+            with open(mpath, encoding="utf-8") as f:
+                msgs = json.load(f)
         except Exception as e:
             errs.append(f"messages.json invalid JSON: {e}")
             msgs = {}
@@ -93,10 +95,14 @@ def check_pack(lang, en_keys):
                 errs.append(f"message {k!r} is not format-safe: {e!r}")
     for _, _, fname, _ in FAMILIES:
         p = os.path.join(d, fname)
-        if not os.path.isfile(p) or not open(p, encoding="utf-8").read().strip():
+        if not os.path.isfile(p):
             errs.append(f"{fname} missing or empty (all four templates are required)")
             continue
-        body = open(p, encoding="utf-8").read()
+        with open(p, encoding="utf-8") as f:
+            body = f.read()
+        if not body.strip():
+            errs.append(f"{fname} missing or empty (all four templates are required)")
+            continue
         if '"""' in body:
             errs.append(f"{fname} contains a triple-quote sequence")
         if body and body.rstrip("\\") != body and (len(body) - len(body.rstrip("\\"))) % 2:
@@ -124,7 +130,8 @@ def read_pack(lang, en_keys):
     msgs = check_pack(lang, en_keys)
     out = {"messages": msgs}
     for _, _, fname, _ in FAMILIES:
-        out[fname] = open(os.path.join(pack_dir(lang), fname), encoding="utf-8").read()
+        with open(os.path.join(pack_dir(lang), fname), encoding="utf-8") as f:
+            out[fname] = f.read()
     return out
 
 
@@ -156,7 +163,8 @@ def splice_one(src, mark, replacement, *, before=False):
 
 
 def build(langs, en_keys):
-    src = open(CORE, encoding="utf-8").read()
+    with open(CORE, encoding="utf-8") as f:
+        src = f.read()
     # 1. emit every <FAM>_<LANG> template constant (all languages, all families)
     new_consts = ""
     for lang in langs:

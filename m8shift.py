@@ -8364,7 +8364,7 @@ def cmd_next(args):
             print(tr("wait_done"))
             return 0
         exp = parse_iso(lk.get("expires"))
-        if (st.startswith("WORKING_") and st != working and exp and now() > exp):
+        if st.startswith("WORKING_") and exp and now() > exp:
             if heartbeat_protective(lk, lk.get("holder", "none")):
                 # RFC 049 alive-expired: the holder appears alive — never offer
                 # (or perform) a force recovery; report and stop this attempt.
@@ -9187,6 +9187,7 @@ def cmd_task(args):
     if verb in ("list", "show"):
         return _cmd_task_read(args)
     desc = blocked = ""                   # clean user values OUTSIDE the lock (like cmd_remember)
+    tid = n = 0                           # assigned for add below; explicit for static analysis
     if verb == "add":
         desc = clean_field("desc", args.desc)
         if not desc:
