@@ -2,7 +2,7 @@
 
 ## Version
 
-**v3.59.0 (Révision).** Unreleased adds backwards-compatible security,
+**v3.59.0 (Révision).** This release adds backwards-compatible security,
 conformance, listener-observability, and stale-state capabilities without a
 relay-format or CLI compatibility break. It is more than a Correction and does
 not require a Génération.
