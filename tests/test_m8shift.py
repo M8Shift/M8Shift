@@ -11314,6 +11314,28 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertNotIn("Traceback", r.stderr)
         return r.stdout
 
+    def test_last_known_windowed_snapshot_survives_newest_empty(self):
+        older = self.snapshot(decision_ratio=0.73, captured_at=self.fresh_iso(-60))
+        newest = self.snapshot(decision_ratio=None, captured_at=self.fresh_iso())
+        self.write_sidecar([self.event(older), self.event(newest)])
+        line = self._agent_line(self.status_out(), "claude")
+        self.assertIn("73%", line)
+        self.assertIn("stale", line)
+
+    def test_all_empty_snapshots_keep_em_dash(self):
+        self.write_sidecar([self.event(self.snapshot(decision_ratio=None))])
+        line = self._agent_line(self.status_out(), "claude")
+        self.assertIn("—", line)
+
+    def test_newest_usable_snapshot_is_not_forced_stale(self):
+        self.write_sidecar([
+            self.event(self.snapshot(decision_ratio=0.2, captured_at=self.fresh_iso(-60))),
+            self.event(self.snapshot(decision_ratio=0.8, captured_at=self.fresh_iso())),
+        ])
+        line = self._agent_line(self.status_out(), "claude")
+        self.assertIn("80%", line)
+        self.assertNotIn("stale", line)
+
     @staticmethod
     def _mask_human(out):
         # The only volatile human line is the pre-existing session `duration`; mask it

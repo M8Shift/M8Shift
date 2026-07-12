@@ -7714,6 +7714,7 @@ def _usage_read_snapshots(lk):
             lines = lines[1:]                       # D: drop the partial first line
         roster = set(active_agents(lk))
         found = {}
+        usable = {}
         for line in lines:
             if not line.strip():
                 continue
@@ -7741,7 +7742,34 @@ def _usage_read_snapshots(lk):
                 continue                            # B: … and a valid agent id
             if ev_agent not in roster:
                 continue                            # B: render only roster agents
+            # Preserve the newest informative reading as a display fallback.  A
+            # provider may emit a schema-valid empty snapshot on a transient read
+            # failure; replacing useful history with that row makes status least
+            # informative exactly at a quota boundary (#107).
+            windows = snap.get("windows")
+            has_window = isinstance(windows, list) and any(
+                isinstance(w, dict)
+                and _usage_window_pct(w.get("used_ratio")) is not None
+                and bool(_usage_sanitize(w.get("kind"), cap=10, fallback=""))
+                for w in windows
+            )
+            if _usage_ratio_valid(snap.get("decision_ratio")) or has_window:
+                usable[ev_agent] = snap
             found[ev_agent] = snap                  # file-order last wins
+        for agent, latest in list(found.items()):
+            windows = latest.get("windows")
+            latest_has_window = isinstance(windows, list) and any(
+                isinstance(w, dict)
+                and _usage_window_pct(w.get("used_ratio")) is not None
+                and bool(_usage_sanitize(w.get("kind"), cap=10, fallback=""))
+                for w in windows
+            )
+            if not _usage_ratio_valid(latest.get("decision_ratio")) and not latest_has_window:
+                previous = usable.get(agent)
+                if previous is not None and previous is not latest:
+                    previous = dict(previous)
+                    previous["_m8shift_last_known"] = True
+                    found[agent] = previous
         return found
     except Exception:
         return {}                                   # fail-open: never crash status/watch
@@ -7975,7 +8003,8 @@ def _usage_rows(lk, ref=None):
                 "reset": _usage_reset_display(snap, ref),
                 "age_seconds": age,
                 "age_display": _usage_age_display(age),
-                "stale": age is None or age > USAGE_STALE_AFTER_SECONDS,
+                "stale": bool(snap.get("_m8shift_last_known"))
+                         or age is None or age > USAGE_STALE_AFTER_SECONDS,
             })
         except Exception:
             continue
