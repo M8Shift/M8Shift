@@ -297,14 +297,14 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
             history_results = history_futures[rule_index].result()
         except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
             if history_pool is not None:
-                history_pool.shutdown(wait=False, cancel_futures=True)
+                history_pool.shutdown(wait=False)
             print("scrub-check: ERROR running git log (%s)" % exc.__class__.__name__,
                   file=err)
             return 2
         for r in history_results:
             if r.returncode != 0:
                 if history_pool is not None:
-                    history_pool.shutdown(wait=False, cancel_futures=True)
+                    history_pool.shutdown(wait=False)
                 print("scrub-check: ERROR git log rc=%d: %s"
                       % (r.returncode, (r.stderr or "").strip()[:200]), file=err)
                 return 2

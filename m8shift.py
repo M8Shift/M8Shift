@@ -8258,7 +8258,8 @@ def _status_usage_windows(snapshot, last_known=False):
     """Stable two-window projection: absence is data, never a dropped field."""
     by_kind = {}
     if isinstance(snapshot, dict) and isinstance(snapshot.get("windows"), list):
-        by_kind = {w.get("kind"): w for w in snapshot["windows"] if isinstance(w, dict)}
+        by_kind = {w.get("kind"): w for w in snapshot["windows"]
+                   if isinstance(w, dict) and isinstance(w.get("kind"), str)}
     out = {}
     for public, kind in (("session_5h", "session_5h"), ("weekly", "weekly")):
         row = by_kind.get(kind)

@@ -6919,8 +6919,8 @@ class TestInstallerMultiOSCore(unittest.TestCase):
     def setUp(self):
         self.src = tempfile.mkdtemp(prefix="m8shift-mos-src-")
         self.addCleanup(shutil.rmtree, self.src, True)
-        for f in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
-                  "m8shift-context.py", "checksums.sha256"):
+        for f in ("m8shift.py", "m8shift-top.py", "m8shift-worktree.py",
+                  "m8shift-runtime.py", "m8shift-context.py", "checksums.sha256"):
             shutil.copy(os.path.join(REPO, f), self.src)
 
     def test_help_prints_prerequisites_and_writes_nothing(self):
@@ -11670,6 +11670,9 @@ class TestRFC051UsageAdvisory(CLIBase):
         d = json.loads(js_str)
         d.pop("session_duration", None)          # pre-existing volatile fields
         d.pop("session_duration_seconds", None)
+        snap = d.get("snapshot")                 # v1 nests the same volatile duration
+        if isinstance(snap, dict) and isinstance(snap.get("ledger"), dict):
+            snap["ledger"].pop("session_duration_seconds", None)
         return d
 
     def _runtime_tree(self):
