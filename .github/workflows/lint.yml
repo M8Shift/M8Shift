@@ -78,7 +78,7 @@ jobs:
       - name: Install Bandit
         # Version-pinned dev tool; the project itself stays stdlib-only at
         # runtime — Bandit is CI-only and never imported by the shipped code.
-        run: python -m pip install --disable-pip-version-check bandit==1.9.4
+        run: python -m pip install --disable-pip-version-check --require-hashes -r .github/requirements-ci-lint.txt
       - name: Run Bandit (fail on medium+ severity / confidence)
         # The stdlib subprocess argv calls (B603/B607/B404) and the fail-open
         # try/except reads (B110/B112) are low-severity by design and stay
