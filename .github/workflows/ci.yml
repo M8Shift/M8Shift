@@ -1,0 +1,79 @@
+name: CI
+
+# Correctness + data-hygiene gates. Free tier, no third-party deps: the whole
+# project is stdlib-only, so there is nothing to `pip install`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Compile + checksums + data hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # scrub-check scans history + PR refs; give it the full history.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Byte-compile every tracked module
+        run: python -m py_compile $(git ls-files '*.py')
+
+      - name: Verify the shipped checksum manifest
+        run: sha256sum -c checksums.sha256
+
+      - name: Data-hygiene lint (real home paths / identity)
+        # Repo-scoped; exits 1 on high-confidence outbound-path hits. This is
+        # the gate that catches a real `/Users/<name>/…` path in a tracked file.
+        run: python m8shift.py doctor --hygiene --lint
+
+      - name: Confidential-denylist scrub (opt-in via secret)
+        # RFC 052 E1: catches specific confidential project identifiers across
+        # the tip, history, and PR refs. The denylist is confidential and is
+        # NEVER committed — provide it as the `M8SHIFT_DENYLIST` secret (one
+        # term per line). Skipped when unset or on fork PRs (no secret access).
+        env:
+          DENYLIST: ${{ secrets.M8SHIFT_DENYLIST }}
+        run: |
+          if [ -z "$DENYLIST" ]; then
+            echo "M8SHIFT_DENYLIST secret not set — skipping confidential scrub."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
+          python scripts/scrub-check.py \
+            --denylist "$RUNNER_TEMP/denylist.txt" --refs-pull
+          rm -f "$RUNNER_TEMP/denylist.txt"
+
+  test:
+    name: Test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The supported floor (3.8) and a current interpreter.
+        python: ["3.8", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run the full test suite
+        run: python -m pytest -q

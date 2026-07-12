@@ -1,0 +1,60 @@
+name: Lint
+
+# Static linting that CodeQL does not cover: the bash installers/hooks
+# (ShellCheck) and the GitHub Actions workflows themselves (actionlint).
+# Both linters run from tooling already on the runner / an official pinned
+# image — no third-party wrapper action to trust.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.sh'
+      - 'hooks/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.sh'
+      - 'hooks/**'
+      - '.github/workflows/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  shellcheck:
+    name: ShellCheck (bash)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        run: |
+          shellcheck --version
+          # Every tracked *.sh plus the shell hooks (which carry a bash shebang
+          # but no extension). Warnings fail the job; installers must stay clean.
+          files=$(git ls-files '*.sh')
+          for h in hooks/pre-push hooks/pre-commit; do
+            [ -f "$h" ] && head -1 "$h" | grep -qE '^#!.*(ba)?sh' && files="$files $h"
+          done
+          echo "Linting: $files"
+          # shellcheck disable=SC2086
+          shellcheck --severity=warning --external-sources $files
+
+  actionlint:
+    name: actionlint (workflows)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        # Official pinned image; Dependabot bumps the tag.
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo \
+            rhysd/actionlint:1.7.7 -color

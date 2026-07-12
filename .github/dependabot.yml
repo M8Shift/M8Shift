@@ -1,0 +1,19 @@
+version: 2
+# The project is stdlib-only Python — there is no pip/npm manifest to track.
+# The only moving dependency is the set of pinned GitHub Actions in the
+# workflows; keep those current (and patched) so the CI supply chain does not
+# rot. Grouped so a single PR bumps them together.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:23"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"
