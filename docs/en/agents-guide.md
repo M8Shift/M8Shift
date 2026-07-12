@@ -529,6 +529,12 @@ identity-pinned through the explicit project-local adapter opt-in. A planted `.m
 without that opt-in and matching installer provenance is ignored. Headroom-compatible compression
 remains a separate explicit experiment.
 
+`m8shift-runtime.py doctor` also reports the local per-agent routing-adoption ratio
+when RTK's own `discover` statistics support that agent. The check is advisory and
+fail-open: missing, disabled, empty, or unsupported statistics are shown explicitly
+as `unavailable`. Set `M8SHIFT_RTK_ADOPTION_THRESHOLD` to a ratio from `0` to `1`
+(default `0.5`) to tune the warning threshold; it never gates relay work.
+
 ## 11. Recurring memory-parasite audit (contributor process)
 
 Dogfooding agents accumulate private know-how in their persistent memory and

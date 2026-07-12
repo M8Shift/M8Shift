@@ -665,6 +665,58 @@ def context_rtk_status():
     }
 
 
+def rtk_adoption_findings(agents):
+    """Best-effort local RTK routing audit. Advisory only and always fail-open.
+
+    `rtk discover` currently audits Claude Code history; other agent lanes are
+    reported explicitly as unavailable instead of being assigned invented data.
+    """
+    try:
+        threshold = float(os.environ.get("M8SHIFT_RTK_ADOPTION_THRESHOLD", "0.5"))
+    except ValueError:
+        threshold = 0.5
+    threshold = min(1.0, max(0.0, threshold))
+    status = context_rtk_status()
+    findings = []
+    if not status.get("pinned"):
+        return [{"severity": "info", "check": "runtime.rtk_adoption",
+                 "message": f"{agent} RTK routing adoption: unavailable (RTK absent or disabled)"}
+                for agent in agents]
+    manifest, _ = read_json_diagnostic(CONTEXT_RTK_ADAPTER, {})
+    exe = manifest.get("trusted_executable", {}).get("path")
+    audit = None
+    try:
+        proc = subprocess.run([exe, "discover", "--format", "json", "--since", "30"],
+                              cwd=HERE, capture_output=True, text=True, timeout=5,
+                              check=False)
+        if proc.returncode == 0 and len(proc.stdout) <= 1024 * 1024:
+            candidate = json.loads(proc.stdout)
+            if isinstance(candidate, dict):
+                audit = candidate
+    except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        audit = None
+    for agent in agents:
+        if agent != "claude" or audit is None:
+            findings.append({"severity": "info", "check": "runtime.rtk_adoption",
+                             "message": f"{agent} RTK routing adoption: unavailable"})
+            continue
+        total = audit.get("total_commands")
+        routed = audit.get("already_rtk")
+        if not (isinstance(total, int) and total > 0 and isinstance(routed, int)
+                and 0 <= routed <= total):
+            findings.append({"severity": "info", "check": "runtime.rtk_adoption",
+                             "message": f"{agent} RTK routing adoption: unavailable (no commands)"})
+            continue
+        ratio = routed / total
+        findings.append({
+            "severity": "warning" if ratio < threshold else "info",
+            "check": "runtime.rtk_adoption",
+            "message": (f"{agent} RTK routing adoption: {ratio:.0%} ({routed}/{total}); "
+                        f"advisory threshold {threshold:.0%}"),
+        })
+    return findings
+
+
 def presence_rtk_label(presence_row):
     if not isinstance(presence_row, dict):
         return "off"
@@ -3096,6 +3148,13 @@ def cmd_doctor(args):
         findings.extend(context_rtk_status().get("findings", []))
     except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
         findings.append({"severity": "warning", "check": "runtime.context_rtk", "message": str(e)})
+    try:
+        lock = run_core_json("status", "--json").get("lock", {})
+        agents = [a.strip() for a in str(lock.get("agents", "")).split(",") if a.strip()]
+        findings.extend(rtk_adoption_findings(agents))
+    except Exception as e:  # noqa: BLE001 - adoption audit is advisory only
+        findings.append({"severity": "info", "check": "runtime.rtk_adoption",
+                         "message": f"RTK routing adoption: unavailable ({e})"})
     if os.path.exists(PROVIDERS):
         findings.extend(provider_findings(load_provider_registry()))
     if os.path.exists(ROUTING_MODELS) or os.path.exists(ROUTING_SKILLS):
