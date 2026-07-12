@@ -212,8 +212,8 @@ function Add-ExpectedSha256([string]$Spec) {
     if ($Spec -match "^([^:=]+)[:=]([0-9a-fA-F]{64})$") {
         $file = $Matches[1]
         $hex = $Matches[2].ToLowerInvariant()
-        if ($file -notin @("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py")) {
-            Fail "-Sha256 file must be m8shift.py, m8shift-worktree.py, m8shift-runtime.py, or m8shift-context.py"
+        if ($file -notin @("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py", "m8shift-context.py", "m8shift-top.py")) {
+            Fail "-Sha256 file is not a shipped M8Shift component"
         }
         $script:ExpectedSha256[$file] = $hex
         return
@@ -370,6 +370,7 @@ if ($VerifyDownloads) {
 $Python = Resolve-Python
 
 Install-File "m8shift.py" $BaseUrl $TargetDir $VerifyDownloads
+Install-File "m8shift-top.py" $BaseUrl $TargetDir $VerifyDownloads
 if (-not $NoWorktree) {
     Install-File "m8shift-worktree.py" $BaseUrl $TargetDir $VerifyDownloads
 }

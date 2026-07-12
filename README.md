@@ -109,6 +109,12 @@ core install continues (exit 0 when the core install succeeded). The two
 installers are kept in lockstep for the core components — verified by static
 parity tests, and executed end-to-end where `pwsh` is available.
 
+For a read-only terminal dashboard, run `python3 m8shift-top.py`. It consumes
+the frozen `status --json` snapshot, uses an alternate screen on capable TTYs,
+and delegates byte-for-byte to the existing `watch` output for pipes, dumb
+terminals, `--plain`, or `M8SHIFT_NO_ALT_SCREEN`. Keys are display-only: `q`,
+`?`, `r`, and navigation; the companion never claims or changes a relay.
+
 For a pinned release, fetch the installer from the tag and use the same ref for the
 downloaded files:
 

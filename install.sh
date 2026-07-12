@@ -223,8 +223,8 @@ add_expected_sha256() {
     *) die "--sha256 expects FILE:HEX" ;;
   esac
   case "$name" in
-    m8shift.py|m8shift-worktree.py|m8shift-runtime.py|m8shift-context.py|m8shift-headroom.py) ;;
-    *) die "--sha256 file must be m8shift.py, m8shift-worktree.py, m8shift-runtime.py, m8shift-context.py, or m8shift-headroom.py" ;;
+    m8shift.py|m8shift-worktree.py|m8shift-runtime.py|m8shift-context.py|m8shift-headroom.py|m8shift-top.py) ;;
+    *) die "--sha256 file is not a shipped M8Shift component" ;;
   esac
   printf '%s' "$hex" | grep -Eiq '^[0-9a-f]{64}$' || die "--sha256 expects a 64-char hex digest"
   EXPECTED_SHA256S="${EXPECTED_SHA256S}${hex} ${name}
@@ -991,6 +991,7 @@ download_file() {
 }
 
 download_file "m8shift.py"
+download_file "m8shift-top.py"
 if [ "$WITH_WORKTREE" -eq 1 ]; then
   download_file "m8shift-worktree.py"
 fi

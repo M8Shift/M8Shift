@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Read-only, dependency-free dashboard for the M8Shift status snapshot."""
+import argparse
+import atexit
+import json
+import os
+import shutil
+import signal
+import select
+import subprocess
+import sys
+import time
+
+ALT_ON = "\x1b[?1049h\x1b[?25l"
+ALT_OFF = "\x1b[?25h\x1b[?1049l"
+HOME = "\x1b[H"
+SCHEMA_MAJOR = 1
+_active = False
+
+
+def restore(stream=None):
+    global _active
+    if _active:
+        (stream or sys.stdout).write(ALT_OFF)
+        (stream or sys.stdout).flush()
+        _active = False
+
+
+def enter(stream=None):
+    global _active
+    stream = stream or sys.stdout
+    stream.write(ALT_ON)
+    stream.flush()
+    _active = True
+
+
+def clean(value, width):
+    text = value if isinstance(value, str) and value else "unavailable"
+    text = "".join(c for c in text if ord(c) >= 32 and not 127 <= ord(c) <= 159)
+    return text[:max(0, width)]
+
+
+def _value(value):
+    return "unavailable" if value is None else str(value)
+
+
+def render(snapshot, width):
+    width = max(24, width)
+    rule = "─" * width
+    lines = ["M8SHIFT TOP".ljust(width), rule]
+    for agent in snapshot.get("agents") or []:
+        name = clean(agent.get("id"), 18)
+        state = clean(agent.get("role_state") or "unknown", 14)
+        usage = agent.get("usage") or {}
+        windows = usage.get("windows") or {}
+        bits = []
+        for label in ("session_5h", "weekly"):
+            row = windows.get(label) or {}
+            ratio = row.get("used_ratio")
+            bits.append("%s %s" % (label, "unavailable" if ratio is None else "%d%%" % round(ratio * 100)))
+        lines.append(clean("%-18s [%-10s]  %s" % (name, state, "  ".join(bits)), width).ljust(width))
+    ledger = snapshot.get("ledger") or {}
+    listeners = snapshot.get("listeners")
+    lines += [rule, clean("listeners: %s" % _value(listeners), width).ljust(width),
+              clean("ledger: tasks_open=%s decisions_pending=%s doctor_findings=%s gate_armed=%s" %
+                    tuple(_value(ledger.get(k)) for k in ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed")), width).ljust(width)]
+    last = snapshot.get("last_turn") or {}
+    lines.append(clean("last turn: #%s %s → %s  %s" % (_value(last.get("n")), _value(last.get("agent")),
+                                                        _value(last.get("to")), _value(last.get("ask_excerpt"))), width).ljust(width))
+    lines += [rule, "activity".ljust(width)]
+    for event in snapshot.get("activity") or []:
+        lines.append(clean("  %s  %s" % (_value(event.get("agent")), _value(event.get("summary"))), width).ljust(width))
+    lines.append(clean("q quit  ? help  r refresh  ↑/↓ navigate", width).ljust(width))
+    return "\n".join(lines)
+
+
+def load_snapshot(engine, root):
+    env = dict(os.environ, M8SHIFT_ROOT=root)
+    proc = subprocess.run([sys.executable, engine, "status", "--json"], env=env,
+                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "status failed")
+    payload = json.loads(proc.stdout)
+    snap = payload.get("snapshot")
+    if not isinstance(snap, dict):
+        raise RuntimeError("status snapshot unavailable")
+    schema = snap.get("schema", "")
+    try:
+        major = int(schema.rsplit("/", 1)[1])
+    except (ValueError, IndexError):
+        raise RuntimeError("unsupported status snapshot schema: %s" % clean(schema, 80))
+    if major != SCHEMA_MAJOR:
+        raise RuntimeError("unsupported status snapshot major: %s" % major)
+    return snap
+
+
+def scroll_fallback(engine, root, extra):
+    os.execve(sys.executable, [sys.executable, engine, "watch"] + extra,
+              dict(os.environ, M8SHIFT_ROOT=root))
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser()
+    p.add_argument("--interval", type=int, default=2)
+    p.add_argument("--plain", action="store_true")
+    p.add_argument("--root", default=os.environ.get("M8SHIFT_ROOT", os.getcwd()))
+    p.add_argument("--engine", default=os.environ.get("M8SHIFT_ENGINE"))
+    args, extra = p.parse_known_args(argv)
+    engine = args.engine or os.path.join(args.root, "m8shift.py")
+    tty = sys.stdout.isatty()
+    no_alt = args.plain or os.environ.get("TERM") == "dumb" or os.environ.get("M8SHIFT_NO_ALT_SCREEN")
+    if not tty or no_alt or os.name == "nt":
+        forwarded = (["--interval", str(args.interval)] if "--interval" not in extra else []) + extra
+        return scroll_fallback(engine, args.root, forwarded)
+    atexit.register(restore)
+    old = {}
+    def stop(signum, frame):
+        restore()
+        raise SystemExit(128 + signum)
+    def suspend(signum, frame):
+        restore()
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTSTP)
+    def resume(signum, frame):
+        signal.signal(signal.SIGTSTP, suspend)
+        enter()
+    for sig, handler in ((signal.SIGINT, stop), (signal.SIGTERM, stop),
+                         (getattr(signal, "SIGTSTP", None), suspend),
+                         (getattr(signal, "SIGCONT", None), resume)):
+        if sig is not None:
+            old[sig] = signal.signal(sig, handler)
+    enter()
+    previous = None
+    try:
+        while True:
+            snap = load_snapshot(engine, args.root)
+            frame = render(snap, shutil.get_terminal_size((80, 24)).columns)
+            if frame != previous:
+                sys.stdout.write(HOME + frame + "\x1b[J")
+                sys.stdout.flush()
+                previous = frame
+            ready, _, _ = select.select([sys.stdin], [], [], max(.1, args.interval))
+            if ready:
+                key = sys.stdin.read(1)
+                if key == "q":
+                    break
+                if key == "?":
+                    previous = None
+                # r and navigation intentionally trigger/no-op a read-only refresh.
+                if key in ("r", "\x1b"):
+                    previous = None
+    finally:
+        restore()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, ValueError) as exc:
+        restore()
+        print("m8shift-top: %s" % exc, file=sys.stderr)
+        raise SystemExit(2)
