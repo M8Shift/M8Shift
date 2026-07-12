@@ -1923,6 +1923,84 @@ def should_manage_gitignore(args):
     return answer.strip().lower() not in {"n", "no", "non"}
 
 
+BOOTSTRAP_SCHEMA = "m8shift.bootstrap/1"
+CAPABILITY_REGISTRY_VERSION = 1
+INIT_PROFILES = {
+    "bare": ("relay-core",),
+    "headless": ("relay-core", "headless-config", "listener-docs"),
+    "ops": ("relay-core", "gitignore-block", "hook-samples", "watch-launcher",
+            "denylist-pointer"),
+    "full": ("relay-core", "headless-config", "listener-docs", "gitignore-block",
+             "hook-samples", "watch-launcher", "denylist-pointer"),
+}
+CAPABILITY_REGISTRY = {
+    "relay-core": {"description": "Core relay kit", "artifacts": [], "actions": [], "never_auto": False},
+    "gitignore-block": {"description": "Generated M8Shift ignore block", "artifacts": [".gitignore"], "actions": [], "never_auto": False},
+    "headless-config": {"description": "Headless runner sample configuration", "artifacts": [".m8shift/runner/config.sample.json"], "actions": [], "never_auto": False},
+    "listener-docs": {"description": "Listener quickstart", "artifacts": [".m8shift/LISTENER.md"], "actions": [], "never_auto": False},
+    "hook-samples": {"description": "Opt-in hook configuration", "artifacts": [".m8shift/HOOKS.md"], "actions": [{"kind": "run_command", "argv": ["git", "config", "core.hooksPath", ".m8shift/hooks"], "approval": "operator", "verify_argv": ["git", "config", "--get", "core.hooksPath"]}], "never_auto": True},
+    "watch-launcher": {"description": "Local status watcher launcher", "artifacts": [".m8shift/watch-status.sample.sh"], "actions": [], "never_auto": False},
+    "denylist-pointer": {"description": "Private denylist setup guidance", "artifacts": [".m8shift/DENYLIST.md"], "actions": [], "never_auto": True},
+}
+
+
+def init_capability_ids(args):
+    profile = getattr(args, "profile", "bare")
+    ids = list(INIT_PROFILES[profile])
+    raw = getattr(args, "capabilities", "") or ""
+    for cap in (x.strip() for x in raw.split(",")):
+        if cap and cap not in ids:
+            ids.append(cap)
+    unknown = [x for x in ids if x not in CAPABILITY_REGISTRY]
+    if unknown:
+        sys.exit("unknown init capability: " + ", ".join(unknown))
+    return ids
+
+
+def _write_capability_artifact(rel, body):
+    path = os.path.join(HERE, rel)
+    if os.path.exists(path):
+        return f"{rel}: kept"
+    write(body, path)
+    if rel.endswith(".sh"):
+        os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+    return f"{rel}: created"
+
+
+def apply_init_capabilities(ids, profile):
+    rows = []
+    bodies = {
+        "headless-config": (".m8shift/runner/config.sample.json", '{\n  "agent": "codex",\n  "timeout_s": 1800\n}\n'),
+        "listener-docs": (".m8shift/LISTENER.md", "# Listener quickstart\n\nRun `./m8shift-runtime.py listener start <agent>`, then check `./m8shift-runtime.py listener status <agent>`. Init never starts a listener.\n"),
+        "hook-samples": (".m8shift/HOOKS.md", "# Hook sample\n\nOperator-approved setup: `git config core.hooksPath .m8shift/hooks`. Verify with `git config --get core.hooksPath`. Set the documented enforce variable explicitly; `doctor` reports `security.anti_leak_gate_dormant`. Init never runs this command.\n"),
+        "watch-launcher": (".m8shift/watch-status.sample.sh", "#!/bin/sh\nexec ./m8shift.py status --for \"${1:-codex}\"\n"),
+        "denylist-pointer": (".m8shift/DENYLIST.md", "# Private denylist\n\nExpected path: `.m8shift/denylist.txt`; one term per line; mode 600. Create and populate it yourself, and mirror it through a CI secret where needed. Init never creates the denylist.\n"),
+    }
+    for cap in ids:
+        if cap in bodies:
+            rows.append(_write_capability_artifact(*bodies[cap]))
+    payload = {"schema": BOOTSTRAP_SCHEMA, "bootstrap_schema": 1,
+               "capability_registry_version": CAPABILITY_REGISTRY_VERSION,
+               "engine_version": VERSION, "profile": profile, "capabilities": []}
+    for cap in ids:
+        spec = CAPABILITY_REGISTRY[cap]
+        payload["capabilities"].append(dict({"id": cap, "status": "rendered"}, **spec))
+    path = os.path.join(HERE, ".m8shift", "bootstrap.json")
+    body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if not os.path.exists(path) or read(path) != body:
+        write(body, path); rows.append(".m8shift/bootstrap.json: written")
+    else:
+        rows.append(".m8shift/bootstrap.json: kept")
+    md = "# Bootstrap plan\n\nProfile: `%s`\n\nCapabilities: %s\n\nActions below are rendered guidance only; init executes none of them.\n" % (
+        profile, ", ".join("`%s`" % cap for cap in ids))
+    md_path = os.path.join(HERE, ".m8shift", "BOOTSTRAP.md")
+    if not os.path.exists(md_path) or read(md_path) != md:
+        write(md, md_path); rows.append(".m8shift/BOOTSTRAP.md: written")
+    else:
+        rows.append(".m8shift/BOOTSTRAP.md: kept")
+    return rows
+
+
 def ensure_gitignore_block():
     path = os.path.join(HERE, ".gitignore")
     block = gitignore_block()
@@ -3238,6 +3316,11 @@ def cmd_update(args):
 
 
 def cmd_init(args):
+    if getattr(args, "list_profiles", False):
+        for name, caps in INIT_PROFILES.items():
+            print(f"{name}: {','.join(caps)}")
+        return 0
+    capability_ids = init_capability_ids(args)
     globals()["LANG"] = resolve_lang(explicit=getattr(args, "lang", "") or None)
     name = clean_project_name(args.name or os.path.basename(HERE) or "project")
     results = []
@@ -3340,12 +3423,14 @@ def cmd_init(args):
 
         guard.require_owned()
         results.append(write_commit_msg_hook_template())
-        if should_manage_gitignore(args):
+        if "gitignore-block" in capability_ids or should_manage_gitignore(args):
             guard.require_owned()
             results.append(ensure_gitignore_block())
         else:
             results.append(tr("gitignore_skipped"))
         results.extend(_companion_lines)
+        guard.require_owned()
+        results.extend(apply_init_capabilities(capability_ids, args.profile))
 
         # M8SHIFT.md: preserved if it exists (state of the ongoing relay), unless --force
         if os.path.exists(COWORK) and not args.force:
@@ -7256,6 +7341,19 @@ def cmd_doctor(args):
             hygiene_verbose=hygiene_verbose,
             hygiene_anchors=hygiene_anchors,
         )
+        bootstrap_path = os.path.join(HERE, ".m8shift", "bootstrap.json")
+        if os.path.exists(bootstrap_path):
+            try:
+                bootstrap = json.loads(read(bootstrap_path))
+            except (OSError, ValueError, TypeError):
+                bootstrap = {}
+            if (bootstrap.get("bootstrap_schema") != 1 or
+                    bootstrap.get("capability_registry_version") != CAPABILITY_REGISTRY_VERSION):
+                findings.append(doctor_finding(
+                    "bootstrap.stale", "warning",
+                    "bootstrap metadata does not match the current schema/capability registry",
+                    path=".m8shift/bootstrap.json",
+                    fix_hint="re-run init with the desired --profile"))
     visible = [f for f in findings if SEVERITY_RANK.get(f["severity"], 99) >= threshold]
     ok = not visible
     if args.json:
@@ -9290,6 +9388,12 @@ def main():
     i.add_argument("--force-generated", action="store_true",
                    help="rebuild a corrupted generated M8SHIFT.agent-pack.md block "
                         "(backs the file up first; never resets the relay)")
+    i.add_argument("--profile", choices=tuple(INIT_PROFILES), default="bare",
+                   help="stable initialization profile (default: bare)")
+    i.add_argument("--capabilities", default="",
+                   help="comma-separated additive capability ids")
+    i.add_argument("--list-profiles", action="store_true",
+                   help="list profiles and exit without writing")
     gi = i.add_mutually_exclusive_group()
     gi.add_argument("--gitignore", dest="gitignore", action="store_true", default=None,
                     help="add/refresh the generated M8Shift block in .gitignore (default in headless mode)")

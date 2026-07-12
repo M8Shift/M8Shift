@@ -339,6 +339,57 @@ class InjectedFRBase(CLIBase):
 # ───────────────────────────── regression: init / portability ───────────────
 
 class TestInit(CLIBase):
+    def test_init_profiles_render_only_and_idempotent(self):
+        sentinel = os.path.join(self.d, "sentinel")
+        self.init("--profile", "full")
+        bootstrap = os.path.join(self.d, ".m8shift", "bootstrap.json")
+        with open(bootstrap, encoding="utf-8") as f:
+            first = f.read()
+        data = json.loads(first)
+        self.assertEqual(data["schema"], "m8shift.bootstrap/1")
+        self.assertEqual(data["bootstrap_schema"], 1)
+        self.assertEqual(data["capability_registry_version"], 1)
+        hook = next(x for x in data["capabilities"] if x["id"] == "hook-samples")
+        self.assertIsInstance(hook["actions"][0]["argv"], list)
+        self.assertFalse(os.path.exists(sentinel))
+        self.init("--profile", "full")
+        with open(bootstrap, encoding="utf-8") as f:
+            self.assertEqual(f.read(), first)
+
+    def test_init_profiles_aliases_and_list_is_write_free(self):
+        r = self.cw("init", "--list-profiles")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("full: relay-core,headless-config", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
+        self.init("--profile", "headless")
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "LISTENER.md")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "HOOKS.md")))
+
+    def test_init_capability_artifacts_do_not_clobber(self):
+        path = os.path.join(self.d, ".m8shift", "HOOKS.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("mine\n")
+        self.init("--profile", "ops")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "mine\n")
+
+    def test_doctor_bootstrap_stale_keys_on_schema_not_engine_version(self):
+        self.init("--profile", "ops")
+        path = os.path.join(self.d, ".m8shift", "bootstrap.json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        data["engine_version"] = "0.0.0"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        r = self.cw("doctor", "--json")
+        self.assertNotIn("bootstrap.stale", r.stdout)
+        data["capability_registry_version"] = 0
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        r = self.cw("doctor", "--json")
+        self.assertIn("bootstrap.stale", r.stdout)
+
     def test_init_creates_kit(self):
         r = self.init()
         for f in ("M8SHIFT.md", "M8SHIFT.protocol.md", "CLAUDE.md", "AGENTS.md"):
