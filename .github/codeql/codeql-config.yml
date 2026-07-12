@@ -1,0 +1,34 @@
+name: "M8Shift CodeQL config"
+
+# Query suites, most→least noisy for a stdlib-only tool:
+#   security-extended    — the security queries plus lower-precision ones that
+#                          matter here (command construction, path/symlink,
+#                          clear-text logging of sensitive data).
+#   security-and-quality — adds maintainability/correctness queries.
+# Drop `security-and-quality` if the quality noise outweighs the signal; the
+# security surface is fully covered by `security-extended` alone.
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+# Analyse the shipped product and the reference adapters/examples (they run as
+# operator-adopted argv and touch subprocess + untrusted provider output, so
+# they are in scope), plus the helper scripts.
+paths:
+  - "*.py"                         # m8shift.py + the m8shift-*.py companions
+  - "examples/**/*.py"
+  - "scripts/**/*.py"
+
+# Exclude source that would only add noise, not signal:
+#   tests/         — fixtures deliberately construct hostile/malformed inputs
+#                    (ESC bytes, path escapes, oversized payloads); CodeQL
+#                    flags those as issues when they are the test's whole point.
+#   shift-demos/   — intentionally-imperfect teaching fixtures (one starts
+#                    unimplemented, one ships a known bug).
+paths-ignore:
+  - "tests/**"
+  - "examples/shift-demos/**"
+
+# No third-party dependencies to model — the project is stdlib-only, so no
+# dependency-install step and no packs beyond the default Python pack.
+# (If a query pack is added later, list it under `packs:` here.)

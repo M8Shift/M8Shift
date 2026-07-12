@@ -1,0 +1,74 @@
+name: CodeQL
+
+# Advanced CodeQL setup for M8Shift — a stdlib-only Python project (no build,
+# no third-party deps). Python is the only CodeQL-analysable language here
+# (the shell installers are not analysed by CodeQL). The security-relevant
+# surface is subprocess handling (usage adapters, the listener/runner), path
+# and symlink handling, and untrusted local data (skills/*/SKILL.md, provider
+# adapter output) — the extended + quality query suites cover those.
+
+on:
+  push:
+    branches: [main]
+    # Skip runs that only touch non-code assets.
+    paths:
+      - '**/*.py'
+      - '.github/workflows/codeql.yml'
+      - '.github/codeql/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.py'
+      - '.github/workflows/codeql.yml'
+      - '.github/codeql/**'
+  schedule:
+    # Weekly deep scan, Monday 06:17 UTC (off the :00 mark on purpose).
+    - cron: '17 6 * * 1'
+  workflow_dispatch: {}
+
+# One in-flight run per ref; a newer push cancels the older PR run but never
+# a push-to-main run (which feeds the security dashboard).
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Only what CodeQL needs — write findings, read the tree.
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Structured as a matrix so a second language can be added later
+        # without reshaping the job.
+        include:
+          - language: python
+            build-mode: none   # interpreted; CodeQL extracts source directly
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # The advanced knobs live in the config file, not inline, so the
+          # query suites and path filters are reviewable in one place.
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:${{ matrix.language }}'
