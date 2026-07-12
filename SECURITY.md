@@ -80,6 +80,9 @@ in scope:
 
 ## Automated checks
 
+The framework-to-control mapping and its executable regression coverage are
+documented in [the security threat model](docs/en/security-threat-model.md).
+
 This repository runs, on every push/PR and on a schedule:
 
 - **CodeQL** (`security-extended` + `security-and-quality`) over the Python.

@@ -81,6 +81,32 @@ python3 scripts/gen_docs.py
 
 ## Commits
 
+## Versioning (GoRoCo)
+
+M8Shift uses **GoRoCo** (`Génération.Révision.Correction`), published as
+`vG.R.C`. The practical rule is: the more consequential the change, the farther
+left the changed number.
+
+- **Génération** changes only for an operator-visible compatibility break, such
+  as an incompatible relay format or a removed/renamed command or flag. It
+  resets R and C and requires a migration note (for example, `v4.0.0`).
+- **Révision** is the normal feature release: a backwards-compatible RFC,
+  command, flag, module, or companion. It resets C (for example, `v3.58.0`).
+- **Correction** fixes a bug, documentation, or hardening issue without adding
+  a capability beyond the fix (for example, `v3.50.1`). Corrections are
+  intentionally rarer than Révisions in the existing tag history.
+
+A release commit updates `VERSION` in lockstep across the core, companions,
+security and architecture/module references; `doctor`'s module-reference check
+detects stale documentation versions. Regenerate `checksums.sha256`, verify the
+release commit, merge it to `main`, then create and verify the `vG.R.C` tag
+before pushing it.
+
+M8Shift does not normally publish alpha, beta, or release-candidate tags; `wip/*`
+branches are its pre-release channel. If external testing ever requires a named
+candidate, `vG.R.C-rc.N` is the explicit escape hatch and must not be presented
+as the final release.
+
 Branch per change; keep `main` green. Don't commit relay artefacts (`M8SHIFT.md`,
 `.m8shift.lock`, `CLAUDE.md`, `AGENTS.md`, …) — they are gitignored.
 

@@ -5474,6 +5474,27 @@ def _security_doctor_findings(lk):
     findings = []
     effective_root = os.path.realpath(os.path.dirname(COWORK))
     script_root = os.path.realpath(HERE)
+    if os.path.isdir(os.path.join(script_root, ".git")):
+        try:
+            hook_path = subprocess.run(
+                ["git", "config", "--get", "core.hooksPath"], cwd=script_root,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                universal_newlines=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            hook_path = ""
+        deny_rules, _deny_allows, _deny_findings = _load_denylist()
+        dormant = []
+        if hook_path.rstrip("/") != "hooks":
+            dormant.append("core.hooksPath is not `hooks`")
+        if not deny_rules:
+            dormant.append("no confidential denylist is resolvable")
+        if dormant:
+            findings.append(doctor_finding(
+                "security.anti_leak_gate_dormant", "info",
+                "local anti-leak gate is dormant: %s." % "; ".join(dormant),
+                ".git/config",
+                "run `git config core.hooksPath hooks` and configure M8SHIFT_DENYLIST",
+            ))
     if effective_root != script_root:
         findings.append(doctor_finding(
             "root.external", "warning",
