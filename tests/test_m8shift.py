@@ -340,7 +340,6 @@ class InjectedFRBase(CLIBase):
 
 class TestInit(CLIBase):
     def test_init_profiles_render_only_and_idempotent(self):
-        sentinel = os.path.join(self.d, "sentinel")
         self.init("--profile", "full")
         bootstrap = os.path.join(self.d, ".m8shift", "bootstrap.json")
         with open(bootstrap, encoding="utf-8") as f:
@@ -351,10 +350,28 @@ class TestInit(CLIBase):
         self.assertEqual(data["capability_registry_version"], 1)
         hook = next(x for x in data["capabilities"] if x["id"] == "hook-samples")
         self.assertIsInstance(hook["actions"][0]["argv"], list)
-        self.assertFalse(os.path.exists(sentinel))
         self.init("--profile", "full")
         with open(bootstrap, encoding="utf-8") as f:
             self.assertEqual(f.read(), first)
+
+    def test_init_capability_actions_are_rendered_not_executed(self):
+        sentinel = os.path.join(self.d, "action-ran")
+        injected = dict(cowork.CAPABILITY_REGISTRY)
+        injected["probe"] = {
+            "description": "Render-only execution probe",
+            "artifacts": [],
+            "actions": [{
+                "kind": "run_command",
+                "argv": [sys.executable, "-c", f"open({sentinel!r}, 'w').close()"],
+                "approval": "operator",
+                "verify_argv": [sys.executable, "-c", "raise SystemExit(1)"],
+            }],
+            "never_auto": True,
+        }
+        with mock.patch.object(cowork, "HERE", self.d), \
+             mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
+            cowork.apply_init_capabilities(["probe"], "bare")
+        self.assertFalse(os.path.exists(sentinel))
 
     def test_init_profiles_aliases_and_list_is_write_free(self):
         r = self.cw("init", "--list-profiles")
