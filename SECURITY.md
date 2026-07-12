@@ -60,7 +60,7 @@ in scope:
 - **`skills/*/SKILL.md`** and provider **adapter output**: third-party text on a
   cloned/shared repo. It is parsed and, for skills, rendered into `doctor`
   output — control-character/terminal-escape stripping and bounded, fail-open
-  reads apply. (A gap here was fixed in the v3.58.0 cycle.)
+  reads apply. (A gap here was fixed in the v3.59.0 cycle.)
 - **Filesystem paths**: readers use `O_NOFOLLOW` + `fstat` regular-file checks
   and bounded reads; writers use `O_CREAT|O_EXCL|O_NOFOLLOW`. Symlink/TOCTOU
   and path-escape reports are in scope.

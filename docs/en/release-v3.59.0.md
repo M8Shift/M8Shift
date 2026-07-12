@@ -1,6 +1,4 @@
-# v3.59.0 release proposal
-
-Status: proposed — operator decision required.
+# v3.59.0 release notes
 
 ## Version
 
@@ -8,8 +6,6 @@ Status: proposed — operator decision required.
 conformance, listener-observability, and stale-state capabilities without a
 relay-format or CLI compatibility break. It is more than a Correction and does
 not require a Génération.
-
-## Release-notes skeleton
 
 ### Security baseline
 
@@ -21,15 +17,12 @@ not require a Génération.
 ### Runtime honesty
 
 - #108 slice 2 listener capabilities, TTY waiter notice, and stale-AWAITING
-  advisory (subject to design review).
-- #107 explicit last-known stale usage fallback (subject to design review).
+  advisory.
+- #107 explicit last-known stale usage fallback.
 
 ### Upgrade and verification
 
 - No migration and no removed or renamed command/flag.
-- Regenerate protocol artifacts and `checksums.sha256`; update lockstep version
-  references; run focused security/runtime suites and the full quality gate;
-  verify the release commit and tag before pushing either remote.
-
-The operator approves, revises, or defers the cut after design review and
-implementation status are known.
+- Release artifacts and `checksums.sha256` are regenerated and lockstep version
+  references are updated. Verify the release commit and tag before pushing
+  either remote.

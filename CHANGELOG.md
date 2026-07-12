@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.59.0 — 2026-07-12
+
 - **Security baseline and local anti-leak enforcement (RFC 052).** Advanced
   CodeQL configuration, Bandit, ShellCheck, actionlint, OpenSSF Scorecard, and
   Dependabot now cover the repository; `SECURITY.md` and the repository threat

@@ -32,7 +32,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.58.0"
+VERSION = "3.59.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -9489,7 +9489,7 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
             ["tokscale"], popen=lambda *a, **k: (_ for _ in ()).throw(OSError("no binary"))))
 
     def test_stdout_is_memory_bounded_not_post_hoc(self):
-        # SECURITY (v3.58.0 hunt, LOW): the reader must STOP at the cap, never
+        # SECURITY (v3.59.0 hunt, LOW): the reader must STOP at the cap, never
         # materialize an unbounded child stdout. An infinite stream returns None
         # after a bounded number of reads (~cap/65536), not after OOM.
         mod = self._example()
@@ -12202,7 +12202,7 @@ class TestRFC050SkillsDoctor(CLIBase):
                 if f["check"].startswith("skills.")]
 
     def test_untrusted_values_never_inject_terminal_escapes(self):
-        # SECURITY (v3.58.0 adversarial hunt, MEDIUM): skills/ is third-party
+        # SECURITY (v3.59.0 adversarial hunt, MEDIUM): skills/ is third-party
         # content. Attacker-authored name/lane/dir values must NOT carry ESC/C0
         # bytes into the human doctor output (terminal-escape injection).
         esc = "\x1b"
