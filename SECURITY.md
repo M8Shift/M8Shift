@@ -99,8 +99,11 @@ This repository runs, on every push/PR and on a schedule:
 
 CI is the backstop, but the cheapest place to stop a compartmentalization leak
 is before it ever leaves the machine. The repo ships `hooks/pre-commit` and
-`hooks/pre-push`, which run the same `doctor --hygiene-only --lint` (and, at
-push time, `scripts/scrub-check.py` over history) locally. Install with:
+`hooks/pre-push`, which run the same `doctor --hygiene-only --lint` locally —
+and, at push time, `scripts/scrub-check.py` over **each pushed range** (the
+commits this push actually publishes, derived from git's stdin ref updates;
+deletion-only pushes skip the scan). The full-history walk stays a CI/audit
+tool (`scrub-check.py` without `--range`), not a per-push tax. Install with:
 
     git config core.hooksPath hooks
 

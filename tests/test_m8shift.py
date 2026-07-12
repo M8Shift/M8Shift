@@ -12622,6 +12622,10 @@ class TestRFC052ScrubCheck(CLIBase):
             fh.write(text)
         return p
 
+    def _sha(self, rev="HEAD"):
+        return subprocess.run(["git", "rev-parse", rev], cwd=self.d,
+                              capture_output=True, text=True).stdout.strip()
+
     def _scrub(self, *args, denylist=None, env_extra=None):
         env = dict(os.environ)
         env["HOME"] = self.home
@@ -12800,6 +12804,89 @@ class TestRFC052ScrubCheck(CLIBase):
                                cwd=self.d, capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 0, (name, r.stderr))
             self.assertIn("continuing without it", r.stderr, name)
+
+    def test_range_scans_only_pushed_commits(self):
+        # Codex review blocker (v3.58 cycle): a full-history walk per push
+        # trains --no-verify. --range A..B must scan ONLY what the push
+        # publishes: an old leak OUTSIDE the range no longer fires.
+        self._commit("docs/old.md", "ancient %s leak\n" % self.TERM)
+        self._rm_commit("docs/old.md")
+        base = self._sha()
+        self._commit("docs/new.md", "clean content\n")
+        tip = self._sha()
+        dl = self._deny(self.TERM + "\n")
+        r = self._scrub("--range", "%s..%s" % (base, tip), denylist=dl)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("1 pushed range(s)", r.stdout)
+        # …but a range that INTRODUCES the term hits on tip AND history.
+        self._commit("docs/new2.md", "fresh %s here\n" % self.TERM)
+        r = self._scrub("--range", "%s..%s" % (base, self._sha()), denylist=dl)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("TIP hit", r.stdout)
+        self.assertIn("HISTORY hit", r.stdout)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)   # still redacted
+
+    def test_range_bare_sha_scans_new_branch_against_remotes(self):
+        # New branch (all-zero remote sha): bare --range SHA scans
+        # `SHA --not --remotes` — commits already on a remote-tracking ref
+        # (the old leak below) are NOT rescanned; genuinely new ones are.
+        self._commit("docs/old.md", "ancient %s leak\n" % self.TERM)
+        self._rm_commit("docs/old.md")
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main",
+                        self._sha()], cwd=self.d, capture_output=True)
+        self._commit("docs/feat.md", "clean feature\n")
+        dl = self._deny(self.TERM + "\n")
+        r = self._scrub("--range", self._sha(), denylist=dl)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self._commit("docs/feat2.md", "with %s inside\n" % self.TERM)
+        r = self._scrub("--range", self._sha(), denylist=dl)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_range_invalid_or_refs_pull_mix_is_scanner_error(self):
+        # A non-hex value must never reach the git argv (option injection),
+        # and range mode is incompatible with the CI refs-pull full walk.
+        # Both are rc 2 = scanner ERROR — the hooks fail OPEN on it.
+        self._commit("docs/a.md", "clean\n")
+        dl = self._deny(self.TERM + "\n")
+        r = self._scrub("--range", "--exec=evil", denylist=dl)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        r = self._scrub("--range", "deadbeef", "--refs-pull", denylist=dl)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_pre_push_hook_scans_pushed_range_and_skips_deletions(self):
+        # E2 wiring: the hook turns git's stdin ref-update lines into --range
+        # specs. Old leak outside the pushed range -> push proceeds even under
+        # enforce; a deletion record is skipped; a range that introduces the
+        # term still blocks.
+        self._commit("docs/old.md", "ancient %s leak\n" % self.TERM)
+        self._rm_commit("docs/old.md")
+        base = self._sha()
+        self._commit("docs/new.md", "clean\n")
+        tip = self._sha()
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(self.d, "scripts", "scrub-check.py"))
+        dl = self._deny(self.TERM + "\n")
+
+        def hook(stdin_text):
+            env = dict(os.environ)
+            env.update(HOME=self.home, M8SHIFT_DENYLIST=dl,
+                       M8SHIFT_SCRUB_ENFORCE="1")
+            env.pop("M8SHIFT_AGENT", None)
+            return subprocess.run(["sh", os.path.join(REPO, "hooks", "pre-push")],
+                                  cwd=self.d, capture_output=True, text=True,
+                                  env=env, input=stdin_text)
+
+        zeros = "0" * 40
+        r = hook("refs/heads/main %s refs/heads/main %s\n" % (tip, base))
+        self.assertEqual(r.returncode, 0, r.stderr)      # old leak not in range
+        self.assertIn("pushed range", r.stderr)
+        r = hook("refs/heads/gone %s refs/heads/gone %s\n" % (zeros, base))
+        self.assertEqual(r.returncode, 0, r.stderr)      # deletion: skipped
+        self._commit("docs/new2.md", "with %s inside\n" % self.TERM)
+        r = hook("refs/heads/main %s refs/heads/main %s\n" % (self._sha(), base))
+        self.assertEqual(r.returncode, 1, r.stderr)      # introduced -> blocked
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)
 
 
 class TestRFC052AnchorMode(CLIBase):

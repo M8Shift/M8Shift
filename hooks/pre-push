@@ -10,12 +10,19 @@
 # What runs:
 #   1. `m8shift.py doctor --hygiene-only --lint` — the RFC 052 C1+C3 data-hygiene
 #      lint (real home paths + operator-confidential denylist, redacted output).
-#   2. `scripts/scrub-check.py` (if present) — the denylist over git TIP + HISTORY
-#      via raw git (never a lossy optimizer). rc 1 = hit, rc >= 2 = scanner error.
+#   2. `scripts/scrub-check.py` (if present) — the denylist over WHAT THIS PUSH
+#      PUBLISHES: git feeds the hook one `<local ref> <local sha> <remote ref>
+#      <remote sha>` line per ref on stdin, and each becomes a `--range`
+#      (remote..local; a bare local sha when the remote side is new or unknown;
+#      deletions are skipped — nothing leaves). Raw git, never a lossy optimizer.
+#      Scanning only the pushed ranges keeps the hook fast — a full-history walk
+#      per push trains a `--no-verify` reflex that rots the gate. The full walk
+#      remains available (CI, audits): run scrub-check.py without --range.
+#      rc 1 = hit, rc >= 2 = scanner error (fail open).
 #
 # Install (per clone, hooks are not version-controlled by Git):
-#   cp hooks/pre-push <repo>/.git/hooks/pre-push
-#   chmod +x <repo>/.git/hooks/pre-push
+#   git config core.hooksPath hooks
+#   (or: cp hooks/pre-push <repo>/.git/hooks/pre-push && chmod +x it)
 
 set -eu
 
@@ -44,15 +51,52 @@ if [ -n "${m8shift}" ]; then
 	fi
 fi
 
-# --- 2. denylist scrub over tip + history (E1) -----------------------------------
+# --- 2. denylist scrub over the pushed ranges (E1) --------------------------------
+# Git's pre-push stdin: one `<local ref> <local sha> <remote ref> <remote sha>`
+# line per ref being pushed. Only read it when stdin is NOT a terminal (a manual
+# `sh hooks/pre-push` run from a shell has no ref lines — fall back to the full
+# tip+history scan rather than hang on a read).
+ranges=""
+stdin_lines=0
+if [ ! -t 0 ]; then
+	while read -r _local_ref local_sha _remote_ref remote_sha; do
+		[ -n "${local_sha:-}" ] || continue
+		stdin_lines=$((stdin_lines + 1))
+		case "${local_sha}" in
+		*[!0]*) ;;                       # has a non-zero digit: a real object
+		*) continue ;;                   # all zeros: a DELETION — nothing leaves
+		esac
+		case "${remote_sha:-}" in
+		"" ) ranges="${ranges} --range ${local_sha}" ;;
+		*[!0]*)
+			# Known remote base -> scan exactly the new commits. If the base
+			# object is absent locally (stale tracking), the bare-sha form
+			# over-scans (--not --remotes) instead of erroring out.
+			if git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
+				ranges="${ranges} --range ${remote_sha}..${local_sha}"
+			else
+				ranges="${ranges} --range ${local_sha}"
+			fi
+			;;
+		*) ranges="${ranges} --range ${local_sha}" ;;   # new branch/tag
+		esac
+	done
+fi
+
 scrub="${repo_root}/scripts/scrub-check.py"
 if [ -f "${scrub}" ]; then
-	scrub_rc=0
-	python3 "${scrub}" --repo "${repo_root}" >&2 || scrub_rc=$?
-	if [ "${scrub_rc}" -eq 1 ]; then
-		block=1
-	elif [ "${scrub_rc}" -ge 2 ]; then
-		printf '%s\n' "m8shift pre-push: scrub-check failed (rc ${scrub_rc}) — continuing without it." >&2
+	if [ "${stdin_lines}" -gt 0 ] && [ -z "${ranges}" ]; then
+		# Every pushed ref was a deletion: nothing new leaves the machine.
+		printf '%s\n' "m8shift pre-push: deletion-only push — scrub skipped (nothing published)." >&2
+	else
+		scrub_rc=0
+		# shellcheck disable=SC2086 # intentional word-splitting: hex-only rev specs
+		python3 "${scrub}" --repo "${repo_root}" ${ranges} >&2 || scrub_rc=$?
+		if [ "${scrub_rc}" -eq 1 ]; then
+			block=1
+		elif [ "${scrub_rc}" -ge 2 ]; then
+			printf '%s\n' "m8shift pre-push: scrub-check failed (rc ${scrub_rc}) — continuing without it." >&2
+		fi
 	fi
 fi
 
