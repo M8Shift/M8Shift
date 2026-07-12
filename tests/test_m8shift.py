@@ -373,6 +373,29 @@ class TestInit(CLIBase):
             cowork.apply_init_capabilities(["probe"], "bare")
         self.assertFalse(os.path.exists(sentinel))
 
+    def test_init_multiple_render_only_capabilities_are_preserved_and_idempotent(self):
+        sentinels = [os.path.join(self.d, "action-ran-%d" % i) for i in range(2)]
+        injected = dict(cowork.CAPABILITY_REGISTRY)
+        for i, sentinel in enumerate(sentinels):
+            injected["probe-%d" % i] = {
+                "description": "Render-only probe %d" % i, "artifacts": [],
+                "actions": [{"kind": "run_command", "argv": [sys.executable, "-c",
+                             "open(%r, 'w').close()" % sentinel], "approval": "operator"}],
+                "never_auto": True,
+            }
+        with mock.patch.object(cowork, "HERE", self.d), \
+             mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
+            cowork.apply_init_capabilities(["probe-0", "probe-1"], "bare")
+            with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
+                first = fh.read()
+            cowork.apply_init_capabilities(["probe-0", "probe-1"], "bare")
+            with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
+                second = fh.read()
+        self.assertEqual([c["id"] for c in json.loads(first)["capabilities"]],
+                         ["probe-0", "probe-1"])
+        self.assertEqual(second, first)
+        self.assertFalse(any(os.path.exists(path) for path in sentinels))
+
     def test_init_profiles_aliases_and_list_is_write_free(self):
         r = self.cw("init", "--list-profiles")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -6624,6 +6647,24 @@ class _InstallerUpgradeDelegateTests(unittest.TestCase):
         self.assertIn("Generation change refused", result.stderr)
         self.assertEqual(self._snapshot(), before)
 
+    def test_semantic_minor_boundary_accepts_39_to_310_but_refuses_4(self):
+        for name in self.FILES:
+            self._reversion(os.path.join(self.target, name), "3.9.0")
+            self._reversion(os.path.join(self.src, name), "3.10.0")
+        self._manifest()
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with open(os.path.join(self.target, "m8shift.py"), encoding="utf-8") as fh:
+            self.assertIn('VERSION = "3.10.0"', fh.read())
+        for name in self.FILES:
+            self._reversion(os.path.join(self.src, name), "4.0.0")
+        self._manifest()
+        before = self._snapshot()
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Generation change refused", result.stderr)
+        self.assertEqual(self._snapshot(), before)
+
     def test_checksum_mismatch_aborts_before_delegation(self):
         with open(os.path.join(self.src, "m8shift.py"), "a", encoding="utf-8") as fh:
             fh.write("\n# tampered\n")
@@ -7188,6 +7229,31 @@ class TestInstallerPs1Parity(unittest.TestCase):
         self.assertIn("Prerequisites:", r.stdout)
         self.assertIn("No files were downloaded or written.", r.stdout)
         self.assertFalse(os.path.exists(target))
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"),
+                         "native-Windows PowerShell upgrade behavior")
+    def test_ps1_upgrade_from_local_release_preserves_relay(self):
+        source = tempfile.mkdtemp(prefix="m8shift-ps1-source-")
+        target = tempfile.mkdtemp(prefix="m8shift-ps1-target-")
+        self.addCleanup(shutil.rmtree, source, True)
+        self.addCleanup(shutil.rmtree, target, True)
+        files = ("m8shift.py", "m8shift-top.py", "m8shift-worktree.py",
+                 "m8shift-runtime.py", "m8shift-context.py", "m8shift-e2e.py",
+                 "m8shift-headroom.py", "m8shift-i18n.py")
+        for name in files:
+            shutil.copy(os.path.join(REPO, name), source)
+        with open(os.path.join(source, "checksums.sha256"), "w", encoding="utf-8") as out:
+            for name in files:
+                body = open(os.path.join(source, name), "rb").read()
+                out.write("%s  %s\n" % (hashlib.sha256(body).hexdigest(), name))
+        subprocess.run([sys.executable, os.path.join(source, "m8shift.py"), "init"],
+                       cwd=target, check=True, capture_output=True, text=True)
+        relay = open(os.path.join(target, "M8SHIFT.md"), "rb").read()
+        r = subprocess.run(["pwsh", "-NoProfile", "-File", os.path.join(REPO, "install.ps1"),
+                            "-Upgrade", "-Dir", target, "-SourceDir", source],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(open(os.path.join(target, "M8SHIFT.md"), "rb").read(), relay)
 
 
 class TestDoctorInstall(CLIBase):

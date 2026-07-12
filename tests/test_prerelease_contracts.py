@@ -45,6 +45,17 @@ def test_parallel_scrub_worker_failure_is_ordered_and_fail_closed(tmp_path):
     # The first rule's completed hit is emitted before the second rule's error.
     assert out.getvalue().startswith("HISTORY hit:")
 
+    def nonzero(cmd, repo):
+        if "log" in cmd:
+            return SimpleNamespace(returncode=128, stdout="", stderr="bad history")
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = scrub.main(["--repo", str(ROOT), "--denylist", str(denylist)], out, err, nonzero)
+    assert rc == 2
+    assert "ERROR git log rc=128" in err.getvalue()
+    assert "scrub-check: clean" not in out.getvalue()
+
 
 def test_ci_dependency_installs_are_hash_closed():
     workflows = list((ROOT / ".github" / "workflows").glob("*.yml"))
