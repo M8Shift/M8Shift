@@ -226,10 +226,15 @@ def _load_access_token(env=None, system=None, run=subprocess.run, now_ms=None):
 
 
 def _fetch(token):
+    # Defence in depth: only ever speak HTTPS to the fixed provider endpoint.
+    # Guards a future edit that repointed USAGE_URL at file:/ or a custom
+    # scheme (Bandit B310 / CWE-939). The literal is https today; assert it.
+    if not USAGE_URL.startswith("https://"):
+        raise ValueError("usage endpoint must be https")
     req = urllib.request.Request(
         USAGE_URL, headers={"Authorization": f"Bearer {token}",
                             "anthropic-beta": "oauth-2025-04-20"})
-    with urllib.request.urlopen(req, timeout=10) as resp:   # noqa: S310 (https literal)
+    with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 - https-guarded literal
         return json.loads(resp.read().decode("utf-8"))
 
 

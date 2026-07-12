@@ -1,20 +1,24 @@
 name: Lint
 
 # Static linting that CodeQL does not cover: the bash installers/hooks
-# (ShellCheck) and the GitHub Actions workflows themselves (actionlint).
-# Both linters run from tooling already on the runner / an official pinned
-# image — no third-party wrapper action to trust.
+# (ShellCheck), the GitHub Actions workflows themselves (actionlint), and a
+# Python SAST pass (Bandit) for the idioms CodeQL's default suites are lighter
+# on — shell=True, eval/exec, weak crypto, insecure deserialisation, urlopen
+# schemes. Linters run from tooling on the runner, an official pinned image, or
+# a version-pinned PyPI package — no third-party wrapper action to trust.
 
 on:
   push:
     branches: [main]
     paths:
+      - '**/*.py'
       - '**/*.sh'
       - 'hooks/**'
       - '.github/workflows/**'
   pull_request:
     branches: [main]
     paths:
+      - '**/*.py'
       - '**/*.sh'
       - 'hooks/**'
       - '.github/workflows/**'
@@ -33,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Run ShellCheck
         run: |
           shellcheck --version
@@ -52,9 +56,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Run actionlint
-        # Official pinned image; Dependabot bumps the tag.
+        # Official image pinned by immutable digest (rhysd/actionlint:1.7.7).
+        # Dependabot's docker ecosystem is not enabled here; bump this digest
+        # by hand (or add a docker update to dependabot.yml) on a new release.
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
-            rhysd/actionlint:1.7.7 -color
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            -color
+
+  bandit:
+    name: Bandit (Python SAST)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.x"
+      - name: Install Bandit
+        # Version-pinned dev tool; the project itself stays stdlib-only at
+        # runtime — Bandit is CI-only and never imported by the shipped code.
+        run: python -m pip install --disable-pip-version-check bandit==1.9.4
+      - name: Run Bandit (fail on medium+ severity / confidence)
+        # The stdlib subprocess argv calls (B603/B607/B404) and the fail-open
+        # try/except reads (B110/B112) are low-severity by design and stay
+        # reported-but-non-blocking. The gate is the classes that would be real
+        # findings here: shell=True (B602/HIGH), eval/exec, weak hashes,
+        # insecure deserialisation, and non-https urlopen schemes (B310) — see
+        # the # nosec justifications in the tree. Tests are excluded (assert is
+        # expected there; B101).
+        run: |
+          bandit --version
+          bandit -r m8shift.py scripts examples \
+            --severity-level medium --confidence-level medium
