@@ -7853,6 +7853,7 @@ def _usage_read_snapshots(lk):
         roster = set(active_agents(lk))
         found = {}
         usable = {}
+        known_windows = {}
         for line in lines:
             if not line.strip():
                 continue
@@ -7880,6 +7881,14 @@ def _usage_read_snapshots(lk):
                 continue                            # B: … and a valid agent id
             if ev_agent not in roster:
                 continue                            # B: render only roster agents
+            # Keep a display-only memory of standard window kinds seen in earlier
+            # snapshots.  This lets the human line distinguish a transiently absent
+            # provider field from a provider that never offered that window.  The
+            # underscore-prefixed marker is stripped by _usage_json_safe, preserving
+            # the frozen snapshot/status JSON contract.
+            prior = dict(known_windows.get(ev_agent, {}))
+            snap = dict(snap)
+            snap["_m8shift_known_windows"] = prior
             # Preserve the newest informative reading as a display fallback.  A
             # provider may emit a schema-valid empty snapshot on a transient read
             # failure; replacing useful history with that row makes status least
@@ -7894,6 +7903,15 @@ def _usage_read_snapshots(lk):
             if _usage_ratio_valid(snap.get("decision_ratio")) or has_window:
                 usable[ev_agent] = snap
             found[ev_agent] = snap                  # file-order last wins
+            if isinstance(windows, list):
+                remembered = known_windows.setdefault(ev_agent, {})
+                for w in windows:
+                    if not isinstance(w, dict):
+                        continue
+                    kind = w.get("kind")
+                    if kind in ("session_5h", "weekly") and _usage_window_pct(
+                            w.get("used_ratio")) is not None:
+                        remembered[kind] = w.get("resets_at")
         for agent, latest in list(found.items()):
             windows = latest.get("windows")
             latest_has_window = isinstance(windows, list) and any(
@@ -8059,6 +8077,19 @@ def _usage_window_frags(snap, ref):
             continue
         when = _usage_reset_when(w.get("resets_at"), ref)
         frags.append(f"{label} {pct}" + (f" (Reset {when})" if when else ""))
+    current_kinds = {
+        w.get("kind") for w in windows
+        if isinstance(w, dict) and isinstance(w.get("kind"), str)
+        and _usage_window_pct(w.get("used_ratio")) is not None
+    }
+    known = snap.get("_m8shift_known_windows")
+    if isinstance(known, dict):
+        for kind in ("session_5h", "weekly"):
+            if kind in current_kinds or kind not in known:
+                continue
+            label = USAGE_WINDOW_LABELS.get(kind) or kind
+            when = _usage_reset_when(known.get(kind), ref)
+            frags.append(f"{label} N/A" + (f" (Reset {when})" if when else ""))
     if len(frags) > USAGE_LINE_MAX_WINDOWS:
         extra = len(frags) - USAGE_LINE_MAX_WINDOWS
         frags = frags[:USAGE_LINE_MAX_WINDOWS] + [f"+{extra}"]

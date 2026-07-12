@@ -12146,6 +12146,36 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertEqual(entry["windows"][0]["used_ratio"], 0.64)
         self.assertEqual(entry["windows"][1]["used_ratio"], 0.42)
 
+    def test_known_standard_window_absent_now_renders_na_without_inventing_pct(self):
+        reset = self.fresh_iso(7200)
+        older = self.snapshot(agent="codex", windows=[
+            {"kind": "session_5h", "used_ratio": 0.64, "resets_at": reset},
+            {"kind": "weekly", "used_ratio": 0.42, "resets_at": None},
+        ])
+        current = self.snapshot(agent="codex", decision_ratio=0.43, windows=[
+            {"kind": "weekly", "used_ratio": 0.43, "resets_at": None},
+        ])
+        self.write_sidecar([self.event(older), self.event(current)])
+        line = self._agent_line(self.status_out(), "codex")
+        self.assertIn("weekly 43%", line)
+        self.assertIn(f"5h N/A (Reset {self._local_when(reset)})", line)
+        self.assertNotIn("5h 64%", line)
+        # Internal history is display-only; frozen JSON echoes only the current snapshot.
+        entry = next(u for u in json.loads(self.status_out("--json"))["usage"]
+                     if u["agent"] == "codex")
+        self.assertEqual(entry["windows"], current["windows"])
+        self.assertFalse(any(k.startswith("_") for k in entry))
+
+    def test_weekly_only_forever_does_not_render_5h_na(self):
+        weekly = {"kind": "weekly", "used_ratio": 0.42, "resets_at": None}
+        self.write_sidecar([
+            self.event(self.snapshot(agent="codex", windows=[weekly])),
+            self.event(self.snapshot(agent="codex", windows=[{**weekly, "used_ratio": 0.43}])),
+        ])
+        line = self._agent_line(self.status_out(), "codex")
+        self.assertIn("weekly 43%", line)
+        self.assertNotIn("5h N/A", line)
+
     def test_unified_line_field_level_degradation(self):
         far = self.fresh_iso(6 * 86400)
         self.write_sidecar([self.event(self.snapshot(
