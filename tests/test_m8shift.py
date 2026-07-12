@@ -12908,6 +12908,94 @@ class TestRFC052ScrubCheck(CLIBase):
         r = self._scrub("--range", "deadbeef", "--refs-pull", denylist=dl)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
+    def test_history_oracle_add_modify_remove_swap_and_multi_term_attribution(self):
+        """Gate 1: freeze today's per-term pickaxe behavior before optimizing.
+
+        In particular, moving the sole occurrence between files without changing
+        its repository-wide count *is* a hit under today's ``git log -S`` oracle
+        (pickaxe evaluates the changed file pairs).  An optimized implementation
+        must preserve that result and per-term labels for multi-term commits.
+        """
+        alpha, beta = "SyntheticAlphaSecret", "SyntheticBetaSecret"
+        dl = self._deny("%s\n%s\n" % (alpha, beta))
+        self._commit("a.txt", "clean\n", "base")
+        base = self._sha()
+        self._commit("a.txt", "one %s\n" % alpha, "add alpha")
+        add = self._sha()
+        self._commit("a.txt", "changed %s case\n" % alpha.upper(), "modify/case")
+        modify = self._sha()
+        # Same commit: alpha moves a.txt -> b.txt, total occurrence count stays 1.
+        with open(os.path.join(self.d, "a.txt"), "w", encoding="utf-8") as fh:
+            fh.write("clean again\n")
+        with open(os.path.join(self.d, "b.txt"), "w", encoding="utf-8") as fh:
+            fh.write("moved %s\n" % alpha)
+        subprocess.run(["git", "add", "a.txt", "b.txt"], cwd=self.d,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "swap"], cwd=self.d,
+                       capture_output=True)
+        swap = self._sha()
+        self._commit("b.txt", "%s and %s\n" % (alpha, beta), "multi")
+        multi = self._sha()
+        self._rm_commit("b.txt", "remove both")
+        remove = self._sha()
+
+        r = self._scrub("--range", "%s..%s" % (base, remove), denylist=dl)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        labels = {alpha: self._scrub_mod().label_of(alpha),
+                  beta: self._scrub_mod().label_of(beta)}
+        history = [line for line in r.stdout.splitlines()
+                   if line.startswith("HISTORY hit:")]
+        self.assertTrue(any(add[:12] in x and labels[alpha] in x for x in history))
+        self.assertNotIn(modify[:12], "\n".join(history))  # count unchanged
+        self.assertTrue(any(swap[:12] in x and labels[alpha] in x for x in history))
+        self.assertTrue(any(multi[:12] in x and labels[beta] in x for x in history))
+        self.assertTrue(any(remove[:12] in x and labels[alpha] in x for x in history))
+        self.assertTrue(any(remove[:12] in x and labels[beta] in x for x in history))
+        self.assertNotIn(alpha, r.stdout + r.stderr)
+        self.assertNotIn(beta, r.stdout + r.stderr)
+
+    def test_tip_oracle_word_allow_path_binary_non_utf8_and_case(self):
+        """Gate 1 adversarial tip fixture: literal/word/allow/I/O contracts."""
+        term = "ZebraSecret"
+        self._commit("case.txt", "mixed zEbRaSeCrEt value\n")
+        self._commit("substring.txt", "ZebraSecrets is plural\n")
+        self._commit("approved/path.txt", "%s real content\n" % term)
+        self._commit("allowed.txt", "%s approved marker\n" % term)
+        p = os.path.join(self.d, "binary.bin")
+        with open(p, "wb") as fh:
+            fh.write(b"\x00" + term.encode("ascii") + b"\x00")
+        subprocess.run(["git", "add", "binary.bin"], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "binary"], cwd=self.d,
+                       capture_output=True)
+        dl = self._deny("word:%s\nallow:approved marker\n" % term)
+        r = self._scrub("--no-history", denylist=dl)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("case.txt", r.stdout)
+        self.assertIn("approved/path.txt", r.stdout)  # allow in content only
+        self.assertNotIn("substring.txt", r.stdout)
+        self.assertNotIn("allowed.txt", r.stdout)
+        self.assertNotIn("binary.bin", r.stdout)       # git grep -I
+
+    def test_history_max_commits_is_per_term_and_output_format_is_pinned(self):
+        alpha, beta = "BoundedAlphaSecret", "BoundedBetaSecret"
+        self._commit("f.txt", "clean\n", "base")
+        base = self._sha()
+        for i in range(4):
+            body = (alpha if i % 2 == 0 else beta) + "\n"
+            self._commit("f.txt", body, "change-%d" % i)
+        r = self._scrub("--range", "%s..%s" % (base, self._sha()),
+                        "--max-commits", "2",
+                        denylist=self._deny("%s\n%s\n" % (alpha, beta)))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        history = [x for x in r.stdout.splitlines() if x.startswith("HISTORY hit:")]
+        mod = self._scrub_mod()
+        self.assertLessEqual(sum(mod.label_of(alpha) in x for x in history), 2)
+        self.assertLessEqual(sum(mod.label_of(beta) in x for x in history), 2)
+        for line in history:
+            self.assertRegex(
+                line,
+                r"^HISTORY hit: commit [0-9a-f]{12} \[denylist:[0-9a-f]{10}\]$")
+
     def test_pre_push_hook_scans_pushed_range_and_skips_deletions(self):
         # E2 wiring: the hook turns git's stdin ref-update lines into --range
         # specs. Old leak outside the pushed range -> push proceeds even under
