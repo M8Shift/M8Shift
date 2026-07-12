@@ -574,9 +574,12 @@ output: `backend_configured`, `can_invoke_agent`, `survives_parent_exit`, and
 `last_successful_run`. The first reports a validated invocation profile; the
 second means the resident listener can launch a bounded run now; the third
 describes backend lifecycle ownership, never process residency; the last is a
-timestamp or null. `ALIVE` requires both a live process and invocation
-capability. Missing, malformed, stale, or unreadable sidecars degrade to
-false/null and remain read-only.
+timestamp or null. `ALIVE` keeps its existing meaning of process residency;
+readiness is carried only by the additive `can_invoke_agent` field (consumers
+that need both properties test `status == "ALIVE" && can_invoke_agent`). This
+preserves CLI compatibility and avoids conflating residency with backend
+readiness. Missing, malformed, stale, or unreadable sidecars degrade the
+additive capability fields to false/null and remain read-only.
 
 ### Wait notice and stale-AWAITING advisory
 
@@ -585,11 +588,14 @@ detects a turn but cannot invoke a completed chat/model run. Non-interactive
 output and exit codes remain byte-identical.
 
 Runtime `doctor` adds one fail-open `runtime.stale_state` info finding only when
-the relay remains `AWAITING_<agent>` beyond the bounded threshold and no live,
-invocation-capable listener is provable. It is advisory: no claim, force,
-provider launch, or relay mutation follows. This is designed jointly with RFC
-051's stale-usage rule so both use explicit timestamps, bounded reads, and
-honest last-known semantics.
+the relay remains `AWAITING_<agent>` for more than 300 seconds, measured from
+the LOCK block's `since` timestamp, and no live, invocation-capable listener is
+provable. `doctor --stale-after SECONDS` overrides the 300-second default for
+diagnostics and accepts a non-negative integer; age exactly equal to the
+threshold is not stale, while age strictly greater is. It is advisory: no
+claim, force, provider launch, or relay mutation follows. This is designed
+jointly with RFC 051's stale-usage rule so both use explicit timestamps,
+bounded reads, and honest last-known semantics.
 
 Tests pin JSON types, human rendering, TTY-only notice behavior,
 non-interactive byte identity, backend-vs-residency separation, threshold
