@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Security baseline and local anti-leak enforcement (RFC 052).** Advanced
+  CodeQL configuration, Bandit, ShellCheck, actionlint, OpenSSF Scorecard, and
+  Dependabot now cover the repository; `SECURITY.md` and the repository threat
+  model document reporting and trust boundaries. The opt-in local anti-leak
+  gate has an explicit activation path, `scrub-check --range` supports bounded
+  history review, and the pre-push hook scans exactly the ranges being pushed.
+  `doctor` reports `security.anti_leak_gate_dormant` when enforcement is
+  configured but inactive. CI includes a behavioral, mutation-gated threat
+  conformance suite, and Scorecard publication remains disabled by default.
+- **Release governance.** CONTRIBUTING defines GoRoCo
+  (`Génération.Révision.Correction`) version selection and the verified release
+  sequence. The proposed next release is **v3.59.0** (Révision): it adds
+  backwards-compatible security and diagnostics capabilities without a relay
+  format or CLI compatibility break.
 - **#108 slice 2 + #107 — usage/listener liveness surface.** Listener status
   reports explicit host-wake capabilities (`can_invoke_agent`,
   `survives_parent_exit` — backend-only, no residency conflation —

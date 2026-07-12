@@ -259,3 +259,13 @@ number (amendment C):** an invalid/NaN/Inf `decision_ratio` is serialized as
   release ahead (so every sidecar already carries the field before the core reads
   for it). Proposed: same release; the core treats a missing `decision_window` as
   "no window attribution" (percentage still shows), so ordering is not load-bearing.
+
+## Amendment — last-known usage during stale runtime state (#107 / #108)
+
+At a watch tick, an official adapter may transiently publish a valid snapshot
+with no usable windows. Readers select the newest snapshot with usable windows,
+mark that fallback `last_known: true` in public JSON, and render it explicitly
+as stale. No underscore-prefixed selection metadata crosses the JSON boundary.
+If no usable snapshot exists in the bounded read, the existing em-dash output is
+byte-identical. The same bounded timestamp vocabulary feeds RFC 047's
+advisory-only stale-AWAITING diagnostic; neither path gates or mutates the relay.

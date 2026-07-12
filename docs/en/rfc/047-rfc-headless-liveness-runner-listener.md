@@ -561,3 +561,37 @@ listener/runner help output.
 - Doctor can explain missing/dead/skewed listener state.
 - The implementation stays stdlib-only and keeps all relay mutations inside normal
   `m8shift.py claim/append/done` flows.
+
+## Amendment — host-wake observability (#108 slice 2, design)
+
+Slice 1 documents the distinction between a waiter and a listener. Slice 2 makes
+that distinction machine-observable without changing relay authority.
+
+### Listener capability fields
+
+`listener status --agent AGENT` adds four additive fields to human and JSON
+output: `backend_configured`, `can_invoke_agent`, `survives_parent_exit`, and
+`last_successful_run`. The first reports a validated invocation profile; the
+second means the resident listener can launch a bounded run now; the third
+describes backend lifecycle ownership, never process residency; the last is a
+timestamp or null. `ALIVE` requires both a live process and invocation
+capability. Missing, malformed, stale, or unreadable sidecars degrade to
+false/null and remain read-only.
+
+### Wait notice and stale-AWAITING advisory
+
+When `wait` or `next` is attached to a TTY, it prints one concise notice that it
+detects a turn but cannot invoke a completed chat/model run. Non-interactive
+output and exit codes remain byte-identical.
+
+Runtime `doctor` adds one fail-open `runtime.stale_state` info finding only when
+the relay remains `AWAITING_<agent>` beyond the bounded threshold and no live,
+invocation-capable listener is provable. It is advisory: no claim, force,
+provider launch, or relay mutation follows. This is designed jointly with RFC
+051's stale-usage rule so both use explicit timestamps, bounded reads, and
+honest last-known semantics.
+
+Tests pin JSON types, human rendering, TTY-only notice behavior,
+non-interactive byte identity, backend-vs-residency separation, threshold
+boundaries, malformed sidecars, and suppression by a live capable listener.
+Implementation starts only after relay-peer design review.
