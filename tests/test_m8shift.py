@@ -12146,6 +12146,12 @@ class TestRFC050SkillsDoctor(CLIBase):
         with open(os.path.join(self.d, "skills", "evil\x1b[0mdir", "SKILL.md"),
                   "w", encoding="utf-8") as fh:
             fh.write("---\nname: x\ndescription: x\n---\nbody\n")
+        # oversized-body path in a control-byte dir (regression: this message
+        # interpolated raw `rel` after the first sanitize pass — Codex review).
+        os.makedirs(os.path.join(self.d, "skills", "big\x1bevil"), exist_ok=True)
+        with open(os.path.join(self.d, "skills", "big\x1bevil", "SKILL.md"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("---\nname: big-evil\ndescription: ok\n---\n" + "line\n" * 600)
         # HUMAN output is the injection surface (default branch, not --json).
         r = self.cw("doctor", "--severity-min", "info")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

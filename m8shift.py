@@ -6820,7 +6820,7 @@ def _skills_findings():
                     "skills.oversized", "info",
                     "%s: body is %d lines (> %d recommended by the open spec) — "
                     "consider moving detail into references/."
-                    % (rel, body_lines, SKILL_BODY_LINE_BUDGET), rel))
+                    % (srel, body_lines, SKILL_BODY_LINE_BUDGET), rel))
     except Exception:
         return findings               # fail-open: never brick doctor
     return findings
