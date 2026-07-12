@@ -87,7 +87,7 @@ An observed correction or recurring behavior has no normative force. It records 
 
 ### Candidate
 
-A candidate has at least one intelligible evidence item and a proposed scope. It is still descriptive, not normative. Similar observations may be linked, never silently merged.
+A quarantined observation advances to candidate only when a human or the companion can represent it as an intelligible claim, give it a bounded proposed scope, and establish project-local or explicitly opted-in non-foreign provenance. Merely recording that something happened is evidence, but does not satisfy those qualification checks. A candidate therefore has at least one qualified evidence item; it is still descriptive, not normative. Similar observations may be linked, never silently merged.
 
 ### Proposed
 
@@ -118,6 +118,8 @@ Trust labels are advisory explanations, not hidden scores. No opaque ranking dec
 ## Compartmentalization and security boundary (RFC 052)
 
 Rules are project-local by default. The companion reads and writes only the current bound project's rules artifact and explicitly supplied project-local evidence. It never scans sibling repositories, global agent memory, home-directory histories, or other relay sessions for habits.
+
+By default, `M8SHIFT.rules.md` is local and gitignored alongside `M8SHIFT.md`. This makes the RFC 052 boundary mechanical: cloning or forking a repository does not silently transport project-specific conventions or their provenance into another project. A team may explicitly opt into committing the artifact as shared repository state after reviewing its contents and accepting that it will travel with every clone and fork; committed rules are not presumed safe to reuse outside the bound project.
 
 Cross-repository learning requires explicit, fact-scoped operator opt-in. An opted-in fact must be abstracted at intake, carry source-project provenance in a non-identifying form suitable for the target project, state its target scope, and have an expiry. Literal foreign project identities, real paths, or session output must not enter the target artifact.
 
@@ -163,7 +165,7 @@ Read-only validation of schema, lifecycle transitions, evidence independence dec
 
 Emits a bounded, deterministic context document containing only active, unexpired rules relevant to an explicit scope. The pack includes source ids, precedence notice, generation time, and a warning that content is untrusted. It is a derived cache, never authority or proof, and may be deleted/regenerated. Packing performs no activation or mutation.
 
-All mutations use an artifact-local file lock and atomic replacement. They do not require or acquire the relay pen because they do not mutate `M8SHIFT.md`; however, repository edits remain subject to the surrounding agent's normal write authorization and project workflow.
+All mutations use an artifact-local file lock and atomic replacement, which prevents two companion processes from corrupting the artifact. That lock does not establish relay ownership or make competing proposals semantically race-free. When a relay session governs the project checkout, rules mutations **SHOULD** also require the current relay pen, like other project-state changes; artifact-local locking remains necessary for atomicity but is not a substitute for the degree-one writer discipline. Human approval remains an authority gate, not a concurrency mechanism. Human use outside a relay session follows the project's ordinary write authorization and workflow.
 
 ## Conflict handling
 
@@ -198,7 +200,7 @@ Scope specificity may explain applicability, but it is not an automatic override
 1. The documented precedence is enforced by lint/pack; rules cannot override higher layers.
 2. Memory remains byte-for-byte outside companion mutation, append-only, and human-controlled.
 3. Skills remain how-to artifacts; rules contain normative project conventions and may only link to skills.
-4. No proposal becomes active without two independent evidence lineages **and** explicit human validation.
+4. No proposal becomes active without two evidence lineages whose claimed independence is surfaced for human scrutiny, and explicit human validation confirms that evidence, wording, and scope; the companion flags likely dependence but does not claim to certify independence autonomously.
 5. Every active rule has provenance, bounded scope, and review/expiry metadata; expired rules are not packed.
 6. Cross-project evidence is rejected absent explicit fact-scoped opt-in and required provenance/expiry; foreign identifiers are never persisted.
 7. Reserved mutex, authority, permission, and security subjects cannot be approved or packed.
@@ -209,7 +211,6 @@ Scope specificity may explain applicability, but it is not an automatic override
 ## Open questions
 
 - Should human approval use a typed confirmation, a signed local decision record, or integration with the existing decisions ledger?
-- Should `M8SHIFT.rules.md` be committed by default or optionally local for sensitive conventions?
+- What review and explicit opt-in should be required before a team changes the local/gitignored default and commits `M8SHIFT.rules.md` as shared repository state?
 - What minimum evidence reference format preserves raw-proof retrievability without retaining sensitive session content?
 - Which review/expiry defaults are appropriate for project-wide versus path-scoped rules?
-
