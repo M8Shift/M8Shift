@@ -5023,6 +5023,7 @@ class TestRuntimeCompanion(CLIBase):
     def clean_env():
         env = os.environ.copy()
         env.pop("M8SHIFT_ROOT", None)
+        env.pop("CI", None)
         return env
 
     def cw(self, *args, stdin=None):
@@ -5036,7 +5037,7 @@ class TestRuntimeCompanion(CLIBase):
         )
 
     def rt_env(self, env_overrides, *args):
-        env = os.environ.copy()
+        env = self.clean_env()
         env.update(env_overrides)
         return subprocess.run(
             [sys.executable, "m8shift-runtime.py", *args],
@@ -5085,6 +5086,31 @@ class TestRuntimeCompanion(CLIBase):
         self.assertTrue(any("no live listener" in m for m in messages), messages)
         self.assertTrue(any("none are fresh" in m for m in messages), messages)
         self.assertFalse(any("advisory unavailable" in m for m in messages), messages)
+
+    def test_stale_awaiting_equal_to_threshold_is_not_stale(self):
+        import importlib.util
+
+        runtime_path = os.path.join(self.d, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_boundary", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        instant = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+
+        class FrozenDateTime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return instant
+
+        with mock.patch.object(runtime.dt, "datetime", FrozenDateTime), \
+                mock.patch.object(runtime, "run_core_json", return_value={
+                    "state": "AWAITING_CLAUDE",
+                    "since": "2025-12-31T23:59:00Z",
+                }), \
+                mock.patch.object(runtime, "read_listener_pid", return_value=(False, None)), \
+                mock.patch.object(runtime, "read_usage_ledger_diagnostic", return_value=([], [])):
+            findings = runtime.stale_state_findings(60)
+
+        self.assertFalse(any(f["check"] == "runtime.stale_state" for f in findings), findings)
 
     def test_wait_and_next_lifecycle_notice_is_tty_only(self):
         notice = "host lifecycle:"
