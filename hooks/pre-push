@@ -10,7 +10,10 @@
 # What runs:
 #   1. `m8shift.py doctor --hygiene-only --lint` — the RFC 052 C1+C3 data-hygiene
 #      lint (real home paths + operator-confidential denylist, redacted output).
-#   2. `scripts/scrub-check.py` (if present) — the denylist over WHAT THIS PUSH
+#   2. `checksums.sha256` (if present) — verifies that shipped artifacts still
+#      match the release manifest. Mismatches follow the same advisory/enforce
+#      policy as scrub findings; verifier errors fail open.
+#   3. `scripts/scrub-check.py` (if present) — the denylist over WHAT THIS PUSH
 #      PUBLISHES: git feeds the hook one `<local ref> <local sha> <remote ref>
 #      <remote sha>` line per ref on stdin, and each becomes a `--range`
 #      (remote..local; a bare local sha when the remote side is new or unknown;
@@ -51,7 +54,26 @@ if [ -n "${m8shift}" ]; then
 	fi
 fi
 
-# --- 2. denylist scrub over the pushed ranges (E1) --------------------------------
+# --- 2. release checksum manifest ------------------------------------------------
+manifest="${repo_root}/checksums.sha256"
+if [ -f "${manifest}" ]; then
+	checksum_rc=0
+	if command -v sha256sum >/dev/null 2>&1; then
+		(cd "${repo_root}" && sha256sum -c checksums.sha256) >&2 || checksum_rc=$?
+	elif command -v shasum >/dev/null 2>&1; then
+		(cd "${repo_root}" && shasum -a 256 -c checksums.sha256) >&2 || checksum_rc=$?
+	else
+		checksum_rc=2
+	fi
+	if [ "${checksum_rc}" -eq 1 ]; then
+		printf '%s\n' "m8shift pre-push: checksums.sha256 is stale or invalid." >&2
+		block=1
+	elif [ "${checksum_rc}" -gt 1 ]; then
+		printf '%s\n' "m8shift pre-push: checksum verification failed (rc ${checksum_rc}) — continuing without it." >&2
+	fi
+fi
+
+# --- 3. denylist scrub over the pushed ranges (E1) --------------------------------
 # Git's pre-push stdin: one `<local ref> <local sha> <remote ref> <remote sha>`
 # line per ref being pushed. Only read it when stdin is NOT a terminal (a manual
 # `sh hooks/pre-push` run from a shell has no ref lines — fall back to the full
@@ -102,10 +124,10 @@ fi
 
 if [ "${block}" -eq 1 ]; then
 	if [ "${M8SHIFT_SCRUB_ENFORCE:-0}" = "1" ]; then
-		printf '%s\n' "m8shift pre-push: scrub findings above and M8SHIFT_SCRUB_ENFORCE=1 — push blocked. Fix the findings or unset the enforce variable." >&2
+		printf '%s\n' "m8shift pre-push: gate findings above and M8SHIFT_SCRUB_ENFORCE=1 — push blocked. Fix the findings or unset the enforce variable." >&2
 		exit 1
 	fi
-	printf '%s\n' "m8shift pre-push: scrub findings above are ADVISORY (set M8SHIFT_SCRUB_ENFORCE=1 to block on them); pushing anyway." >&2
+	printf '%s\n' "m8shift pre-push: gate findings above are ADVISORY (set M8SHIFT_SCRUB_ENFORCE=1 to block on them); pushing anyway." >&2
 fi
 
 exit 0

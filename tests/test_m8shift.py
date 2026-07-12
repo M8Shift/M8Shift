@@ -12831,6 +12831,35 @@ class TestRFC052ScrubCheck(CLIBase):
             self.assertEqual(r.returncode, 0, (name, r.stderr))
             self.assertIn("continuing without it", r.stderr, name)
 
+    def test_pre_push_checksum_manifest_is_advisory_then_enforced(self):
+        payload = os.path.join(self.d, "release.bin")
+        with open(payload, "wb") as fh:
+            fh.write(b"released bytes\n")
+        import hashlib
+        digest = hashlib.sha256(b"released bytes\n").hexdigest()
+        with open(os.path.join(self.d, "checksums.sha256"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("%s  release.bin\n" % digest)
+
+        def hook(enforce=False):
+            env = dict(os.environ, HOME=self.home)
+            env.pop("M8SHIFT_DENYLIST", None)
+            env.pop("M8SHIFT_SCRUB_ENFORCE", None)
+            if enforce:
+                env["M8SHIFT_SCRUB_ENFORCE"] = "1"
+            return subprocess.run(
+                ["sh", os.path.join(REPO, "hooks", "pre-push")], cwd=self.d,
+                capture_output=True, text=True, env=env, input="")
+
+        self.assertEqual(hook(enforce=True).returncode, 0)
+        with open(payload, "ab") as fh:
+            fh.write(b"stale\n")
+        advisory = hook()
+        self.assertEqual(advisory.returncode, 0, advisory.stderr)
+        self.assertIn("checksums.sha256 is stale", advisory.stderr)
+        self.assertIn("ADVISORY", advisory.stderr)
+        self.assertEqual(hook(enforce=True).returncode, 1)
+
     def test_range_scans_only_pushed_commits(self):
         # Codex review blocker (v3.58 cycle): a full-history walk per push
         # trains --no-verify. --range A..B must scan ONLY what the push
