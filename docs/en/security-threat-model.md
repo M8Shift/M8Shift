@@ -13,7 +13,7 @@ the protected assets.
 | LLM06 Sensitive Information Disclosure; ATLAS AML.T0057 | JSON underscore keys are filtered recursively; hygiene labels are hashed and scrub-check redacts terms. | control+test | `test_LLM06_sensitive_information_denylist_label_is_hashed` |
 | LLM07 Insecure Plugin Design | Foreign skills are inert-by-default and parsed with bounded, whole-file fail-open validation. | control+test | `test_LLM07_insecure_plugin_parser_is_bounded` |
 | LLM08 Excessive Agency | Companions are advisory and cannot acquire relay write authority; the mutex has degree one. | by-construction | `test_LLM08_excessive_agency_mutex_has_one_holder` |
-| LLM10 Unbounded Consumption | Adapter reads have a cap+1 memory ceiling, kill on overflow, and timeouts. | control+test | `test_LLM10_unbounded_consumption_caps_skill_input` |
+| LLM10 Unbounded Consumption | Agent Skill input is read through a fixed byte cap and oversized content is suppressed. | control+test | `test_LLM10_unbounded_consumption_caps_skill_input` |
 
 ## Explicitly out of scope
 

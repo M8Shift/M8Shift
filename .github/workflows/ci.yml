@@ -1,7 +1,7 @@
 name: CI
 
 # Correctness + data-hygiene gates. Free tier, no third-party deps: the whole
-# project is stdlib-only, so there is nothing to `pip install`.
+# project runtime is stdlib-only; CI installs only its pinned test runner.
 
 on:
   push:
@@ -32,8 +32,11 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Install test runner
+        run: python -m pip install 'pytest==8.*'
+
       - name: Byte-compile every tracked module
-        run: python -m py_compile $(git ls-files '*.py')
+        run: git ls-files -z '*.py' | xargs -0 python -m py_compile
 
       - name: Verify the shipped checksum manifest
         run: sha256sum -c checksums.sha256
@@ -75,5 +78,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Install test runner
+        run: python -m pip install 'pytest==8.*'
       - name: Run the full test suite
         run: python -m pytest -q

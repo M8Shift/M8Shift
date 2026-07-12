@@ -79,8 +79,6 @@ After editing the English protocol template **or** a pack, regenerate the docs s
 python3 scripts/gen_docs.py
 ```
 
-## Commits
-
 ## Versioning (GoRoCo)
 
 M8Shift uses **GoRoCo** (`Génération.Révision.Correction`), published as
@@ -106,6 +104,8 @@ M8Shift does not normally publish alpha, beta, or release-candidate tags; `wip/*
 branches are its pre-release channel. If external testing ever requires a named
 candidate, `vG.R.C-rc.N` is the explicit escape hatch and must not be presented
 as the final release.
+
+## Commits
 
 Branch per change; keep `main` green. Don't commit relay artefacts (`M8SHIFT.md`,
 `.m8shift.lock`, `CLAUDE.md`, `AGENTS.md`, …) — they are gitignored.

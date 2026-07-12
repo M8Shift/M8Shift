@@ -10,6 +10,7 @@
 #   M8SHIFT_ENGINE  explicit path to m8shift.py (overrides discovery)
 set -uo pipefail
 M8SHIFT_RUNNER_VERSION="3.58.0"
+export M8SHIFT_RUNNER_VERSION
 
 root="${M8SHIFT_ROOT:-$PWD}"
 
