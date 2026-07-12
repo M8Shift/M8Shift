@@ -12796,6 +12796,23 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("docs/w.md", r.stdout)
         self.assertNotIn("docs/sub.md", r.stdout)
 
+    def test_parallel_scan_output_is_deterministic_across_runs(self):
+        # The history walks run in a bounded thread pool; results must be emitted
+        # in denylist order so output is byte-identical every run (a concurrency
+        # regression that reordered results would pass a single-run oracle but
+        # flake here). Multi-term history with adds/removes exercises ordering.
+        self._commit("docs/a.md", "%sONE lives here\n" % self.TERM)
+        self._commit("docs/b.md", "%sTWO and %sONE together\n" % (self.TERM, self.TERM))
+        self._rm_commit("docs/a.md")
+        self._commit("docs/c.md", "%sTHREE on the tip\n" % self.TERM)
+        dl = self._deny("%sONE\n%sTWO\n%sTHREE\n" % (self.TERM, self.TERM, self.TERM))
+        first = self._scrub(denylist=dl)
+        self.assertEqual(first.returncode, 1, first.stdout + first.stderr)
+        for _ in range(6):
+            again = self._scrub(denylist=dl)
+            self.assertEqual(again.stdout, first.stdout)   # byte-identical order
+            self.assertEqual(again.returncode, first.returncode)
+
     def test_allow_suppresses_tip_and_no_history_flag(self):
         self._commit("docs/ok.md", "%s (approved sample)\n" % self.TERM)
         dl = self._deny("%s\nallow:approved sample\n" % self.TERM)
