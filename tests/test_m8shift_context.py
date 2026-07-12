@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for m8shift-context.py Phase 1 native context companion."""
+import argparse
 import hashlib
 import json
 import importlib.util
@@ -975,6 +976,111 @@ class TestContextCompression(ContextBase):
         retrieved = self.ctx("retrieve", "badnumeric", "--grep", "ERROR", "--json")
         self.assertEqual(retrieved.returncode, 0, retrieved.stderr + retrieved.stdout)
         self.assertNotIn("Traceback", retrieved.stderr + retrieved.stdout)
+
+
+class TestContextPendingHardening(ContextBase):
+    """#92 — four LOW robustness findings on the compression pending-file
+    lifecycle and writer symlink resistance. Each finding gets a regression."""
+
+    def _compression_dir(self):
+        return os.path.join(self.d, ".m8shift", "context", "compression")
+
+    def _pending_litter(self):
+        base = self._compression_dir()
+        hits = []
+        for dirpath, _dirs, names in os.walk(base):
+            for name in names:
+                if ".pending." in name or ".tmp." in name:
+                    hits.append(os.path.join(dirpath, name))
+        return hits
+
+    # Finding 2 — writer symlink resistance (O_CREAT|O_EXCL|O_NOFOLLOW).
+    def test_exclusive_writer_refuses_preplanted_symlink(self):
+        mod = load_context_module()
+        target = os.path.join(self.d, "victim.txt")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("original\n")
+        link = os.path.join(self.d, "attacker.pending")
+        os.symlink(target, link)
+        with self.assertRaises(OSError):            # O_NOFOLLOW/O_EXCL refuse the link
+            mod.exclusive_text_writer(link)
+        with open(target, encoding="utf-8") as fh:  # victim never clobbered
+            self.assertEqual(fh.read(), "original\n")
+
+    def test_exclusive_writer_refuses_existing_regular_file(self):
+        mod = load_context_module()
+        path = os.path.join(self.d, "exists.pending")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("keep\n")
+        with self.assertRaises(FileExistsError):    # O_EXCL never clobbers
+            mod.exclusive_text_writer(path)
+
+    # Findings 1 + 4 — doctor sweeps stale pending/tmp litter under compression/.
+    def test_doctor_flags_stale_pending_and_tmp_litter(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        base = self._compression_dir()
+        os.makedirs(os.path.join(base, "raw"), exist_ok=True)
+        litter = [os.path.join(base, "raw", "rec.txt.pending.999"),
+                  os.path.join(base, "rec.json.tmp.999")]
+        for p in litter:
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("stale\n")
+        r = self.ctx("doctor", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        findings = json.loads(r.stdout)["findings"]
+        stale = [f for f in findings if f["check"] == "compression.stale_pending"]
+        self.assertEqual(len(stale), 2, stale)
+        self.assertTrue(all(f["severity"] == "warning" for f in stale))
+
+    # Finding 1 (happy-path cleanup) + finding 3 (record via pending-replace-last):
+    # a successful compress publishes raw+compact+record and leaves NO litter.
+    def test_successful_compress_leaves_no_pending_litter(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        r = self.ctx("compress", "--id", "clean1", "--type", "test_output",
+                     "--agent", "codex", "--backend", "builtin", "--stdin",
+                     "--json", stdin="INFO line one\nINFO line two\n")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self._pending_litter(), [])          # nothing left behind
+        base = self._compression_dir()
+        # raw + compact + record all published (record went through pending-replace)
+        present = []
+        for dirpath, _dirs, names in os.walk(base):
+            present.extend(names)
+        self.assertTrue(any(n.endswith(".json") for n in present), present)
+        self.assertTrue(any("clean1" in n for n in present), present)
+
+    # Finding 1 (abort path) — a backend that raises mid-compress must unlink the
+    # raw pending it already wrote, never leaving litter.
+    def test_pending_cleanup_on_backend_abort(self):
+        self.assertEqual(self.ctx("init").returncode, 0)
+        mod = load_context_module()
+        cwd = os.getcwd()
+        os.chdir(self.d)
+        self.addCleanup(os.chdir, cwd)
+
+        def boom(*_a, **_k):
+            raise RuntimeError("simulated Ctrl-C mid-adapter")
+
+        reached = {"backend": False}
+
+        def boom2(*_a, **_k):
+            reached["backend"] = True
+            raise RuntimeError("simulated Ctrl-C mid-adapter")
+
+        mod.compact_backend = boom2
+        # root MUST be self.d — root_from falls back to the module's own dir
+        # (HERE) otherwise, which would write the pending outside our litter walk
+        # and make this assertion vacuous.
+        args = argparse.Namespace(
+            id="abrt", agent="codex", type="test_output", backend="builtin",
+            access_mode="retrieve", whole_content=False, stdin=False,
+            input="in.txt", json=False, root=self.d)
+        with open(os.path.join(self.d, "in.txt"), "w", encoding="utf-8") as fh:
+            fh.write("INFO to compress\n")
+        with self.assertRaises(RuntimeError):
+            mod.cmd_compress(args)
+        self.assertTrue(reached["backend"], "abort path was never reached")
+        self.assertEqual(self._pending_litter(), [])          # aborted write cleaned up
 
 
 class TestContextAdapters(ContextBase):

@@ -460,16 +460,23 @@ def read_text(path, default=""):
 def write_text(path, text):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with exclusive_text_writer(tmp) as fh:
         fh.write(text)
     os.replace(tmp, path)
+
+
+def exclusive_text_writer(path):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 def write_pending_text(path, text):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     pending = f"{path}.pending.{os.getpid()}"
     tmp = f"{pending}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with exclusive_text_writer(tmp) as fh:
         fh.write(text)
     os.replace(tmp, pending)
     return pending
@@ -478,7 +485,7 @@ def write_pending_text(path, text):
 def write_json(path, data):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with exclusive_text_writer(tmp) as fh:
         json.dump(data, fh, ensure_ascii=False, sort_keys=True, indent=2)
         fh.write("\n")
     os.replace(tmp, path)
@@ -2190,12 +2197,19 @@ def cmd_compress(args):
     raw_path = record_raw_path(root, args.id)
     compact_path = record_compact_path(root, args.id)
     record_path = record_json_path(root, args.id)
-    raw_pending = write_pending_text(raw_path, redacted)
+    raw_pending = None
     compact_pending = None
+    record_pending = None
     raw_ref = rel(root, raw_path)
     compact_ref = rel(root, compact_path)
 
-    backend_result = compact_backend(root, args, redacted, config, config_fail_safe)
+    raw_pending = write_pending_text(raw_path, redacted)
+    try:
+        backend_result = compact_backend(root, args, redacted, config, config_fail_safe)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(raw_pending)
+        raise
     filtered = backend_result["filtered"]
     backend_error = backend_result["error"]
     extras = backend_result["extras"]
@@ -2275,11 +2289,20 @@ def cmd_compress(args):
         "findings": config_findings + backend_findings,
         "warning": "Compressed context is operational orientation, not evidence; verify against bounded raw references.",
     }
-    os.replace(raw_pending, raw_path)
-    raw_pending = None
-    os.replace(compact_pending, compact_path)
-    compact_pending = None
-    write_json(record_path, record)
+    record_text = json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    try:
+        record_pending = write_pending_text(record_path, record_text)
+        os.replace(raw_pending, raw_path)
+        raw_pending = None
+        os.replace(compact_pending, compact_path)
+        compact_pending = None
+        os.replace(record_pending, record_path)
+        record_pending = None
+    finally:
+        for pending in (raw_pending, compact_pending, record_pending):
+            if pending:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(pending)
     if args.json:
         print(json.dumps(record, ensure_ascii=False, sort_keys=True))
     else:
@@ -2665,6 +2688,13 @@ def cmd_doctor(args):
     findings.extend(compression_findings)
     if compression_fail_safe:
         findings.append(finding("warning", "compression.fail_safe", "context compression will redact and fall back to reference-only until config is valid"))
+    base = compression_dir(root)
+    if os.path.isdir(base):
+        for dirpath, _, filenames in os.walk(base):
+            for name in filenames:
+                if ".pending." in name or ".tmp." in name:
+                    path = os.path.join(dirpath, name)
+                    findings.append(finding("warning", "compression.stale_pending", f"stale compression temporary file: {rel(root, path)}"))
     for name in PROFILE_NAMES:
         path = os.path.join(profiles_dir(root), f"{name}.json")
         data = read_json(path, None)
