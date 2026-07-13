@@ -962,8 +962,10 @@ opened ticket, an unpushed branch, or an unreviewed draft.
 ## Operational disciplines (extract)
 
 When you change M8Shift's own code/docs, beyond the relay floor above. Full,
-human-authored detail lives in `docs/en/agents-guide.md`. (Evidence/compression
-and shared-checkout disciplines are stated above and not repeated here.)
+human-authored detail lives in the M8Shift source repository (its
+`docs/en/agents-guide.md`) — a source-tree document, not a file dropped into your
+project. (Evidence/compression and shared-checkout disciplines are stated above
+and not repeated here.)
 
 - **Code-quality bar** — match the surrounding code's style and idiom; add tests
   for new behaviour; leave no dead code or stray debug output.
