@@ -12,6 +12,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+VERSION = "3.60.0"  # lockstep with m8shift.py; required for companion install/update
+
 ALT_ON = "\x1b[?1049h\x1b[?25l"
 ALT_OFF = "\x1b[?25h\x1b[?1049l"
 HOME = "\x1b[H"
