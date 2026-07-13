@@ -5339,6 +5339,16 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
             "used": w_used,
             "limit": w_limit,
         }
+        # Optional provider-safe model attribution.  Some providers expose a
+        # model-specific window alongside the aggregate account windows.  Keep
+        # the short label so an exhausted model window is not mistaken for a
+        # missing aggregate window by status/top readers.
+        model = win.get("model")
+        if isinstance(model, str) and model and len(model) <= 80 \
+                and all(ord(ch) >= 32 and ord(ch) != 127 for ch in model):
+            window["model"] = model
+        elif model is not None:
+            warnings.append(f"windows[{idx}].model must be a printable string up to 80 characters; ignored")
         # Additive: `used_ratio` appears ONLY on ratio-native windows, so token-only
         # snapshots stay byte-identical to the shipped v1 output.
         if w_ratio is not None:

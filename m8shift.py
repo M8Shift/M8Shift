@@ -8096,7 +8096,10 @@ def _usage_window_frags(snap, ref):
         if not label:
             continue
         when = _usage_reset_when(w.get("resets_at"), ref)
-        frags.append(f"{label} {pct}" + (f" (Reset {when})" if when else ""))
+        model = _usage_sanitize(w.get("model"), cap=24, fallback="")
+        exhausted = pct == "100%" and bool(model)
+        value = f"EXHAUSTED [{model}]" if exhausted else pct
+        frags.append(f"{label} {value}" + (f" (Reset {when})" if when else ""))
     current_kinds = {
         w.get("kind") for w in windows
         if isinstance(w, dict) and isinstance(w.get("kind"), str)

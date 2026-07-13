@@ -51,6 +51,17 @@ def _color(code, text, enabled):
     return "\x1b[%sm%s\x1b[0m" % (code, text) if enabled else text
 
 
+def _usage_cell(windows, label, short):
+    """Render known exhaustion separately from genuinely absent usage data."""
+    row = windows.get(label) or {}
+    ratio = row.get("used_ratio")
+    model = row.get("model") if isinstance(row.get("model"), str) else ""
+    model = clean(model, 18) if model else ""
+    if ratio == 1 and model:
+        return "%s EXHAUSTED [%s]" % (short, model), ratio
+    return "%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100)), ratio
+
+
 def _stamp(value):
     if not value or value == "-":
         return None
@@ -135,9 +146,8 @@ def _render_stacked(snapshot, width, now=None):
         windows = usage.get("windows") or {}
         bits = []
         for label in ("session_5h", "weekly"):
-            usage_row = windows.get(label) or {}
-            ratio = usage_row.get("used_ratio")
-            bits.append("%s %s" % (label, "unavailable" if ratio is None else "%d%%" % round(ratio * 100)))
+            bit, _ = _usage_cell(windows, label, label)
+            bits.append(bit)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
         lines.append(row("%s %-16s [%-10s]  %s" % (marker, name, state, "  ".join(bits))))
     ledger = snapshot.get("ledger") or {}
@@ -252,9 +262,9 @@ def _render_wide(snapshot, width, now=None):
         windows = (agent.get("usage") or {}).get("windows") or {}
         ratios, bits = [], []
         for short, label in (("5h", "session_5h"), ("weekly", "weekly")):
-            ratio = (windows.get(label) or {}).get("used_ratio")
+            bit, ratio = _usage_cell(windows, label, short)
             ratios.append(ratio)
-            bits.append("%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100)))
+            bits.append(bit)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
         arow = cells([("  AGENTS" if i == 0 else "        ", 0),
                       ("%s %s" % (marker, name), 10), ("● %s" % astate, 22),

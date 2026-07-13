@@ -105,7 +105,7 @@ def _window_kind(raw_window):
     return WINDOW_KIND_BY_DURATION_MIN.get(duration_i)
 
 
-def _window_to_fixture(raw_window):
+def _window_to_fixture(raw_window, model=None):
     if not isinstance(raw_window, dict):
         return None
     kind = _window_kind(raw_window)
@@ -123,7 +123,10 @@ def _window_to_fixture(raw_window):
     if reset_raw is not None and resets_at is None:
         return None
     used_ratio = max(0.0, min(100.0, percent)) / 100.0
-    return {"kind": kind, "used_ratio": round(used_ratio, 4), "resets_at": resets_at}
+    out = {"kind": kind, "used_ratio": round(used_ratio, 4), "resets_at": resets_at}
+    if isinstance(model, str) and model:
+        out["model"] = model
+    return out
 
 
 def build_fixture(payload, now_iso):
@@ -134,13 +137,27 @@ def build_fixture(payload, now_iso):
     """
     try:
         result = _result_from_jsonrpc(payload)
-        snapshot = _select_rate_limit_snapshot(result)
         windows = []
+        snapshot = _select_rate_limit_snapshot(result)
         if isinstance(snapshot, dict):
             for field in ("primary", "secondary"):
                 win = _window_to_fixture(snapshot.get(field))
                 if win is not None:
                     windows.append(win)
+        # Preserve model-specific buckets too.  A provider can report the
+        # aggregate 5h window as absent while one model is at its limit; dropping
+        # these buckets made dashboards say "5h unavailable" at exhaustion.
+        by_id = result.get("rateLimitsByLimitId") if isinstance(result, dict) else None
+        if isinstance(by_id, dict):
+            for model, bucket in by_id.items():
+                if model == "codex" or not isinstance(model, str) or not isinstance(bucket, dict):
+                    continue
+                for field in ("primary", "secondary"):
+                    win = _window_to_fixture(bucket.get(field), model=model)
+                    # Model buckets are actionable here only at cooldown.  Healthy
+                    # model rows would duplicate the aggregate 5h/weekly display.
+                    if win is not None and win["used_ratio"] == 1.0:
+                        windows.append(win)
         fixture = _empty_fixture(now_iso)
         fixture["windows"] = windows
         return fixture

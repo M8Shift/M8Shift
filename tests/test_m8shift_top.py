@@ -123,6 +123,16 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             else:
                 os.environ["NO_COLOR"] = old
 
+    def test_known_model_exhaustion_is_not_rendered_as_unavailable(self):
+        top = load_top()
+        snap = fixture()
+        snap["agents"][0]["usage"]["windows"] = {
+            "session_5h": {"used_ratio": 1.0, "model": "Fable"},
+        }
+        output = self._plain(top.render(snap, 120, self.NOW))
+        self.assertIn("5h EXHAUSTED [Fable]", output)
+        self.assertNotIn("5h unavailable", output)
+
     def test_piped_stdout_falls_back_to_watch_cleanly(self):
         # Piped (non-TTY) stdout must fall back to `watch` byte-compatibly: no
         # alt-screen, no `--interval` int-parse error. `init` is a script-local
