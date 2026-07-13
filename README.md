@@ -517,6 +517,7 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 | Operator-loop guardrails | ✅ Shipped | `next`, `append --wait`, `status --for`, `request-turn/yield-turn/decline-turn/steer-turn` | prevents lost handoffs and UI-routing deadlocks without creating a second pen |
 | Agent adoption discipline | ✅ Shipped | `M8SHIFT.agent-pack.md`, compact anchor safety floor, `doctor` adoption checks | gives every agent the same first-read workflow and flags stale/missing adoption files without changing lock authority |
 | Local source-driven update | ✅ Shipped | `update --target DIR --source DIR`, `doctor --source DIR` | updates adopted projects from a newer local copy while preserving relay state; default runner refresh covers only installed, checksum-proven runner artifacts |
+
 | Pause / resume | ✅ Shipped | `pause <holder> --reason …`, `resume <agent> --reason …`, `next --resume` | stable open/no-work state: `PAUSED`, `holder=none`, explicit user-scope resume |
 | Local integration layer | ✅ Shipped | installers, checksums, version surfaces, `examples/headless_runner.py`, `m8shift-runtime.py` | local convenience layer; no provider SDK in the core |
 | Degree-2 parallel work | ✅ Shipped, opt-in | [`m8shift-worktree.py`](docs/en/rfc/008-rfc-worktree-companion.md) | isolated git worktrees; serialized integration pen; core remains degree-1 |
@@ -524,6 +525,16 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 | Local notifications | ✅ Shipped | `m8shift-runtime.py notify`, `watch` notification path | stdout/file/bell/OS/hook tiers; advisory only, no daemon, no network in M8Shift |
 | `subturn` provenance ledger | ❌ Rejected | [rationale](docs/en/rfc/007-rfc-subturn.md) | redundant with advisory fields and `remember` |
 | Hosted control plane / IDE integrations | 🔭 Future companion | [RFC](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | optional layer outside the passive core |
+
+To refresh the live relay scripts from a verified merged checkout, first preview and
+then explicitly apply the reversible wrapper. It requires a clean checkout whose
+`HEAD` exactly matches `origin/main`, refuses an active `WORKING_*` relay through the
+RFC 048 updater, never writes `M8SHIFT.md`, and retains a rollback snapshot:
+
+```bash
+python3 scripts/m8shift-self-update.py --source /path/to/M8Shift --target /path/to/project
+python3 scripts/m8shift-self-update.py --source /path/to/M8Shift --target /path/to/project --apply
+```
 
 New ideas are welcome via an RFC under `docs/en/rfc/`. RFCs are English-only;
 localized documentation should link to the canonical English RFC instead of maintaining
