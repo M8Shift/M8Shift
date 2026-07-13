@@ -51,6 +51,19 @@ def _color(code, text, enabled):
     return "\x1b[%sm%s\x1b[0m" % (code, text) if enabled else text
 
 
+def _paint_wordmark(plain, enabled):
+    """Bold the header wordmark with the M8Shift brand colours."""
+    if not enabled or "M8SHIFT" not in plain:
+        return plain
+    left, right = plain.split("M8SHIFT", 1)
+    wordmark = (
+        _color("1;38;2;255;122;24", "M", True)
+        + _color("1;38;2;93;38;242", "8", True)
+        + _color("1", "SHIFT", True)
+    )
+    return left + wordmark + right
+
+
 def _usage_cell(windows, label, short):
     """Render exhaustion or usage, plus the provider-supplied reset time."""
     row = windows.get(label) or {}
@@ -114,7 +127,7 @@ def _render_stacked(snapshot, width, now=None, interval=2):
     header = "M8SHIFT · %s · %s · session %s · %s" % (
         _value(snapshot.get("project")), _value(snapshot.get("m8shift_version")),
         _value(snapshot.get("session")), clock)
-    lines = [top, row(header)]
+    lines = [top, _paint_wordmark(row(header), colored)]
 
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
@@ -234,7 +247,9 @@ def _render_wide(snapshot, width, now=None, interval=2):
     header = framed("┌", "┐", "─ M8SHIFT · %s · %s · session %s " % (
         _value(snapshot.get("project")), version,
         _value(snapshot.get("session"))), " %s ─" % clock)
-    lines = [paint(header, version, cyan) if version != "unavailable" else header, blank]
+    if version != "unavailable":
+        header = paint(header, version, cyan)
+    lines = [_paint_wordmark(header, colored), blank]
 
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
