@@ -158,6 +158,24 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertIn("5h EXHAUSTED [Fable]", output)
         self.assertNotIn("5h unavailable", output)
 
+    def test_wide_long_fields_keep_a_gap_between_columns(self):
+        top = load_top()
+        snap = fixture()
+        snap["agents"][0]["usage"]["windows"] = {
+            "session_5h": {
+                "used_ratio": 1.0,
+                "model": "Fable reset mon 08:00",
+            },
+            "weekly": {"used_ratio": 0.42},
+        }
+        lines = self._plain(top.render(snap, 120, self.NOW)).splitlines()
+        agent_line = next(line for line in lines if "5h EXHAUSTED" in line)
+        pen_line = next(line for line in lines if "heartbeat" in line)
+
+        self.assertEqual(agent_line[agent_line.index("weekly") - 1], " ")
+        self.assertEqual(pen_line[pen_line.index("heartbeat") - 1], " ")
+        self.assertTrue(all(len(line) == 120 for line in lines))
+
     def test_piped_stdout_falls_back_to_watch_cleanly(self):
         # Piped (non-TTY) stdout must fall back to `watch` byte-compatibly: no
         # alt-screen, no `--interval` int-parse error. `init` is a script-local
