@@ -118,7 +118,7 @@ the alias `guard <agent>`) before scripted writes or commits. It exits 0 only wh
 that agent holds a non-expired `WORKING_<AGENT>` lock; any other rc means stop and
 follow the printed next action.
 
-### Pre-commit hook (enforce the pen on commit)
+### Pre-commit hook (refresh checksums and enforce the pen)
 
 `hooks/pre-commit` is a POSIX-sh, stdlib-only, **local and advisory** Git hook that runs
 `may-i-write` immediately before each commit, so the rule is *enforced* — not merely
@@ -131,8 +131,12 @@ chmod +x .git/hooks/pre-commit
 
 Behaviour:
 
+- A staged path already listed in `checksums.sha256` is hashed from the Git index;
+  the hook rewrites and stages the manifest automatically. This is fail-closed on
+  refresh errors, never hashes an unstaged worktree edit, and runs only after a
+  configured agent passes the pen guard.
 - `$M8SHIFT_AGENT` **unset** → the hook exits 0 (skip). Humans and unconfigured
-  checkouts are never blocked.
+  checkouts skip only the pen guard; checksum refresh still runs.
 - `$M8SHIFT_AGENT` **set** → the hook runs `m8shift.py may-i-write "$M8SHIFT_AGENT"` and,
   on any non-zero rc, prints why and **blocks the commit** (fail *closed*). The relay
   root is resolved by `m8shift.py` via `$M8SHIFT_ROOT`; the program is found via

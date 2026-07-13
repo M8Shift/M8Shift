@@ -488,7 +488,7 @@ explicit stop. `idle`/`PAUSED` is not a stop signal: park cleanly and wait for t
 next authorized scope. The author never closes their own review; only an explicit
 human stop ends the loop.
 
-## 9. Enforce the pen on commit — `hooks/pre-commit`
+## 9. Refresh checksums and enforce the pen — `hooks/pre-commit`
 
 The relay coordinates *who writes when*, but nothing stops a misconfigured agent from
 running `git commit` without holding the pen. `hooks/pre-commit` closes that gap: a
@@ -501,12 +501,16 @@ chmod +x .git/hooks/pre-commit
 ```
 
 - **`$M8SHIFT_AGENT` unset** → the hook exits 0 (skip). Humans and unconfigured
-  checkouts are never blocked.
+  checkouts skip the pen guard; checksum refresh still runs.
 - **`$M8SHIFT_AGENT` set** → it runs `m8shift.py may-i-write "$M8SHIFT_AGENT"` and, on
   any non-zero rc, prints why and **blocks the commit** — fail *closed* for a configured
   agent. The relay root is resolved by `m8shift.py` via `$M8SHIFT_ROOT`; the program is
   found via `$M8SHIFT_BIN`, else `m8shift.py` on `$PATH`, else `./m8shift.py` at the
   repo root.
+- **A listed file is staged** → the hook hashes its Git-index blob, rewrites and
+  stages `checksums.sha256` automatically. Unstaged bytes are never folded into the
+  commit. A configured agent passes the pen guard before this index mutation.
+  Refresh errors block the commit; pre-push verification stays as a backstop.
 
 > [!NOTE]
 > **Zero-memory by design.** A fresh agent does not have to *remember* the write rule:
