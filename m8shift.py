@@ -10046,6 +10046,11 @@ def main():
                          "window is max(120, min(2*cadence, TTL))")
     hb.set_defaults(fn=cmd_heartbeat)
 
+    # A bare invocation is an orientation request, not a malformed command.
+    # Keep argparse's normal error handling for every other incomplete command.
+    if len(sys.argv) == 1:
+        p.print_help()
+        return 0
     args = p.parse_args()
     # RFC 038 §9.2 (RFC 052 PR4): centralized pre-write session-binding gate —
     # ambiguity/binding refusals happen HERE, before any file lock can exist.
