@@ -8338,6 +8338,7 @@ def _status_activity(turns, limit=8):
             continue
         fields = turn.get("fields") if isinstance(turn.get("fields"), dict) else {}
         out.append({
+            "turn": turn.get("n"),
             "ts": fields.get("at") or None,
             "kind": "turn",
             "agent": _status_snapshot_text(turn.get("agent")),

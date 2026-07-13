@@ -1464,6 +1464,7 @@ class TestReadCommands(CLIBase):
                          {"schema", "agents", "listeners", "last_turn", "ledger", "pen", "activity"})
         self.assertIsInstance(d["snapshot"]["activity"], list)
         self.assertLessEqual(len(d["snapshot"]["activity"]), 8)
+        self.assertEqual([event["turn"] for event in d["snapshot"]["activity"]], [0, 1, 2])
         self.assertEqual(d["snapshot"]["last_turn"]["to"], "claude")
         self.assertIsInstance(d["snapshot"]["last_turn"]["ask_excerpt"], str)
         ledger = d["snapshot"]["ledger"]

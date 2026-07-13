@@ -27,7 +27,7 @@ def fixture():
         "pen": {"heartbeat": "2026-07-13T00:10:00Z"},
         "agents": [{"id": "codex", "role_state": "working", "usage": {"windows": {}}}],
         "ledger": {}, "listeners": [], "last_turn": {"ask_excerpt": "x"},
-        "activity": [{"agent": "claude", "summary": "x" * 200}],
+        "activity": [{"turn": 6, "agent": "claude", "summary": "x" * 200}],
     }
 
 
@@ -110,9 +110,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         top = load_top()
         snap = dict(fixture())
         snap["activity"] = [
-            {"agent": "codex", "kind": "turn", "ts": "2026-07-13T03:40:24Z",
+            {"turn": 40, "agent": "codex", "kind": "turn", "ts": "2026-07-13T03:40:24Z",
              "summary": "Reviewed the diff and merged"},
-            {"agent": "claude", "kind": "turn", "ts": "2026-07-13T03:47:21Z",
+            {"turn": 41, "agent": "claude", "kind": "turn", "ts": "2026-07-13T03:47:21Z",
              "summary": "Acknowledged the plan; disposable branch off origin/main"},
         ]
         old = os.environ.pop("NO_COLOR", None)
@@ -127,6 +127,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertIn("2026-07-13T", output)
             i_new = next(i for i, l in enumerate(lines) if "Acknowledged" in l)
             i_old = next(i for i, l in enumerate(lines) if "Reviewed" in l)
+            self.assertIn("│  41    2026-07-13T", lines[i_new])
             self.assertLess(i_new, i_old)
         finally:
             if old is not None:

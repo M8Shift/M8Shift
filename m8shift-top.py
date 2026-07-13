@@ -165,7 +165,9 @@ def _render_stacked(snapshot, width, now=None, interval=2):
                                                        _value(last.get("to")), _value(last.get("ask_excerpt")))))
     lines += [sep, row("ACTIVITY", dim)]
     for event in snapshot.get("activity") or []:
-        lines.append(row("  %s  %s" % (_value(event.get("agent")), _value(event.get("summary")))))
+        lines.append(row("  #%s  %s  %s" % (_value(event.get("turn")),
+                                             _value(event.get("agent")),
+                                             _value(event.get("summary")))))
     lines += [sep, row("q quit  ? help  r refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
     return "\n".join(lines)
 
@@ -305,7 +307,7 @@ def _render_wide(snapshot, width, now=None, interval=2):
                          ("#%s %s → %s  %s" % (_value(last.get("n")), _value(last.get("agent")),
                                                _value(last.get("to")), _value(last.get("ask_excerpt"))), 10)])
     lines += [blank, listen_line, ledger_line, turn_line, blank, framed("├", "┤", "─ activity ")]
-    # ACTIVITY: recent -> oldest, tabulated (ts-local | hold-dur | agent | action | note).
+    # ACTIVITY: recent -> oldest, tabulated (turn | ts-local | hold-dur | agent | action | note).
     stamped = [(_stamp(e.get("ts")), e) for e in (snapshot.get("activity") or [])]
     if any(t for t, _ in stamped):
         stamped.sort(key=lambda p: p[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
@@ -318,8 +320,9 @@ def _render_wide(snapshot, width, now=None, interval=2):
         parts = (_value(e.get("summary")) or "").split(None, 1)
         action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
         note = parts[1] if len(parts) > 1 else ""
-        lines.append("│" + cells([("  %s" % ts_s, 0), (dur, 22), (clean(e.get("agent"), 8), 30),
-                                   (action, 40), (note, 54)]) + "│")
+        lines.append("│" + cells([("  %s" % _value(e.get("turn")), 0), (ts_s, 8),
+                                   (dur, 28), (clean(e.get("agent"), 8), 36),
+                                   (action, 46), (note, 60)]) + "│")
     lines.append(framed("└", "┘", "─ q quit  ? help  r refresh  ↑/↓ navigate  tick %ss " % interval))
     return "\n".join(lines)
 
