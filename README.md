@@ -115,6 +115,28 @@ and delegates byte-for-byte to the existing `watch` output for pipes, dumb
 terminals, `--plain`, or `M8SHIFT_NO_ALT_SCREEN`. Keys are display-only: `q`,
 `?`, `r`, and navigation; the companion never claims or changes a relay.
 
+Optional aliases let both commands run from any working directory. The helper
+uses its own resolved install directory (including on Git Bash/Windows), so the
+aliases do not depend on where the shell was opened. Preview the exact marked
+block first; this is the default and writes nothing:
+
+```bash
+python3 m8shift-aliases.py
+```
+
+To append or update that block idempotently, opt in with `--write`. Bash and
+Git Bash default to `~/.bashrc`; zsh defaults to `~/.zshrc`:
+
+```bash
+python3 m8shift-aliases.py --write --shell zsh
+python3 m8shift-aliases.py --write --shell bash
+python3 m8shift-aliases.py --write --shell git-bash
+```
+
+Use `--rc PATH` for a nonstandard startup file. This helper needs only the same
+Python 3.8+ prerequisite as M8Shift; it changes no PATH setting and installs no
+package. Restart the shell or `source` the rc path printed after a write.
+
 For a pinned release, fetch the installer from the tag and use the same ref for the
 downloaded files:
 
