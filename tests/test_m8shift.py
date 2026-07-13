@@ -1515,9 +1515,20 @@ class TestReadCommands(CLIBase):
         d = json.loads(self.cw("status", "--json").stdout)
         codex = next(a for a in d["snapshot"]["agents"] if a["id"] == "codex")
         windows = codex["usage"]["windows"]
-        self.assertEqual(windows["session_5h"], {"available": False, "used_ratio": None,
-                                                  "resets_at": None, "last_known": False})
+        self.assertEqual(windows["session_5h"], {
+            "available": False, "not_provided": True, "used_ratio": None,
+            "resets_at": None, "last_known": False,
+        })
         self.assertTrue(windows["weekly"]["available"])
+        self.assertFalse(windows["weekly"]["not_provided"])
+
+    def test_status_snapshot_empty_usage_keeps_windows_unavailable(self):
+        self.init()
+        d = json.loads(self.cw("status", "--json").stdout)
+        codex = next(a for a in d["snapshot"]["agents"] if a["id"] == "codex")
+        for row in codex["usage"]["windows"].values():
+            self.assertFalse(row["available"])
+            self.assertFalse(row["not_provided"])
 
     def test_status_and_recap_show_timezone_prefixed_local_time(self):
         self.init()
@@ -9417,6 +9428,31 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         by = {w["kind"]: w for w in fx["windows"]}
         self.assertEqual(by["session_5h"]["used_ratio"], 0.8)
         self.assertEqual(by["weekly"]["used_ratio"], 0.25)
+
+    def test_build_fixture_weekly_only_does_not_map_credits_or_aggregate_new_bucket(self):
+        mod = self._example()
+        payload = {"id": 2, "result": {
+            "rateLimitResetCredits": 123,
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "primary": {"usedPercent": 37, "windowDurationMins": 10080,
+                                "resetsAt": 1_804_317_600},
+                    "secondary": None,
+                },
+                "codex_bengalfox": {
+                    "primary": {"usedPercent": 73, "windowDurationMins": 10080,
+                                "resetsAt": 1_804_317_600},
+                    "secondary": None,
+                },
+            },
+        }}
+        fx = mod.build_fixture(payload, "2026-01-01T00:00:00Z")
+        self.assertEqual(fx["windows"], [{
+            "kind": "weekly", "used_ratio": 0.37,
+            "resets_at": "2027-03-06T07:20:00Z",
+        }])
+        self.assertNotIn("rateLimitResetCredits", fx)
+        self.assertNotIn("codex_bengalfox", json.dumps(fx))
 
     def test_build_fixture_keeps_exhausted_model_bucket_with_attribution(self):
         mod = self._example()

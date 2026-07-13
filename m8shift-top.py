@@ -73,7 +73,8 @@ def _usage_cell(windows, label, short):
     if ratio == 1 and model:
         value = "%s EXHAUSTED [%s]" % (short, model)
     else:
-        value = "%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100))
+        missing = "n/a" if row.get("not_provided") is True else "unavailable"
+        value = "%s %s" % (short, missing if ratio is None else "%d%%" % round(ratio * 100))
     reset = _stamp(row.get("resets_at"))
     if reset is not None:
         value += " reset " + reset.astimezone().strftime("%a %H:%M").lower()

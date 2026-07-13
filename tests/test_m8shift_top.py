@@ -107,6 +107,22 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertIn("5h 42% reset", output)
         self.assertIn("weekly 30% reset", output)
 
+    def test_usage_not_provided_is_distinct_from_unavailable_at_all_widths(self):
+        top = load_top()
+        data = fixture()
+        data["agents"][0]["usage"]["windows"] = {
+            "session_5h": {"available": False, "not_provided": True,
+                           "used_ratio": None, "resets_at": None},
+            "weekly": {"available": False, "not_provided": False,
+                       "used_ratio": None, "resets_at": None},
+        }
+        for width in (80, 100, 120):
+            output = self._plain(top.render(data, width, self.NOW))
+            self.assertIn("5h n/a", output)
+            self.assertIn("weekly unavailable", output)
+            self.assertNotIn("5h unavailable", output)
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
     def test_footer_shows_configured_refresh_tick(self):
         top = load_top()
         for width in (80, 120):
