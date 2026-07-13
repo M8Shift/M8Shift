@@ -8309,11 +8309,22 @@ def _status_role_state(lk, agent):
 
 
 def _status_usage_windows(snapshot, last_known=False):
-    """Stable two-window projection: absence is data, never a dropped field."""
+    """Stable two-window projection: absence is data, never a dropped field.
+
+    A readable snapshot with at least one plausible ratio window proves the
+    adapter succeeded. If that snapshot omits one of the two standard kinds,
+    expose the omission as ``not_provided`` so consumers do not mislabel a
+    provider/account shape change as an unavailable read. Empty or wholly
+    invalid snapshots carry no such proof and remain unavailable.
+    """
     by_kind = {}
     if isinstance(snapshot, dict) and isinstance(snapshot.get("windows"), list):
         by_kind = {w.get("kind"): w for w in snapshot["windows"]
                    if isinstance(w, dict) and isinstance(w.get("kind"), str)}
+    has_valid_window = any(
+        isinstance(row, dict) and _usage_window_pct(row.get("used_ratio")) is not None
+        for row in by_kind.values()
+    )
     out = {}
     for public, kind in (("session_5h", "session_5h"), ("weekly", "weekly")):
         row = by_kind.get(kind)
@@ -8321,6 +8332,7 @@ def _status_usage_windows(snapshot, last_known=False):
         available = _usage_window_pct(ratio) is not None
         out[public] = {
             "available": available,
+            "not_provided": bool(has_valid_window and row is None),
             "used_ratio": ratio if available else None,
             "resets_at": _status_snapshot_text(row.get("resets_at")) if available else None,
             "last_known": bool(last_known),
