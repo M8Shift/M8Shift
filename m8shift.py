@@ -2750,7 +2750,10 @@ def _update_companions_component(selection, source_dir, checksums, allow_downgra
     (#43)."""
     if not selection:
         return ("skipped",
-                "no companions installed in the target (none refreshed, none added)", [])
+                "no companions installed in the target (none refreshed, none added). "
+                "To add them for a pre-RFC044 adopter, re-run with explicit --companions "
+                "names (e.g. --companions runtime,context,headroom); an absent companion "
+                "is never added silently.", [])
     ns = argparse.Namespace(companions=",".join(selection), companion_source=source_dir,
                             force_companions=True, full=False, no_companions=False)
     plan, errors = plan_companions(ns)
