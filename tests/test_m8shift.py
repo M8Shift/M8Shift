@@ -14631,6 +14631,21 @@ class TestRFC049PRBListenerProducer(CLIBase):
             self.d, ".m8shift", "holder-heartbeats", "claude.json")))
 
 
+class TestUpdateBackcompatCompanionHint(unittest.TestCase):
+    """#29 backward-compat: a pre-RFC044 adopter (no companions installed) who
+    runs `update` sees the companions component skipped. The skip detail must
+    guide them to add companions explicitly (adding an absent companion is never
+    silent, by design)."""
+
+    def test_empty_companion_selection_hints_explicit_add(self):
+        result, detail, items = cowork._update_companions_component(
+            [], "", {}, False, True)
+        self.assertEqual(result, "skipped")
+        self.assertEqual(items, [])
+        self.assertIn("--companions", detail)
+        self.assertIn("pre-RFC044", detail)
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(f"test_m8shift.py {VERSION}")
