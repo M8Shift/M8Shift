@@ -202,10 +202,15 @@ def _render_wide(snapshot, width, now=None, interval=2):
 
     def cells(pairs):
         out = ""
-        for text, col in pairs:
+        for index, (text, col) in enumerate(pairs):
             if col > len(out):
                 out += " " * (col - len(out))
-            out += text
+            # A cell may grow when a model name, reset time, or timestamp is
+            # unusually long.  Reserve one column before the next fixed start
+            # instead of letting this value collide with (or push) its peer.
+            next_col = pairs[index + 1][1] if index + 1 < len(pairs) else inner
+            available = max(0, next_col - max(col, len(out)) - 1)
+            out += text[:available]
         return clean(out, inner).ljust(inner)
 
     def content(pairs):
@@ -273,7 +278,7 @@ def _render_wide(snapshot, width, now=None, interval=2):
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
         arow = cells([("  AGENTS" if i == 0 else "        ", 0),
                       ("%s %s" % (marker, name), 10), ("● %s" % astate, 22),
-                      (bits[0], 42), (bits[1], 56)])
+                      (bits[0], 42), (bits[1], 72)])
         arow = paint(arow, "●", dot_style(astate))
         arow = paint(arow, bits[0], usage_style(ratios[0]))
         arow = paint(arow, bits[1], usage_style(ratios[1]))
