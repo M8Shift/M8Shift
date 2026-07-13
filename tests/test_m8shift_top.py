@@ -25,9 +25,12 @@ def fixture():
         "holder": "codex", "state": "WORKING_CODEX", "turn": 7,
         "since": "2026-07-13T00:00:00Z", "expires": "2026-07-13T00:30:00Z",
         "pen": {"heartbeat": "2026-07-13T00:10:00Z"},
-        "agents": [{"id": "codex", "role_state": "working", "usage": {"windows": {}}}],
-        "ledger": {}, "listeners": [], "last_turn": {"ask_excerpt": "x"},
-        "activity": [{"turn": 6, "agent": "claude", "summary": "x" * 200}],
+        "agents": [{"id": "codex", "model": "gpt-5.4", "model_source": "self_declared",
+                    "role_state": "working", "usage": {"windows": {}}}],
+        "ledger": {}, "listeners": [],
+        "last_turn": {"agent": "claude", "model": "claude-opus-4-8", "ask_excerpt": "x"},
+        "activity": [{"turn": 6, "agent": "claude", "model": "claude-opus-4-8",
+                      "summary": "x" * 200}],
     }
 
 
@@ -62,7 +65,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 output = top.render(fixture(), width, self.NOW)
                 plain = self._plain(output)
                 self.assertTrue(all(token in plain for token in (
-                    "┌", "│", "├", "└", "M8SHIFT · demo", "AGENTS", "TTL", "codex")))
+                    "┌", "│", "├", "└", "M8SHIFT · demo", "AGENTS", "TTL", "codex",
+                    "gpt-5.4*", "self-declared (unverified)")))
                 lines = plain.splitlines()
                 self.assertTrue(all(len(line) == width for line in lines))
                 # the pen holder sits in its own column, not glued to the label
@@ -141,9 +145,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         top = load_top()
         snap = dict(fixture())
         snap["activity"] = [
-            {"turn": 40, "agent": "codex", "kind": "turn", "ts": "2026-07-13T03:40:24Z",
+            {"turn": 40, "agent": "codex", "model": "gpt-5.4", "kind": "turn", "ts": "2026-07-13T03:40:24Z",
              "summary": "Reviewed the diff and merged"},
-            {"turn": 41, "agent": "claude", "kind": "turn", "ts": "2026-07-13T03:47:21Z",
+            {"turn": 41, "agent": "claude", "model": "claude-opus-4-8", "kind": "turn", "ts": "2026-07-13T03:47:21Z",
              "summary": "Acknowledged the plan; disposable branch off origin/main"},
         ]
         old = os.environ.pop("NO_COLOR", None)
@@ -154,6 +158,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             # action inferred from the leading verb (note is the remainder)
             self.assertIn("Acknowledged", output)
             self.assertIn("Reviewed", output)
+            self.assertIn("claude-opus-4-8*", output)
             # timestamps rendered (local); recent turn (03:47) above the older (03:40)
             self.assertIn("2026-07-13T", output)
             i_new = next(i for i, l in enumerate(lines) if "Acknowledged" in l)

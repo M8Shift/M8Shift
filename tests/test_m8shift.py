@@ -779,6 +779,30 @@ class TestClaimModel(CLIBase):
         self.assertTrue(claude_acts, "claude activity item present")
         self.assertRegex(claude_acts[0].get("ts") or "", r"^\d{4}-\d{2}-\d{2}T")
 
+    def test_model_declaration_is_persisted_stamped_and_snapshotted(self):
+        self.init()
+        with mock.patch.dict(os.environ, {"M8SHIFT_AGENT_MODEL": "claude-opus-4-8"}):
+            self.assertEqual(self.cw("claim", "claude").returncode, 0)
+            self.assertEqual(self.cw("append", "claude", "--to", "codex",
+                                     "--done", "modeled").returncode, 0)
+        self.assertIn("- model:   claude-opus-4-8", self.md())
+        snap = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        claude = next(a for a in snap["agents"] if a["id"] == "claude")
+        self.assertEqual(claude["model"], "claude-opus-4-8")
+        self.assertEqual(claude["model_source"], "self_declared")
+        self.assertEqual(snap["last_turn"]["model"], "claude-opus-4-8")
+        self.assertEqual(snap["activity"][-1]["model"], "claude-opus-4-8")
+
+    def test_invalid_model_declaration_is_not_recorded(self):
+        self.init()
+        with mock.patch.dict(os.environ, {"M8SHIFT_AGENT_MODEL": "bad model\nforged"}):
+            self.assertEqual(self.cw("claim", "claude").returncode, 0)
+            self.assertEqual(self.cw("append", "claude", "--to", "codex").returncode, 0)
+        snap = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        claude = next(a for a in snap["agents"] if a["id"] == "claude")
+        self.assertIsNone(claude["model"])
+        self.assertNotIn("- model:", self.md())
+
 
 # ───────────────────────────── mutex / guardrails ───────────────────────────
 
