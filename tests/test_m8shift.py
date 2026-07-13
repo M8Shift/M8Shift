@@ -1480,6 +1480,27 @@ class TestReadCommands(CLIBase):
         d = json.loads(self.cw("status", "--json").stdout)
         self.assertEqual(d["snapshot"]["ledger"]["tasks_open"], 0)
 
+    def test_status_snapshot_projects_real_optional_sources(self):
+        self.init()
+        decisions = os.path.join(self.d, "docs", "decisions")
+        os.makedirs(decisions)
+        with open(os.path.join(decisions, "0001-choice.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Choice\n\n- Status: proposed\n")
+        usage = os.path.join(self.d, ".m8shift", "usage")
+        os.makedirs(usage)
+        with open(os.path.join(usage, "budget.json"), "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.usage.budget.v1",
+                       "budgets": [{"agent": "claude", "windows": {"weekly": 1}}]}, fh)
+        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners)
+        with open(os.path.join(listeners, "claude.pid"), "w", encoding="ascii") as fh:
+            fh.write(str(os.getpid()))
+        snapshot = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        self.assertEqual(snapshot["ledger"]["decisions_pending"], 1)
+        self.assertIsInstance(snapshot["ledger"]["doctor_findings"], int)
+        self.assertIs(snapshot["ledger"]["gate_armed"], True)
+        self.assertEqual(snapshot["listeners"], "claude ALIVE")
+
     def test_status_snapshot_usage_keeps_absent_window_explicit(self):
         self.init()
         path = os.path.join(self.d, ".m8shift", "runtime", "usage.jsonl")

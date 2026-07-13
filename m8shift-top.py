@@ -52,14 +52,19 @@ def _color(code, text, enabled):
 
 
 def _usage_cell(windows, label, short):
-    """Render known exhaustion separately from genuinely absent usage data."""
+    """Render exhaustion or usage, plus the provider-supplied reset time."""
     row = windows.get(label) or {}
     ratio = row.get("used_ratio")
     model = row.get("model") if isinstance(row.get("model"), str) else ""
     model = clean(model, 18) if model else ""
     if ratio == 1 and model:
-        return "%s EXHAUSTED [%s]" % (short, model), ratio
-    return "%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100)), ratio
+        value = "%s EXHAUSTED [%s]" % (short, model)
+    else:
+        value = "%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100))
+    reset = _stamp(row.get("resets_at"))
+    if reset is not None:
+        value += " reset " + reset.astimezone().strftime("%a %H:%M").lower()
+    return value, ratio
 
 
 def _stamp(value):

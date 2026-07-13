@@ -8347,7 +8347,7 @@ def _status_activity(turns, limit=8):
 
 
 def _status_ledger_counts():
-    """Cheap, fail-open counters. Unknown sources stay explicit rather than guessed."""
+    """Read-only dashboard counters; every optional source fails open independently."""
     tasks_open = 0
     try:
         if os.path.exists(TASKS):
@@ -8355,8 +8355,69 @@ def _status_ledger_counts():
                              if event["verb"] == "add")
     except (OSError, UnicodeError):
         tasks_open = None
-    return {"tasks_open": tasks_open, "decisions_pending": None,
-            "doctor_findings": None, "gate_armed": "unknown"}
+    decisions_pending = 0
+    try:
+        paths = []
+        if os.path.isfile(decisions_single()):
+            paths.append(decisions_single())
+        if os.path.isdir(decisions_dir()):
+            paths.extend(os.path.join(decisions_dir(), name)
+                         for name in sorted(os.listdir(decisions_dir()))[:256]
+                         if name.endswith(".md"))
+        for path in paths:
+            # Decision records are small generated Markdown documents.  Read only
+            # the header: Status is emitted before any untrusted turn excerpts.
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(16 * 1024)
+            if re.search(r"(?im)^- status:\s*(proposed|pending|draft)\s*$", head):
+                decisions_pending += 1
+    except OSError:
+        decisions_pending = None
+    try:
+        # Keep the 2s dashboard path passive and bounded.  The kit pass is the
+        # core doctor's local, subprocess-free diagnostic slice.
+        doctor_findings = len(_kit_doctor_findings())
+    except Exception:
+        doctor_findings = None
+    gate_armed = False
+    try:
+        budget, err = read_json_diagnostic(
+            os.path.join(project_root(), ".m8shift", "usage", "budget.json"), {})
+        rows = budget.get("budgets") if isinstance(budget, dict) else None
+        gate_armed = (not err and budget.get("schema") == "m8shift.usage.budget.v1"
+                      and isinstance(rows, list) and bool(rows))
+    except Exception:
+        gate_armed = None
+    return {"tasks_open": tasks_open, "decisions_pending": decisions_pending,
+            "doctor_findings": doctor_findings, "gate_armed": gate_armed}
+
+
+def _status_listeners(lk):
+    """Compact live-listener summary from bounded, roster-owned PID sidecars."""
+    rows = []
+    base = os.path.join(project_root(), ".m8shift", "runtime", "listeners")
+    for agent in active_agents(lk):
+        alive = False
+        try:
+            with open(os.path.join(base, agent + ".pid"), encoding="ascii") as fh:
+                pid = int(fh.read(32).strip())
+            if pid > 0:
+                os.kill(pid, 0)
+                alive = True
+        except (OSError, ValueError):
+            pass
+        if alive:
+            rows.append(agent + " ALIVE")
+    return " · ".join(rows) if rows else "none"
+
+
+def _status_heartbeat_timestamp(lk):
+    """Timestamp of the matching RFC 049 beat; metadata remains in flat status."""
+    holder = lk.get("holder", "none")
+    status, doc = read_heartbeat(holder)
+    if status != "valid" or not heartbeat_matches_window(lk, holder, doc):
+        return None
+    return _status_snapshot_text(doc.get("written_at"))
 
 
 def status_snapshot_v1(lk, last, session_info, turns=None):
@@ -8379,7 +8440,7 @@ def status_snapshot_v1(lk, last, session_info, turns=None):
     return {
         "schema": STATUS_SNAPSHOT_SCHEMA,
         "agents": agents,
-        "listeners": None,
+        "listeners": _status_listeners(lk),
         "last_turn": ({"n": last.get("n"), "agent": _status_snapshot_text(last.get("agent")),
                        "to": _status_snapshot_text((last.get("fields") or {}).get("to")),
                        "ask_excerpt": _status_snapshot_text((last.get("fields") or {}).get("ask"))}
@@ -8391,7 +8452,7 @@ def status_snapshot_v1(lk, last, session_info, turns=None):
         },
         "pen": {
             "note": _status_snapshot_text(lk.get("note")),
-            "heartbeat": heartbeat_meta(lk),
+            "heartbeat": _status_heartbeat_timestamp(lk),
         },
         "activity": _status_activity(turns),
     }

@@ -81,6 +81,17 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         plain = self._plain(output)
         self.assertTrue(all(len(line) == 120 for line in plain.splitlines()))
 
+    def test_usage_columns_include_reset_time(self):
+        top = load_top()
+        data = fixture()
+        data["agents"][0]["usage"]["windows"] = {
+            "session_5h": {"used_ratio": .42, "resets_at": "2026-07-13T05:00:00Z"},
+            "weekly": {"used_ratio": .3, "resets_at": "2026-07-17T05:00:00Z"},
+        }
+        output = self._plain(top.render(data, 120, self.NOW))
+        self.assertIn("5h 42% reset", output)
+        self.assertIn("weekly 30% reset", output)
+
     def test_wide_activity_tabulated_recent_first(self):
         top = load_top()
         snap = dict(fixture())
