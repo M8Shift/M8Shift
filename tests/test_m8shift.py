@@ -40,6 +40,30 @@ TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 # ───────────────────────────── unit tests: pure functions ───────────────────
 
 class TestPureFunctions(unittest.TestCase):
+    def test_every_cli_parser_has_summary_help(self):
+        """Every command remains discoverable in the top-level/subcommand help."""
+        with open(SCRIPT, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        parsers = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_parser"
+        ]
+        missing = [
+            node.lineno for node in parsers
+            if not any(keyword.arg == "help" for keyword in node.keywords)
+        ]
+        self.assertEqual(missing, [], "add_parser calls missing help= summaries")
+
+    def test_bare_cli_prints_help_and_succeeds(self):
+        result = subprocess.run(
+            [sys.executable, SCRIPT], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage:", result.stdout)
+        self.assertIn("claim", result.stdout)
+        self.assertEqual(result.stderr, "")
+
     def test_other(self):
         self.assertEqual(cowork.other("claude"), "codex")
         self.assertEqual(cowork.other("codex"), "claude")
