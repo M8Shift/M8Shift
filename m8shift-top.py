@@ -60,7 +60,25 @@ def _stamp(value):
         return None
 
 
+def _fmt_dur(seconds):
+    # pen-hold duration for one turn; "—" when unknown (no timestamps yet).
+    if seconds is None or seconds < 0:
+        return "—"
+    m, s = divmod(int(seconds), 60)
+    return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%02d:%02d" % (m, s)
+
+
 def render(snapshot, width, now=None):
+    # Operator policy: cap the frame near 120 columns, and tabulate into aligned
+    # columns once there is room (>=100 cols); below that keep the stacked narrow
+    # layout. Frame fidelity (every line == width) holds in both.
+    width = min(max(24, width), 120)
+    if width >= 100:
+        return _render_wide(snapshot, width, now)
+    return _render_stacked(snapshot, width, now)
+
+
+def _render_stacked(snapshot, width, now=None):
     width = max(24, width)
     inner = width - 2
     colored = "NO_COLOR" not in os.environ
@@ -134,6 +152,155 @@ def render(snapshot, width, now=None):
     for event in snapshot.get("activity") or []:
         lines.append(row("  %s  %s" % (_value(event.get("agent")), _value(event.get("summary")))))
     lines += [sep, row("q quit  ? help  r refresh  ↑/↓ navigate", dim), bottom]
+    return "\n".join(lines)
+
+
+def _render_wide(snapshot, width, now=None):
+    # Tabulated layout for wide terminals: sections lay out in aligned columns,
+    # the dash-filled header/separators pin the right edge. Colour is composed
+    # AFTER padding (paint replaces a plain segment with an equal-width coloured
+    # one), so ANSI bytes never shift a border. Amber is reserved for the pen and
+    # the TTL gauge; state carries an inverse badge, never colour alone.
+    inner = width - 2
+    colored = "NO_COLOR" not in os.environ
+    amber = lambda text: _color("33", text, colored)
+    green = lambda text: _color("32", text, colored)
+    red = lambda text: _color("31", text, colored)
+    cyan = lambda text: _color("36", text, colored)
+    dim = lambda text: _color("2", text, colored)
+    badge = lambda text: _color("7", text, colored)
+
+    def usage_style(ratio):
+        # green ok · amber elevated · red near-limit · dim when unknown.
+        if ratio is None:
+            return dim
+        return red if ratio >= 0.85 else amber if ratio >= 0.60 else green
+
+    def dot_style(role):
+        return green if role == "idle" else amber if role == "working" else dim
+
+    def paint(plain, seg, style):
+        if not colored or not seg or seg not in plain:
+            return plain
+        left, rest = plain.split(seg, 1)
+        return left + style(seg) + rest
+
+    def cells(pairs):
+        out = ""
+        for text, col in pairs:
+            if col > len(out):
+                out += " " * (col - len(out))
+            out += text
+        return clean(out, inner).ljust(inner)
+
+    def content(pairs):
+        return "│" + cells(pairs) + "│"
+
+    def framed(lc, rc, left, right=""):
+        fill = inner - len(left) - len(right)
+        if fill < 0:
+            body = clean(left + right, inner).ljust(inner, "─")
+        else:
+            body = left + "─" * fill + right
+        return lc + body + rc
+
+    # A structural blank must stay blank; clean() turns "" into "unavailable".
+    blank = "│" + " " * inner + "│"
+
+    clock = (now or datetime.now(timezone.utc)).astimezone().strftime("%H:%M:%S")
+    version = _value(snapshot.get("m8shift_version"))
+    header = framed("┌", "┐", "─ M8SHIFT · %s · %s · session %s " % (
+        _value(snapshot.get("project")), version,
+        _value(snapshot.get("session"))), " %s ─" % clock)
+    lines = [paint(header, version, cyan) if version != "unavailable" else header, blank]
+
+    holder = _value(snapshot.get("holder"))
+    state = _value(snapshot.get("state"))
+    pen = snapshot.get("pen") or {}
+    turn_seg = "turn %s" % _value(snapshot.get("turn"))
+    hb_seg = "heartbeat %s" % _value(pen.get("heartbeat") or "—")
+    pen_row = cells([
+        ("  PEN", 0), (holder, 9), ("[%s]" % state, 17),
+        (turn_seg, 34), ("claimed %s" % _value(snapshot.get("since")), 47),
+        (hb_seg, 66)])
+    pen_row = paint(pen_row, holder, amber)
+    pen_row = paint(pen_row, "[%s]" % state, badge)
+    pen_row = paint(pen_row, turn_seg, cyan)
+    pen_row = paint(pen_row, hb_seg, green)
+    lines.append("│" + pen_row + "│")
+
+    expires = _stamp(snapshot.get("expires"))
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    remaining = max(0, int((expires - current).total_seconds())) if expires else 0
+    alive = bool(expires and remaining > 0)
+    gw = max(12, min(28, inner - 70))
+    filled = min(gw, max(0, round(gw * remaining / 1800)))
+    gauge = "█" * filled + "░" * (gw - filled)
+    left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
+    ttl_row = cells([
+        ("  TTL", 0), (gauge, 10), (left_seg, 12 + gw),
+        ("expires %s (%s)" % (_value(snapshot.get("expires")),
+                              "alive" if alive else "stale"), 24 + gw)])
+    ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
+    lines += ["│" + ttl_row + "│", blank]
+
+    for i, agent in enumerate(snapshot.get("agents") or []):
+        name = clean(agent.get("id"), 16)
+        astate = clean(agent.get("role_state") or "unknown", 12)
+        windows = (agent.get("usage") or {}).get("windows") or {}
+        ratios, bits = [], []
+        for short, label in (("5h", "session_5h"), ("weekly", "weekly")):
+            ratio = (windows.get(label) or {}).get("used_ratio")
+            ratios.append(ratio)
+            bits.append("%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100)))
+        marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
+        arow = cells([("  AGENTS" if i == 0 else "        ", 0),
+                      ("%s %s" % (marker, name), 10), ("● %s" % astate, 22),
+                      (bits[0], 42), (bits[1], 56)])
+        arow = paint(arow, "●", dot_style(astate))
+        arow = paint(arow, bits[0], usage_style(ratios[0]))
+        arow = paint(arow, bits[1], usage_style(ratios[1]))
+        lines.append("│" + arow + "│")
+
+    ledger = snapshot.get("ledger") or {}
+    last = snapshot.get("last_turn") or {}
+    listen_val = _value(snapshot.get("listeners"))
+    listen_line = content([("  LISTEN", 0), (listen_val, 10)])
+    listen_line = paint(listen_line, "ALIVE", green)
+    if listen_val == "unavailable":
+        listen_line = paint(listen_line, listen_val, dim)
+    lg = tuple(_value(ledger.get(k)) for k in
+               ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
+    ledger_line = content([("  LEDGER", 0),
+                           ("tasks_open=%s  decisions_pending=%s  doctor_findings=%s  gate_armed=%s" % lg, 10)])
+    ledger_line = paint(ledger_line, "tasks_open=%s" % lg[0], cyan)
+    ledger_line = paint(ledger_line, "decisions_pending=%s" % lg[1], cyan)
+    ledger_line = paint(ledger_line, "doctor_findings=%s" % lg[2],
+                        green if lg[2] == "0" else dim if lg[2] == "unavailable" else red)
+    ledger_line = paint(ledger_line, "gate_armed=%s" % lg[3],
+                        dim if lg[3] in ("unavailable", "no", "false", "False") else green)
+    turn_line = content([("  TURN", 0),
+                         ("#%s %s → %s  %s" % (_value(last.get("n")), _value(last.get("agent")),
+                                               _value(last.get("to")), _value(last.get("ask_excerpt"))), 10)])
+    lines += [blank, listen_line, ledger_line, turn_line, blank, framed("├", "┤", "─ activity ")]
+    # ACTIVITY: recent -> oldest, tabulated (ts-local | hold-dur | agent | action | note).
+    stamped = [(_stamp(e.get("ts")), e) for e in (snapshot.get("activity") or [])]
+    if any(t for t, _ in stamped):
+        stamped.sort(key=lambda p: p[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    else:
+        stamped.reverse()  # no ts yet: core is oldest-first, show newest on top
+    for idx, (dt, e) in enumerate(stamped):
+        ts_s = dt.astimezone().strftime("%Y-%m-%dT%H:%M:%S") if dt else "—"
+        older = stamped[idx + 1][0] if idx + 1 < len(stamped) else None
+        dur = _fmt_dur((dt - older).total_seconds()) if (dt and older) else "—"
+        parts = (_value(e.get("summary")) or "").split(None, 1)
+        action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
+        note = parts[1] if len(parts) > 1 else ""
+        lines.append("│" + cells([("  %s" % ts_s, 0), (dur, 22), (clean(e.get("agent"), 8), 30),
+                                   (action, 40), (note, 54)]) + "│")
+    lines.append(framed("└", "┘", "─ q quit  ? help  r refresh  ↑/↓ navigate "))
     return "\n".join(lines)
 
 

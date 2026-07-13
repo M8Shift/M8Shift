@@ -3,6 +3,8 @@ import sys
 import unittest
 import importlib.util
 import os
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,18 +32,77 @@ def fixture():
 
 
 class M8ShiftTopFallbackTests(unittest.TestCase):
-    def test_frame_fidelity_and_right_edge_at_two_widths(self):
+    NOW = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _plain(output):
+        # ANSI is confined inside fixed-width borders; strip it before measuring.
+        import re
+        return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+    def test_stacked_frame_fidelity_narrow(self):
         top = load_top()
-        now = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
         old = os.environ.pop("NO_COLOR", None)
         try:
-            for width in (80, 120):
-                output = top.render(fixture(), width, now)
-                self.assertTrue(all(token in output for token in ("┌", "│", "├", "└", "M8SHIFT · demo", "PEN codex", "TTL <")))
-                # ANSI is confined inside fixed-width borders; strip it locally.
-                import re
-                plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            for width in (80, 96):  # < 100 => stacked layout
+                output = top.render(fixture(), width, self.NOW)
+                self.assertTrue(all(token in output for token in (
+                    "┌", "│", "├", "└", "M8SHIFT · demo", "PEN codex", "TTL <")))
+                plain = self._plain(output)
                 self.assertTrue(all(len(line) == width for line in plain.splitlines()))
+        finally:
+            if old is not None:
+                os.environ["NO_COLOR"] = old
+
+    def test_wide_layout_tabulates_and_pins_right_edge(self):
+        top = load_top()
+        old = os.environ.pop("NO_COLOR", None)
+        try:
+            for width in (100, 120):  # >= 100 => wide tabulated layout
+                output = top.render(fixture(), width, self.NOW)
+                self.assertTrue(all(token in output for token in (
+                    "┌", "│", "├", "└", "M8SHIFT · demo", "AGENTS", "TTL", "codex")))
+                plain = self._plain(output)
+                lines = plain.splitlines()
+                self.assertTrue(all(len(line) == width for line in lines))
+                # the pen holder sits in its own column, not glued to the label
+                self.assertNotIn("PEN codex", output)
+                # structural blanks stay blank (clean("") must not leak "unavailable")
+                self.assertIn("│" + " " * (width - 2) + "│", lines)
+                # colour is emitted in a colour-capable env (stripped for the width check)
+                self.assertIn("\x1b[", output)
+        finally:
+            if old is not None:
+                os.environ["NO_COLOR"] = old
+
+    def test_width_capped_near_120(self):
+        top = load_top()
+        output = top.render(fixture(), 174, self.NOW)  # cap keeps the frame at 120
+        plain = self._plain(output)
+        self.assertTrue(all(len(line) == 120 for line in plain.splitlines()))
+
+    def test_wide_activity_tabulated_recent_first(self):
+        top = load_top()
+        snap = dict(fixture())
+        snap["activity"] = [
+            {"agent": "codex", "kind": "turn", "ts": "2026-07-13T03:40:24Z",
+             "summary": "Reviewed the diff and merged"},
+            {"agent": "claude", "kind": "turn", "ts": "2026-07-13T03:47:21Z",
+             "summary": "Acknowledged the plan; disposable branch off origin/main"},
+        ]
+        old = os.environ.pop("NO_COLOR", None)
+        try:
+            output = top.render(snap, 120, self.NOW)
+            lines = self._plain(output).splitlines()
+            self.assertTrue(all(len(line) == 120 for line in lines))
+            # action inferred from the leading verb (note is the remainder)
+            self.assertIn("Acknowledged", output)
+            self.assertIn("Reviewed", output)
+            # timestamps rendered (local); recent turn (03:47) above the older (03:40)
+            self.assertIn("2026-07-13T", output)
+            i_new = next(i for i, l in enumerate(lines) if "Acknowledged" in l)
+            i_old = next(i for i, l in enumerate(lines) if "Reviewed" in l)
+            self.assertLess(i_new, i_old)
         finally:
             if old is not None:
                 os.environ["NO_COLOR"] = old
@@ -51,10 +112,11 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         old = os.environ.get("NO_COLOR")
         os.environ["NO_COLOR"] = "1"
         try:
-            output = top.render(fixture(), 80, datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc))
-            self.assertNotIn("\x1b[", output)
-            self.assertIn("┌", output)
-            self.assertTrue(all(len(line) == 80 for line in output.splitlines()))
+            for width in (80, 120):  # stacked and wide, both monochrome-framed
+                output = top.render(fixture(), width, self.NOW)
+                self.assertNotIn("\x1b[", output)
+                self.assertIn("┌", output)
+                self.assertTrue(all(len(line) == width for line in output.splitlines()))
         finally:
             if old is None:
                 os.environ.pop("NO_COLOR", None)
@@ -62,10 +124,13 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 os.environ["NO_COLOR"] = old
 
     def test_piped_stdout_falls_back_to_watch_cleanly(self):
-        # `init` is script-local (RFC 038 §9): copy the engine into a temp dir and
-        # drive that copy so the fallback's `watch` has an M8SHIFT.md to render.
-        # cwd=ROOT would rely on a stray relay in the checkout (fails on a clean CI).
-        import shutil, tempfile, os
+        # Piped (non-TTY) stdout must fall back to `watch` byte-compatibly: no
+        # alt-screen, no `--interval` int-parse error. `init` is a script-local
+        # bootstrap (RFC 038 §9), so copy the engine into a temp dir and drive
+        # that copy — the relay lands next to it and the fallback's `watch` has
+        # an M8SHIFT.md to render, then exits via --once. Isolating in a temp
+        # dir keeps the test deterministic on a clean checkout (M8SHIFT.md is
+        # gitignored, so cwd=ROOT would exit rc1 "M8SHIFT.md not found" on CI).
         with tempfile.TemporaryDirectory() as d:
             for name in ("m8shift.py", "m8shift-top.py"):
                 shutil.copy(str(ROOT / name), os.path.join(d, name))
@@ -80,8 +145,10 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             proc = subprocess.run(
                 [sys.executable, os.path.join(d, "m8shift-top.py"),
                  "--engine", engine, "--interval", "2", "--once"],
-                cwd=d, env=env, text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cwd=d, env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("invalid int value", proc.stderr)
