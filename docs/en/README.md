@@ -103,6 +103,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [050-rfc-manual-multi-agent-specialists.md](rfc/050-rfc-manual-multi-agent-specialists.md) | Draft manual multi-agent specialist workflow: advisory read-only and mutating worktree lanes report back to the relay. |
 | [051-rfc-usage-advisory-in-core-display.md](rfc/051-rfc-usage-advisory-in-core-display.md) | Draft: a read-only usage advisory line in the core `status`/`watch` display, fed by the companion's local sidecar (charter-safe, echo-only, fail-open). |
 | [052-rfc-project-compartmentalization-data-hygiene.md](rfc/052-rfc-project-compartmentalization-data-hygiene.md) | Draft: projects compartmentalized by default + mechanical data-hygiene gates (`doctor --hygiene` raw path lint, agent-pack invariant, out-of-repo denylist, scrub-check, session binding). Post INC-2026-0708 (#101). |
+| [054-rfc-pre-exhaustion-session-rotation.md](rfc/054-rfc-pre-exhaustion-session-rotation.md) | Draft design: provider-aware pre-exhaustion thresholds, compact checkpoint + bounded resume packet, and explicit operator-confirmed fresh-session rotation before native compaction becomes impossible. Extends RFC 036; no UI automation or core authority change. Reviewed (F1/F5/F6/F7/F9 amendments applied). |
 
 ## Security docs
 
