@@ -738,6 +738,18 @@ class TestClaimModel(CLIBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("CORPS-LIBRE-XYZ", self.md())
 
+    def test_append_stamps_at_and_activity_ts_is_populated(self):
+        # A posted turn carries an `- at:` stamp so the dashboard activity zone
+        # can render real timestamps + hold-duration (RFC/backlog #111).
+        self.init()
+        self.turn("claude", "codex", done="Reviewed the change")
+        self.assertIn("- at:", self.md())
+        payload = json.loads(self.cw("status", "--json").stdout)
+        snap = payload.get("snapshot") or payload
+        claude_acts = [a for a in (snap.get("activity") or []) if a.get("agent") == "claude"]
+        self.assertTrue(claude_acts, "claude activity item present")
+        self.assertRegex(claude_acts[0].get("ts") or "", r"^\d{4}-\d{2}-\d{2}T")
+
 
 # ───────────────────────────── mutex / guardrails ───────────────────────────
 
