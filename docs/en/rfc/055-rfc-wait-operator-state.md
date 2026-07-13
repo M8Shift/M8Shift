@@ -74,8 +74,8 @@ python3 m8shift.py wait-operator claude --reason "GO/no-GO on the reconciliation
 
 ### 4.2 TTL semantics while blocked
 
-- `expires` is **frozen** (or rendered `N-A`) while `wait: operator` is set: it is not a
-  countdown-to-stale.
+- The stored `expires` timestamp is left unchanged for compatibility and audit, but is
+  rendered as **advisory** while `wait: operator` is set: it is not a countdown-to-stale.
 - Staleness is decided by **liveness**, not the TTL: an alive-but-waiting holder keeps a
   fresh heartbeat (RFC 049), so it is not stale. A holder that also loses its heartbeat is
   stale by the normal RFC 049 rule and may be reclaimed.
@@ -84,10 +84,14 @@ python3 m8shift.py wait-operator claude --reason "GO/no-GO on the reconciliation
 
 ### 4.3 Provenance guard (prompt-security)
 
-`wait: operator` is set by the holder itself (a first-party command), and cleared by the
-holder's own next action. It is **not** inferred from relay/handoff/model text (untrusted
-coordination data). An operator answer that unblocks the holder arrives through the
-operator's own channel, not by a peer asserting "the operator replied."
+`wait: operator` is set by an explicit holder command and cleared by the holder's own
+next terminal turn action. It is **not** inferred or auto-set from relay/handoff/model
+text (untrusted coordination data). The command is an actor-authorized mutation, not
+proof that its reason came from the operator: a model can still invoke it after reading
+untrusted text. Runtime integration may invoke it only from a first-party host event
+that actually suspends execution for operator input; it must never classify free-form
+text as such an event. An operator answer that unblocks the holder arrives through that
+same host/operator channel, not by a peer asserting "the operator replied."
 
 ## 5. Display
 
@@ -99,6 +103,8 @@ reason: GO/no-GO on the reconciliation strategy
 ```
 
 - The TTL gauge shows `held · awaiting operator` instead of a shrinking bar.
+- Show `held since <t>` (plus the unchanged expiry timestamp labelled `advisory` in
+  verbose/JSON output); do not use `N-A` or present a frozen timestamp as a deadline.
 - Honesty rule (as elsewhere): `alive` vs `stale` stays visible; the reason is shown when
   present, `—` when absent — never a fake countdown.
 - The top dashboard treats `wait: operator` as its own PEN sub-state colour/badge, not the
@@ -130,14 +136,27 @@ reason: GO/no-GO on the reconciliation strategy
 
 ## 8. Open decisions
 
-1. Command name: `wait-operator` vs a flag on an existing command (e.g. `heartbeat
-   --wait operator`)?
-2. Should `wait: operator` auto-set when the runtime companion detects an interactive
-   `AskUserQuestion`/plan-approval, or stay a purely explicit first-party call?
-3. Does the frozen `expires` display as `N-A`, as the frozen timestamp, or as
-   `held since <t>`?
-4. Should there be a soft cap (e.g. warn if a holder has waited on the operator for
-   > N hours) to catch truly abandoned waits, distinct from dead holders?
+1. **Dedicated command:** use `wait-operator`; do not overload `heartbeat`, whose
+   protective producer semantics and cadence contract remain exactly RFC 049's.
+2. **Explicit core mutation:** no inference from `AskUserQuestion`, plan, relay, or
+   model text. A runtime companion may call the same command only from a typed,
+   first-party host suspension event; that integration is a separate gated change.
+3. **Display:** `held since <t>` in the primary display; preserve the original expiry
+   timestamp as explicitly advisory in verbose/JSON output.
+4. **Warning, not a cap:** surface a configurable/default informational warning after a
+   long wait (initial default: one normal operator shift, 8h), but never reclaim or clear
+   the marker based on elapsed wait alone. Liveness still decides claimability.
+
+### 8.1 RFC 049 implementation constraint
+
+The marker does not manufacture liveness. A waiting interactive process with no
+protective producer remains unobservable, exactly as RFC 049 says. Therefore the core
+must not treat the marker itself, its reason, an audit-only `claim --refresh` beat, or
+elapsed operator-wait time as protective evidence. `wait-operator` should either be
+paired with a real periodic `heartbeat` producer (runtime listener/wrapper), or status
+must honestly render `liveness unknown`; a dead/no-heartbeat holder remains eligible
+for RFC 049's guarded stale recovery. Heartbeat and refresh operations maintain the
+marker; only `append`/`release`/`pause`/`done` clear it.
 
 ## 9. Decision requested
 
