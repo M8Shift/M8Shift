@@ -92,6 +92,20 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertIn("5h 42% reset", output)
         self.assertIn("weekly 30% reset", output)
 
+    def test_footer_shows_configured_refresh_tick(self):
+        top = load_top()
+        for width in (80, 120):
+            output = self._plain(top.render(fixture(), width, self.NOW, interval=7))
+            self.assertIn("tick 7s", output)
+
+    def test_help_documents_refresh_interval(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "m8shift-top.py"), "--help"],
+            text=True, capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("--interval", proc.stdout)
+        self.assertIn("refresh interval in seconds", proc.stdout)
+
     def test_wide_activity_tabulated_recent_first(self):
         top = load_top()
         snap = dict(fixture())

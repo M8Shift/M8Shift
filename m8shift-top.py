@@ -84,17 +84,17 @@ def _fmt_dur(seconds):
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%02d:%02d" % (m, s)
 
 
-def render(snapshot, width, now=None):
+def render(snapshot, width, now=None, interval=2):
     # Operator policy: cap the frame near 120 columns, and tabulate into aligned
     # columns once there is room (>=100 cols); below that keep the stacked narrow
     # layout. Frame fidelity (every line == width) holds in both.
     width = min(max(24, width), 120)
     if width >= 100:
-        return _render_wide(snapshot, width, now)
-    return _render_stacked(snapshot, width, now)
+        return _render_wide(snapshot, width, now, interval)
+    return _render_stacked(snapshot, width, now, interval)
 
 
-def _render_stacked(snapshot, width, now=None):
+def _render_stacked(snapshot, width, now=None, interval=2):
     width = max(24, width)
     inner = width - 2
     colored = "NO_COLOR" not in os.environ
@@ -166,11 +166,11 @@ def _render_stacked(snapshot, width, now=None):
     lines += [sep, row("ACTIVITY", dim)]
     for event in snapshot.get("activity") or []:
         lines.append(row("  %s  %s" % (_value(event.get("agent")), _value(event.get("summary")))))
-    lines += [sep, row("q quit  ? help  r refresh  ↑/↓ navigate", dim), bottom]
+    lines += [sep, row("q quit  ? help  r refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
     return "\n".join(lines)
 
 
-def _render_wide(snapshot, width, now=None):
+def _render_wide(snapshot, width, now=None, interval=2):
     # Tabulated layout for wide terminals: sections lay out in aligned columns,
     # the dash-filled header/separators pin the right edge. Colour is composed
     # AFTER padding (paint replaces a plain segment with an equal-width coloured
@@ -315,7 +315,7 @@ def _render_wide(snapshot, width, now=None):
         note = parts[1] if len(parts) > 1 else ""
         lines.append("│" + cells([("  %s" % ts_s, 0), (dur, 22), (clean(e.get("agent"), 8), 30),
                                    (action, 40), (note, 54)]) + "│")
-    lines.append(framed("└", "┘", "─ q quit  ? help  r refresh  ↑/↓ navigate "))
+    lines.append(framed("└", "┘", "─ q quit  ? help  r refresh  ↑/↓ navigate  tick %ss " % interval))
     return "\n".join(lines)
 
 
@@ -350,7 +350,8 @@ def scroll_fallback(engine, root, extra):
 
 def main(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--interval", type=int, default=2)
+    p.add_argument("--interval", type=int, default=2,
+                   help="refresh interval in seconds (default: 2)")
     p.add_argument("--plain", action="store_true")
     p.add_argument("--root", default=os.environ.get("M8SHIFT_ROOT", os.getcwd()))
     p.add_argument("--engine", default=os.environ.get("M8SHIFT_ENGINE"))
@@ -383,7 +384,8 @@ def main(argv=None):
     try:
         while True:
             snap = load_snapshot(engine, args.root)
-            frame = render(snap, shutil.get_terminal_size((80, 24)).columns)
+            frame = render(snap, shutil.get_terminal_size((80, 24)).columns,
+                           interval=args.interval)
             if frame != previous:
                 sys.stdout.write(HOME + frame + "\x1b[J")
                 sys.stdout.flush()
