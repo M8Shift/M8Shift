@@ -959,6 +959,20 @@ implemented, verified, committed, pushed, and handed off or closed according
 to the relay. Never append or report "done" for work that only exists as an
 opened ticket, an unpushed branch, or an unreviewed draft.
 
+## Operational disciplines (extract)
+
+When you change M8Shift's own code/docs, beyond the relay floor above. Full,
+human-authored detail lives in `docs/en/agents-guide.md`. (Evidence/compression
+and shared-checkout disciplines are stated above and not repeated here.)
+
+- **Code-quality bar** — match the surrounding code's style and idiom; add tests
+  for new behaviour; leave no dead code or stray debug output.
+- **Commit hygiene** — commit per logical change; never stage unrelated pre-existing
+  untracked files (history-rewrite/destructive-git rules are under "Shared checkouts").
+- **Forge tracking** — one open → decide → close ticket per change; keep commit ↔ ticket.
+- **Token economy** — use RTK when present (its lossy-for-review caveat is under
+  "Compression is not proof" above).
+
 ## When in doubt
 
 Run read-only commands first: `./m8shift.py status --for <you>`, `peek <you>`,

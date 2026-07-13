@@ -185,6 +185,11 @@ class TestPureFunctions(unittest.TestCase):
             "A refused checkout is a signal, not an obstacle",
             "isolated worktree (`m8shift-worktree.py`)",
             "outside relay coordination",
+            # #10: operational-disciplines extract + pointer to the full agents-guide
+            "## Operational disciplines (extract)",
+            "docs/en/agents-guide.md",
+            "**Code-quality bar**",
+            "**Forge tracking**",
         ):
             self.assertIn(needle, pack,
                           f"agent pack dropped the discipline text: {needle!r}")
