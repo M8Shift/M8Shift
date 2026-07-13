@@ -160,6 +160,7 @@ def _render_stacked(snapshot, width, now=None, interval=2):
     lines += [row(ttl, amber), sep, row("AGENTS", dim)]
     for agent in snapshot.get("agents") or []:
         name = clean(agent.get("id"), 18)
+        model = clean(agent.get("model") or "—", 24) + ("*" if agent.get("model") else "")
         state = clean(agent.get("role_state") or "unknown", 14)
         usage = agent.get("usage") or {}
         windows = usage.get("windows") or {}
@@ -168,19 +169,24 @@ def _render_stacked(snapshot, width, now=None, interval=2):
             bit, _ = _usage_cell(windows, label, label)
             bits.append(bit)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
-        lines.append(row("%s %-16s [%-10s]  %s" % (marker, name, state, "  ".join(bits))))
+        lines.append(row("%s %s | %s | %s | %s" %
+                         (marker, name, model, state, "  ".join(bits))))
+    lines.append(row("* model self-declared (unverified)", dim))
     ledger = snapshot.get("ledger") or {}
     listeners = snapshot.get("listeners")
     lines += [sep, row("LISTENERS  %s" % _value(listeners)),
               row("LEDGER  tasks_open=%s decisions_pending=%s doctor_findings=%s gate_armed=%s" %
                   tuple(_value(ledger.get(k)) for k in ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed")))]
     last = snapshot.get("last_turn") or {}
-    lines.append(row("LAST TURN  #%s %s → %s  %s" % (_value(last.get("n")), _value(last.get("agent")),
-                                                       _value(last.get("to")), _value(last.get("ask_excerpt")))))
+    last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
+    lines.append(row("LAST TURN  #%s %s/%s → %s  %s" %
+                     (_value(last.get("n")), _value(last.get("agent")), last_model,
+                      _value(last.get("to")), _value(last.get("ask_excerpt")))))
     lines += [sep, row("ACTIVITY", dim)]
     for event in snapshot.get("activity") or []:
-        lines.append(row("  #%s  %s  %s" % (_value(event.get("turn")),
-                                             _value(event.get("agent")),
+        event_model = ((event.get("model") or "—") + ("*" if event.get("model") else ""))
+        lines.append(row("  #%s  %s/%s  %s" % (_value(event.get("turn")),
+                                             _value(event.get("agent")), event_model,
                                              _value(event.get("summary")))))
     lines += [sep, row("q quit  ? help  r refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
     return "\n".join(lines)
@@ -286,6 +292,7 @@ def _render_wide(snapshot, width, now=None, interval=2):
 
     for i, agent in enumerate(snapshot.get("agents") or []):
         name = clean(agent.get("id"), 16)
+        model = clean(agent.get("model") or "—", 17) + ("*" if agent.get("model") else "")
         astate = clean(agent.get("role_state") or "unknown", 12)
         windows = (agent.get("usage") or {}).get("windows") or {}
         ratios, bits = [], []
@@ -295,12 +302,13 @@ def _render_wide(snapshot, width, now=None, interval=2):
             bits.append(bit)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
         arow = cells([("  AGENTS" if i == 0 else "        ", 0),
-                      ("%s %s" % (marker, name), 10), ("● %s" % astate, 22),
-                      (bits[0], 42), (bits[1], 72)])
+                      ("%s %s" % (marker, name), 10), (model, 20),
+                      ("● %s" % astate, 38), (bits[0], 52), (bits[1], 73)])
         arow = paint(arow, "●", dot_style(astate))
         arow = paint(arow, bits[0], usage_style(ratios[0]))
         arow = paint(arow, bits[1], usage_style(ratios[1]))
         lines.append("│" + arow + "│")
+    lines.append(content([("        * model self-declared (unverified)", 0)]))
 
     ledger = snapshot.get("ledger") or {}
     last = snapshot.get("last_turn") or {}
@@ -319,9 +327,11 @@ def _render_wide(snapshot, width, now=None, interval=2):
                         green if lg[2] == "0" else dim if lg[2] == "unavailable" else red)
     ledger_line = paint(ledger_line, "gate_armed=%s" % lg[3],
                         dim if lg[3] in ("unavailable", "no", "false", "False") else green)
+    last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
     turn_line = content([("  TURN", 0),
-                         ("#%s %s → %s  %s" % (_value(last.get("n")), _value(last.get("agent")),
-                                               _value(last.get("to")), _value(last.get("ask_excerpt"))), 10)])
+                         ("#%s %s/%s → %s  %s" %
+                          (_value(last.get("n")), _value(last.get("agent")), last_model,
+                           _value(last.get("to")), _value(last.get("ask_excerpt"))), 10)])
     lines += [blank, listen_line, ledger_line, turn_line, blank, framed("├", "┤", "─ activity ")]
     # ACTIVITY: recent -> oldest, tabulated (turn | ts-local | hold-dur | agent | action | note).
     stamped = [(_stamp(e.get("ts")), e) for e in (snapshot.get("activity") or [])]
@@ -336,9 +346,10 @@ def _render_wide(snapshot, width, now=None, interval=2):
         parts = (_value(e.get("summary")) or "").split(None, 1)
         action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
         note = parts[1] if len(parts) > 1 else ""
+        model = clean(e.get("model") or "—", 19) + ("*" if e.get("model") else "")
         lines.append("│" + cells([("  %s" % _value(e.get("turn")), 0), (ts_s, 8),
                                    (dur, 28), (clean(e.get("agent"), 8), 36),
-                                   (action, 46), (note, 60)]) + "│")
+                                   (model, 46), (action, 68), (note, 82)]) + "│")
     lines.append(framed("└", "┘", "─ q quit  ? help  r refresh  ↑/↓ navigate  tick %ss " % interval))
     return "\n".join(lines)
 

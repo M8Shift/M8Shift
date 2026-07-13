@@ -93,8 +93,9 @@ AGENTS = ("claude", "codex")     # default active pair
 ROSTER = AGENTS                  # current ACTIVE roster (>=2 agents) — refined at runtime
 AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
 FIELD_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")   # advisory turn-field key: snake_case / x_*
+MODEL_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 # Turn fields the engine writes itself (routing) — an advisory field may not shadow them.
-ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff"))
+ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff", "model"))
 # Stage 4 contract vocabulary. These fields stay advisory: they are validated only by explicit
 # read-only commands and never feed the mutex, routing, permissions, or claimability.
 CONTRACT_SCHEMA = "stage4.v1"
@@ -1660,6 +1661,9 @@ def load_or_die():
                            or lk.get("holder") in (None, "none")
                            or lk.get("state") != f"WORKING_{(lk.get('holder') or '').upper()}"):
         errs.append(f"integrating={ig!r}")
+    models = parse_agent_models(lk.get("models", ""))
+    if models is None or not set(models).issubset(roster):
+        errs.append(f"models={lk.get('models')!r}")
     if errs:
         sys.exit(tr("lock_invalid", file=os.path.basename(COWORK), errs=", ".join(errs)))
     globals()["ROSTER"] = roster
@@ -1680,6 +1684,42 @@ def clean_field(label, val):
         if r in val:
             sys.exit(tr("field_reserved", label=label, marker=r))
     return val
+
+
+def declared_agent_model():
+    """Return the process' safe self-declared model id, or empty when absent/invalid."""
+    value = (os.environ.get("M8SHIFT_AGENT_MODEL", "") or "").strip()
+    return value if MODEL_ID_RE.fullmatch(value) else ""
+
+
+def parse_agent_models(raw):
+    """Parse the compact LOCK model map; None means malformed or duplicated."""
+    models = {}
+    if not raw:
+        return models
+    for item in raw.split(","):
+        agent, sep, model = item.partition("=")
+        if (not sep or not re.fullmatch(AGENT_RE, agent) or
+                not MODEL_ID_RE.fullmatch(model) or agent in models):
+            return None
+        models[agent] = model
+    return models
+
+
+def stored_agent_model(lk, agent):
+    models = parse_agent_models(lk.get("models", ""))
+    return (models or {}).get(agent, "")
+
+
+def capture_agent_model(lk, agent):
+    """Persist a valid declaration while preserving the last declaration if unset."""
+    value = declared_agent_model()
+    if value:
+        models = parse_agent_models(lk.get("models", "")) or {}
+        models[agent] = value
+        lk["models"] = ",".join("%s=%s" % (name, models[name])
+                                for name in active_agents(lk) if name in models)
+    return value or stored_agent_model(lk, agent)
 
 def clean_project_name(val):
     val = (val or "").strip()
@@ -8354,6 +8394,8 @@ def _status_activity(turns, limit=8):
             "ts": fields.get("at") or None,
             "kind": "turn",
             "agent": _status_snapshot_text(turn.get("agent")),
+            "model": _status_snapshot_text(fields.get("model")) or None,
+            "model_source": "self_declared" if fields.get("model") else None,
             "summary": _status_snapshot_text(fields.get("done")),
         })
     return out
@@ -8443,6 +8485,8 @@ def status_snapshot_v1(lk, last, session_info, turns=None):
         last_known = bool(snap and snap.get("_m8shift_last_known"))
         agents.append({
             "id": agent,
+            "model": stored_agent_model(lk, agent) or None,
+            "model_source": "self_declared" if stored_agent_model(lk, agent) else None,
             "role_state": _status_role_state(lk, agent),
             "usage": {
                 "available": snap is not None,
@@ -8455,6 +8499,9 @@ def status_snapshot_v1(lk, last, session_info, turns=None):
         "agents": agents,
         "listeners": _status_listeners(lk),
         "last_turn": ({"n": last.get("n"), "agent": _status_snapshot_text(last.get("agent")),
+                       "model": _status_snapshot_text((last.get("fields") or {}).get("model")) or None,
+                       "model_source": ("self_declared" if (last.get("fields") or {}).get("model")
+                                        else None),
                        "to": _status_snapshot_text((last.get("fields") or {}).get("to")),
                        "ask_excerpt": _status_snapshot_text((last.get("fields") or {}).get("ask"))}
                       if isinstance(last, dict) else None),
@@ -8989,6 +9036,7 @@ def cmd_claim(args):
             note=(tr("note_reclaim", holder=holder) if reclaim
                   else tr("note_holds", agent=agent)),
         )
+        capture_agent_model(lk, agent)
         guard.require_owned()
         write(set_lock(text, lk))
         if getattr(args, "refresh", False):
@@ -9076,7 +9124,8 @@ def collect_advisory_fields(args):
     return out
 
 
-def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", advisory=(), at=None):
+def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", advisory=(), at=None,
+                model=None):
     """Render ONE append-only journal turn block — the single shared format used by cmd_append and
     by the §8 worktree companion's low-level integration handoff. The caller owns the turn-number
     bump and the LOCK flip; this only renders the block text. `at` is an optional ISO stamp for
@@ -9092,6 +9141,8 @@ def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", ad
     )
     if at:   # optional, backward-compatible: parsed as an ordinary field when present
         block += f"- at:      {at}\n"
+    if model:  # optional advisory provenance; validated before persistence
+        block += f"- model:   {model}\n"
     for key, value in advisory:   # §5: advisory fields follow the fixed routing block
         block += f"- {key}: {value}\n"
     if body:
@@ -9282,7 +9333,9 @@ def cmd_append(args):
         if st != f"WORKING_{agent.upper()}":
             sys.exit(tr("append_need_claim", st=st, agent=agent))
         n = int(lk.get("turn", "0")) + 1
-        block = render_turn(n, agent, to, ask=ask, done=done, files=files, body=body, advisory=advisory, at=iso(now()))
+        model = capture_agent_model(lk, agent)
+        block = render_turn(n, agent, to, ask=ask, done=done, files=files, body=body,
+                            advisory=advisory, at=iso(now()), model=model)
 
         # insert the turn at the end of the file (append-only journal)
         text = text.rstrip("\n") + "\n\n" + block
