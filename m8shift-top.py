@@ -10,8 +10,8 @@ import select
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
-VERSION = "3.60.0"
 ALT_ON = "\x1b[?1049h\x1b[?25l"
 ALT_OFF = "\x1b[?25h\x1b[?1049l"
 HOME = "\x1b[H"
@@ -45,10 +45,69 @@ def _value(value):
     return "unavailable" if value is None else str(value)
 
 
-def render(snapshot, width):
+def _color(code, text, enabled):
+    return "\x1b[%sm%s\x1b[0m" % (code, text) if enabled else text
+
+
+def _stamp(value):
+    if not value or value == "-":
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def render(snapshot, width, now=None):
     width = max(24, width)
-    rule = "─" * width
-    lines = ["M8SHIFT TOP".ljust(width), rule]
+    inner = width - 2
+    colored = "NO_COLOR" not in os.environ
+    amber = lambda text: _color("33", text, colored)
+    dim = lambda text: _color("2", text, colored)
+    badge = lambda text: _color("7", text, colored)
+
+    def row(text="", style=None):
+        plain = clean(str(text), inner)
+        padded = plain.ljust(inner)
+        return "│" + (style(padded) if style else padded) + "│"
+
+    top = "┌" + "─" * inner + "┐"
+    sep = "├" + "─" * inner + "┤"
+    bottom = "└" + "─" * inner + "┘"
+    clock = (now or datetime.now(timezone.utc)).astimezone().strftime("%H:%M:%S")
+    header = "M8SHIFT · %s · %s · session %s · %s" % (
+        _value(snapshot.get("project")), _value(snapshot.get("m8shift_version")),
+        _value(snapshot.get("session")), clock)
+    lines = [top, row(header)]
+
+    holder = _value(snapshot.get("holder"))
+    state = _value(snapshot.get("state"))
+    pen = snapshot.get("pen") or {}
+    pen_prefix = "PEN %s  " % holder
+    pen_suffix = "  turn %s  claimed %s  heartbeat %s" % (
+        _value(snapshot.get("turn")), _value(snapshot.get("since")),
+        _value(pen.get("heartbeat") or "—"))
+    # Compose styles after padding so ANSI bytes never affect border alignment.
+    pen_plain = clean(pen_prefix + "[%s]" % state + pen_suffix, inner).ljust(inner)
+    if colored and ("[%s]" % state) in pen_plain:
+        left, right = pen_plain.split("[%s]" % state, 1)
+        lines.append("│" + amber(left) + badge("[%s]" % state) + amber(right) + "│")
+    else:
+        lines.append("│" + pen_plain + "│")
+
+    expires = _stamp(snapshot.get("expires"))
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    remaining = max(0, int((expires - current).total_seconds())) if expires else 0
+    alive = bool(expires and remaining > 0)
+    # The pen lease is 30 minutes; cap protects the gauge after clock skew.
+    filled = min(10, max(0, round(10 * remaining / 1800)))
+    gauge = "█" * filled + "░" * (10 - filled)
+    ttl = "TTL <%s>  %02d:%02d left  expires %s (%s)" % (
+        gauge, remaining // 60, remaining % 60, _value(snapshot.get("expires")),
+        "alive" if alive else "stale")
+    lines += [row(ttl, amber), sep, row("AGENTS", dim)]
     for agent in snapshot.get("agents") or []:
         name = clean(agent.get("id"), 18)
         state = clean(agent.get("role_state") or "unknown", 14)
@@ -56,22 +115,23 @@ def render(snapshot, width):
         windows = usage.get("windows") or {}
         bits = []
         for label in ("session_5h", "weekly"):
-            row = windows.get(label) or {}
-            ratio = row.get("used_ratio")
+            usage_row = windows.get(label) or {}
+            ratio = usage_row.get("used_ratio")
             bits.append("%s %s" % (label, "unavailable" if ratio is None else "%d%%" % round(ratio * 100)))
-        lines.append(clean("%-18s [%-10s]  %s" % (name, state, "  ".join(bits)), width).ljust(width))
+        marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
+        lines.append(row("%s %-16s [%-10s]  %s" % (marker, name, state, "  ".join(bits))))
     ledger = snapshot.get("ledger") or {}
     listeners = snapshot.get("listeners")
-    lines += [rule, clean("listeners: %s" % _value(listeners), width).ljust(width),
-              clean("ledger: tasks_open=%s decisions_pending=%s doctor_findings=%s gate_armed=%s" %
-                    tuple(_value(ledger.get(k)) for k in ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed")), width).ljust(width)]
+    lines += [sep, row("LISTENERS  %s" % _value(listeners)),
+              row("LEDGER  tasks_open=%s decisions_pending=%s doctor_findings=%s gate_armed=%s" %
+                  tuple(_value(ledger.get(k)) for k in ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed")))]
     last = snapshot.get("last_turn") or {}
-    lines.append(clean("last turn: #%s %s → %s  %s" % (_value(last.get("n")), _value(last.get("agent")),
-                                                        _value(last.get("to")), _value(last.get("ask_excerpt"))), width).ljust(width))
-    lines += [rule, "activity".ljust(width)]
+    lines.append(row("LAST TURN  #%s %s → %s  %s" % (_value(last.get("n")), _value(last.get("agent")),
+                                                       _value(last.get("to")), _value(last.get("ask_excerpt")))))
+    lines += [sep, row("ACTIVITY", dim)]
     for event in snapshot.get("activity") or []:
-        lines.append(clean("  %s  %s" % (_value(event.get("agent")), _value(event.get("summary"))), width).ljust(width))
-    lines.append(clean("q quit  ? help  r refresh  ↑/↓ navigate", width).ljust(width))
+        lines.append(row("  %s  %s" % (_value(event.get("agent")), _value(event.get("summary")))))
+    lines += [sep, row("q quit  ? help  r refresh  ↑/↓ navigate", dim), bottom]
     return "\n".join(lines)
 
 
@@ -92,7 +152,11 @@ def load_snapshot(engine, root):
         raise RuntimeError("unsupported status snapshot schema: %s" % clean(schema, 80))
     if major != SCHEMA_MAJOR:
         raise RuntimeError("unsupported status snapshot major: %s" % major)
-    return snap
+    # Snapshot owns the structured sections; status owns relay-wide flat keys.
+    merged = dict(payload)
+    merged.pop("snapshot", None)
+    merged.update(snap)
+    return merged
 
 
 def scroll_fallback(engine, root, extra):

@@ -1,22 +1,71 @@
-import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
+import importlib.util
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def load_top():
+    spec = importlib.util.spec_from_file_location("m8shift_top", ROOT / "m8shift-top.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def fixture():
+    return {
+        "project": "demo", "m8shift_version": "v3.60.0", "session": "session-1",
+        "holder": "codex", "state": "WORKING_CODEX", "turn": 7,
+        "since": "2026-07-13T00:00:00Z", "expires": "2026-07-13T00:30:00Z",
+        "pen": {"heartbeat": "2026-07-13T00:10:00Z"},
+        "agents": [{"id": "codex", "role_state": "working", "usage": {"windows": {}}}],
+        "ledger": {}, "listeners": [], "last_turn": {"ask_excerpt": "x"},
+        "activity": [{"agent": "claude", "summary": "x" * 200}],
+    }
+
+
 class M8ShiftTopFallbackTests(unittest.TestCase):
+    def test_frame_fidelity_and_right_edge_at_two_widths(self):
+        top = load_top()
+        now = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
+        old = os.environ.pop("NO_COLOR", None)
+        try:
+            for width in (80, 120):
+                output = top.render(fixture(), width, now)
+                self.assertTrue(all(token in output for token in ("┌", "│", "├", "└", "M8SHIFT · demo", "PEN codex", "TTL <")))
+                # ANSI is confined inside fixed-width borders; strip it locally.
+                import re
+                plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+                self.assertTrue(all(len(line) == width for line in plain.splitlines()))
+        finally:
+            if old is not None:
+                os.environ["NO_COLOR"] = old
+
+    def test_no_color_keeps_frame_without_ansi(self):
+        top = load_top()
+        old = os.environ.get("NO_COLOR")
+        os.environ["NO_COLOR"] = "1"
+        try:
+            output = top.render(fixture(), 80, datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc))
+            self.assertNotIn("\x1b[", output)
+            self.assertIn("┌", output)
+            self.assertTrue(all(len(line) == 80 for line in output.splitlines()))
+        finally:
+            if old is None:
+                os.environ.pop("NO_COLOR", None)
+            else:
+                os.environ["NO_COLOR"] = old
+
     def test_piped_stdout_falls_back_to_watch_cleanly(self):
-        # Piped (non-TTY) stdout must fall back to `watch` byte-compatibly: no
-        # alt-screen, no `--interval` int-parse error. `init` is a script-local
-        # bootstrap (RFC 038 §9), so copy the engine into a temp dir and drive
-        # that copy — the relay lands next to it and the fallback's `watch` has
-        # an M8SHIFT.md to render, then exits via --once.
+        # `init` is script-local (RFC 038 §9): copy the engine into a temp dir and
+        # drive that copy so the fallback's `watch` has an M8SHIFT.md to render.
+        # cwd=ROOT would rely on a stray relay in the checkout (fails on a clean CI).
+        import shutil, tempfile, os
         with tempfile.TemporaryDirectory() as d:
             for name in ("m8shift.py", "m8shift-top.py"):
                 shutil.copy(str(ROOT / name), os.path.join(d, name))
@@ -31,10 +80,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             proc = subprocess.run(
                 [sys.executable, os.path.join(d, "m8shift-top.py"),
                  "--engine", engine, "--interval", "2", "--once"],
-                cwd=d, env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                cwd=d, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("invalid int value", proc.stderr)
