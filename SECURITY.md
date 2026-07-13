@@ -118,3 +118,8 @@ written*, so nothing reaches history to purge. The confidential denylist is
 never committed: point `M8SHIFT_DENYLIST` at a private file (default
 `~/.config/m8shift/denylist.txt`, one term per line). Matches are reported as
 hashed labels — never the term, never the matched line.
+
+Independently of that advisory scrub policy, pre-commit refreshes
+`checksums.sha256` whenever a listed file is staged. It hashes the Git index blob,
+stages the updated manifest, and fails closed if the refresh cannot complete;
+pre-push checksum verification remains the backstop.

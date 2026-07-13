@@ -927,10 +927,9 @@ HOOK = os.path.join(REPO, "hooks", "pre-commit")
 
 @unittest.skipUnless(shutil.which("git"), "git not available")
 class TestPreCommitHook(unittest.TestCase):
-    """The shipped hook template gates `git commit` on a valid write pen: it BLOCKS a
-    commit when the holder is not the configured agent and ALLOWS it when the agent
-    holds the pen. Driven in a throwaway /tmp git repo + relay, exactly as an agent
-    would install it (copied into .git/hooks/pre-commit, chmod +x)."""
+    """The shipped hook refreshes staged checksums after gating `git commit` on a
+    valid write pen. Driven in a throwaway /tmp git repo + relay, exactly as an
+    agent would install it (copied into .git/hooks/pre-commit, chmod +x)."""
 
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="m8shift-hook-")
@@ -945,11 +944,18 @@ class TestPreCommitHook(unittest.TestCase):
         shutil.copy(HOOK, dst)
         os.chmod(dst, 0o755)
         r = subprocess.run([sys.executable, "m8shift.py", "init"],
-                           cwd=self.d, capture_output=True, text=True)
+                           cwd=self.d, capture_output=True, text=True,
+                           env=self._local_env())
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
+
+    def _local_env(self):
+        env = dict(os.environ)
+        env.pop("M8SHIFT_AGENT", None)
+        env.pop("M8SHIFT_ROOT", None)
+        return env
 
     def _commit(self, content, agent=None):
         path = os.path.join(self.d, "f.txt")
@@ -957,7 +963,7 @@ class TestPreCommitHook(unittest.TestCase):
             f.write(content)
         subprocess.run(["git", "add", "f.txt"], cwd=self.d, check=True,
                        capture_output=True, text=True)
-        env = dict(os.environ)
+        env = self._local_env()
         env["M8SHIFT_BIN"] = os.path.join(self.d, "m8shift.py")
         if agent is None:
             env.pop("M8SHIFT_AGENT", None)
@@ -965,6 +971,23 @@ class TestPreCommitHook(unittest.TestCase):
             env["M8SHIFT_AGENT"] = agent
         return subprocess.run(["git", "commit", "-m", "msg"], cwd=self.d,
                               capture_output=True, text=True, env=env)
+
+    def _install_manifest_entry(self, content="old\n"):
+        path = os.path.join(self.d, "f.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        subprocess.run(["git", "add", "f.txt"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "add file"], cwd=self.d, check=True,
+                       capture_output=True, text=True, env=self._local_env())
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with open(os.path.join(self.d, "checksums.sha256"), "w", encoding="utf-8") as f:
+            f.write("%s  f.txt\n" % digest)
+        subprocess.run(["git", "add", "checksums.sha256"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "add manifest"], cwd=self.d,
+                       check=True, capture_output=True, text=True,
+                       env=self._local_env())
 
     def test_unset_agent_skips(self):
         """No $M8SHIFT_AGENT: a human/unconfigured commit is never blocked."""
@@ -980,7 +1003,8 @@ class TestPreCommitHook(unittest.TestCase):
     def test_allows_when_agent_holds_pen(self):
         """The pen holder commits successfully."""
         c = subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
-                           cwd=self.d, capture_output=True, text=True)
+                           cwd=self.d, capture_output=True, text=True,
+                           env=self._local_env())
         self.assertEqual(c.returncode, 0, c.stderr)
         r = self._commit("b\n", agent="claude")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -988,10 +1012,96 @@ class TestPreCommitHook(unittest.TestCase):
     def test_blocks_when_other_agent_holds_pen(self):
         """Holder=claude, committer configured as codex → blocked."""
         subprocess.run([sys.executable, "m8shift.py", "claim", "claude"],
-                       cwd=self.d, check=True, capture_output=True, text=True)
+                       cwd=self.d, check=True, capture_output=True, text=True,
+                       env=self._local_env())
         r = self._commit("c\n", agent="codex")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("commit blocked", r.stderr)
+
+    def test_failed_pen_guard_does_not_refresh_index(self):
+        """Authorization fails before the hook mutates the staged manifest."""
+        self._install_manifest_entry()
+        before = subprocess.run(
+            ["git", "show", ":checksums.sha256"], cwd=self.d,
+            check=True, capture_output=True, text=True,
+        ).stdout
+        r = self._commit("unauthorized\n", agent="claude")
+        self.assertNotEqual(r.returncode, 0)
+        after = subprocess.run(
+            ["git", "show", ":checksums.sha256"], cwd=self.d,
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(after, before)
+
+    def test_refreshes_and_stages_manifest_for_checksummed_file(self):
+        """A checksummed staged path mechanically refreshes the committed manifest."""
+        self._install_manifest_entry()
+        r = self._commit("new\n", agent=None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("refreshed checksums.sha256", r.stderr)
+        expected = hashlib.sha256(b"new\n").hexdigest() + "  f.txt\n"
+        committed = subprocess.run(
+            ["git", "show", "HEAD:checksums.sha256"], cwd=self.d,
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(committed, expected)
+
+    def test_refresh_hashes_index_blob_not_unstaged_worktree_content(self):
+        """Partial staging hashes exactly the bytes entering the commit."""
+        self._install_manifest_entry()
+        path = os.path.join(self.d, "f.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("staged\n")
+        subprocess.run(["git", "add", "f.txt"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("unstaged\n")
+        env = self._local_env()
+        env["M8SHIFT_BIN"] = os.path.join(self.d, "m8shift.py")
+        env.pop("M8SHIFT_AGENT", None)
+        r = subprocess.run(["git", "commit", "-m", "partial"], cwd=self.d,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        manifest = subprocess.run(
+            ["git", "show", "HEAD:checksums.sha256"], cwd=self.d,
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(manifest,
+                         hashlib.sha256(b"staged\n").hexdigest() + "  f.txt\n")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "unstaged\n")
+
+    def test_refresh_removes_entry_for_staged_deletion(self):
+        """Deleting a listed file also deletes its now-obsolete manifest row."""
+        self._install_manifest_entry()
+        subprocess.run(["git", "rm", "f.txt"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        r = subprocess.run(["git", "commit", "-m", "delete"], cwd=self.d,
+                           capture_output=True, text=True, env=self._local_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        manifest = subprocess.run(
+            ["git", "show", "HEAD:checksums.sha256"], cwd=self.d,
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(manifest, "")
+
+    def test_refresh_refuses_to_absorb_unstaged_manifest_edit(self):
+        """An unrelated manifest edit is preserved and blocks automatic staging."""
+        self._install_manifest_entry()
+        path = os.path.join(self.d, "f.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("new\n")
+        subprocess.run(["git", "add", "f.txt"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        manifest_path = os.path.join(self.d, "checksums.sha256")
+        with open(manifest_path, "a", encoding="utf-8") as f:
+            f.write("# keep my unstaged note\n")
+        r = subprocess.run(["git", "commit", "-m", "must block"], cwd=self.d,
+                           capture_output=True, text=True, env=self._local_env())
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("has unstaged changes", r.stderr)
+        with open(manifest_path, encoding="utf-8") as f:
+            self.assertIn("# keep my unstaged note", f.read())
 
 
 # ───────────────────────────── robustness / inputs ─────────────────────────

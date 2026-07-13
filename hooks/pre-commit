@@ -1,5 +1,5 @@
 #!/bin/sh
-# M8Shift pre-commit guard — one-pen write rule + advisory data-hygiene lint.
+# M8Shift pre-commit guard — checksum refresh + one-pen write rule + hygiene lint.
 #
 # This hook is ADVISORY and LOCAL: it does not contact the network and it is not a
 # security boundary. It only narrows the window in which a misconfigured agent can
@@ -15,6 +15,10 @@
 #      - $M8SHIFT_AGENT set    -> `m8shift.py may-i-write "$M8SHIFT_AGENT"`; on a
 #        non-zero return code, print why and exit 1 (BLOCK the commit). Fail CLOSED:
 #        a configured agent that cannot prove a valid WORKING lock cannot commit.
+#   3. Checksum refresh (#51): after that write authorization, when a path already
+#      listed in checksums.sha256 is staged, hash its INDEX blob (never an unstaged
+#      worktree edit), rewrite the manifest, and stage the manifest automatically.
+#      A refresh error blocks the commit so a stale manifest cannot be committed.
 #
 # Resolution:
 #   - The relay root is resolved by m8shift.py itself via $M8SHIFT_ROOT (opt-in);
@@ -28,6 +32,8 @@
 
 set -eu
 
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '.')"
+
 # Resolve the m8shift.py program robustly (soft here: hygiene is advisory, and the
 # pen guard below keeps its own fail-closed handling for a configured agent).
 m8shift=""
@@ -36,7 +42,6 @@ if [ -n "${M8SHIFT_BIN:-}" ] && [ -x "${M8SHIFT_BIN}" ]; then
 elif command -v m8shift.py >/dev/null 2>&1; then
 	m8shift="m8shift.py"
 else
-	repo_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '.')"
 	if [ -x "${repo_root}/m8shift.py" ]; then
 		m8shift="${repo_root}/m8shift.py"
 	fi
@@ -59,20 +64,127 @@ if [ -n "${m8shift}" ]; then
 fi
 
 # --- Pen guard (#39) — unchanged semantics ---------------------------------------
-# Unconfigured / human commit: never block.
-if [ -z "${M8SHIFT_AGENT:-}" ]; then
-	exit 0
+# Validate before checksum refresh: a configured agent without the pen must not be
+# able to mutate even the Git index through this hook. Humans/unconfigured commits
+# skip this guard and continue to the checksum stage below.
+if [ -n "${M8SHIFT_AGENT:-}" ]; then
+	if [ -z "${m8shift}" ]; then
+		printf '%s\n' "m8shift pre-commit: cannot find m8shift.py (set \$M8SHIFT_BIN or add it to \$PATH); refusing to commit as agent '${M8SHIFT_AGENT}'." >&2
+		exit 1
+	fi
+
+	# Point-in-time guard: rc 0 only while the agent holds a valid WORKING lock.
+	if ! "${m8shift}" may-i-write "${M8SHIFT_AGENT}" >&2; then
+		printf '%s\n' "m8shift pre-commit: '${M8SHIFT_AGENT}' does not hold a valid write pen — commit blocked. Acquire the pen (m8shift.py claim ${M8SHIFT_AGENT}) or follow the next action above." >&2
+		exit 1
+	fi
 fi
 
-if [ -z "${m8shift}" ]; then
-	printf '%s\n' "m8shift pre-commit: cannot find m8shift.py (set \$M8SHIFT_BIN or add it to \$PATH); refusing to commit as agent '${M8SHIFT_AGENT}'." >&2
-	exit 1
+# --- #51: regenerate the release manifest from staged content -------------------
+# Python is already a M8Shift runtime prerequisite. Keeping the generator inline
+# means a copied hook remains self-contained. `git show :path` reads the index, so
+# a partially staged file is hashed exactly as it will appear in the commit.
+manifest="${repo_root}/checksums.sha256"
+if [ -f "${manifest}" ]; then
+	if ! command -v python3 >/dev/null 2>&1; then
+		printf '%s\n' "m8shift pre-commit: python3 is required to refresh checksums.sha256 — commit blocked." >&2
+		exit 1
+	fi
+	checksum_rc=0
+	python3 - "${repo_root}" <<'PY' >&2 || checksum_rc=$?
+import hashlib
+import os
+import re
+import subprocess
+import sys
+
+root = sys.argv[1]
+os.chdir(root)
+manifest_path = os.path.join(root, "checksums.sha256")
+
+# Never overwrite or accidentally stage a contributor's unrelated manifest edit.
+unstaged = subprocess.run(
+    ["git", "diff", "--quiet", "--", "checksums.sha256"]
+).returncode
+if unstaged not in (0, 1):
+    raise SystemExit("m8shift pre-commit: cannot inspect checksums.sha256")
+
+raw = subprocess.check_output([
+    "git", "diff", "--cached", "--name-status", "-z",
+    "--diff-filter=ACMRD", "--",
+])
+fields = raw.split(b"\0")
+if fields and fields[-1] == b"":
+    fields.pop()
+
+changed = set()
+i = 0
+while i < len(fields):
+    status = fields[i].decode("ascii", "strict")
+    i += 1
+    path_count = 2 if status[:1] in ("R", "C") else 1
+    if i + path_count > len(fields):
+        raise SystemExit("m8shift pre-commit: malformed staged-path list")
+    for field in fields[i:i + path_count]:
+        changed.add(field.decode("utf-8", "surrogateescape"))
+    i += path_count
+
+try:
+    indexed = subprocess.run(
+        ["git", "show", ":checksums.sha256"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
+    ).stdout.decode("utf-8")
+except (subprocess.CalledProcessError, UnicodeDecodeError):
+    with open(manifest_path, encoding="utf-8") as fh:
+        indexed = fh.read()
+
+entry_re = re.compile(r"^([0-9a-fA-F]{64}) ([ *])(.+)$")
+entries = []
+listed = set()
+for line in indexed.splitlines():
+    match = entry_re.match(line)
+    path = match.group(3) if match else None
+    entries.append((line, path))
+    if path is not None:
+        listed.add(path)
+
+targets = changed & listed
+if not targets:
+    raise SystemExit(0)
+if unstaged == 1:
+    raise SystemExit(
+        "m8shift pre-commit: checksums.sha256 has unstaged changes; "
+        "stage or set them aside before committing a checksummed file"
+    )
+
+rendered = []
+refreshed = 0
+for line, path in entries:
+    if path not in targets:
+        rendered.append(line)
+        continue
+    blob = subprocess.run(
+        ["git", "show", ":" + path],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    if blob.returncode != 0:  # staged deletion: remove the obsolete entry
+        refreshed += 1
+        continue
+    rendered.append("%s  %s" % (hashlib.sha256(blob.stdout).hexdigest(), path))
+    refreshed += 1
+
+body = "\n".join(rendered) + ("\n" if rendered and indexed.endswith("\n") else "")
+tmp = manifest_path + ".m8shift.tmp"
+with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+    fh.write(body)
+os.replace(tmp, manifest_path)
+subprocess.run(["git", "add", "--", "checksums.sha256"], check=True)
+print("m8shift pre-commit: refreshed checksums.sha256 for %d staged file(s)." % refreshed)
+PY
+	if [ "${checksum_rc}" -ne 0 ]; then
+		printf '%s\n' "m8shift pre-commit: checksum refresh failed (rc ${checksum_rc}) — commit blocked." >&2
+		exit 1
+	fi
 fi
 
-# Point-in-time guard: rc 0 only while $M8SHIFT_AGENT holds a valid WORKING lock.
-if "${m8shift}" may-i-write "${M8SHIFT_AGENT}" >&2; then
-	exit 0
-fi
-
-printf '%s\n' "m8shift pre-commit: '${M8SHIFT_AGENT}' does not hold a valid write pen — commit blocked. Acquire the pen (m8shift.py claim ${M8SHIFT_AGENT}) or follow the next action above." >&2
-exit 1
+exit 0

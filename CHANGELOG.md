@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Checksums cannot be forgotten at commit time (#51).** The shipped pre-commit
+  hook now detects staged files listed in `checksums.sha256`, hashes their exact
+  Git-index blobs, regenerates and stages the manifest automatically, and fails
+  closed on refresh errors. Unstaged file bytes are never included; pre-push
+  verification remains the backstop.
+
 ## v3.60.0 — 2026-07-13
 
 - **Operational advisory skills.** Four open-format skills ship under `skills/`:
