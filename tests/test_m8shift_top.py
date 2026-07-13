@@ -46,9 +46,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         try:
             for width in (80, 96):  # < 100 => stacked layout
                 output = top.render(fixture(), width, self.NOW)
-                self.assertTrue(all(token in output for token in (
-                    "┌", "│", "├", "└", "M8SHIFT · demo", "PEN codex", "TTL <")))
                 plain = self._plain(output)
+                self.assertTrue(all(token in plain for token in (
+                    "┌", "│", "├", "└", "M8SHIFT · demo", "PEN codex", "TTL <")))
                 self.assertTrue(all(len(line) == width for line in plain.splitlines()))
         finally:
             if old is not None:
@@ -60,9 +60,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         try:
             for width in (100, 120):  # >= 100 => wide tabulated layout
                 output = top.render(fixture(), width, self.NOW)
-                self.assertTrue(all(token in output for token in (
-                    "┌", "│", "├", "└", "M8SHIFT · demo", "AGENTS", "TTL", "codex")))
                 plain = self._plain(output)
+                self.assertTrue(all(token in plain for token in (
+                    "┌", "│", "├", "└", "M8SHIFT · demo", "AGENTS", "TTL", "codex")))
                 lines = plain.splitlines()
                 self.assertTrue(all(len(line) == width for line in lines))
                 # the pen holder sits in its own column, not glued to the label
@@ -71,6 +71,21 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 self.assertIn("│" + " " * (width - 2) + "│", lines)
                 # colour is emitted in a colour-capable env (stripped for the width check)
                 self.assertIn("\x1b[", output)
+        finally:
+            if old is not None:
+                os.environ["NO_COLOR"] = old
+
+    def test_header_wordmark_uses_bold_brand_glyphs_at_all_layout_widths(self):
+        top = load_top()
+        old = os.environ.pop("NO_COLOR", None)
+        try:
+            for width in (80, 100, 120):
+                output = top.render(fixture(), width, self.NOW)
+                self.assertIn("\x1b[1;38;2;255;122;24mM\x1b[0m", output)
+                self.assertIn("\x1b[1;38;2;93;38;242m8\x1b[0m", output)
+                self.assertIn("\x1b[1mSHIFT\x1b[0m", output)
+                self.assertTrue(all(
+                    len(line) == width for line in self._plain(output).splitlines()))
         finally:
             if old is not None:
                 os.environ["NO_COLOR"] = old
@@ -138,9 +153,10 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         old = os.environ.get("NO_COLOR")
         os.environ["NO_COLOR"] = "1"
         try:
-            for width in (80, 120):  # stacked and wide, both monochrome-framed
+            for width in (80, 100, 120):  # stacked and wide, both monochrome-framed
                 output = top.render(fixture(), width, self.NOW)
                 self.assertNotIn("\x1b[", output)
+                self.assertIn("M8SHIFT", output)
                 self.assertIn("┌", output)
                 self.assertTrue(all(len(line) == width for line in output.splitlines()))
         finally:
