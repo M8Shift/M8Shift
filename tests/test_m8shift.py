@@ -14,6 +14,7 @@ Standard library only.
 import datetime as dt
 import hashlib
 import http.client
+import importlib.util
 import io
 import json
 import os
@@ -2168,7 +2169,7 @@ class TestAdvisoryFields(CLIBase):
         md = self.md()
         block = md[md.index("TURN 1 claude BEGIN"):md.index("TURN 1 claude END")]
         keys = [ln[2:ln.index(":")] for ln in block.splitlines() if ln.startswith("- ")]
-        self.assertEqual(keys, ["from", "to", "ask", "done", "files", "handoff"])
+        self.assertEqual(keys, ["from", "to", "ask", "done", "files", "handoff", "at"])
 
     def test_field_value_keeps_first_equals(self):
         self._claim_append("--field", "x_url=a=b=c")
@@ -13047,6 +13048,7 @@ class TestShiftDemos(unittest.TestCase):
                            cwd=d, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
 
+    @unittest.skipUnless(importlib.util.find_spec("pytest"), "pytest is not installed")
     def test_demo_oracles_are_never_collected_by_repo_pytest(self):
         # Collection-integrity pin (#102 review round 1): the conftest glob
         # is implementation-dependent — assert the OUTCOME instead.
