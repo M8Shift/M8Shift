@@ -8375,6 +8375,14 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertIsNone(win["used"])
         self.assertIsNone(win["limit"])
 
+    def test_ratio_native_window_preserves_safe_model_attribution(self):
+        doc = self.usage_doc(used=None, limit=None, windows=[{
+            "kind": "session_5h", "used_ratio": 1.0, "model": "Fable",
+            "resets_at": "2026-01-01T05:00:00Z",
+        }])
+        snap = json.loads(self.snapshot_for(doc).stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snap["windows"][0]["model"], "Fable")
+
     def test_unit_mixed_window_is_rejected_never_coerced(self):
         """A window carrying BOTH used_ratio and token counts is unit-mixed: it is
         dropped (never coerced), contributes nothing, and the run fails open."""
@@ -9387,6 +9395,20 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         by = {w["kind"]: w for w in fx["windows"]}
         self.assertEqual(by["session_5h"]["used_ratio"], 0.8)
         self.assertEqual(by["weekly"]["used_ratio"], 0.25)
+
+    def test_build_fixture_keeps_exhausted_model_bucket_with_attribution(self):
+        mod = self._example()
+        payload = self._rpc_response()
+        payload["result"]["rateLimitsByLimitId"]["Fable"] = {
+            "primary": {"usedPercent": 100, "windowDurationMins": 300,
+                        "resetsAt": 1_804_317_600},
+        }
+        fx = mod.build_fixture(payload, "2026-01-01T00:00:00Z")
+        exhausted = [w for w in fx["windows"] if w.get("model") == "Fable"]
+        self.assertEqual(exhausted, [{
+            "kind": "session_5h", "used_ratio": 1.0,
+            "resets_at": "2027-03-06T07:20:00Z", "model": "Fable",
+        }])
 
     def test_build_fixture_clamps_percent_and_skips_unknown_or_invalid_windows(self):
         mod = self._example()
@@ -11698,6 +11720,17 @@ class TestRFC051UsageAdvisory(CLIBase):
 
         for row in usage:
             assert_public(row)
+
+    def test_status_and_watch_name_known_exhausted_model_window(self):
+        snap = self.snapshot(decision_ratio=1.0, windows=[{
+            "kind": "session_5h", "used_ratio": 1.0, "model": "Fable",
+            "used": None, "limit": None, "resets_at": self.fresh_iso(3600),
+        }])
+        self.write_sidecar([self.event(snap)])
+        for output in (self.status_out(), self.watch_out()):
+            line = self._agent_line(output, "claude")
+            self.assertIn("5h EXHAUSTED [Fable]", line)
+            self.assertNotIn("unavailable", line)
 
     def test_all_empty_snapshots_keep_em_dash(self):
         self.write_sidecar([self.event(self.snapshot(decision_ratio=None))])
