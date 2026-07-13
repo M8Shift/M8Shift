@@ -8316,7 +8316,7 @@ def _status_activity(turns, limit=8):
             continue
         fields = turn.get("fields") if isinstance(turn.get("fields"), dict) else {}
         out.append({
-            "ts": None,
+            "ts": fields.get("at") or None,
             "kind": "turn",
             "agent": _status_snapshot_text(turn.get("agent")),
             "summary": _status_snapshot_text(fields.get("done")),
@@ -8980,10 +8980,11 @@ def collect_advisory_fields(args):
     return out
 
 
-def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", advisory=()):
+def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", advisory=(), at=None):
     """Render ONE append-only journal turn block — the single shared format used by cmd_append and
     by the §8 worktree companion's low-level integration handoff. The caller owns the turn-number
-    bump and the LOCK flip; this only renders the block text."""
+    bump and the LOCK flip; this only renders the block text. `at` is an optional ISO stamp for
+    when the turn was posted (enables the dashboard activity TS + hold-duration columns)."""
     block = (
         f"<!-- M8SHIFT:TURN {n} {agent} BEGIN -->\n"
         f"- from:    {agent}\n"
@@ -8993,6 +8994,8 @@ def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", ad
         f"- files:   {files}\n"
         f"- handoff: {to}\n"
     )
+    if at:   # optional, backward-compatible: parsed as an ordinary field when present
+        block += f"- at:      {at}\n"
     for key, value in advisory:   # §5: advisory fields follow the fixed routing block
         block += f"- {key}: {value}\n"
     if body:
@@ -9183,7 +9186,7 @@ def cmd_append(args):
         if st != f"WORKING_{agent.upper()}":
             sys.exit(tr("append_need_claim", st=st, agent=agent))
         n = int(lk.get("turn", "0")) + 1
-        block = render_turn(n, agent, to, ask=ask, done=done, files=files, body=body, advisory=advisory)
+        block = render_turn(n, agent, to, ask=ask, done=done, files=files, body=body, advisory=advisory, at=iso(now()))
 
         # insert the turn at the end of the file (append-only journal)
         text = text.rstrip("\n") + "\n\n" + block
