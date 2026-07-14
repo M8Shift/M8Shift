@@ -242,9 +242,12 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             "session_5h": {"used_ratio": .42, "resets_at": "2026-07-13T05:00:00Z"},
             "weekly": {"used_ratio": .3, "resets_at": "2026-07-17T05:00:00Z"},
         }
-        output = self._plain(top.render(data, 120, self.NOW))
-        self.assertIn("5h 42% reset", output)
-        self.assertIn("weekly 30% reset", output)
+        for width in (80, 120, 160):
+            output = self._plain(top.render(data, width, self.NOW, utc=True))
+            self.assertIn("42% reset Mon 07-13 05:00Z", output)
+            if width >= 120:
+                self.assertIn("weekly 30% reset Fri 07-17 05:00Z", output)
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
     @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone control")
     def test_every_time_uses_local_default_or_utc_flag_consistently(self):
@@ -277,8 +280,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertIn("claimed 2026-07-14 01:30", local_frame)
             self.assertIn("heartbeat 2026-07-14 01:40", local_frame)
             self.assertIn("expires 2026-07-14 02:30", local_frame)
-            self.assertIn("5h 42% reset 01:45", local_frame)
-            self.assertIn("weekly 30% reset 02:15", local_frame)
+            self.assertIn("5h 42% reset Tue 07-14 01:45", local_frame)
+            self.assertIn("weekly 30% reset Tue 07-14 02:15", local_frame)
             self.assertIn("2026-07-14T01:50:00", local_frame)
             self.assertNotIn("Z", local_frame)
 
@@ -286,7 +289,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             for token in (
                     "23:45:00Z", "claimed 2026-07-13 23:30Z",
                     "heartbeat 2026-07-13 23:40Z", "expires 2026-07-14 00:30Z",
-                    "5h 42% reset 23:45Z", "weekly 30% reset 00:15Z",
+                    "5h 42% reset Mon 07-13 23:45Z",
+                    "weekly 30% reset Tue 07-14 00:15Z",
                     "2026-07-13T23:50:00Z"):
                 self.assertIn(token, utc_frame)
         finally:
@@ -312,11 +316,12 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertNotIn("5h unavailable", output)
             self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
-    def test_footer_shows_configured_refresh_tick(self):
+    def test_footer_shows_configured_auto_refresh_interval(self):
         top = load_top()
-        for width in (80, 120):
+        for width in (80, 120, 160):
             output = self._plain(top.render(fixture(), width, self.NOW, interval=7))
-            self.assertIn("tick 7s", output)
+            self.assertIn("auto-refresh 7s", output)
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
     @unittest.skipUnless(os.name == "posix", "cbreak is POSIX-only")
     def test_enter_sets_cbreak_and_restore_reinstates_terminal(self):
@@ -443,7 +448,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "8f3ab76a83186f0028c28a08ded0a82d7be746af013d142ea443d46ce3cd2a80",
+            "d2a814474db290053ac873f55b1c7680ab794d74523f28cf446c102954b73770",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):

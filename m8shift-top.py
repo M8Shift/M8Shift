@@ -223,7 +223,7 @@ def _usage_cell(windows, label, short, utc=False):
         value = "%s %s" % (short, missing if ratio is None else "%d%%" % round(ratio * 100))
     reset = _stamp(row.get("resets_at"))
     if reset is not None:
-        value += " reset " + _display_time(reset, utc, "%H:%M")
+        value += " reset " + _display_time(reset, utc, "%a %m-%d %H:%M")
     return value, ratio
 
 
@@ -498,7 +498,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(row("") for _ in range(capacity - len(visible)))
-    lines += [sep, row("q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
+    lines += [sep, row("q quit  ? help  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss" % interval, dim), bottom]
     return "\n".join(lines)
 
 
@@ -638,7 +638,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
              "%s %s" % (marker, name), model, "● %s" % astate,
              bits[0], bits[1]),
             (0, 10, 20, 38, 52, 73),
-            (10, 10, 18, 14, 21, 45),
+            (10, 10, 20, 14, 30, 34),
             (0, 1, 1, 0, 2, 2),
         )
         arow = paint(arow, "●", dot_style(astate))
@@ -708,7 +708,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(blank for _ in range(capacity - len(visible)))
-    lines.append(framed("└", "┘", "─ q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss " % interval))
+    lines.append(framed("└", "┘", "─ q quit  ? help  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss " % interval))
     return "\n".join(lines)
 
 
