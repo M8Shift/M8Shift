@@ -204,7 +204,9 @@ Schutzvorrichtung:
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # schreibgeschütztes Briefing: LOCK + letzte Züge + Speicher + Aufgaben
 ./m8shift.py peek <agent>  # letzte an <agent> gerichtete Übergabe (rc 3 wenn nicht dran)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # schreibgeschützte Relais-Timeline
+./m8shift.py turn N [--json]  # vollständigen done-Text eines unveränderlichen Zugs abrufen
 ./m8shift.py history [--limit N] [--oneline] [--json]  # Sitzungsverlauf (schreibgeschützt)
+./m8shift.py time [current|SESSION_ID] [--json]  # effektive Arbeits- und Nichtarbeitszeit (schreibgeschützt)
 ./m8shift.py session {list,show,decisions,report} …  # Sitzungsansichten + optionaler Markdown-Bericht
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # wartet auf deinen Zug ; --once = 1 Prüfung (rc 3 wenn nicht dran)
@@ -223,6 +225,7 @@ Schutzvorrichtung:
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # eine dauerhafte Speichernotiz anhängen (advisory)
+./m8shift.py work-tag <agent> <ref>  # dem WORKING-Fenster eine undurchsichtige Hauptreferenz zuordnen
 ./m8shift.py task {add,done,drop,list,show} …  # advisory Aufgabenliste (To-dos pro Agent)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # bindet diese Schicht an EIN Projekt-Relay (RFC 038 §9); stiftfrei; verweigert bei Mehrdeutigkeit ohne den geschlossenen Selektor
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: schützender Liveness-Herzschlag eines WORKING-Halters (verwaltete Produzenten; Fenster = max(120, min(2*N, TTL)); claim --refresh schreibt nur Audit-Schläge)

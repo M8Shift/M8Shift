@@ -115,6 +115,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [061-rfc-bounded-adaptive-activity.md](rfc/061-rfc-bounded-adaptive-activity.md) | Implemented parameterized bounded activity provision, a capped adaptive viewport, true turn-position labels, and explicit truncated-buffer edges. |
 | [062-rfc-listening-ends-only-at-done.md](rfc/062-rfc-listening-ends-only-at-done.md) | Strengthened the listening invariant so any halt — including holding the pen, PAUSED, or a denied action — suspends acting but never listening; only DONE ends listening, for every agent. |
 | [063-rfc-on-demand-expanded-activity-reader.md](rfc/063-rfc-on-demand-expanded-activity-reader.md) | Implemented an `e`-toggle expanded ACTIVITY reader with immutable-turn point fetches, full word-wrapped done-text, block navigation, and text paging without widening the status snapshot. |
+| [064-rfc-effective-time-accounting.md](rfc/064-rfc-effective-time-accounting.md) | Accepted effective-work/non-work accounting: exact append-only state durations going forward, honest unclassified legacy spans, one primary work item per work window, and one permanent global dashboard TIME strip. |
 
 ## Security docs
 

@@ -137,12 +137,14 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N] [--brief]  # read-only briefing: LOCK + last turns + memory + tasks
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
+./m8shift.py turn N [--json]  # fetch one immutable turn's complete done text
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
+./m8shift.py time [current|SESSION_ID] [--json]  # read-only effective-work and non-work accounting
 ./m8shift.py session {list,show,decisions,report} …  # read-only session views + optional Markdown report
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
-./m8shift.py claim <agent> [--force|--refresh]     # ACQUIRE the pen (exclusive) — from your turn /
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."] [--work-item REF]  # wait if needed, then claim + peek
+./m8shift.py claim <agent> [--force|--refresh] [--work-item REF]  # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY ;
                                                   #   --refresh = extend YOUR OWN WORKING lock only (runner heartbeat)
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
@@ -157,6 +159,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
+./m8shift.py work-tag <agent> <ref>  # replace the current WORKING window's opaque primary item
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # pin this shift to ONE project relay (RFC 038 §9); penless; refuses under ambiguity without the closed selector
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: protective liveness beat for a WORKING holder (managed producers; window = max(120, min(2*N, TTL)); claim --refresh records audit-only beats)

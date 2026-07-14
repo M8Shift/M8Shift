@@ -204,7 +204,9 @@ Salvaguarda:
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # resumo somente leitura: LOCK + últimos turnos + memória + tarefas
 ./m8shift.py peek <agent>  # última passagem endereçada a <agent> (rc 3 se não for sua vez)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # linha do tempo do relé (somente leitura)
+./m8shift.py turn N [--json]  # mostra o texto done completo de um turno imutável
 ./m8shift.py history [--limit N] [--oneline] [--json]  # histórico de sessão (somente leitura)
+./m8shift.py time [current|SESSION_ID] [--json]  # tempo efetivo e não trabalhado (somente leitura)
 ./m8shift.py session {list,show,decisions,report} …  # vistas de sessão + relatório Markdown opcional
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # aguarda sua vez ; --once = 1 verificação (rc 3 se não for sua vez)
@@ -223,6 +225,7 @@ Salvaguarda:
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # anexa uma nota de memória durável (advisory)
+./m8shift.py work-tag <agent> <ref>  # atribui uma referência primária opaca à janela WORKING
 ./m8shift.py task {add,done,drop,list,show} …  # registro de tarefas advisory (afazeres por agente)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # fixa este turno a UM relay de projeto (RFC 038 §9); sem caneta; recusa sob ambiguidade sem o seletor fechado
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: batimento de vivacidade protetor de um detentor WORKING (produtores geridos; janela = max(120, min(2*N, TTL)); claim --refresh regista apenas batimentos de auditoria)
