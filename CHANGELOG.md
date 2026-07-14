@@ -7,6 +7,11 @@
   Git-index blobs, regenerates and stages the manifest automatically, and fails
   closed on refresh errors. Unstaged file bytes are never included; pre-push
   verification remains the backstop.
+- **Claim-on-pickup liveness (#47).** Generated anchors, the agent pack, and the
+  protocol now require an agent to claim before substantive handed-off work,
+  including long read-only review. Runtime doctor emits the advisory
+  `runtime.awaiting_unclaimed` finding while an `AWAITING_*` turn lacks the
+  visible `WORKING_*` expiry/liveness signal.
 
 ## v3.60.0 — 2026-07-13
 

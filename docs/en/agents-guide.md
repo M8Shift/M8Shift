@@ -445,6 +445,9 @@ states, and conflating them causes collisions.
   worktrees when idle.
 - **Keep your own pen fresh during long work** so it never goes stale mid-op and invites a
   force-claim in the first place — this is the holder's half of the contract.
+- **Claim as soon as you pick up a handed-off turn**, even when the work is a long read-only
+  review or verification. `AWAITING_<you>` has no lease or heartbeat; only the transition to
+  `WORKING_<you>` plus `expires` tells the peer that the reviewer is alive.
 
 > [!WARNING]
 > The durable fix is structural: liveness must be decoupled from pen-TTL (a presence
@@ -470,6 +473,9 @@ see [`docs/en/modules/runtime.md`](modules/runtime.md).
 
 Two rules follow, and they are mandatory:
 
+- **Pickup-liveness — claim before substantive work.** A handed-off `AWAITING_<you>` turn is
+  assigned but emits no liveness. Run `claim <you>` before reading, reviewing, or verifying
+  the task for an extended period, then refresh the claim during long work.
 - **Status-guard — never announce the baton from memory.** Before any response that mentions
   `holder`, `state`, `AWAITING_*`, `WORKING_*`, or "the pen is on X", re-read `M8SHIFT.md` or run
   `./m8shift.py status --for <agent>` *immediately first*. A checkpoint from earlier in the turn
