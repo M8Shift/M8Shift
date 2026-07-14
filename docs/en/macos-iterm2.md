@@ -28,6 +28,30 @@ The preset contains the 16 ANSI colours plus the background, foreground,
 cursor, selection, link, and bold colours. Its exact 24-bit values are recorded
 in the [palette reference](assets/terminal/github-dark-dimmed-palette.md).
 
+## Optional: make iTerm2 the default terminal
+
+This step is **optional**. M8Shift and its truecolour dashboard work in iTerm2
+without changing the macOS default terminal.
+
+To make iTerm2 the application macOS opens for terminal requests, open the
+**iTerm2** menu and choose **Make iTerm2 Default Term**.
+
+You can perform the same menu action from Script Editor with this AppleScript:
+
+```applescript
+tell application id "com.googlecode.iterm2" to activate
+tell application "System Events"
+    tell application process "iTerm2"
+        click menu item "Make iTerm2 Default Term" of menu 1 of menu bar item 2 of menu bar 1
+    end tell
+end tell
+```
+
+macOS may ask for Accessibility permission before Script Editor can control
+iTerm2. To verify the change, reopen the **iTerm2** menu: **Make iTerm2 Default
+Term** is disabled and **Make Terminal Default Term** is available. To revert
+to Apple's Terminal, choose **Make Terminal Default Term**.
+
 ## Confirm truecolour detection
 
 The imported preset controls how iTerm2 displays colours; it does not by itself
