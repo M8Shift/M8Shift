@@ -5,6 +5,7 @@ import importlib.util
 import copy
 import hashlib
 import io
+import json
 import os
 import signal
 import shutil
@@ -360,6 +361,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
 
         self.assertEqual(top.read_key(io.StringIO("\x1b[A"), selector=ready), "up")
         self.assertEqual(top.read_key(io.StringIO("\x1b[B"), selector=ready), "down")
+        self.assertEqual(top.read_key(io.StringIO("\x1b[C"), selector=ready), "right")
+        self.assertEqual(top.read_key(io.StringIO("\x1b[D"), selector=ready), "left")
         self.assertEqual(
             top.read_key(io.StringIO("\x1b"), selector=lambda *_: ([], [], [])),
             "escape")
@@ -431,6 +434,49 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             snap, 120, self.NOW, height=34, activity_offset=180))
         self.assertNotIn(top.ACTIVITY_BUFFER_EDGE, complete)
 
+    def test_expanded_reader_wraps_complete_text_and_preserves_frame_matrix(self):
+        top = load_top()
+        snap = fixture()
+        record = {
+            "schema": top.TURN_SCHEMA, "turn": 6, "agent": "claude",
+            "to": "codex", "done": "alpha " + ("bravo " * 180).strip(),
+        }
+        for width in (80, 120, 160):
+            height = 30
+            wrapped = top._activity_reader_lines(record, width)
+            seen = []
+            offset = 0
+            while True:
+                visible, actual, total = top._activity_reader_window(
+                    snap, record, width, height, offset)
+                seen.extend(visible)
+                frame = self._plain(top.render(
+                    snap, width, self.NOW, height=height,
+                    expanded_activity=record, text_offset=actual))
+                self.assertEqual(len(frame.splitlines()), height)
+                self.assertTrue(all(len(line) == width for line in frame.splitlines()))
+                self.assertIn("ACTIVITY · EXPANDED #6", frame)
+                if actual + len(visible) >= total:
+                    break
+                offset = top.activity_text_page(
+                    snap, record, width, height, actual, 1)
+            self.assertEqual(seen, wrapped)
+
+    def test_expanded_reader_navigates_immutable_blocks_and_fetches_one_turn(self):
+        top = load_top()
+        snap = fixture()
+        snap["activity"] = [{"turn": n} for n in range(1, 5)]
+        self.assertEqual(top.activity_adjacent_turn(snap, 4, 1), 3)
+        self.assertEqual(top.activity_adjacent_turn(snap, 3, -1), 4)
+        self.assertEqual(top.activity_adjacent_turn(snap, 1, 1), 1)
+
+        payload = {"schema": top.TURN_SCHEMA, "turn": 3, "agent": "codex",
+                   "to": "claude", "at": None, "done": "complete"}
+        proc = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+        with mock.patch.object(top.subprocess, "run", return_value=proc) as run:
+            self.assertEqual(top.load_activity_turn("engine.py", "/relay", 3), payload)
+        self.assertEqual(run.call_args.args[0][-3:], ["turn", "3", "--json"])
+
     def test_help_overlay_documents_keys_and_preserves_frame_width(self):
         top = load_top()
         for width in (80, 120, 160):
@@ -439,7 +485,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertEqual(len(output.splitlines()), 24)
             self.assertIn("q       quit", output)
             self.assertIn("Esc     close help", output)
+            self.assertIn("e       toggle compact", output)
             self.assertIn("↑ / ↓   scroll", output)
+            self.assertIn("← / →   page complete", output)
             self.assertIn("every 7s", output)
 
     def test_120_column_plain_frame_is_byte_stable(self):
@@ -448,7 +496,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "d2a814474db290053ac873f55b1c7680ab794d74523f28cf446c102954b73770",
+            "e51cc5be2ad6092162d0e76585aa018f978069445c25aef79ea3bf699eb9e118",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):

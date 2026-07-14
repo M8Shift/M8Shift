@@ -9,6 +9,7 @@ import signal
 import select
 import subprocess
 import sys
+import textwrap
 import time
 from datetime import datetime, timezone
 
@@ -29,6 +30,7 @@ ACTIVITY_VIEWPORT_MAX = 20
 ACTIVITY_SCROLL_HEADROOM = 180
 ACTIVITY_PROVISION_MAX = 200
 ACTIVITY_BUFFER_EDGE = "<older turns on disk — peek/journal>"
+TURN_SCHEMA = "m8shift.turn/1"
 _active = False
 _keyboard_fd = None
 _keyboard_attrs = None
@@ -321,6 +323,71 @@ def activity_max_scroll(snapshot, width, height):
     return max(0, len(snapshot.get("activity") or []) - limit)
 
 
+def _activity_navigation(snapshot):
+    """Return snapshot events newest-first; immutable turn numbers are cursors."""
+    return list(reversed(snapshot.get("activity") or []))
+
+
+def _display_text(value):
+    """Sanitize terminal controls without imposing the snapshot's text bound."""
+    if not isinstance(value, str) or not value:
+        return "—"
+    return "".join(c if ord(c) >= 32 and not 127 <= ord(c) <= 159 else " "
+                   for c in value)
+
+
+def _activity_reader_lines(record, width):
+    """Word-wrap the complete on-demand done text; never truncate it."""
+    available = max(1, max(24, width) - 6)
+    return textwrap.wrap(
+        _display_text((record or {}).get("done")), width=available,
+        replace_whitespace=True, drop_whitespace=True,
+        break_long_words=True, break_on_hyphens=False,
+    ) or ["—"]
+
+
+def _activity_reader_window(snapshot, record, width, height, text_offset=0):
+    lines = _activity_reader_lines(record, width)
+    capacity = _activity_capacity(snapshot, max(24, width), height)
+    if capacity is None:
+        return lines, 0, len(lines)
+    maximum = ((len(lines) - 1) // max(1, capacity)) * max(1, capacity)
+    offset = min(max(0, text_offset), maximum)
+    return lines[offset:offset + capacity], offset, len(lines)
+
+
+def activity_text_page(snapshot, record, width, height, text_offset, direction):
+    """Move one physical page while retaining access to every wrapped line."""
+    lines = _activity_reader_lines(record, width)
+    capacity = _activity_capacity(snapshot, max(24, width), height) or 1
+    maximum = ((len(lines) - 1) // capacity) * capacity
+    return min(maximum, max(0, text_offset + direction * capacity))
+
+
+def activity_adjacent_turn(snapshot, selected_turn, direction):
+    """Navigate one activity block (direction -1 newer, +1 older)."""
+    numbers = [event.get("turn") for event in _activity_navigation(snapshot)
+               if isinstance(event, dict)
+               and isinstance(event.get("turn"), int)
+               and not isinstance(event.get("turn"), bool)]
+    if not numbers:
+        return None
+    try:
+        index = numbers.index(selected_turn)
+    except ValueError:
+        index = 0
+    return numbers[min(len(numbers) - 1, max(0, index + direction))]
+
+
+def _expanded_activity_label(record, offset, visible_count, total):
+    start = offset + 1 if total else 0
+    end = offset + visible_count
+    return "ACTIVITY · EXPANDED #%s  %s → %s  text %d-%d / %d" % (
+        _value((record or {}).get("turn")),
+        _value((record or {}).get("agent")),
+        _value((record or {}).get("to")), start, end, total)
+
+
 def _flex_track_widths(width, baseline, weights):
     """Grow a 120-column track plan by weighted largest remainder."""
     if width < 120 or len(baseline) != len(weights):
@@ -356,19 +423,20 @@ def _track_cells(values, widths):
 
 
 def render(snapshot, width, now=None, interval=2, utc=False, height=None,
-           activity_offset=0):
+           activity_offset=0, expanded_activity=None, text_offset=0):
     # Use the real terminal width. The 100-column breakpoint is stable; the wide
     # layout grows deterministically above its byte-stable 120-column baseline.
     width = max(24, width)
     if width >= 100:
         return _render_wide(snapshot, width, now, interval, utc, height,
-                            activity_offset)
+                            activity_offset, expanded_activity, text_offset)
     return _render_stacked(snapshot, width, now, interval, utc, height,
-                           activity_offset)
+                           activity_offset, expanded_activity, text_offset)
 
 
 def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
-                    height=None, activity_offset=0):
+                    height=None, activity_offset=0, expanded_activity=None,
+                    text_offset=0):
     width = max(24, width)
     inner = width - 2
     colored = _colour_tier() != "plain"
@@ -483,27 +551,38 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     lines.append(row("LAST TURN  #%s %s/%s → %s  %s" %
                      (_value(last.get("n")), _value(last.get("agent")), last_model,
                       _value(last.get("to")), _value(last.get("ask_excerpt")))))
-    events = list(reversed(snapshot.get("activity") or []))
-    visible, activity_offset = _activity_window(
-        events, activity_offset, _activity_limit(snapshot, width, height))
-    at_buffer_edge = _activity_buffer_edge(
-        snapshot, events, activity_offset, len(visible))
-    lines += [sep, row(_activity_label(
-        events, visible, upper=True, buffer_edge=at_buffer_edge), dim)]
-    for event in visible:
-        event_model = ((event.get("model") or "—") + ("*" if event.get("model") else ""))
-        lines.append(row("  #%s  %s/%s  %s" % (_value(event.get("turn")),
-                                             _value(event.get("agent")), event_model,
-                                             _value(event.get("summary")))))
+    events = _activity_navigation(snapshot)
+    if expanded_activity is not None:
+        visible, text_offset, text_total = _activity_reader_window(
+            snapshot, expanded_activity, width, height, text_offset)
+        lines += [sep, row(_expanded_activity_label(
+            expanded_activity, text_offset, len(visible), text_total), dim)]
+        lines.extend(row("  " + text) for text in visible)
+    else:
+        visible, activity_offset = _activity_window(
+            events, activity_offset, _activity_limit(snapshot, width, height))
+        at_buffer_edge = _activity_buffer_edge(
+            snapshot, events, activity_offset, len(visible))
+        lines += [sep, row(_activity_label(
+            events, visible, upper=True, buffer_edge=at_buffer_edge), dim)]
+        for event in visible:
+            event_model = ((event.get("model") or "—") + ("*" if event.get("model") else ""))
+            lines.append(row("  #%s  %s/%s  %s" % (_value(event.get("turn")),
+                                                 _value(event.get("agent")), event_model,
+                                                 _value(event.get("summary")))))
     capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(row("") for _ in range(capacity - len(visible)))
-    lines += [sep, row("q quit  ? help  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss" % interval, dim), bottom]
+    footer = ("q quit  ? help  e compact  ↑/↓ block  ←/→ text  auto-refresh %ss" % interval
+              if expanded_activity is not None else
+              "q quit  ? help  e expand  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss" % interval)
+    lines += [sep, row(footer, dim), bottom]
     return "\n".join(lines)
 
 
 def _render_wide(snapshot, width, now=None, interval=2, utc=False,
-                 height=None, activity_offset=0):
+                 height=None, activity_offset=0, expanded_activity=None,
+                 text_offset=0):
     # Tabulated layout for wide terminals: sections lay out in aligned columns,
     # the dash-filled header/separators pin the right edge. Colour is composed
     # AFTER padding (paint replaces a plain segment with an equal-width coloured
@@ -680,35 +759,47 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         stamped.sort(key=lambda p: p[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     else:
         stamped.reverse()  # no ts yet: core is oldest-first, show newest on top
-    visible, activity_offset = _activity_window(
-        stamped, activity_offset, _activity_limit(snapshot, width, height))
-    visible_events = [event for _, event in visible]
-    at_buffer_edge = _activity_buffer_edge(
-        snapshot, stamped, activity_offset, len(visible))
-    lines.append(framed("├", "┤", "─ %s " % _activity_label(
-        [event for _, event in stamped], visible_events,
-        buffer_edge=at_buffer_edge)))
-    for idx, (dt, e) in enumerate(visible):
-        ts_s = _display_time(dt, utc) if dt else "—"
-        absolute_index = activity_offset + idx
-        older = stamped[absolute_index + 1][0] if absolute_index + 1 < len(stamped) else None
-        dur = _fmt_dur((dt - older).total_seconds()) if (dt and older) else "—"
-        parts = (_value(e.get("summary")) or "").split(None, 1)
-        action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
-        note = parts[1] if len(parts) > 1 else ""
-        model = clean(e.get("model") or "—", 19) + ("*" if e.get("model") else "")
-        activity_row = adaptive_cells(
-            ("  %s" % _value(e.get("turn")), ts_s, dur,
-             clean(e.get("agent"), 8), model, action, note),
-            (0, 8, 29, 37, 47, 69, 83),
-            (8, 21, 8, 10, 22, 14, 35),
-            (0, 0, 0, 0, 1, 1, 2),
-        )
-        lines.append("│" + activity_row + "│")
+    if expanded_activity is not None:
+        expanded_lines, text_offset, text_total = _activity_reader_window(
+            snapshot, expanded_activity, width, height, text_offset)
+        lines.append(framed("├", "┤", "─ %s " % _expanded_activity_label(
+            expanded_activity, text_offset, len(expanded_lines), text_total)))
+        for expanded_line in expanded_lines:
+            lines.append(content([("  " + expanded_line, 0)]))
+        visible = expanded_lines
+    else:
+        visible, activity_offset = _activity_window(
+            stamped, activity_offset, _activity_limit(snapshot, width, height))
+        visible_events = [event for _, event in visible]
+        at_buffer_edge = _activity_buffer_edge(
+            snapshot, stamped, activity_offset, len(visible))
+        lines.append(framed("├", "┤", "─ %s " % _activity_label(
+            [event for _, event in stamped], visible_events,
+            buffer_edge=at_buffer_edge)))
+        for idx, (dt, e) in enumerate(visible):
+            ts_s = _display_time(dt, utc) if dt else "—"
+            absolute_index = activity_offset + idx
+            older = stamped[absolute_index + 1][0] if absolute_index + 1 < len(stamped) else None
+            dur = _fmt_dur((dt - older).total_seconds()) if (dt and older) else "—"
+            parts = (_value(e.get("summary")) or "").split(None, 1)
+            action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
+            note = parts[1] if len(parts) > 1 else ""
+            model = clean(e.get("model") or "—", 19) + ("*" if e.get("model") else "")
+            activity_row = adaptive_cells(
+                ("  %s" % _value(e.get("turn")), ts_s, dur,
+                 clean(e.get("agent"), 8), model, action, note),
+                (0, 8, 29, 37, 47, 69, 83),
+                (8, 21, 8, 10, 22, 14, 35),
+                (0, 0, 0, 0, 1, 1, 2),
+            )
+            lines.append("│" + activity_row + "│")
     capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(blank for _ in range(capacity - len(visible)))
-    lines.append(framed("└", "┘", "─ q quit  ? help  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss " % interval))
+    footer = ("─ q quit  ? help  e compact  ↑/↓ block  ←/→ text  auto-refresh %ss " % interval
+              if expanded_activity is not None else
+              "─ q quit  ? help  e expand  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss " % interval)
+    lines.append(framed("└", "┘", footer))
     return "\n".join(lines)
 
 
@@ -737,6 +828,21 @@ def load_snapshot(engine, root, activity_limit=8):
     return merged
 
 
+def load_activity_turn(engine, root, turn):
+    """Fetch exactly one full done-text record by immutable turn number."""
+    env = dict(os.environ, M8SHIFT_ROOT=root)
+    proc = subprocess.run([sys.executable, engine, "turn", str(turn), "--json"],
+                          env=env, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "turn fetch failed")
+    payload = json.loads(proc.stdout)
+    if not isinstance(payload, dict) or payload.get("schema") != TURN_SCHEMA \
+            or payload.get("turn") != turn or not isinstance(payload.get("done"), str):
+        raise RuntimeError("invalid turn payload for #%s" % turn)
+    return payload
+
+
 def scroll_fallback(engine, root, extra):
     os.execve(sys.executable, [sys.executable, engine, "watch"] + extra,
               dict(os.environ, M8SHIFT_ROOT=root))
@@ -759,7 +865,8 @@ def read_key(stream=None, timeout=.03, selector=select.select):
     ready, _, _ = selector([stream], [], [], timeout)
     if not ready:
         return "escape"
-    return {"A": "up", "B": "down"}.get(stream.read(1), "escape")
+    return {"A": "up", "B": "down", "C": "right", "D": "left"}.get(
+        stream.read(1), "escape")
 
 
 def key_effect(key, scroll_offset, max_scroll, help_visible):
@@ -789,7 +896,7 @@ def render_help(width, interval=2, height=None):
     top = "┌" + "─" * inner + "┐"
     sep = "├" + "─" * inner + "┤"
     bottom = "└" + "─" * inner + "┘"
-    padding = max(0, height - 13) if height is not None else 0
+    padding = max(0, height - 15) if height is not None else 0
     lines = [
         top,
         row("M8SHIFT TOP · HELP"),
@@ -798,7 +905,9 @@ def render_help(width, interval=2, height=None):
         row("r       reload the relay snapshot now"),
         row("Esc     close help and reload the snapshot"),
         row("?       open or close this help"),
+        row("e       toggle compact / expanded activity"),
         row("↑ / ↓   scroll the activity window"),
+        row("← / →   page complete text in expanded mode"),
         row(""),
         row("Automatic refresh: every %ss" % interval),
     ]
@@ -859,6 +968,10 @@ def main(argv=None):
     enter()
     previous = None
     scroll_offset = 0
+    expanded = False
+    selected_turn = None
+    selected_activity = None
+    text_offset = 0
     help_visible = False
     agent_count = 2
     try:
@@ -870,9 +983,18 @@ def main(argv=None):
             agent_count = len(snap.get("agents") or [])
             max_scroll = activity_max_scroll(snap, size.columns, size.lines)
             scroll_offset = min(scroll_offset, max_scroll)
+            if expanded and selected_turn is None:
+                selected_turn = activity_adjacent_turn(snap, None, 0)
+            if expanded and selected_turn is not None and selected_activity is None:
+                selected_activity = load_activity_turn(engine, args.root, selected_turn)
+            reader_record = (selected_activity or {
+                "turn": None, "agent": None, "to": None, "done": "",
+            }) if expanded else None
             frame = (render_help(size.columns, args.interval, size.lines) if help_visible else
                      render(snap, size.columns, interval=args.interval, utc=args.utc,
-                            height=size.lines, activity_offset=scroll_offset))
+                            height=size.lines, activity_offset=scroll_offset,
+                            expanded_activity=reader_record,
+                            text_offset=text_offset))
             if frame != previous:
                 sys.stdout.write(HOME + frame + "\x1b[J")
                 sys.stdout.flush()
@@ -885,6 +1007,30 @@ def main(argv=None):
                 previous = None
             if sys.stdin in ready:
                 key = read_key()
+                if not help_visible and key == "e":
+                    expanded = not expanded
+                    text_offset = 0
+                    if expanded:
+                        events = _activity_navigation(snap)
+                        selected_turn = (events[min(scroll_offset, len(events) - 1)].get("turn")
+                                         if events else None)
+                        selected_activity = None
+                    previous = None
+                    continue
+                if not help_visible and expanded and key in ("up", "down"):
+                    adjacent = activity_adjacent_turn(
+                        snap, selected_turn, -1 if key == "up" else 1)
+                    if adjacent != selected_turn:
+                        selected_turn, selected_activity = adjacent, None
+                    text_offset = 0
+                    previous = None
+                    continue
+                if not help_visible and expanded and key in ("left", "right"):
+                    text_offset = activity_text_page(
+                        snap, selected_activity, size.columns, size.lines,
+                        text_offset, -1 if key == "left" else 1)
+                    previous = None
+                    continue
                 quit_requested, refresh, scroll_offset, help_visible = key_effect(
                     key, scroll_offset, max_scroll, help_visible)
                 if quit_requested:

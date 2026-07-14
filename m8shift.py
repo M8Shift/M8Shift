@@ -7704,6 +7704,38 @@ def cmd_log(args):
     return 0
 
 
+def cmd_turn(args):
+    """Fetch one immutable turn's complete done text without widening status.
+
+    This read-only, point lookup is the dashboard's expanded-reader transport.
+    It deliberately reads the archive only on demand and returns no relay-wide
+    history or status snapshot fields.
+    """
+    if args.number < 0:
+        print("turn number must be non-negative.", file=sys.stderr)
+        return 2
+    _text, turns = all_turns(include_archive=True)
+    turn = next((item for item in turns if item["n"] == args.number), None)
+    if turn is None:
+        print("turn #%d not found." % args.number, file=sys.stderr)
+        return 3
+    fields = turn["fields"]
+    payload = {
+        "schema": "m8shift.turn/1",
+        "turn": turn["n"],
+        "agent": fields.get("from", turn["agent"]),
+        "to": fields.get("to", "none"),
+        "at": fields.get("at"),
+        "done": fields.get("done", ""),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print("#%d %s -> %s" % (payload["turn"], payload["agent"], payload["to"]))
+        print(payload["done"])
+    return 0
+
+
 def cmd_history(args):
     """Read-only session history: one folded entry per session."""
     text, turns = all_turns(include_archive=True)
@@ -10008,6 +10040,11 @@ def main():
     lg.add_argument("--oneline", action="store_true",
                     help="compact one-line-per-turn output")
     lg.set_defaults(fn=cmd_log)
+
+    tn = sub.add_parser("turn", help="fetch one immutable turn's complete done text")
+    tn.add_argument("number", type=int, help="immutable turn number")
+    tn.add_argument("--json", action="store_true", help="machine-readable turn payload")
+    tn.set_defaults(fn=cmd_turn)
 
     hs = sub.add_parser("history", help="read-only session history")
     hs.add_argument("--limit", type=int, default=0, help="show only the last N sessions")
