@@ -393,7 +393,7 @@ published site, or use the repository-local docs when working from a clone.
 | 063 | [On-demand expanded activity reader](docs/en/rfc/063-rfc-on-demand-expanded-activity-reader.md) | Toggleable, word-wrapped full done-text blocks fetched by immutable turn number | implemented | 2026-07-14 | `e` toggles; ↑/↓ selects blocks; ←/→ pages text; status snapshot stays lean |
 | 064 | [Effective-work and non-work time accounting](docs/en/rfc/064-rfc-effective-time-accounting.md) | State-duration accounting for effective work vs awaiting, paused, idle, and unknown time | accepted for implementation | 2026-07-14 | `WORKING` proxy; honest partial retroactivity; one primary work item per window; permanent global TIME strip |
 | 065 | [Ticketed, committed, and pushed delivery](docs/en/rfc/065-rfc-ticketed-committed-pushed-delivery.md) | One forge ticket and remotely recoverable Git history for every intentional change | accepted / implemented | 2026-07-14 | advisory offline reminders; named role-based forge gateway |
-| 066 | [Asymmetric solo advance](docs/en/rfc/066-rfc-asymmetric-solo-advance.md) | Bounded solo progress during an explicit peer absence, followed by mandatory deferred reconciliation | draft / feasibility study | — | no behavior active; operator must decide authorization, eligible tasks, and returning-peer authority |
+| 066 | [Asymmetric solo advance](docs/en/rfc/066-rfc-asymmetric-solo-advance.md) | Bounded solo progress during an explicit peer absence, followed by mandatory deferred reconciliation | accepted / design-only | — | signed project policy; reversible branch-local work; returning peer may require follow-up corrections; implementation deferred |
 
 ## 🔁 How it works
 

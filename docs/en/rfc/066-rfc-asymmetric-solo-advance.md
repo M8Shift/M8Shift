@@ -1,6 +1,6 @@
 # RFC 066 — Asymmetric solo advance with deferred reconciliation
 
-- **Status:** draft / feasibility study; no behavior is active
+- **Status:** accepted / design-only; phased implementation deferred (#155)
 - **Date:** 2026-07-14
 - **Scope:** allow one available relay agent to make bounded progress while a peer is
   quota-blocked or explicitly absent, without erasing the review that normal alternating
@@ -28,8 +28,9 @@ The core remains degree-1: there is still one pen and never more than one writer
 changes who may receive the next turn; it does not create another holder, simulate a peer
 message, or declare deferred review complete.
 
-This is a feasibility RFC, not authorization to implement or use the mode. Three policy
-forks in §12 require an operator decision first.
+This RFC accepts the design and policy choices in §12. It does not authorize use of the
+mode or implementation of the solo-advance engine. Delivery remains explicitly deferred
+and requires separately authorized, reviewed phases.
 
 ## 1. Problem
 
@@ -282,12 +283,16 @@ episodes with pending debt. Diagnostics are advisory and never approve or revert
 - Frontend crashes: the relay, Git history, episode declaration, and debt ledger are the
   recovery source; a foreground waiter alone does not promise invocation.
 
-## 12. Operator decisions required before implementation
+## 12. Accepted policy decisions
 
-These forks are intentionally unresolved. No implementation may encode defaults until the
-operator selects each one.
+The operator selected the following closed policy. These decisions accept the design; they
+do not activate the mode or authorize implementation.
 
 ### D1 — Who authorizes solo override?
+
+**Decision: pre-approved policy.** An episode may open only under a signed,
+project-local policy whose mechanical predicates all match. Creating, amending, or
+replacing that policy remains operator-gated.
 
 - **Operator-only:** safest and easiest to audit; cannot progress unattended.
 - **Pre-approved policy:** an agent may open an episode when a signed/project-local policy
@@ -297,6 +302,11 @@ operator selects each one.
 
 ### D2 — Which task classes are solo-able?
 
+**Decision: reversible branch-local implementation too.** Documentation, tests,
+diagnostics, and reversible implementation on an unmerged branch may be eligible within
+the declared scope and evidence gates. The irreversible and high-risk classes in §8
+remain excluded; classification ambiguity fails closed.
+
 - **Docs/tests only:** lowest blast radius, limited useful progress.
 - **Reversible branch-local implementation too:** recommended candidate; excludes the
   irreversible/high-risk classes in §8.
@@ -304,6 +314,11 @@ operator selects each one.
   and policy-drift risk.
 
 ### D3 — What authority does the returning peer have?
+
+**Decision: revise through normal follow-up commits.** The returning peer may block
+episode closure, require corrections, and review the resulting follow-up commits. The
+peer cannot rewrite existing history silently; every correction continues to obey the
+normal pen, delivery, and review gates.
 
 - **Acknowledge/advisory only:** solo results stand unless the operator intervenes; weakens
   contradictory review.
@@ -313,8 +328,8 @@ operator selects each one.
   destructive-operation, and external-state gates. Already-merged/deployed effects may not
   be honestly reversible, which is why §8 denies them by default.
 
-The operator may choose a hybrid, but the resulting policy must be explicit, closed-enum,
-versioned, and displayed in the episode declaration.
+Any future policy change requires a new explicit operator decision. The active policy must
+remain closed-enum, versioned, and displayed in the episode declaration.
 
 ## 13. Security and governance
 
@@ -351,13 +366,14 @@ versioned, and displayed in the episode declaration.
 12. Tests cover concurrent open attempts, stale/malformed usage data, expiry mid-turn,
    ledger-write failure, peer return during a fresh pen, dispute, and crash recovery.
 
-## 15. Feasibility and staged delivery
+## 15. Accepted design and deferred staged delivery
 
 The design is feasible with local stdlib-only mechanisms already used by the relay:
 exclusive file locking, immutable turns, append-only ledgers, normalized usage sidecars,
 project binding, and dashboard snapshots. The hard problem is policy, not process control.
 
-After D1–D3 are decided, deliver in gated slices:
+Implementation is not part of this acceptance. If separately authorized later, deliver it
+in gated slices:
 
 1. ledger schema, parser, read-only status/doctor, and fixtures;
 2. `solo-open`/`solo-yield` plus bounded self-handoff state transitions;
