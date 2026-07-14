@@ -205,6 +205,7 @@ Garanzia:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # timeline del relay (sola lettura)
 ./m8shift.py turn N [--json]  # mostra il testo done completo di un turno immutabile
 ./m8shift.py history [--limit N] [--oneline] [--json]  # cronologia di sessione (sola lettura)
+./m8shift.py time [current|SESSION_ID] [--json]  # tempo effettivo e non lavorativo (sola lettura)
 ./m8shift.py session {list,show,decisions,report} …  # viste sessione + report Markdown opzionale
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)

@@ -321,12 +321,63 @@ def _fmt_dur(seconds):
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%02d:%02d" % (m, s)
 
 
+def _time_duration(seconds):
+    """Compact cumulative duration used by the permanent RFC-064 strip."""
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return "-"
+    minutes = max(0, int(seconds)) // 60
+    return "%dh%02d" % divmod(minutes, 60)
+
+
+def _time_strip(accounting, width):
+    """Return a priority-preserving TIME strip and its semantic segments."""
+    accounting = accounting if isinstance(accounting, dict) else {}
+    effective = "effective* %s" % _time_duration(
+        accounting.get("effective_work_seconds"))
+    non_work = "non-work %s" % _time_duration(accounting.get("non_work_seconds"))
+    partial = accounting.get("quality") != "exact"
+    unknown = ("unknown %s" % _time_duration(
+        accounting.get("unclassified_seconds"))) if partial else ""
+    detail = " (await %s · pause %s · idle %s)" % (
+        _time_duration(accounting.get("awaiting_seconds")),
+        _time_duration(accounting.get("paused_seconds")),
+        _time_duration(accounting.get("idle_seconds")),
+    )
+    required = " · ".join(part for part in (effective, non_work, unknown) if part)
+    detailed = "TIME  " + " · ".join(
+        part for part in (effective, non_work + detail, unknown) if part)
+    plain = detailed if len(detailed) <= width else "TIME  %s" % required
+    if len(plain) > width:
+        effective = "e* %s" % _time_duration(
+            accounting.get("effective_work_seconds"))
+        non_work = "nw %s" % _time_duration(accounting.get("non_work_seconds"))
+        unknown = ("unk %s" % _time_duration(
+            accounting.get("unclassified_seconds"))) if partial else ""
+        compact = "TIME %s · %s" % (
+            effective,
+            non_work,
+        )
+        if unknown:
+            compact += " · %s" % unknown
+        plain = compact
+    if len(plain) > width:
+        effective = "e%s" % _time_duration(
+            accounting.get("effective_work_seconds"))
+        non_work = "n%s" % _time_duration(accounting.get("non_work_seconds"))
+        unknown = ("u%s" % _time_duration(
+            accounting.get("unclassified_seconds"))) if partial else ""
+        plain = "T " + " ".join(
+            part for part in (effective, non_work, unknown) if part)
+    return clean(plain, width).ljust(width), effective, non_work, unknown
+
+
 def _activity_capacity(snapshot, width, height):
     """Physical activity-zone rows available inside the terminal frame."""
     if height is None:
         return None
     agent_rows = len(snapshot.get("agents") or [])
-    fixed_rows = (13 if max(24, width) >= 100 else 16) + agent_rows
+    # RFC 064's permanent global TIME strip consumes one physical row.
+    fixed_rows = (14 if max(24, width) >= 100 else 17) + agent_rows
     return max(0, height - fixed_rows)
 
 
@@ -692,10 +743,16 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(row("") for _ in range(capacity - len(visible)))
+    time_plain, effective_seg, non_work_seg, unknown_seg = _time_strip(
+        snapshot.get("time_accounting"), inner)
+    time_row = "│" + time_plain + "│"
+    time_row = paint(time_row, effective_seg, cyan)
+    time_row = paint(time_row, non_work_seg, cyan)
+    time_row = paint(time_row, unknown_seg, amber)
     footer = ("q quit  ? help  e compact  ↑/↓ block  ←/→ text  auto-refresh %ss" % interval
               if expanded_activity is not None else
               "q quit  ? help  e expand  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss" % interval)
-    lines += [sep, row(footer, dim), bottom]
+    lines += [sep, time_row, row(footer, dim), bottom]
     return "\n".join(lines)
 
 
@@ -910,6 +967,13 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(blank for _ in range(capacity - len(visible)))
+    time_plain, effective_seg, non_work_seg, unknown_seg = _time_strip(
+        snapshot.get("time_accounting"), inner)
+    time_row = "│" + time_plain + "│"
+    time_row = paint(time_row, effective_seg, cyan)
+    time_row = paint(time_row, non_work_seg, cyan)
+    time_row = paint(time_row, unknown_seg, amber)
+    lines.append(time_row)
     footer = ("─ q quit  ? help  e compact  ↑/↓ block  ←/→ text  auto-refresh %ss " % interval
               if expanded_activity is not None else
               "─ q quit  ? help  e expand  r/Esc refresh  ↑/↓ navigate  auto-refresh %ss " % interval)

@@ -245,6 +245,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py log [--limit N] [--all] [--oneline]  # timeline du relais (lecture seule)
 ./m8shift.py turn N [--json]  # affiche le texte done complet d'un tour immuable
 ./m8shift.py history [--limit N] [--oneline] [--json]  # historique de session (lecture seule)
+./m8shift.py time [current|SESSION_ID] [--json]  # temps effectif et non travaillé (lecture seule)
 ./m8shift.py session {list,show,decisions,report} …  # vues de session + rapport Markdown optionnel
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # attend ton tour ; --once = 1 check (rc 3 si pas ton tour)

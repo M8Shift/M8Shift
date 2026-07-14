@@ -206,6 +206,7 @@ Salvaguarda:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # linha do tempo do relé (somente leitura)
 ./m8shift.py turn N [--json]  # mostra o texto done completo de um turno imutável
 ./m8shift.py history [--limit N] [--oneline] [--json]  # histórico de sessão (somente leitura)
+./m8shift.py time [current|SESSION_ID] [--json]  # tempo efetivo e não trabalhado (somente leitura)
 ./m8shift.py session {list,show,decisions,report} …  # vistas de sessão + relatório Markdown opcional
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # aguarda sua vez ; --once = 1 verificação (rc 3 se não for sua vez)

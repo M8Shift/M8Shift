@@ -205,6 +205,7 @@ loop:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # лента реле (только для чтения)
 ./m8shift.py turn N [--json]  # показать полный текст done неизменяемого хода
 ./m8shift.py history [--limit N] [--oneline] [--json]  # история сессии (только для чтения)
+./m8shift.py time [current|SESSION_ID] [--json]  # эффективное и нерабочее время (только для чтения)
 ./m8shift.py session {list,show,decisions,report} …  # просмотры сессии + необязательный Markdown-отчёт
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # ожидает вашего хода ; --once = 1 проверка (rc 3, если не ваш ход)

@@ -206,6 +206,7 @@ Schutzvorrichtung:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # schreibgeschützte Relais-Timeline
 ./m8shift.py turn N [--json]  # vollständigen done-Text eines unveränderlichen Zugs abrufen
 ./m8shift.py history [--limit N] [--oneline] [--json]  # Sitzungsverlauf (schreibgeschützt)
+./m8shift.py time [current|SESSION_ID] [--json]  # effektive Arbeits- und Nichtarbeitszeit (schreibgeschützt)
 ./m8shift.py session {list,show,decisions,report} …  # Sitzungsansichten + optionaler Markdown-Bericht
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # wartet auf deinen Zug ; --once = 1 Prüfung (rc 3 wenn nicht dran)

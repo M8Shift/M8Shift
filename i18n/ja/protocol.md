@@ -204,6 +204,7 @@ loop:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # リレーのタイムライン（読み取り専用）
 ./m8shift.py turn N [--json]  # 不変ターンの完全な done テキストを取得
 ./m8shift.py history [--limit N] [--oneline] [--json]  # セッション履歴（読み取り専用）
+./m8shift.py time [current|SESSION_ID] [--json]  # 有効作業時間と非作業時間（読み取り専用）
 ./m8shift.py session {list,show,decisions,report} …  # セッション表示 + 任意のMarkdownレポート
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # あなたの番を待つ ; --once = 1回チェック（あなたの番でなければ rc 3）

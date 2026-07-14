@@ -440,6 +440,47 @@ class TestPureFunctions(unittest.TestCase):
         self.assertIn("state_chain_broken", result["diagnostics"])
         self.assertIn("transition_clock_regression", result["diagnostics"])
 
+    def test_time_fold_ten_thousand_transitions_stays_inside_refresh_budget(self):
+        sid = "20260714T000000Z-4567abcd"
+        started = dt.datetime(2026, 7, 14, tzinfo=dt.timezone.utc)
+        rows = [{"event": "start", "session_id": sid,
+                 "at": cowork.iso(started)}]
+        rows.append({
+            "event": "state", "session_id": sid, "at": cowork.iso(started),
+            "from_state": "-", "to_state": "IDLE", "actor": "init",
+            "turn": 0, "operation": "init",
+        })
+        window = ""
+        state = "IDLE"
+        for index in range(1, 10000):
+            stamp = cowork.iso(started + dt.timedelta(seconds=index))
+            if state == "IDLE":
+                target = "WORKING_CODEX"
+                window = "%08x" % ((index + 1) // 2)
+                operation = "claim"
+            else:
+                target = "IDLE"
+                operation = "release"
+            rows.append({
+                "event": "state", "session_id": sid, "at": stamp,
+                "from_state": state, "to_state": target, "actor": "codex",
+                "turn": index, "operation": operation,
+                "work_window_id": window,
+            })
+            state = target
+
+        as_of = started + dt.timedelta(seconds=10000)
+        lock = {"session": sid, "state": state, "since": rows[-1]["at"]}
+        begin = time.perf_counter()
+        result = cowork.fold_time_accounting(
+            rows, sid, as_of=as_of, current_lock=lock)
+        elapsed = time.perf_counter() - begin
+        self.assertLess(elapsed, 2.0, "10k fold exceeded the dashboard refresh budget")
+        self.assertEqual(result["quality"], "exact")
+        self.assertEqual(result["wall_seconds"], 10000)
+        self.assertEqual(result["effective_work_seconds"] + result["non_work_seconds"],
+                         result["wall_seconds"])
+
     def test_transition_evidence_failure_warns_without_undoing_authoritative_state(self):
         before = {"session": "20260714T000000Z-4567abcd", "state": "IDLE",
                   "turn": "0", "since": "2026-07-14T00:00:00Z"}
@@ -1907,6 +1948,66 @@ class TestReadCommands(CLIBase):
         ledger = d["snapshot"]["ledger"]
         self.assertEqual(set(("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
                          <= set(ledger), True)
+
+    def test_rfc064_time_command_status_sibling_and_human_blocks(self):
+        self.init()
+
+        def read_bytes(name):
+            with open(os.path.join(self.d, name), "rb") as fh:
+                return fh.read()
+
+        before = {
+            name: read_bytes(name)
+            for name in ("M8SHIFT.md", "M8SHIFT.sessions.jsonl")
+        }
+
+        full = self.cw("time", "--json")
+        self.assertEqual(full.returncode, 0, full.stderr)
+        accounting = json.loads(full.stdout)
+        self.assertEqual(accounting["schema"], "m8shift.time-accounting/1")
+        self.assertEqual(
+            accounting["wall_seconds"],
+            accounting["effective_work_seconds"] + accounting["non_work_seconds"]
+            + accounting["unclassified_seconds"],
+        )
+        self.assertEqual(
+            accounting["non_work_seconds"],
+            accounting["awaiting_seconds"] + accounting["paused_seconds"]
+            + accounting["idle_seconds"],
+        )
+        for key in ("agents", "work_items", "diagnostics",
+                    "unattributed_work_seconds", "as_of", "session_id"):
+            self.assertIn(key, accounting)
+
+        status_result = self.cw("status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+        projection = status["time_accounting"]
+        self.assertEqual(set(projection), set(cowork.TIME_ACCOUNTING_STATUS_KEYS))
+        for omitted in ("agents", "work_items", "diagnostics", "as_of", "session_id"):
+            self.assertNotIn(omitted, projection)
+        self.assertEqual(status["snapshot"]["schema"], "m8shift.status/1")
+        self.assertNotIn("time_accounting", status["snapshot"])
+
+        human = self.cw("time").stdout
+        self.assertIn("── TIME", human)
+        self.assertIn("effective*", human)
+        self.assertIn("WORKING-state proxy; not productivity", human)
+        verbose_status = self.cw("status").stdout
+        self.assertIn("── TIME", verbose_status)
+        self.assertNotIn("── TIME", self.cw("status", "--brief").stdout)
+
+        session_id = accounting["session_id"]
+        named = self.cw("time", session_id, "--json")
+        self.assertEqual(named.returncode, 0, named.stderr)
+        self.assertEqual(json.loads(named.stdout)["session_id"], session_id)
+        self.assertNotEqual(self.cw("time", "20260714T000000Z-deadbeef").returncode, 0)
+
+        after = {
+            name: read_bytes(name)
+            for name in before
+        }
+        self.assertEqual(after, before, "RFC 064 read surfaces must never mutate the relay")
 
     def test_status_activity_limit_cli_defaults_parameterizes_and_clamps(self):
         self.init()
@@ -12346,15 +12447,23 @@ class TestRFC051UsageAdvisory(CLIBase):
 
     @staticmethod
     def _mask_human(out):
-        # The only volatile human line is the pre-existing session `duration`; mask it
-        # so a byte-identity comparison isolates the RFC 051 surface.
-        return "\n".join(l for l in out.splitlines() if not l.startswith("  duration "))
+        # Session duration and RFC-064 accounting accrue between subprocesses;
+        # mask those volatile read-only lines so this comparison isolates RFC 051.
+        volatile_prefixes = (
+            "  duration ", "── TIME ", "  effective*", "  non-work",
+            "  unclassified", "  * WORKING-state proxy",
+        )
+        return "\n".join(
+            line for line in out.splitlines()
+            if not line.startswith(volatile_prefixes)
+        )
 
     @staticmethod
     def _mask_json(js_str):
         d = json.loads(js_str)
         d.pop("session_duration", None)          # pre-existing volatile fields
         d.pop("session_duration_seconds", None)
+        d.pop("time_accounting", None)           # RFC-064 cumulative current-session sibling
         snap = d.get("snapshot")                 # v1 nests the same volatile duration
         if isinstance(snap, dict) and isinstance(snap.get("ledger"), dict):
             snap["ledger"].pop("session_duration_seconds", None)
@@ -14422,7 +14531,8 @@ class TestRFC052SessionBinding(CLIBase):
                        "decisions", "session", "heartbeat"}         # gated mutators
                       | {"init", "update", "bind"}                   # special rules
                       | {"status", "may-i-write", "guard", "watch", "doctor",
-                         "contract", "recap", "peek", "log", "turn", "history", "wait"})
+                         "contract", "recap", "peek", "log", "turn", "history",
+                         "time", "wait"})
         self.assertEqual(cmds - classified, set(),
                          "unclassified CLI commands — extend the §9.2 matrix")
 

@@ -203,6 +203,7 @@ loop:
 ./m8shift.py log [--limit N] [--all] [--oneline]  # 中继时间线（只读）
 ./m8shift.py turn N [--json]  # 获取不可变轮次的完整 done 文本
 ./m8shift.py history [--limit N] [--oneline] [--json]  # 会话历史（只读）
+./m8shift.py time [current|SESSION_ID] [--json]  # 有效工作与非工作时间（只读）
 ./m8shift.py session {list,show,decisions,report} …  # 会话视图 + 可选 Markdown 报告
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)

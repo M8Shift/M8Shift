@@ -579,6 +579,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py turn N [--json]  # fetch one immutable turn's complete done text
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
+./m8shift.py time [current|SESSION_ID] [--json]  # read-only effective-work and non-work accounting
 ./m8shift.py session {list,show,decisions,report} …  # read-only session views + optional Markdown report
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
@@ -4049,6 +4050,102 @@ def fold_time_accounting(events, session_id, as_of=None, current_lock=None):
     }
 
 
+TIME_ACCOUNTING_STATUS_KEYS = (
+    "schema", "quality", "wall_seconds", "effective_work_seconds",
+    "non_work_seconds", "awaiting_seconds", "paused_seconds", "idle_seconds",
+    "unclassified_seconds", "coverage_ratio",
+)
+
+
+def status_time_accounting(accounting):
+    """Bounded RFC-064 projection kept outside the frozen status snapshot v1."""
+    return {key: accounting.get(key) for key in TIME_ACCOUNTING_STATUS_KEYS}
+
+
+def current_time_accounting(lk, as_of=None, events=None):
+    """Fold the current session at one caller-owned observation instant."""
+    return fold_time_accounting(
+        read_session_events() if events is None else events,
+        lk.get("session", ""), as_of=as_of or now(), current_lock=lk,
+    )
+
+
+def _accounting_duration(seconds):
+    """Compact human duration for accounting blocks (whole-second, never signed)."""
+    if seconds is None:
+        return "-"
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return "%dh %02dm %02ds" % (hours, minutes, secs)
+
+
+def _print_time_accounting(accounting, heading="── TIME ───────────────────────────────"):
+    partial = accounting.get("quality") != "exact"
+    lower = "≥ " if partial else ""
+    agents = " · ".join(
+        "%s %s" % (row.get("id", "?"), _accounting_duration(
+            row.get("effective_work_seconds")))
+        for row in accounting.get("agents", []) if isinstance(row, dict)
+    )
+    effective_tail = "  (%s)" % agents if agents else ""
+    print(heading)
+    print("  effective*  %s%s%s" % (
+        lower, _accounting_duration(accounting.get("effective_work_seconds")),
+        effective_tail))
+    print("  non-work    %s%s  (await %s · pause %s · idle %s)" % (
+        lower, _accounting_duration(accounting.get("non_work_seconds")),
+        _accounting_duration(accounting.get("awaiting_seconds")),
+        _accounting_duration(accounting.get("paused_seconds")),
+        _accounting_duration(accounting.get("idle_seconds"))))
+    if partial:
+        coverage = accounting.get("coverage_ratio")
+        coverage_text = "-" if coverage is None else "%d%%" % round(coverage * 100)
+        print("  unclassified %s   coverage %s" % (
+            _accounting_duration(accounting.get("unclassified_seconds")),
+            coverage_text))
+    print("  * WORKING-state proxy; not productivity")
+
+
+def cmd_time(args):
+    """Read-only full RFC-064 accounting for the current or named session."""
+    text = load_or_die()
+    lk, _, _ = _status_info(text)
+    requested = getattr(args, "session", "current") or "current"
+    session_id = lk.get("session") if requested == "current" else requested
+    if not session_id or not SESSION_ID_RE.fullmatch(session_id):
+        sys.exit("unknown or invalid session id: %s" % requested)
+    events = read_session_events()
+    if not any(row.get("session_id") == session_id for row in events):
+        sys.exit("session not found: %s" % session_id)
+    observed = now()
+    accounting = fold_time_accounting(
+        events, session_id, as_of=observed,
+        current_lock=lk if session_id == lk.get("session") else None,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(accounting, ensure_ascii=False, sort_keys=True))
+        return 0
+    print("m8shift.py time · session %s · as of %s" % (
+        session_id, accounting.get("as_of", "-")))
+    _print_time_accounting(accounting)
+    if accounting.get("work_items"):
+        print("── WORK ITEMS ─────────────────────────")
+        for row in accounting["work_items"]:
+            print("  %-24s %s" % (
+                row.get("ref", "?"),
+                _accounting_duration(row.get("effective_work_seconds"))))
+    if accounting.get("unattributed_work_seconds"):
+        print("  %-24s %s" % (
+            "unattributed", _accounting_duration(
+                accounting.get("unattributed_work_seconds"))))
+    if accounting.get("diagnostics"):
+        print("── DIAGNOSTICS ────────────────────────")
+        for code in accounting["diagnostics"]:
+            print("  %s" % code)
+    return 0
+
+
 REQUEST_RE = re.compile(
     r"<!-- M8SHIFT:REQUEST (\d+) BEGIN -->\n?"
     r"(.*?)"
@@ -5018,7 +5115,7 @@ def write_report_atomic(path, text, force=False):
                 os.unlink(tmp)
 
 
-def current_session_info(lk, turns=None):
+def current_session_info(lk, turns=None, as_of=None):
     """Best-effort, read-only session start/duration metadata for `status`.
 
     The LOCK records when the current state started (`since`), not necessarily when the session
@@ -5041,7 +5138,7 @@ def current_session_info(lk, turns=None):
     closed_at = (close_event or {}).get("closed_at") or (close_event or {}).get("at") or "open"
     end = parse_iso(closed_at) if closed_at not in ("", "-", "open") else None
     if end is None:
-        end = now()
+        end = as_of or now()
     seconds = max(0, int((end - start).total_seconds()))
     return {
         "started_at": started_at,
@@ -9015,7 +9112,8 @@ def status_snapshot_v1(lk, last, session_info, turns=None,
     }
 
 
-def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False):
+def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False,
+                        accounting=None):
     session_info = session_info or current_session_info(lk)
     print(f"m8shift.py v{VERSION}")
     print(f"project  {project_display_name()}")
@@ -9075,6 +9173,8 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
         print(tr("status_next", action=next_action_for(lk, stale=stale)))
     if last:
         print(tr("last_turn", n=last["n"], who=last["agent"]))
+    if accounting is not None and not brief:
+        _print_time_accounting(accounting)
     _print_usage_block(lk)   # RFC 051: after the LOCK block; absent when no usable snapshot
 
 
@@ -9111,7 +9211,9 @@ def cmd_status(args):
     text = load_or_die()
     lk, stale, last = _status_info(text)
     parsed_turns = parse_turns(text)
-    session_info = current_session_info(lk, parsed_turns)
+    observed = now()
+    session_info = current_session_info(lk, parsed_turns, as_of=observed)
+    accounting = current_time_accounting(lk, as_of=observed)
     if getattr(args, "json", False):
         out = dict(lk)                       # raw LOCK fields…
         out["agents_active"] = active_agents(lk)  # full active roster (N)
@@ -9139,6 +9241,7 @@ def cmd_status(args):
         )
         out["session_duration_seconds"] = session_info["duration_seconds"]
         out["session_duration"] = None if session_info["duration"] == "-" else session_info["duration"]
+        out["time_accounting"] = status_time_accounting(accounting)
         if getattr(args, "for_agent", ""):
             agent = need_agent(args.for_agent)
             out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
@@ -9153,7 +9256,7 @@ def cmd_status(args):
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""),
-                        getattr(args, "brief", False))
+                        getattr(args, "brief", False), accounting)
     return 0
 
 
@@ -9172,14 +9275,18 @@ def cmd_watch(args):
         while True:
             text = load_or_die()
             lk, stale, last = _status_info(text)
+            observed = now()
+            accounting = current_time_accounting(lk, as_of=observed)
             sig = _status_signature(lk, stale, last, args.for_agent)
             should_print = (sig != last_sig) or not args.changes_only
             if should_print:
                 if args.clear:
                     print("\033[2J\033[H", end="")
                 print(tr("watch_header", ts=display_time(iso(now())), project=project_display_name(), cwd=(os.getcwd() if relay_ambiguity_snapshot() is None else _ambiguity_safe_path(os.getcwd()))))
-                _print_status_block(lk, stale, last, current_session_info(lk, parse_turns(text)),
-                                    args.for_agent)
+                _print_status_block(
+                    lk, stale, last,
+                    current_session_info(lk, parse_turns(text), as_of=observed),
+                    args.for_agent, accounting=accounting)
                 print("", flush=True)
             last_sig = sig
             if args.once:
@@ -10359,6 +10466,14 @@ def main():
     st.add_argument("--for", dest="for_agent", default="",
                     help="show the next safe action for this agent")
     st.set_defaults(fn=cmd_status)
+
+    tm = sub.add_parser(
+        "time", help="read-only effective-work and non-work session accounting")
+    tm.add_argument("session", nargs="?", default="current",
+                    help="session id to inspect (default: current)")
+    tm.add_argument("--json", action="store_true",
+                    help="machine-readable full accounting breakdown")
+    tm.set_defaults(fn=cmd_time)
 
     mw = sub.add_parser("may-i-write",
                         help="read-only hard guard: rc 0 only while this agent holds a valid pen")

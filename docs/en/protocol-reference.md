@@ -139,6 +139,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
 ./m8shift.py turn N [--json]  # fetch one immutable turn's complete done text
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
+./m8shift.py time [current|SESSION_ID] [--json]  # read-only effective-work and non-work accounting
 ./m8shift.py session {list,show,decisions,report} …  # read-only session views + optional Markdown report
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
