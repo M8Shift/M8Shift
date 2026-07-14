@@ -64,7 +64,7 @@ def _paint_wordmark(plain, enabled):
     return left + wordmark + right
 
 
-def _usage_cell(windows, label, short):
+def _usage_cell(windows, label, short, utc=False):
     """Render exhaustion or usage, plus the provider-supplied reset time."""
     row = windows.get(label) or {}
     ratio = row.get("used_ratio")
@@ -77,7 +77,7 @@ def _usage_cell(windows, label, short):
         value = "%s %s" % (short, missing if ratio is None else "%d%%" % round(ratio * 100))
     reset = _stamp(row.get("resets_at"))
     if reset is not None:
-        value += " reset " + reset.astimezone().strftime("%a %H:%M").lower()
+        value += " reset " + _display_time(reset, utc, "%H:%M")
     return value, ratio
 
 
@@ -85,9 +85,21 @@ def _stamp(value):
     if not value or value == "-":
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
+
+
+def _display_time(value, utc=False, fmt="%Y-%m-%dT%H:%M:%S"):
+    """Render one instant through the invocation's single display timezone."""
+    stamp = value if isinstance(value, datetime) else _stamp(value)
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    shown = stamp.astimezone(timezone.utc) if utc else stamp.astimezone()
+    return shown.strftime(fmt) + ("Z" if utc else "")
 
 
 def _fmt_dur(seconds):
@@ -98,17 +110,17 @@ def _fmt_dur(seconds):
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%02d:%02d" % (m, s)
 
 
-def render(snapshot, width, now=None, interval=2):
+def render(snapshot, width, now=None, interval=2, utc=False):
     # Operator policy: cap the frame near 120 columns, and tabulate into aligned
     # columns once there is room (>=100 cols); below that keep the stacked narrow
     # layout. Frame fidelity (every line == width) holds in both.
     width = min(max(24, width), 120)
     if width >= 100:
-        return _render_wide(snapshot, width, now, interval)
-    return _render_stacked(snapshot, width, now, interval)
+        return _render_wide(snapshot, width, now, interval, utc)
+    return _render_stacked(snapshot, width, now, interval, utc)
 
 
-def _render_stacked(snapshot, width, now=None, interval=2):
+def _render_stacked(snapshot, width, now=None, interval=2, utc=False):
     width = max(24, width)
     inner = width - 2
     colored = "NO_COLOR" not in os.environ
@@ -124,7 +136,7 @@ def _render_stacked(snapshot, width, now=None, interval=2):
     top = "┌" + "─" * inner + "┐"
     sep = "├" + "─" * inner + "┤"
     bottom = "└" + "─" * inner + "┘"
-    clock = (now or datetime.now(timezone.utc)).astimezone().strftime("%H:%M:%S")
+    clock = _display_time(now or datetime.now(timezone.utc), utc, "%H:%M:%S")
     header = "M8SHIFT · %s · %s · session %s · %s" % (
         _value(snapshot.get("project")), _value(snapshot.get("m8shift_version")),
         _value(snapshot.get("session")), clock)
@@ -133,10 +145,11 @@ def _render_stacked(snapshot, width, now=None, interval=2):
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
     pen = snapshot.get("pen") or {}
+    claimed = _display_time(snapshot.get("since"), utc, "%Y-%m-%d %H:%M") or "—"
+    heartbeat = _display_time(pen.get("heartbeat"), utc, "%Y-%m-%d %H:%M") or "—"
     pen_prefix = "PEN %s  " % holder
     pen_suffix = "  turn %s  claimed %s  heartbeat %s" % (
-        _value(snapshot.get("turn")), _value(snapshot.get("since")),
-        _value(pen.get("heartbeat") or "—"))
+        _value(snapshot.get("turn")), claimed, heartbeat)
     # Compose styles after padding so ANSI bytes never affect border alignment.
     pen_plain = clean(pen_prefix + "[%s]" % state + pen_suffix, inner).ljust(inner)
     if colored and ("[%s]" % state) in pen_plain:
@@ -155,7 +168,8 @@ def _render_stacked(snapshot, width, now=None, interval=2):
     filled = min(10, max(0, round(10 * remaining / 1800)))
     gauge = "█" * filled + "░" * (10 - filled)
     ttl = "TTL <%s>  %02d:%02d left  expires %s (%s)" % (
-        gauge, remaining // 60, remaining % 60, _value(snapshot.get("expires")),
+        gauge, remaining // 60, remaining % 60,
+        _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—",
         "alive" if alive else "stale")
     lines += [row(ttl, amber), sep, row("AGENTS", dim)]
     for agent in snapshot.get("agents") or []:
@@ -166,7 +180,7 @@ def _render_stacked(snapshot, width, now=None, interval=2):
         windows = usage.get("windows") or {}
         bits = []
         for label in ("session_5h", "weekly"):
-            bit, _ = _usage_cell(windows, label, label)
+            bit, _ = _usage_cell(windows, label, label, utc)
             bits.append(bit)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
         lines.append(row("%s %s | %s | %s | %s" %
@@ -192,7 +206,7 @@ def _render_stacked(snapshot, width, now=None, interval=2):
     return "\n".join(lines)
 
 
-def _render_wide(snapshot, width, now=None, interval=2):
+def _render_wide(snapshot, width, now=None, interval=2, utc=False):
     # Tabulated layout for wide terminals: sections lay out in aligned columns,
     # the dash-filled header/separators pin the right edge. Colour is composed
     # AFTER padding (paint replaces a plain segment with an equal-width coloured
@@ -249,7 +263,7 @@ def _render_wide(snapshot, width, now=None, interval=2):
     # A structural blank must stay blank; clean() turns "" into "unavailable".
     blank = "│" + " " * inner + "│"
 
-    clock = (now or datetime.now(timezone.utc)).astimezone().strftime("%H:%M:%S")
+    clock = _display_time(now or datetime.now(timezone.utc), utc, "%H:%M:%S")
     version = _value(snapshot.get("m8shift_version"))
     header = framed("┌", "┐", "─ M8SHIFT · %s · %s · session %s " % (
         _value(snapshot.get("project")), version,
@@ -262,11 +276,13 @@ def _render_wide(snapshot, width, now=None, interval=2):
     state = _value(snapshot.get("state"))
     pen = snapshot.get("pen") or {}
     turn_seg = "turn %s" % _value(snapshot.get("turn"))
-    hb_seg = "heartbeat %s" % _value(pen.get("heartbeat") or "—")
+    claimed = _display_time(snapshot.get("since"), utc, "%Y-%m-%d %H:%M") or "—"
+    heartbeat = _display_time(pen.get("heartbeat"), utc, "%Y-%m-%d %H:%M") or "—"
+    hb_seg = "heartbeat %s" % heartbeat
     pen_row = cells([
         ("  PEN", 0), (holder, 9), ("[%s]" % state, 17),
-        (turn_seg, 34), ("claimed %s" % _value(snapshot.get("since")), 47),
-        (hb_seg, 66)])
+        (turn_seg, 34), ("claimed %s" % claimed, 44),
+        (hb_seg, 70)])
     pen_row = paint(pen_row, holder, amber)
     pen_row = paint(pen_row, "[%s]" % state, badge)
     pen_row = paint(pen_row, turn_seg, cyan)
@@ -285,7 +301,7 @@ def _render_wide(snapshot, width, now=None, interval=2):
     left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
     ttl_row = cells([
         ("  TTL", 0), (gauge, 10), (left_seg, 12 + gw),
-        ("expires %s (%s)" % (_value(snapshot.get("expires")),
+        ("expires %s (%s)" % (_display_time(expires, utc, "%Y-%m-%d %H:%M") or "—",
                               "alive" if alive else "stale"), 24 + gw)])
     ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
     lines += ["│" + ttl_row + "│", blank]
@@ -297,7 +313,7 @@ def _render_wide(snapshot, width, now=None, interval=2):
         windows = (agent.get("usage") or {}).get("windows") or {}
         ratios, bits = [], []
         for short, label in (("5h", "session_5h"), ("weekly", "weekly")):
-            bit, ratio = _usage_cell(windows, label, short)
+            bit, ratio = _usage_cell(windows, label, short, utc)
             ratios.append(ratio)
             bits.append(bit)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
@@ -340,7 +356,7 @@ def _render_wide(snapshot, width, now=None, interval=2):
     else:
         stamped.reverse()  # no ts yet: core is oldest-first, show newest on top
     for idx, (dt, e) in enumerate(stamped):
-        ts_s = dt.astimezone().strftime("%Y-%m-%dT%H:%M:%S") if dt else "—"
+        ts_s = _display_time(dt, utc) if dt else "—"
         older = stamped[idx + 1][0] if idx + 1 < len(stamped) else None
         dur = _fmt_dur((dt - older).total_seconds()) if (dt and older) else "—"
         parts = (_value(e.get("summary")) or "").split(None, 1)
@@ -348,8 +364,8 @@ def _render_wide(snapshot, width, now=None, interval=2):
         note = parts[1] if len(parts) > 1 else ""
         model = clean(e.get("model") or "—", 19) + ("*" if e.get("model") else "")
         lines.append("│" + cells([("  %s" % _value(e.get("turn")), 0), (ts_s, 8),
-                                   (dur, 28), (clean(e.get("agent"), 8), 36),
-                                   (model, 46), (action, 68), (note, 82)]) + "│")
+                                   (dur, 29), (clean(e.get("agent"), 8), 37),
+                                   (model, 47), (action, 69), (note, 83)]) + "│")
     lines.append(framed("└", "┘", "─ q quit  ? help  r refresh  ↑/↓ navigate  tick %ss " % interval))
     return "\n".join(lines)
 
@@ -388,6 +404,8 @@ def main(argv=None):
     p.add_argument("--interval", type=int, default=2,
                    help="refresh interval in seconds (default: 2)")
     p.add_argument("--plain", action="store_true")
+    p.add_argument("--utc", action="store_true",
+                   help="render every dashboard time in UTC with a Z suffix")
     p.add_argument("--root", default=os.environ.get("M8SHIFT_ROOT", os.getcwd()))
     p.add_argument("--engine", default=os.environ.get("M8SHIFT_ENGINE"))
     args, extra = p.parse_known_args(argv)
@@ -420,7 +438,7 @@ def main(argv=None):
         while True:
             snap = load_snapshot(engine, args.root)
             frame = render(snap, shutil.get_terminal_size((80, 24)).columns,
-                           interval=args.interval)
+                           interval=args.interval, utc=args.utc)
             if frame != previous:
                 sys.stdout.write(HOME + frame + "\x1b[J")
                 sys.stdout.flush()
