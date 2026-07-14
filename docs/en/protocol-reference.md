@@ -137,12 +137,14 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N] [--brief]  # read-only briefing: LOCK + last turns + memory + tasks
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
+./m8shift.py turn N [--json]  # fetch one immutable turn's complete done text
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
+./m8shift.py time [current|SESSION_ID] [--json]  # read-only effective-work and non-work accounting
 ./m8shift.py session {list,show,decisions,report} …  # read-only session views + optional Markdown report
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
-./m8shift.py claim <agent> [--force|--refresh]     # ACQUIRE the pen (exclusive) — from your turn /
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."] [--work-item REF]  # wait if needed, then claim + peek
+./m8shift.py claim <agent> [--force|--refresh] [--work-item REF]  # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY ;
                                                   #   --refresh = extend YOUR OWN WORKING lock only (runner heartbeat)
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
@@ -157,6 +159,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
+./m8shift.py work-tag <agent> <ref>  # replace the current WORKING window's opaque primary item
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # pin this shift to ONE project relay (RFC 038 §9); penless; refuses under ambiguity without the closed selector
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: protective liveness beat for a WORKING holder (managed producers; window = max(120, min(2*N, TTL)); claim --refresh records audit-only beats)
@@ -172,8 +175,10 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
   A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
   advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
-  valid pen, and with it unset it skips (humans are never blocked). See the agents
-  guide and `CONTRIBUTING.md` for install instructions.
+  valid pen, and with it unset it skips that pen gate (humans are never blocked).
+  Every non-empty staged change also gets a non-blocking, offline RFC 065 reminder
+  to confirm its forge ticket and push/gateway-pending path. See the agents guide
+  and `CONTRIBUTING.md` for install instructions.
 - **SEC-7 / TOCTOU — honest limit**: `may-i-write` is a **point-in-time read** that
   holds **no lock**. It reports the relay state *at the instant it runs*; the state can
   change between that check and the write completing (e.g. the lock expires, or another
@@ -220,6 +225,9 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   the project's git checkout carries uncommitted changes (coordinate/stash
   before an update lands generated writes in a shared checkout — never clear
   the state with destructive git operations without explicit human authorization).
+  RFC 065 also adds local-only `delivery.no_upstream` and `delivery.unpushed`
+  reminders. They use bounded Git reads, never contact a forge, and never present
+  local refs as proof of remote delivery.
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded

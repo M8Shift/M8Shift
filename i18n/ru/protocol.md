@@ -203,7 +203,9 @@ loop:
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # сводка только для чтения: LOCK + последние ходы + память + задачи
 ./m8shift.py peek <agent>  # последняя передача для <agent> (rc 3, если не ваш ход)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # лента реле (только для чтения)
+./m8shift.py turn N [--json]  # показать полный текст done неизменяемого хода
 ./m8shift.py history [--limit N] [--oneline] [--json]  # история сессии (только для чтения)
+./m8shift.py time [current|SESSION_ID] [--json]  # эффективное и нерабочее время (только для чтения)
 ./m8shift.py session {list,show,decisions,report} …  # просмотры сессии + необязательный Markdown-отчёт
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # ожидает вашего хода ; --once = 1 проверка (rc 3, если не ваш ход)
@@ -222,6 +224,7 @@ loop:
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # добавить долговременную заметку памяти (advisory)
+./m8shift.py work-tag <agent> <ref>  # назначить окну WORKING непрозрачную основную ссылку
 ./m8shift.py task {add,done,drop,list,show} …  # журнал задач advisory (дела по агентам)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # привязывает эту смену к ОДНОМУ реле проекта (RFC 038 §9); без пера; отказывает при неоднозначности без закрытого селектора
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: защитный сигнал живости держателя WORKING (управляемые продюсеры; окно = max(120, min(2*N, TTL)); claim --refresh пишет только аудит-сигналы)

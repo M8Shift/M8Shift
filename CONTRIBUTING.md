@@ -118,7 +118,7 @@ the alias `guard <agent>`) before scripted writes or commits. It exits 0 only wh
 that agent holds a non-expired `WORKING_<AGENT>` lock; any other rc means stop and
 follow the printed next action.
 
-### Pre-commit hook (refresh checksums and enforce the pen)
+### Pre-commit hook (remind delivery, refresh checksums, and enforce the pen)
 
 `hooks/pre-commit` is a POSIX-sh, stdlib-only, **local and advisory** Git hook that runs
 `may-i-write` immediately before each commit, so the rule is *enforced* — not merely
@@ -131,6 +131,9 @@ chmod +x .git/hooks/pre-commit
 
 Behaviour:
 
+- Every non-empty staged change prints one stable RFC 065 reminder to confirm its
+  linked forge ticket and, after commit, push the exact checkpoint or record a named
+  gateway-pending handoff. This reminder is offline, fail-open, and never blocks.
 - A staged path already listed in `checksums.sha256` is hashed from the Git index;
   the hook rewrites and stages the manifest automatically. This is fail-closed on
   refresh errors, never hashes an unstaged worktree edit, and runs only after a

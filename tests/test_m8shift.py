@@ -12,6 +12,7 @@ Each regression test targets a fixed bug (NR-n) or a specification guarantee.
 Standard library only.
 """
 import datetime as dt
+import contextlib
 import hashlib
 import http.client
 import importlib.util
@@ -310,6 +311,198 @@ class TestPureFunctions(unittest.TestCase):
         )
         events = cowork.parse_session_events(text)
         self.assertEqual([e["event"] for e in events], ["start", "done"])
+
+    def test_time_fold_exact_invariants_agents_and_last_work_tag_wins(self):
+        sid = "20260714T000000Z-1234abcd"
+
+        def state(at, before, after, operation, window=None, item=None):
+            row = {
+                "event": "state", "session_id": sid, "at": at,
+                "from_state": before, "to_state": after, "actor": "codex",
+                "turn": 0, "operation": operation,
+            }
+            if window:
+                row["work_window_id"] = window
+            if item:
+                row["work_item"] = item
+            return row
+
+        rows = [
+            {"event": "start", "session_id": sid, "at": "2026-07-14T00:00:00Z"},
+            state("2026-07-14T00:00:00Z", "-", "IDLE", "init"),
+            state("2026-07-14T00:00:10Z", "IDLE", "WORKING_CLAUDE", "claim",
+                  "11111111", "task:68"),
+            state("2026-07-14T00:00:30Z", "WORKING_CLAUDE", "AWAITING_CODEX",
+                  "append", "11111111"),
+            state("2026-07-14T00:00:40Z", "AWAITING_CODEX", "WORKING_CODEX",
+                  "claim", "22222222"),
+            {"event": "work_tag", "session_id": sid, "at": "2026-07-14T00:00:42Z",
+             "work_window_id": "22222222", "work_item": "issue:old"},
+            {"event": "work_tag", "session_id": sid, "at": "2026-07-14T00:00:45Z",
+             "work_window_id": "22222222", "work_item": "issue:150"},
+            state("2026-07-14T00:00:50Z", "WORKING_CODEX", "PAUSED", "pause",
+                  "22222222"),
+            state("2026-07-14T00:01:00Z", "PAUSED", "AWAITING_CODEX", "resume"),
+            state("2026-07-14T00:01:10Z", "AWAITING_CODEX", "WORKING_CODEX",
+                  "claim", "33333333"),
+            state("2026-07-14T00:01:20Z", "WORKING_CODEX", "DONE", "done",
+                  "33333333"),
+            {"event": "done", "session_id": sid, "at": "2026-07-14T00:01:20Z"},
+        ]
+        result = cowork.fold_time_accounting(rows, sid)
+        self.assertEqual(result["quality"], "exact")
+        self.assertEqual(result["wall_seconds"], 80)
+        self.assertEqual(result["effective_work_seconds"], 40)
+        self.assertEqual(result["non_work_seconds"], 40)
+        self.assertEqual((result["awaiting_seconds"], result["paused_seconds"],
+                          result["idle_seconds"], result["unclassified_seconds"]),
+                         (20, 10, 10, 0))
+        self.assertEqual(result["agents"], [
+            {"id": "claude", "effective_work_seconds": 20},
+            {"id": "codex", "effective_work_seconds": 20},
+        ])
+        self.assertEqual(result["work_items"], [
+            {"ref": "issue:150", "effective_work_seconds": 10},
+            {"ref": "task:68", "effective_work_seconds": 20},
+        ])
+        self.assertEqual(result["unattributed_work_seconds"], 10)
+        self.assertEqual(result["coverage_ratio"], 1.0)
+        self.assertEqual(result["effective_work_seconds"] + result["non_work_seconds"] +
+                         result["unclassified_seconds"], result["wall_seconds"])
+
+    def test_time_fold_legacy_claim_gap_is_partial_not_guessed(self):
+        sid = "20260714T000000Z-2345abcd"
+        rows = [
+            {"event": "start", "session_id": sid, "at": "2026-07-14T00:00:00Z"},
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:30Z",
+             "from_state": "AWAITING_CLAUDE", "to_state": "WORKING_CLAUDE",
+             "actor": "claude", "turn": 2, "operation": "claim",
+             "work_window_id": "aaaaaaaa"},
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:50Z",
+             "from_state": "WORKING_CLAUDE", "to_state": "AWAITING_CODEX",
+             "actor": "claude", "turn": 3, "operation": "append",
+             "work_window_id": "aaaaaaaa"},
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:01:10Z",
+             "from_state": "AWAITING_CODEX", "to_state": "DONE", "actor": "codex",
+             "turn": 3, "operation": "done"},
+            {"event": "done", "session_id": sid, "at": "2026-07-14T00:01:10Z"},
+        ]
+        result = cowork.fold_time_accounting(rows, sid)
+        self.assertEqual(result["quality"], "partial")
+        self.assertEqual(result["unclassified_seconds"], 30)
+        self.assertEqual(result["effective_work_seconds"], 20)
+        self.assertEqual(result["awaiting_seconds"], 20)
+        self.assertEqual(result["coverage_ratio"], 40 / 70.0)
+        self.assertIn("legacy_claim_boundaries_missing", result["diagnostics"])
+
+    def test_time_fold_bad_rows_and_duplicates_degrade_without_double_counting(self):
+        sid = "20260714T000000Z-3456abcd"
+        initial = {
+            "event": "state", "session_id": sid, "at": "2026-07-14T00:00:00Z",
+            "from_state": "-", "to_state": "IDLE", "actor": "init",
+            "turn": 0, "operation": "init",
+        }
+        working = {
+            "event": "state", "session_id": sid, "at": "2026-07-14T00:00:10Z",
+            "from_state": "IDLE", "to_state": "WORKING_CODEX", "actor": "codex",
+            "turn": 0, "operation": "claim", "work_window_id": "aaaaaaaa",
+        }
+        rows = [
+            {"event": "start", "session_id": sid, "at": "2026-07-14T00:00:00Z"},
+            initial, working, dict(working),
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:15Z",
+             "from_state": "WORKING_CODEX", "to_state": "PAUSED", "actor": "codex",
+             "turn": 0},  # missing operation
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:17Z",
+             "from_state": "WORKING_CODEX", "to_state": "PAUSED", "actor": ["bad"],
+             "turn": 0, "operation": "pause"},  # unhashable malformed identity
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:20Z",
+             "from_state": "WORKING_CODEX", "to_state": "AWAITING_CLAUDE",
+             "actor": "codex", "turn": 1, "operation": "append",
+             "work_window_id": "aaaaaaaa"},
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:30Z",
+             "from_state": "IDLE", "to_state": "PAUSED", "actor": "codex",
+             "turn": 1, "operation": "pause"},
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:25Z",
+             "from_state": "PAUSED", "to_state": "IDLE", "actor": "codex",
+             "turn": 1, "operation": "resume"},
+            {"event": "state", "session_id": sid, "at": "2026-07-14T00:00:40Z",
+             "from_state": "PAUSED", "to_state": "DONE", "actor": "codex",
+             "turn": 1, "operation": "done"},
+            {"event": "done", "session_id": sid, "at": "2026-07-14T00:00:40Z"},
+        ]
+        result = cowork.fold_time_accounting(rows, sid)
+        self.assertEqual(result["wall_seconds"], 40)
+        self.assertEqual(result["idle_seconds"], 10)
+        self.assertEqual(result["effective_work_seconds"], 0)
+        self.assertEqual(result["unclassified_seconds"], 30)
+        self.assertIn("malformed_transition_event", result["diagnostics"])
+        self.assertIn("state_chain_broken", result["diagnostics"])
+        self.assertIn("transition_clock_regression", result["diagnostics"])
+
+    def test_time_fold_ten_thousand_transitions_stays_inside_refresh_budget(self):
+        sid = "20260714T000000Z-4567abcd"
+        started = dt.datetime(2026, 7, 14, tzinfo=dt.timezone.utc)
+        rows = [{"event": "start", "session_id": sid,
+                 "at": cowork.iso(started)}]
+        rows.append({
+            "event": "state", "session_id": sid, "at": cowork.iso(started),
+            "from_state": "-", "to_state": "IDLE", "actor": "init",
+            "turn": 0, "operation": "init",
+        })
+        window = ""
+        state = "IDLE"
+        for index in range(1, 10000):
+            stamp = cowork.iso(started + dt.timedelta(seconds=index))
+            if state == "IDLE":
+                target = "WORKING_CODEX"
+                window = "%08x" % ((index + 1) // 2)
+                operation = "claim"
+            else:
+                target = "IDLE"
+                operation = "release"
+            rows.append({
+                "event": "state", "session_id": sid, "at": stamp,
+                "from_state": state, "to_state": target, "actor": "codex",
+                "turn": index, "operation": operation,
+                "work_window_id": window,
+            })
+            state = target
+
+        as_of = started + dt.timedelta(seconds=10000)
+        lock = {"session": sid, "state": state, "since": rows[-1]["at"]}
+        begin = time.perf_counter()
+        result = cowork.fold_time_accounting(
+            rows, sid, as_of=as_of, current_lock=lock)
+        elapsed = time.perf_counter() - begin
+        self.assertLess(elapsed, 2.0, "10k fold exceeded the dashboard refresh budget")
+        self.assertEqual(result["quality"], "exact")
+        self.assertEqual(result["wall_seconds"], 10000)
+        self.assertEqual(result["effective_work_seconds"] + result["non_work_seconds"],
+                         result["wall_seconds"])
+
+    def test_transition_evidence_failure_warns_without_undoing_authoritative_state(self):
+        before = {"session": "20260714T000000Z-4567abcd", "state": "IDLE",
+                  "turn": "0", "since": "2026-07-14T00:00:00Z"}
+        after = dict(before, state="WORKING_CODEX", since="2026-07-14T00:00:10Z")
+        stderr = io.StringIO()
+        with mock.patch.object(cowork, "append_session_event", side_effect=OSError("full")), \
+                contextlib.redirect_stderr(stderr):
+            self.assertFalse(cowork.append_state_transition(
+                before, after, "codex", "claim",
+                cowork.parse_iso("2026-07-14T00:00:10Z")))
+        self.assertEqual(after["state"], "WORKING_CODEX")
+        self.assertIn("LOCK transition remains authoritative", stderr.getvalue())
+
+    def test_doctor_distinguishes_legacy_absence_from_enabled_timeline_gap(self):
+        sid = "20260714T000000Z-5678abcd"
+        lock = {"session": sid, "state": "IDLE", "since": "2026-07-14T00:00:00Z"}
+        legacy = [{"event": "start", "session_id": sid,
+                   "at": "2026-07-14T00:00:00Z"}]
+        self.assertEqual(cowork._doctor_accounting_timeline_findings(legacy, lock), [])
+        enabled = [dict(legacy[0], accounting_schema="m8shift.time-accounting/1")]
+        findings = cowork._doctor_accounting_timeline_findings(enabled, lock)
+        self.assertEqual([row["check"] for row in findings], ["accounting.timeline_gap"])
 
 
 # ───────────────────────────── CLI base (isolated subprocess) ───────────────
@@ -832,6 +1025,62 @@ class TestClaimModel(CLIBase):
         self.assertIsNone(claude["model"])
         self.assertNotIn("- model:", self.md())
 
+    def test_state_events_cover_core_transitions_and_work_tags_are_window_stable(self):
+        self.init()
+        claim = self.cw("claim", "claude", "--work-item", "task:68")
+        self.assertEqual(claim.returncode, 0, claim.stderr)
+        since = self.lock()["since"]
+        refresh = self.cw("claim", "claude", "--refresh")
+        self.assertEqual(refresh.returncode, 0, refresh.stderr)
+        self.assertEqual(self.lock()["since"], since)
+        tag = self.cw("work-tag", "claude", "issue:150")
+        self.assertEqual(tag.returncode, 0, tag.stderr)
+        self.assertEqual(self.cw("append", "claude", "--to", "codex").returncode, 0)
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        self.assertEqual(self.cw("pause", "codex", "--reason", "review boundary").returncode, 0)
+        self.assertEqual(self.cw("resume", "codex", "--reason", "new scope").returncode, 0)
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        self.assertEqual(self.cw("release", "codex", "--to", "claude", "--force",
+                                 "--reason", "test recovery").returncode, 0)
+        self.assertEqual(self.cw("done", "claude").returncode, 0)
+
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as f:
+            events = cowork.parse_session_events(f.read())
+        transitions = [row for row in events if row.get("event") == "state"]
+        self.assertEqual([row["operation"] for row in transitions], [
+            "init", "claim", "append", "claim", "pause", "resume", "claim",
+            "release", "done",
+        ])
+        self.assertEqual(
+            [(row["from_state"], row["to_state"]) for row in transitions],
+            [("-", "IDLE"), ("IDLE", "WORKING_CLAUDE"),
+             ("WORKING_CLAUDE", "AWAITING_CODEX"),
+             ("AWAITING_CODEX", "WORKING_CODEX"), ("WORKING_CODEX", "PAUSED"),
+             ("PAUSED", "AWAITING_CODEX"), ("AWAITING_CODEX", "WORKING_CODEX"),
+             ("WORKING_CODEX", "AWAITING_CLAUDE"), ("AWAITING_CLAUDE", "DONE")],
+        )
+        first_claim = transitions[1]
+        self.assertEqual(first_claim["work_item"], "task:68")
+        tags = [row for row in events if row.get("event") == "work_tag"]
+        self.assertEqual(len(tags), 1)
+        self.assertEqual(tags[0]["work_window_id"], first_claim["work_window_id"])
+        self.assertEqual(tags[0]["work_item"], "issue:150")
+
+    def test_same_state_cooldown_replace_is_not_a_false_duration_boundary(self):
+        self.init()
+        until = "2099-01-01T00:00:00Z"
+        first = self.cw("cooldown", "--until", until, "--reason", "provider reset")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        since = self.lock()["since"]
+        second = self.cw("cooldown", "--until", until, "--reason", "updated note",
+                         "--replace")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.lock()["since"], since)
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as f:
+            events = cowork.parse_session_events(f.read())
+        transitions = [row for row in events if row.get("event") == "state"]
+        self.assertEqual([row["operation"] for row in transitions], ["init", "cooldown"])
+
 
 # ───────────────────────────── mutex / guardrails ───────────────────────────
 
@@ -1023,6 +1272,14 @@ class TestPreCommitHook(unittest.TestCase):
         r = self._commit("human\n", agent=None)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_delivery_reminder_is_stable_advisory_and_offline(self):
+        """Every staged change gets the RFC 065 reminder without blocking commit."""
+        r = self._commit("ticket reminder\n", agent=None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RFC 065 delivery advisory", r.stderr)
+        self.assertIn("linked forge ticket", r.stderr)
+        self.assertIn("gateway-pending", r.stderr)
+
     def test_blocks_when_agent_does_not_hold_pen(self):
         """$M8SHIFT_AGENT set but no valid pen → fail CLOSED (commit blocked)."""
         r = self._commit("a\n", agent="claude")
@@ -1191,6 +1448,72 @@ class TestRFC058Governance(unittest.TestCase):
             self.assertIn("orphaned 999-rfc-ghost.md", messages)
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+@unittest.skipUnless(shutil.which("git"), "git not available")
+class TestRFC065DeliveryAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8shift-delivery-")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def git(self, *args, check=True):
+        result = subprocess.run(
+            ["git", *args], cwd=self.d, capture_output=True, text=True,
+        )
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def init_repo(self):
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.invalid")
+        self.git("config", "user.name", "tester")
+        with open(os.path.join(self.d, "tracked.txt"), "w", encoding="utf-8") as f:
+            f.write("base\n")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-q", "-m", "base")
+
+    def test_non_git_and_default_branch_fail_open(self):
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
+        self.init_repo()
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
+
+    def test_feature_without_upstream_reports_local_advisory(self):
+        self.init_repo()
+        self.git("switch", "-q", "-c", "issue/74-delivery")
+        findings = cowork._delivery_git_findings(self.d)
+        self.assertEqual([f["check"] for f in findings], ["delivery.no_upstream"])
+        self.assertEqual(findings[0]["severity"], "info")
+
+    def test_default_probe_uses_invoking_checkout_not_relay_root(self):
+        self.init_repo()
+        self.git("switch", "-q", "-c", "issue/74-delivery")
+        with mock.patch.object(cowork.os, "getcwd", return_value=self.d):
+            findings = cowork._delivery_git_findings()
+        self.assertEqual([f["check"] for f in findings], ["delivery.no_upstream"])
+
+    def test_equal_upstream_is_clean_then_ahead_is_unpushed(self):
+        self.init_repo()
+        self.git("switch", "-q", "-c", "issue/74-delivery")
+        self.git("remote", "add", "origin", self.d)
+        self.git("update-ref", "refs/remotes/origin/issue/74-delivery", "HEAD")
+        self.git("branch", "--set-upstream-to", "origin/issue/74-delivery")
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
+
+        with open(os.path.join(self.d, "tracked.txt"), "a", encoding="utf-8") as f:
+            f.write("ahead\n")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-q", "-m", "ahead")
+        findings = cowork._delivery_git_findings(self.d)
+        self.assertEqual([f["check"] for f in findings], ["delivery.unpushed"])
+        self.assertIn("local-ref evidence", findings[0]["message"])
+
+    def test_detached_head_is_clean(self):
+        self.init_repo()
+        self.git("switch", "-q", "--detach", "HEAD")
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
 
 
 # ───────────────────────────── robustness / inputs ─────────────────────────
@@ -1699,6 +2022,66 @@ class TestReadCommands(CLIBase):
         ledger = d["snapshot"]["ledger"]
         self.assertEqual(set(("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
                          <= set(ledger), True)
+
+    def test_rfc064_time_command_status_sibling_and_human_blocks(self):
+        self.init()
+
+        def read_bytes(name):
+            with open(os.path.join(self.d, name), "rb") as fh:
+                return fh.read()
+
+        before = {
+            name: read_bytes(name)
+            for name in ("M8SHIFT.md", "M8SHIFT.sessions.jsonl")
+        }
+
+        full = self.cw("time", "--json")
+        self.assertEqual(full.returncode, 0, full.stderr)
+        accounting = json.loads(full.stdout)
+        self.assertEqual(accounting["schema"], "m8shift.time-accounting/1")
+        self.assertEqual(
+            accounting["wall_seconds"],
+            accounting["effective_work_seconds"] + accounting["non_work_seconds"]
+            + accounting["unclassified_seconds"],
+        )
+        self.assertEqual(
+            accounting["non_work_seconds"],
+            accounting["awaiting_seconds"] + accounting["paused_seconds"]
+            + accounting["idle_seconds"],
+        )
+        for key in ("agents", "work_items", "diagnostics",
+                    "unattributed_work_seconds", "as_of", "session_id"):
+            self.assertIn(key, accounting)
+
+        status_result = self.cw("status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+        projection = status["time_accounting"]
+        self.assertEqual(set(projection), set(cowork.TIME_ACCOUNTING_STATUS_KEYS))
+        for omitted in ("agents", "work_items", "diagnostics", "as_of", "session_id"):
+            self.assertNotIn(omitted, projection)
+        self.assertEqual(status["snapshot"]["schema"], "m8shift.status/1")
+        self.assertNotIn("time_accounting", status["snapshot"])
+
+        human = self.cw("time").stdout
+        self.assertIn("── TIME", human)
+        self.assertIn("effective*", human)
+        self.assertIn("WORKING-state proxy; not productivity", human)
+        verbose_status = self.cw("status").stdout
+        self.assertIn("── TIME", verbose_status)
+        self.assertNotIn("── TIME", self.cw("status", "--brief").stdout)
+
+        session_id = accounting["session_id"]
+        named = self.cw("time", session_id, "--json")
+        self.assertEqual(named.returncode, 0, named.stderr)
+        self.assertEqual(json.loads(named.stdout)["session_id"], session_id)
+        self.assertNotEqual(self.cw("time", "20260714T000000Z-deadbeef").returncode, 0)
+
+        after = {
+            name: read_bytes(name)
+            for name in before
+        }
+        self.assertEqual(after, before, "RFC 064 read surfaces must never mutate the relay")
 
     def test_status_activity_limit_cli_defaults_parameterizes_and_clamps(self):
         self.init()
@@ -2809,7 +3192,9 @@ class TestHistory(CLIBase):
         r = self.cw("done", "claude")
         self.assertEqual(r.returncode, 0, r.stderr)
         rows = self._session_rows()
-        self.assertEqual([r["event"] for r in rows], ["start", "done"])
+        self.assertEqual([r["event"] for r in rows
+                          if r["event"] in ("start", "done", "reset")],
+                         ["start", "done"])
         self.assertEqual(rows[-1]["closed_by"], "claude")
         self.assertEqual(rows[-1]["agents_used"], "claude,codex")
         js = json.loads(self.cw("history", "--json").stdout)
@@ -2837,9 +3222,10 @@ class TestHistory(CLIBase):
         new_sid = self.lock()["session"]
         self.assertNotEqual(old_sid, new_sid)
         rows = self._session_rows()
-        self.assertEqual([r["event"] for r in rows], ["start", "reset", "start"])
-        self.assertEqual(rows[1]["session_id"], old_sid)
-        self.assertEqual(rows[1]["state_before"], "WORKING_CLAUDE")
+        lifecycle = [r for r in rows if r["event"] in ("start", "done", "reset")]
+        self.assertEqual([r["event"] for r in lifecycle], ["start", "reset", "start"])
+        self.assertEqual(lifecycle[1]["session_id"], old_sid)
+        self.assertEqual(lifecycle[1]["state_before"], "WORKING_CLAUDE")
         out = self.cw("history", "--oneline").stdout
         self.assertIn(f"{old_sid}", out)
         self.assertIn("RESET", out)
@@ -10777,9 +11163,9 @@ class TestRFC048PRA(CLIBase):
             "A refused checkout is a signal, not an obstacle",  # #23 shared checkout
             "Never force or steal a valid lock",          # stale-lock recovery
             "advisory",                                   # companion boundaries
-            'An issue, branch, PR, or MR being opened is not "done"; done requires\n'
-            "implemented, verified, committed, pushed, and handed off or closed according\n"
-            "to the relay.",
+            "Every intentional change unit has one structured forge ticket",
+            "named role-based gateway handoff as **gateway pending**",
+            "local-only commit, unpushed branch, or unreviewed draft",
             "## When in doubt",
         ):
             self.assertIn(needle, body)
@@ -12135,15 +12521,23 @@ class TestRFC051UsageAdvisory(CLIBase):
 
     @staticmethod
     def _mask_human(out):
-        # The only volatile human line is the pre-existing session `duration`; mask it
-        # so a byte-identity comparison isolates the RFC 051 surface.
-        return "\n".join(l for l in out.splitlines() if not l.startswith("  duration "))
+        # Session duration and RFC-064 accounting accrue between subprocesses;
+        # mask those volatile read-only lines so this comparison isolates RFC 051.
+        volatile_prefixes = (
+            "  duration ", "── TIME ", "  effective*", "  non-work",
+            "  unclassified", "  * WORKING-state proxy",
+        )
+        return "\n".join(
+            line for line in out.splitlines()
+            if not line.startswith(volatile_prefixes)
+        )
 
     @staticmethod
     def _mask_json(js_str):
         d = json.loads(js_str)
         d.pop("session_duration", None)          # pre-existing volatile fields
         d.pop("session_duration_seconds", None)
+        d.pop("time_accounting", None)           # RFC-064 cumulative current-session sibling
         snap = d.get("snapshot")                 # v1 nests the same volatile duration
         if isinstance(snap, dict) and isinstance(snap.get("ledger"), dict):
             snap["ledger"].pop("session_duration_seconds", None)
@@ -14185,6 +14579,7 @@ class TestRFC052SessionBinding(CLIBase):
             "release": ["release", "claude", "--to", "codex"],
             "done": ["done", "claude"],
             "remember": ["remember", "claude", "note"],
+            "work-tag": ["work-tag", "claude", "task:68"],
             "cooldown": ["cooldown", "--until", "2027-01-01T00:00:00Z", "--reason", "r"],
             "archive": ["archive"],
             "task add": ["task", "add", "claude", "d"],
@@ -14206,11 +14601,12 @@ class TestRFC052SessionBinding(CLIBase):
         cmds = set(re.search(r"\{([a-z0-9,_-]+)\}", helpout).group(1).split(","))
         classified = ({"claim", "append", "next", "request-turn", "yield-turn",
                        "decline-turn", "steer-turn", "pause", "resume", "release",
-                       "done", "remember", "cooldown", "archive", "task",
+                       "done", "remember", "work-tag", "cooldown", "archive", "task",
                        "decisions", "session", "heartbeat"}         # gated mutators
                       | {"init", "update", "bind"}                   # special rules
                       | {"status", "may-i-write", "guard", "watch", "doctor",
-                         "contract", "recap", "peek", "log", "history", "wait"})
+                         "contract", "recap", "peek", "log", "turn", "history",
+                         "time", "wait"})
         self.assertEqual(cmds - classified, set(),
                          "unclassified CLI commands — extend the §9.2 matrix")
 
