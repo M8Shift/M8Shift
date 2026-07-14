@@ -1,6 +1,6 @@
 # RFC 064 — Effective-work and non-work time accounting
 
-- **Status:** draft / design only (#68, #71)
+- **Status:** accepted for implementation (#68, #71; operator-arbitrated 2026-07-14)
 - **Date:** 2026-07-14
 - **Scope:** read-only session/work-item accounting in the core status surface and
   `m8shift-top`; append-only state-transition evidence in the session ledger.
@@ -375,17 +375,22 @@ dim/cyan, and unclassified is amber. Non-work is not an error condition.
 10. Python 3.8, checksums, RFC index integrity, the full suite, and the
     10,000-transition performance fixture remain green.
 
-## 9. Operator decisions requested
+## 9. Operator decisions
 
-1. **Approve `WORKING_*` as the v1 effective-work proxy**, with the visible
-   “not productivity” qualification and no heartbeat subtraction.
-2. **Approve honest partial retroactivity:** older missing claim boundaries become
-   unclassified and totals render as lower bounds. Exact reconstruction of the current
-   pre-telemetry shift cannot be promised from data that was never recorded.
-3. **Approve one optional primary work-item reference per work window**, with no task
-   board/forge lookup and no double-counted multi-tag allocation.
-4. **Approve the permanent global TIME strip immediately above the dashboard key
-   footer**, costing one activity row at all heights.
+The operator accepted all four decisions on 2026-07-14 after adversarial review of the
+transition and failure contract:
 
-Implementation starts only after these four decisions and adversarial review of the
-transition/failure contract.
+1. **Effective work is the `WORKING_<agent>` state proxy.** Heartbeat presence or
+   absence never subtracts time; the human-facing qualification remains “WORKING-state
+   proxy; not productivity.”
+2. **Retroactivity is honest and partial.** A pre-telemetry span without a recorded
+   claim boundary stays `unclassified`; it is never guessed or interpolated.
+3. **Each `WORKING` window has at most one primary work item.** `--work-item` and
+   `work-tag` carry an opaque reference without task-board or forge lookup. An untagged
+   window contributes to `unattributed_work_seconds`, and multiple tags never allocate
+   the same second more than once.
+4. **The dashboard has one permanent global bottom TIME strip.** It appears immediately
+   above the keyboard-help footer in all layouts and consumes one activity row.
+
+These decisions authorize the gated implementation phases in section 7 without
+changing the observability-only or failure-isolation constraints in this RFC.
