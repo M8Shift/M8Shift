@@ -116,6 +116,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [062-rfc-listening-ends-only-at-done.md](rfc/062-rfc-listening-ends-only-at-done.md) | Strengthened the listening invariant so any halt — including holding the pen, PAUSED, or a denied action — suspends acting but never listening; only DONE ends listening, for every agent. |
 | [063-rfc-on-demand-expanded-activity-reader.md](rfc/063-rfc-on-demand-expanded-activity-reader.md) | Implemented an `e`-toggle expanded ACTIVITY reader with immutable-turn point fetches, full word-wrapped done-text, block navigation, and text paging without widening the status snapshot. |
 | [064-rfc-effective-time-accounting.md](rfc/064-rfc-effective-time-accounting.md) | Accepted effective-work/non-work accounting: exact append-only state durations going forward, honest unclassified legacy spans, one primary work item per work window, and one permanent global dashboard TIME strip. |
+| [065-rfc-ticketed-committed-pushed-delivery.md](rfc/065-rfc-ticketed-committed-pushed-delivery.md) | Accepted delivery discipline: one structured forge ticket and committed, pushed history for every intentional change, with advisory offline reminders and a named role-based gateway. |
 
 ## Security docs
 

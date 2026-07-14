@@ -615,8 +615,10 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
   A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
   advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
-  valid pen, and with it unset it skips (humans are never blocked). See the agents
-  guide and `CONTRIBUTING.md` for install instructions.
+  valid pen, and with it unset it skips that pen gate (humans are never blocked).
+  Every non-empty staged change also gets a non-blocking, offline RFC 065 reminder
+  to confirm its forge ticket and push/gateway-pending path. See the agents guide
+  and `CONTRIBUTING.md` for install instructions.
 - **SEC-7 / TOCTOU — honest limit**: `may-i-write` is a **point-in-time read** that
   holds **no lock**. It reports the relay state *at the instant it runs*; the state can
   change between that check and the write completing (e.g. the lock expires, or another
@@ -663,6 +665,9 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   the project's git checkout carries uncommitted changes (coordinate/stash
   before an update lands generated writes in a shared checkout — never clear
   the state with destructive git operations without explicit human authorization).
+  RFC 065 also adds local-only `delivery.no_upstream` and `delivery.unpushed`
+  reminders. They use bounded Git reads, never contact a forge, and never present
+  local refs as proof of remote delivery.
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
@@ -969,10 +974,12 @@ never auto-force. The single-file core is the only authority on turns.
 
 ## Delivery discipline (incident #99)
 
-An issue, branch, PR, or MR being opened is not "done"; done requires
-implemented, verified, committed, pushed, and handed off or closed according
-to the relay. Never append or report "done" for work that only exists as an
-opened ticket, an unpushed branch, or an unreviewed draft.
+Every intentional change unit has one structured forge ticket and reaches review
+as validated, committed, pushed history. An issue, branch, PR, or MR being opened
+is not "done" by itself. A network-isolated author commits locally and records a
+named role-based gateway handoff as **gateway pending**; the gateway reviews and
+pushes that exact SHA before anyone claims remote delivery. Never report "done"
+for an opened ticket, local-only commit, unpushed branch, or unreviewed draft.
 
 ## Operational disciplines (extract)
 
@@ -7546,6 +7553,80 @@ def _rfc_governance_findings(root=None):
     return findings
 
 
+def _delivery_git_probe(root, *args):
+    """Bounded, read-only local Git probe for RFC 065 delivery reminders."""
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=2, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _delivery_git_findings(root=None):
+    """Report local-only upstream evidence; never contact a forge or mutate Git.
+
+    A detached HEAD, default branch, non-Git directory, unavailable Git binary, or
+    malformed local metadata fails open. Ticket existence and actual remote state
+    cannot be proven locally and remain review/gateway responsibilities.
+    """
+    root = os.path.abspath(root or os.getcwd())
+    inside = _delivery_git_probe(root, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
+        return []
+
+    head = _delivery_git_probe(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return []
+    branch = head.stdout.strip()
+
+    default_names = {"main", "master", "trunk", "default"}
+    remote_heads = _delivery_git_probe(
+        root, "for-each-ref", "--format=%(symref:short)", "refs/remotes/*/HEAD",
+    )
+    if remote_heads is not None and remote_heads.returncode == 0:
+        for ref in remote_heads.stdout.splitlines():
+            if "/" in ref.strip():
+                default_names.add(ref.strip().rsplit("/", 1)[-1])
+
+    upstream = _delivery_git_probe(
+        root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}",
+    )
+    if upstream is None:
+        return []
+    if upstream.returncode != 0 or not upstream.stdout.strip():
+        if branch in default_names:
+            return []
+        return [doctor_finding(
+            "delivery.no_upstream", "info",
+            "local branch %s has no configured upstream; a pushed review head cannot be inferred." % branch,
+            ".git",
+            "link the forge ticket, then push the branch directly or record a named gateway-pending handoff",
+        )]
+
+    upstream_name = upstream.stdout.strip()
+    ahead = _delivery_git_probe(root, "rev-list", "--count", upstream_name + "..HEAD")
+    if ahead is None or ahead.returncode != 0:
+        return []
+    try:
+        ahead_count = int(ahead.stdout.strip())
+    except ValueError:
+        return []
+    if ahead_count <= 0:
+        return []
+    return [doctor_finding(
+        "delivery.unpushed", "info",
+        "local HEAD is %d commit(s) ahead of %s; this is local-ref evidence, not proof of forge state." %
+        (ahead_count, upstream_name),
+        ".git",
+        "push the exact review head or record a named gateway-pending handoff",
+    )]
+
+
 def collect_doctor_findings(security=False, contracts=False, update_source="",
                             install_report=None, hygiene=False,
                             hygiene_verbose=False, hygiene_anchors=False):
@@ -7574,6 +7655,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
         # it runs with or without a relay (advisory, fail-open, bounded).
         out.extend(_skills_findings())
         out.extend(_rfc_governance_findings())
+        out.extend(_delivery_git_findings())
         return out
     try:
         text = read()
@@ -7930,6 +8012,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
     # skills/ directory exists; bounded, fail-open, never gates --lint).
     findings.extend(_skills_findings())
     findings.extend(_rfc_governance_findings())
+    findings.extend(_delivery_git_findings())
     return findings
 
 

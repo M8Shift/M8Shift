@@ -178,6 +178,19 @@ All mutations use an artifact-local file lock and atomic replacement, which prev
 
 Scope specificity may explain applicability, but it is not an automatic override mechanism. A narrower rule can supersede a broader rule only through an explicit human-approved relationship.
 
+## Relationship to repository delivery policy (RFC 065 amendment)
+
+[RFC 065](065-rfc-ticketed-committed-pushed-delivery.md) establishes a standing
+repository contribution rule: every intentional change has a structured forge ticket
+and reaches review as committed, pushed history, with an explicit forge-gateway flow
+for a network-isolated author.
+
+That policy does **not** pass through this RFC's quarantine, evidence threshold, or
+optional rules companion. It is a direct operator-approved contribution discipline,
+committed with the repository and reviewed under RFC 058. RFC 053 remains the lifecycle
+for learned, project-local habits; it must not delay, weaken, auto-promote, or become the
+enforcement authority for repository delivery policy.
+
 ## Non-goals
 
 - autonomous habit mining, behavioral surveillance, or prompt-history ingestion;

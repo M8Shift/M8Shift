@@ -1272,6 +1272,14 @@ class TestPreCommitHook(unittest.TestCase):
         r = self._commit("human\n", agent=None)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_delivery_reminder_is_stable_advisory_and_offline(self):
+        """Every staged change gets the RFC 065 reminder without blocking commit."""
+        r = self._commit("ticket reminder\n", agent=None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RFC 065 delivery advisory", r.stderr)
+        self.assertIn("linked forge ticket", r.stderr)
+        self.assertIn("gateway-pending", r.stderr)
+
     def test_blocks_when_agent_does_not_hold_pen(self):
         """$M8SHIFT_AGENT set but no valid pen → fail CLOSED (commit blocked)."""
         r = self._commit("a\n", agent="claude")
@@ -1440,6 +1448,72 @@ class TestRFC058Governance(unittest.TestCase):
             self.assertIn("orphaned 999-rfc-ghost.md", messages)
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+@unittest.skipUnless(shutil.which("git"), "git not available")
+class TestRFC065DeliveryAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8shift-delivery-")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def git(self, *args, check=True):
+        result = subprocess.run(
+            ["git", *args], cwd=self.d, capture_output=True, text=True,
+        )
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def init_repo(self):
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.invalid")
+        self.git("config", "user.name", "tester")
+        with open(os.path.join(self.d, "tracked.txt"), "w", encoding="utf-8") as f:
+            f.write("base\n")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-q", "-m", "base")
+
+    def test_non_git_and_default_branch_fail_open(self):
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
+        self.init_repo()
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
+
+    def test_feature_without_upstream_reports_local_advisory(self):
+        self.init_repo()
+        self.git("switch", "-q", "-c", "issue/74-delivery")
+        findings = cowork._delivery_git_findings(self.d)
+        self.assertEqual([f["check"] for f in findings], ["delivery.no_upstream"])
+        self.assertEqual(findings[0]["severity"], "info")
+
+    def test_default_probe_uses_invoking_checkout_not_relay_root(self):
+        self.init_repo()
+        self.git("switch", "-q", "-c", "issue/74-delivery")
+        with mock.patch.object(cowork.os, "getcwd", return_value=self.d):
+            findings = cowork._delivery_git_findings()
+        self.assertEqual([f["check"] for f in findings], ["delivery.no_upstream"])
+
+    def test_equal_upstream_is_clean_then_ahead_is_unpushed(self):
+        self.init_repo()
+        self.git("switch", "-q", "-c", "issue/74-delivery")
+        self.git("remote", "add", "origin", self.d)
+        self.git("update-ref", "refs/remotes/origin/issue/74-delivery", "HEAD")
+        self.git("branch", "--set-upstream-to", "origin/issue/74-delivery")
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
+
+        with open(os.path.join(self.d, "tracked.txt"), "a", encoding="utf-8") as f:
+            f.write("ahead\n")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-q", "-m", "ahead")
+        findings = cowork._delivery_git_findings(self.d)
+        self.assertEqual([f["check"] for f in findings], ["delivery.unpushed"])
+        self.assertIn("local-ref evidence", findings[0]["message"])
+
+    def test_detached_head_is_clean(self):
+        self.init_repo()
+        self.git("switch", "-q", "--detach", "HEAD")
+        self.assertEqual(cowork._delivery_git_findings(self.d), [])
 
 
 # ───────────────────────────── robustness / inputs ─────────────────────────
@@ -11089,9 +11163,9 @@ class TestRFC048PRA(CLIBase):
             "A refused checkout is a signal, not an obstacle",  # #23 shared checkout
             "Never force or steal a valid lock",          # stale-lock recovery
             "advisory",                                   # companion boundaries
-            'An issue, branch, PR, or MR being opened is not "done"; done requires\n'
-            "implemented, verified, committed, pushed, and handed off or closed according\n"
-            "to the relay.",
+            "Every intentional change unit has one structured forge ticket",
+            "named role-based gateway handoff as **gateway pending**",
+            "local-only commit, unpushed branch, or unreviewed draft",
             "## When in doubt",
         ):
             self.assertIn(needle, body)

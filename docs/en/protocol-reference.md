@@ -175,8 +175,10 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
   A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
   advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
-  valid pen, and with it unset it skips (humans are never blocked). See the agents
-  guide and `CONTRIBUTING.md` for install instructions.
+  valid pen, and with it unset it skips that pen gate (humans are never blocked).
+  Every non-empty staged change also gets a non-blocking, offline RFC 065 reminder
+  to confirm its forge ticket and push/gateway-pending path. See the agents guide
+  and `CONTRIBUTING.md` for install instructions.
 - **SEC-7 / TOCTOU — honest limit**: `may-i-write` is a **point-in-time read** that
   holds **no lock**. It reports the relay state *at the instant it runs*; the state can
   change between that check and the write completing (e.g. the lock expires, or another
@@ -223,6 +225,9 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   the project's git checkout carries uncommitted changes (coordinate/stash
   before an update lands generated writes in a shared checkout — never clear
   the state with destructive git operations without explicit human authorization).
+  RFC 065 also adds local-only `delivery.no_upstream` and `delivery.unpushed`
+  reminders. They use bounded Git reads, never contact a forge, and never present
+  local refs as proof of remote delivery.
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
