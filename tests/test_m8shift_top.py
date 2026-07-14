@@ -151,6 +151,61 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 with mock.patch.dict(os.environ, plain_env, clear=True):
                     self.assertEqual(top._semantic(role, "meaning"), "meaning")
 
+    def test_heartbeat_uses_relative_full_and_slim_formats_with_liveness_tiers(self):
+        top = load_top()
+        cases = (
+            ("fresh", "2026-07-13T00:14:48Z", "12 s", (87, 171, 90)),
+            ("alive-expired", "2026-07-13T00:12:00Z", "3 m", (198, 144, 38)),
+            ("ordinary-stale", "2026-07-12T23:15:00Z", "1 h", (244, 112, 103)),
+        )
+        for liveness, stamp, age, rgb in cases:
+            data = fixture()
+            data["liveness"] = liveness
+            data["pen"]["heartbeat"] = stamp
+            with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+                wide = top.render(data, 120, self.NOW)
+            colour = "\x1b[38;2;%d;%d;%dm" % rgb
+            self.assertIn(colour + "heartbeat %s ago\x1b[0m" % age, wide)
+            with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                slim = top.render(data, 80, self.NOW)
+            self.assertIn("hb %s" % age, slim)
+            self.assertNotIn("hb %s ago" % age, slim)
+            for width in (80, 120, 160):
+                output = self._plain(top.render(data, width, self.NOW))
+                self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
+    def test_ledger_uses_readable_full_and_slim_formats_with_semantic_colours(self):
+        top = load_top()
+        data = fixture()
+        data["ledger"] = {
+            "tasks_open": 3, "decisions_pending": 2,
+            "doctor_findings": 0, "gate_armed": True,
+        }
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+            wide = top.render(data, 120, self.NOW)
+        plain = self._plain(wide)
+        self.assertIn(
+            "tasks 3 open   decisions 2 pending   doctor 0 findings   gate armed",
+            plain)
+        self.assertIn("\x1b[38;2;57;197;207m3\x1b[0m", wide)
+        self.assertIn("\x1b[38;2;57;197;207m2\x1b[0m", wide)
+        self.assertIn("\x1b[38;2;87;171;90m0\x1b[0m", wide)
+        self.assertIn("\x1b[38;2;87;171;90marmed\x1b[0m", wide)
+
+        data["ledger"].update({"doctor_findings": 4, "gate_armed": False})
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+            warning = top.render(data, 120, self.NOW)
+        self.assertIn("\x1b[38;2;244;112;103m4\x1b[0m", warning)
+        self.assertIn("\x1b[38;2;198;144;38mdisarmed\x1b[0m", warning)
+
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+            slim = top.render(data, 80, self.NOW)
+        self.assertIn("tasks 3 . decisions 2 . doctor 4 . gate disarmed", slim)
+        self.assertNotIn("\x1b[", slim)
+        for width in (80, 120, 160):
+            output = self._plain(top.render(data, width, self.NOW))
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
     def test_all_capabilities_preserve_frame_and_non_colour_meaning(self):
         top = load_top()
         tiers = (
@@ -279,7 +334,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             local_frame = self._plain(top.render(data, 120, now))
             self.assertIn("01:45:00", local_frame)  # header clock
             self.assertIn("claimed 2026-07-14 01:30", local_frame)
-            self.assertIn("heartbeat 2026-07-14 01:40", local_frame)
+            self.assertIn("heartbeat 5 m ago", local_frame)
             self.assertIn("expires 2026-07-14 02:30", local_frame)
             self.assertIn("5h 42% reset Tue 07-14 01:45", local_frame)
             self.assertIn("weekly 30% reset Tue 07-14 02:15", local_frame)
@@ -289,7 +344,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             utc_frame = self._plain(top.render(data, 120, now, utc=True))
             for token in (
                     "23:45:00Z", "claimed 2026-07-13 23:30Z",
-                    "heartbeat 2026-07-13 23:40Z", "expires 2026-07-14 00:30Z",
+                    "heartbeat 5 m ago", "expires 2026-07-14 00:30Z",
                     "5h 42% reset Mon 07-13 23:45Z",
                     "weekly 30% reset Tue 07-14 00:15Z",
                     "2026-07-13T23:50:00Z"):
@@ -496,7 +551,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "e51cc5be2ad6092162d0e76585aa018f978069445c25aef79ea3bf699eb9e118",
+            "eb47013abcfbb8bccbb57ff9e5bea3cfe730c3bf6738726d6a72f112662ac3f6",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):

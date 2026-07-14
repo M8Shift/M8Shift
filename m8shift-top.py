@@ -250,6 +250,69 @@ def _display_time(value, utc=False, fmt="%Y-%m-%dT%H:%M:%S"):
     return shown.strftime(fmt) + ("Z" if utc else "")
 
 
+def _heartbeat_display(snapshot, current, slim=False):
+    """Return relative heartbeat text and its RFC 049 semantic colour role."""
+    stamp = _stamp((snapshot.get("pen") or {}).get("heartbeat"))
+    if stamp is None:
+        return ("hb —" if slim else "heartbeat —"), "dim"
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age = max(0, int((current - stamp).total_seconds()))
+    if age < 60:
+        amount, unit = age, "s"
+    elif age < 3600:
+        amount, unit = age // 60, "m"
+    else:
+        amount, unit = age // 3600, "h"
+    text = ("hb %d %s" if slim else "heartbeat %d %s ago") % (amount, unit)
+
+    # The words/age carry meaning without colour.  Colour mirrors the existing
+    # RFC 049 states instead of inventing a second liveness threshold model.
+    liveness = snapshot.get("liveness")
+    if liveness == "ordinary-stale":
+        role = "red"
+    elif liveness == "alive-expired":
+        role = "yellow"
+    elif liveness == "fresh":
+        role = "green"
+    else:
+        expires = _stamp(snapshot.get("expires"))
+        role = "red" if expires is not None and current > expires else "green"
+    return text, role
+
+
+def _ledger_display(ledger, slim=False):
+    """Return readable ledger text plus uniquely addressable styled segments."""
+    values = tuple(_value(ledger.get(key)) for key in
+                   ("tasks_open", "decisions_pending", "doctor_findings"))
+    raw_gate = ledger.get("gate_armed")
+    if raw_gate is True or str(raw_gate).lower() in ("true", "yes", "armed"):
+        gate = "armed"
+    elif raw_gate is False or str(raw_gate).lower() in ("false", "no", "disarmed"):
+        gate = "disarmed"
+    else:
+        gate = "unavailable"
+    if slim:
+        segments = ("tasks %s" % values[0], "decisions %s" % values[1],
+                    "doctor %s" % values[2], "gate %s" % gate)
+        payload = " . ".join(segments)
+    else:
+        segments = ("tasks %s open" % values[0],
+                    "decisions %s pending" % values[1],
+                    "doctor %s findings" % values[2], "gate %s" % gate)
+        payload = "   ".join(segments)
+    return payload, segments, values + (gate,)
+
+
+def _paint_segment_value(plain, segment, value, style, enabled=True):
+    """Paint only a value inside one labelled segment, preserving geometry."""
+    if not enabled or not segment or segment not in plain or value not in segment:
+        return plain
+    left, rest = plain.split(segment, 1)
+    before, after = segment.split(value, 1)
+    return left + before + style(value) + after + rest
+
+
 def _fmt_dur(seconds):
     # pen-hold duration for one turn; "—" when unknown (no timestamps yet).
     if seconds is None or seconds < 0:
@@ -480,24 +543,25 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
 
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
-    pen = snapshot.get("pen") or {}
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
     claimed = _display_time(snapshot.get("since"), utc, "%Y-%m-%d %H:%M") or "—"
-    heartbeat = _display_time(pen.get("heartbeat"), utc, "%Y-%m-%d %H:%M") or "—"
+    heartbeat, heartbeat_role = _heartbeat_display(snapshot, current, slim=True)
+    heartbeat_style = {"green": green, "yellow": amber, "red": red}.get(
+        heartbeat_role, dim)
     pen_prefix = "PEN %s  " % holder
-    pen_suffix = "  %s  claimed %s  heartbeat %s" % (
+    pen_suffix = "  %s  claimed %s  %s" % (
         _pen_turn_label(snapshot), claimed, heartbeat)
     # Compose styles after padding so ANSI bytes never affect border alignment.
     pen_plain = clean(pen_prefix + "[%s]" % state + pen_suffix, inner).ljust(inner)
     pen_plain = paint(pen_plain, holder, amber)
     pen_plain = paint(pen_plain, "[%s]" % state, badge)
     pen_plain = paint(pen_plain, _pen_turn_label(snapshot), magenta)
-    pen_plain = paint(pen_plain, "heartbeat %s" % heartbeat, green)
+    pen_plain = paint(pen_plain, heartbeat, heartbeat_style)
     lines.append("│" + pen_plain + "│")
 
     expires = _stamp(snapshot.get("expires"))
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
     remaining = max(0, int((expires - current).total_seconds())) if expires else 0
     alive = bool(expires and remaining > 0)
     # The pen lease is 30 minutes; cap protects the gauge after clock skew.
@@ -538,13 +602,20 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     listeners = snapshot.get("listeners")
     listen_row = row("LISTENERS  %s" % _value(listeners))
     listen_row = paint(listen_row, "ALIVE", green)
-    lg = tuple(_value(ledger.get(k)) for k in
-               ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
-    ledger_row = row("LEDGER  tasks_open=%s decisions_pending=%s doctor_findings=%s gate_armed=%s" % lg)
-    ledger_row = paint(ledger_row, "doctor_findings=%s" % lg[2],
-                       green if lg[2] == "0" else dim if lg[2] == "unavailable" else red)
-    ledger_row = paint(ledger_row, "gate_armed=%s" % lg[3],
-                       dim if lg[3] in ("unavailable", "no", "false", "False") else green)
+    ledger_payload, ledger_segments, lg = _ledger_display(ledger, slim=True)
+    ledger_row = row("LEDGER  " + ledger_payload)
+    ledger_row = _paint_segment_value(
+        ledger_row, ledger_segments[0], lg[0], cyan, colored)
+    ledger_row = _paint_segment_value(
+        ledger_row, ledger_segments[1], lg[1], cyan, colored)
+    ledger_row = _paint_segment_value(
+        ledger_row, ledger_segments[2], lg[2],
+        green if lg[2] == "0" else dim if lg[2] == "unavailable" else red,
+        colored)
+    ledger_row = _paint_segment_value(
+        ledger_row, ledger_segments[3], lg[3],
+        green if lg[3] == "armed" else amber if lg[3] == "disarmed" else dim,
+        colored)
     lines += [sep, listen_row, ledger_row]
     last = snapshot.get("last_turn") or {}
     last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
@@ -657,11 +728,14 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
 
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
-    pen = snapshot.get("pen") or {}
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
     turn_seg = _pen_turn_label(snapshot)
     claimed = _display_time(snapshot.get("since"), utc, "%Y-%m-%d %H:%M") or "—"
-    heartbeat = _display_time(pen.get("heartbeat"), utc, "%Y-%m-%d %H:%M") or "—"
-    hb_seg = "heartbeat %s" % heartbeat
+    hb_seg, heartbeat_role = _heartbeat_display(snapshot, current)
+    heartbeat_style = {"green": green, "yellow": amber, "red": red}.get(
+        heartbeat_role, dim)
     pen_row = adaptive_cells(
         ("  PEN", holder, "[%s]" % state, turn_seg,
          "claimed %s" % claimed, hb_seg),
@@ -675,13 +749,10 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     pen_row = paint(pen_row, holder, amber)
     pen_row = paint(pen_row, "[%s]" % state, badge)
     pen_row = paint(pen_row, turn_seg, magenta)
-    pen_row = paint(pen_row, hb_seg, green)
+    pen_row = paint(pen_row, hb_seg, heartbeat_style)
     lines.append("│" + pen_row + "│")
 
     expires = _stamp(snapshot.get("expires"))
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
     remaining = max(0, int((expires - current).total_seconds())) if expires else 0
     alive = bool(expires and remaining > 0)
     gw = max(12, min(28, inner - 70)) if width < 120 else 28
@@ -734,18 +805,21 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     listen_line = paint(listen_line, "ALIVE", green)
     if listen_val == "unavailable":
         listen_line = paint(listen_line, listen_val, dim)
-    lg = tuple(_value(ledger.get(k)) for k in
-               ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
-    ledger_payload = (
-        "tasks_open=%s  decisions_pending=%s  doctor_findings=%s  gate_armed=%s" % lg)
+    ledger_payload, ledger_segments, lg = _ledger_display(ledger)
     ledger_line = "│" + adaptive_cells(
         ("  LEDGER", ledger_payload), (0, 10), (10, 108), (0, 1)) + "│"
-    ledger_line = paint(ledger_line, "tasks_open=%s" % lg[0], cyan)
-    ledger_line = paint(ledger_line, "decisions_pending=%s" % lg[1], cyan)
-    ledger_line = paint(ledger_line, "doctor_findings=%s" % lg[2],
-                        green if lg[2] == "0" else dim if lg[2] == "unavailable" else red)
-    ledger_line = paint(ledger_line, "gate_armed=%s" % lg[3],
-                        dim if lg[3] in ("unavailable", "no", "false", "False") else green)
+    ledger_line = _paint_segment_value(
+        ledger_line, ledger_segments[0], lg[0], cyan, colored)
+    ledger_line = _paint_segment_value(
+        ledger_line, ledger_segments[1], lg[1], cyan, colored)
+    ledger_line = _paint_segment_value(
+        ledger_line, ledger_segments[2], lg[2],
+        green if lg[2] == "0" else dim if lg[2] == "unavailable" else red,
+        colored)
+    ledger_line = _paint_segment_value(
+        ledger_line, ledger_segments[3], lg[3],
+        green if lg[3] == "armed" else amber if lg[3] == "disarmed" else dim,
+        colored)
     last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
     turn_payload = "#%s %s/%s → %s  %s" % (
         _value(last.get("n")), _value(last.get("agent")), last_model,
