@@ -92,14 +92,26 @@ def _color(code, text, enabled):
     return "\x1b[%sm%s\x1b[0m" % (code, text) if enabled else text
 
 
+def _brand(rgb, fallback_256, text, enabled, bold=False):
+    """Paint brand text using truecolour when advertised, else xterm-256."""
+    if not enabled:
+        return text
+    capability = os.environ.get("COLORTERM", "").strip().lower()
+    if capability in ("truecolor", "24bit"):
+        colour = "38;2;%d;%d;%d" % rgb
+    else:
+        colour = "38;5;%d" % fallback_256
+    return _color(("1;" if bold else "") + colour, text, True)
+
+
 def _paint_wordmark(plain, enabled):
     """Bold the header wordmark with the M8Shift brand colours."""
     if not enabled or "M8SHIFT" not in plain:
         return plain
     left, right = plain.split("M8SHIFT", 1)
     wordmark = (
-        _color("1;38;2;255;122;24", "M", True)
-        + _color("1;38;2;93;38;242", "8", True)
+        _brand((255, 122, 24), 208, "M", True, bold=True)
+        + _brand((93, 38, 242), 99, "8", True, bold=True)
         + _color("1", "SHIFT", True)
     )
     return left + wordmark + right

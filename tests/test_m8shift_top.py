@@ -82,20 +82,40 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             if old is not None:
                 os.environ["NO_COLOR"] = old
 
-    def test_header_wordmark_uses_bold_brand_glyphs_at_all_layout_widths(self):
+    def test_header_wordmark_uses_truecolour_when_terminal_advertises_it(self):
         top = load_top()
-        old = os.environ.pop("NO_COLOR", None)
-        try:
+        for capability in ("truecolor", "24bit"):
+            with mock.patch.dict(os.environ, {"COLORTERM": capability}, clear=False):
+                os.environ.pop("NO_COLOR", None)
+                for width in (80, 100, 120):
+                    output = top.render(fixture(), width, self.NOW)
+                    self.assertIn("\x1b[1;38;2;255;122;24mM\x1b[0m", output)
+                    self.assertIn("\x1b[1;38;2;93;38;242m8\x1b[0m", output)
+                    self.assertIn("\x1b[1mSHIFT\x1b[0m", output)
+                    self.assertTrue(all(
+                        len(line) == width for line in self._plain(output).splitlines()))
+
+    def test_header_wordmark_falls_back_to_256_colours(self):
+        top = load_top()
+        with mock.patch.dict(os.environ, {"COLORTERM": "ansi"}, clear=False):
+            os.environ.pop("NO_COLOR", None)
             for width in (80, 100, 120):
                 output = top.render(fixture(), width, self.NOW)
-                self.assertIn("\x1b[1;38;2;255;122;24mM\x1b[0m", output)
-                self.assertIn("\x1b[1;38;2;93;38;242m8\x1b[0m", output)
-                self.assertIn("\x1b[1mSHIFT\x1b[0m", output)
+                self.assertIn("\x1b[1;38;5;208mM\x1b[0m", output)
+                self.assertIn("\x1b[1;38;5;99m8\x1b[0m", output)
+                self.assertNotIn("38;2", output)
                 self.assertTrue(all(
                     len(line) == width for line in self._plain(output).splitlines()))
-        finally:
-            if old is not None:
-                os.environ["NO_COLOR"] = old
+
+    def test_header_wordmark_honours_no_color(self):
+        top = load_top()
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1", "COLORTERM": "truecolor"},
+                             clear=False):
+            for width in (80, 100, 120):
+                output = top.render(fixture(), width, self.NOW)
+                self.assertIn("M8SHIFT", output)
+                self.assertNotIn("\x1b[", output)
+                self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
     def test_width_capped_near_120(self):
         top = load_top()
