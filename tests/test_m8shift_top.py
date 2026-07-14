@@ -385,11 +385,46 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         output = self._plain(top.render(
             snap, 120, self.NOW, height=18, activity_offset=1))
         self.assertEqual(len(output.splitlines()), 18)
-        self.assertIn("activity 2-5/10", output)
+        self.assertIn("activity turns 6-9 / 10", output)
         self.assertIn("│  9", output)
         self.assertNotIn("│  10", output)
         self.assertIn("│  6", output)
         self.assertNotIn("│  5", output)
+
+    def test_activity_viewport_caps_at_twenty_but_physical_fill_keeps_height(self):
+        top = load_top()
+        snap = fixture()
+        for width, fixed in ((80, 17), (120, 14)):
+            for capacity in (0, 7, 8, 16, 20, 24):
+                height = fixed + capacity
+                self.assertEqual(top._activity_capacity(snap, width, height), capacity)
+                self.assertEqual(top._activity_limit(snap, width, height), min(capacity, 20))
+        self.assertEqual(top._activity_request_limit(120, 14, 1), 180)
+        self.assertEqual(top._activity_request_limit(120, 34, 1), 200)
+
+    def test_true_turn_denominator_and_truncated_buffer_edge_marker(self):
+        top = load_top()
+        snap = fixture()
+        snap["activity"] = [
+            {"turn": n, "agent": "codex", "model": "gpt", "summary": "event %d" % n}
+            for n in range(535, 735)
+        ]
+        snap["activity_limit"] = 200
+        snap["activity_truncated"] = True
+        for width, height in ((80, 37), (120, 34)):
+            before_floor = self._plain(top.render(
+                snap, width, self.NOW, height=height, activity_offset=179))
+            at_floor = self._plain(top.render(
+                snap, width, self.NOW, height=height, activity_offset=180))
+            self.assertIn("turns 536-555 / 734", before_floor)
+            self.assertNotIn(top.ACTIVITY_BUFFER_EDGE, before_floor)
+            self.assertIn("turns 535-554 / 734", at_floor)
+            self.assertIn(top.ACTIVITY_BUFFER_EDGE, at_floor)
+
+        snap["activity_truncated"] = False
+        complete = self._plain(top.render(
+            snap, 120, self.NOW, height=34, activity_offset=180))
+        self.assertNotIn(top.ACTIVITY_BUFFER_EDGE, complete)
 
     def test_help_overlay_documents_keys_and_preserves_frame_width(self):
         top = load_top()
@@ -408,7 +443,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "040feac6c7b2fa5098f68d416ce9bc71e78a809fbe6977b81dbaec9229056061",
+            "8f3ab76a83186f0028c28a08ded0a82d7be746af013d142ea443d46ce3cd2a80",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
