@@ -62,8 +62,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
 
     def test_wide_layout_tabulates_and_pins_right_edge(self):
         top = load_top()
-        old = os.environ.pop("NO_COLOR", None)
-        try:
+        with mock.patch.dict(os.environ, {"TERM": "xterm-color"}, clear=True):
             for width in (100, 120):  # >= 100 => wide tabulated layout
                 output = top.render(fixture(), width, self.NOW)
                 plain = self._plain(output)
@@ -78,15 +77,11 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 self.assertIn("│" + " " * (width - 2) + "│", lines)
                 # colour is emitted in a colour-capable env (stripped for the width check)
                 self.assertIn("\x1b[", output)
-        finally:
-            if old is not None:
-                os.environ["NO_COLOR"] = old
 
     def test_header_wordmark_uses_truecolour_when_terminal_advertises_it(self):
         top = load_top()
         for capability in ("truecolor", "24bit"):
-            with mock.patch.dict(os.environ, {"COLORTERM": capability}, clear=False):
-                os.environ.pop("NO_COLOR", None)
+            with mock.patch.dict(os.environ, {"COLORTERM": capability}, clear=True):
                 for width in (80, 100, 120):
                     output = top.render(fixture(), width, self.NOW)
                     self.assertIn("\x1b[1;38;2;255;122;24mM\x1b[0m", output)
@@ -97,8 +92,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
 
     def test_header_wordmark_falls_back_to_256_colours(self):
         top = load_top()
-        with mock.patch.dict(os.environ, {"COLORTERM": "ansi"}, clear=False):
-            os.environ.pop("NO_COLOR", None)
+        with mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
             for width in (80, 100, 120):
                 output = top.render(fixture(), width, self.NOW)
                 self.assertIn("\x1b[1;38;5;208mM\x1b[0m", output)
@@ -107,15 +101,89 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 self.assertTrue(all(
                     len(line) == width for line in self._plain(output).splitlines()))
 
+    def test_header_wordmark_falls_back_to_semantic_ansi16_slots(self):
+        top = load_top()
+        with mock.patch.dict(os.environ, {"TERM": "xterm-color"}, clear=True):
+            output = top.render(fixture(), 120, self.NOW)
+        self.assertIn("\x1b[1;33mM\x1b[0m", output)
+        self.assertIn("\x1b[1;35m8\x1b[0m", output)
+        self.assertNotIn("38;", output)
+
     def test_header_wordmark_honours_no_color(self):
         top = load_top()
         with mock.patch.dict(os.environ, {"NO_COLOR": "1", "COLORTERM": "truecolor"},
-                             clear=False):
+                             clear=True):
             for width in (80, 100, 120):
                 output = top.render(fixture(), width, self.NOW)
                 self.assertIn("M8SHIFT", output)
                 self.assertNotIn("\x1b[", output)
                 self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
+    def test_semantic_roles_are_exact_in_every_colour_tier(self):
+        top = load_top()
+        roles = {
+            "green": ((87, 171, 90), 71, "32"),
+            "red": ((244, 112, 103), 203, "31"),
+            "yellow": ((198, 144, 38), 172, "33"),
+            "cyan": ((57, 197, 207), 80, "36"),
+            "magenta": ((176, 131, 240), 141, "35"),
+            "dim": ((99, 110, 123), 242, "90"),
+            "badge": ((205, 217, 229), 253, "97"),
+        }
+        for role, (rgb, index, slot) in roles.items():
+            prefix = "7;" if role == "badge" else ""
+            with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+                self.assertEqual(
+                    top._semantic(role, "meaning"),
+                    "\x1b[%s38;2;%d;%d;%dmmeaning\x1b[0m" % ((prefix,) + rgb))
+            with mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+                self.assertEqual(top._semantic(role, "meaning"),
+                                 "\x1b[%s38;5;%dmmeaning\x1b[0m" % (prefix, index))
+            with mock.patch.dict(os.environ, {"TERM": "xterm-color"}, clear=True):
+                self.assertEqual(top._semantic(role, "meaning"),
+                                 "\x1b[%s%smeaning\x1b[0m" % (prefix, slot + "m"))
+            for plain_env in ({"NO_COLOR": "1", "COLORTERM": "truecolor"},
+                              {"TERM": "dumb", "COLORTERM": "truecolor"}):
+                with mock.patch.dict(os.environ, plain_env, clear=True):
+                    self.assertEqual(top._semantic(role, "meaning"), "meaning")
+
+    def test_all_capabilities_preserve_frame_and_non_colour_meaning(self):
+        top = load_top()
+        tiers = (
+            ({"COLORTERM": "truecolor"}, True),
+            ({"TERM": "xterm-256color"}, True),
+            ({"TERM": "xterm-color"}, True),
+            ({"NO_COLOR": "1", "COLORTERM": "truecolor"}, False),
+            ({"TERM": "dumb", "COLORTERM": "truecolor"}, False),
+        )
+        for env, has_ansi in tiers:
+            with mock.patch.dict(os.environ, env, clear=True):
+                for width in (80, 100, 120):
+                    output = top.render(fixture(), width, self.NOW)
+                    plain = self._plain(output)
+                    self.assertEqual("\x1b[" in output, has_ansi)
+                    self.assertTrue(all(len(line) == width for line in plain.splitlines()))
+                    for token in ("M8SHIFT", "PEN", "[WORKING_CODEX]",
+                                  "→ turn 8", "TTL", "alive", "✦", "● working"):
+                        self.assertIn(token, plain)
+
+    def test_usage_thresholds_remain_green_below_60_yellow_to_85_red_at_85(self):
+        top = load_top()
+        data = fixture()
+        data["agents"] = []
+        for name, ratio in (("safe", .59), ("elevated", .60), ("danger", .85)):
+            data["agents"].append({
+                "id": name, "model": "m", "role_state": "idle",
+                "usage": {"windows": {
+                    "session_5h": {"used_ratio": ratio},
+                    "weekly": {"used_ratio": ratio},
+                }},
+            })
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+            output = top.render(data, 120, self.NOW)
+        self.assertIn("\x1b[38;2;87;171;90m5h 59%\x1b[0m", output)
+        self.assertIn("\x1b[38;2;198;144;38m5h 60%\x1b[0m", output)
+        self.assertIn("\x1b[38;2;244;112;103m5h 85%\x1b[0m", output)
 
     def test_width_capped_near_120(self):
         top = load_top()
