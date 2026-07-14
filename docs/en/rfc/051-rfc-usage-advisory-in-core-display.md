@@ -1,6 +1,6 @@
 # RFC 051 — Usage advisory in the core display
 
-Status: implemented (shipped with the v3.54 line; #59 consumption fragment; amendment E #106 unified multi-window line, 2026-07-10)
+Status: implemented (shipped with the v3.54 line; #59 consumption fragment; amendment E #106 unified multi-window line; amendment F #42 structural absence, 2026-07-13)
 Target: v3.54.0 candidate
 Related issue: #47 follow-up (RFC 040 Phase 3)
 Owner: core relay (display) + runtime usage companion (one additive schema field)
@@ -269,3 +269,30 @@ as stale. No underscore-prefixed selection metadata crosses the JSON boundary.
 If no usable snapshot exists in the bounded read, the existing em-dash output is
 byte-identical. The same bounded timestamp vocabulary feeds RFC 047's
 advisory-only stale-AWAITING diagnostic; neither path gates or mutates the relay.
+
+## Amendment F — structurally absent usage windows (#42)
+
+A successful adapter read does not imply that every provider exposes both standard
+windows. In particular, an account may legitimately expose a weekly window while
+omitting the five-hour window. Treating that shape as a failed read made the top
+dashboard say `unavailable`, which falsely implied that no usable provider data was
+obtained.
+
+The stable status snapshot therefore adds `not_provided` to each standard window
+projection:
+
+- `available: true` means that window carries a plausible ratio;
+- `available: false, not_provided: true` means another plausible window proves the
+  snapshot is usable, but this window kind is structurally absent;
+- `available: false, not_provided: false` means no usable window proves structural
+  absence, so the value remains unavailable.
+
+`m8shift-top.py` renders `not_provided: true` as `n/a` at every width and retains
+`unavailable` for a failed, empty, or wholly invalid snapshot. The field is additive,
+display-only, and never changes usage gating. Provider-specific buckets and credit
+metadata are not aggregated into a missing standard window: the Codex reference
+adapter pins a weekly-only fixture and ignores unrelated model buckets.
+
+Acceptance is pinned by core snapshot tests for weekly-only versus empty usage and
+dashboard tests that distinguish `5h n/a` from `weekly unavailable` across the
+supported widths.
