@@ -12,6 +12,13 @@ import sys
 import time
 from datetime import datetime, timezone
 
+try:
+    import termios
+    import tty as tty_module
+except ImportError:  # pragma: no cover - unavailable on Windows
+    termios = None
+    tty_module = None
+
 VERSION = "3.60.0"  # lockstep with m8shift.py; required for companion install/update
 
 ALT_ON = "\x1b[?1049h\x1b[?25l"
@@ -19,10 +26,43 @@ ALT_OFF = "\x1b[?25h\x1b[?1049l"
 HOME = "\x1b[H"
 SCHEMA_MAJOR = 1
 _active = False
+_keyboard_fd = None
+_keyboard_attrs = None
+
+
+def _enable_keyboard(stream=None):
+    """Put an interactive stdin in cbreak mode, retaining its original state."""
+    global _keyboard_fd, _keyboard_attrs
+    stream = stream or sys.stdin
+    if _keyboard_fd is not None or termios is None or tty_module is None:
+        return
+    try:
+        if not stream.isatty():
+            return
+        fd = stream.fileno()
+        attrs = termios.tcgetattr(fd)
+        tty_module.setcbreak(fd, termios.TCSANOW)
+    except (AttributeError, OSError, termios.error):
+        return
+    _keyboard_fd, _keyboard_attrs = fd, attrs
+
+
+def _restore_keyboard():
+    """Restore stdin exactly once after quit, failure, or job-control suspend."""
+    global _keyboard_fd, _keyboard_attrs
+    fd, attrs = _keyboard_fd, _keyboard_attrs
+    _keyboard_fd = _keyboard_attrs = None
+    if fd is None or attrs is None or termios is None:
+        return
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+    except (OSError, termios.error):
+        pass
 
 
 def restore(stream=None):
     global _active
+    _restore_keyboard()
     if _active:
         (stream or sys.stdout).write(ALT_OFF)
         (stream or sys.stdout).flush()
@@ -35,6 +75,7 @@ def enter(stream=None):
     stream.write(ALT_ON)
     stream.flush()
     _active = True
+    _enable_keyboard()
 
 
 def clean(value, width):
@@ -110,17 +151,50 @@ def _fmt_dur(seconds):
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%02d:%02d" % (m, s)
 
 
-def render(snapshot, width, now=None, interval=2, utc=False):
+def _activity_limit(snapshot, width, height):
+    """Rows available to activity while keeping the frame inside the terminal."""
+    if height is None:
+        return None
+    agent_rows = len(snapshot.get("agents") or [])
+    fixed_rows = (13 if min(max(24, width), 120) >= 100 else 16) + agent_rows
+    return max(1, height - fixed_rows)
+
+
+def _activity_window(events, offset, limit):
+    if limit is None:
+        return events, 0
+    maximum = max(0, len(events) - limit)
+    offset = min(max(0, offset), maximum)
+    return events[offset:offset + limit], offset
+
+
+def _activity_label(total, offset, shown, upper=False):
+    name = "ACTIVITY" if upper else "activity"
+    if not total:
+        return "%s 0/0" % name
+    return "%s %d-%d/%d" % (name, offset + 1, offset + shown, total)
+
+
+def activity_max_scroll(snapshot, width, height):
+    limit = _activity_limit(snapshot, width, height)
+    return max(0, len(snapshot.get("activity") or []) - (limit or 0)) if limit else 0
+
+
+def render(snapshot, width, now=None, interval=2, utc=False, height=None,
+           activity_offset=0):
     # Operator policy: cap the frame near 120 columns, and tabulate into aligned
     # columns once there is room (>=100 cols); below that keep the stacked narrow
     # layout. Frame fidelity (every line == width) holds in both.
     width = min(max(24, width), 120)
     if width >= 100:
-        return _render_wide(snapshot, width, now, interval, utc)
-    return _render_stacked(snapshot, width, now, interval, utc)
+        return _render_wide(snapshot, width, now, interval, utc, height,
+                            activity_offset)
+    return _render_stacked(snapshot, width, now, interval, utc, height,
+                           activity_offset)
 
 
-def _render_stacked(snapshot, width, now=None, interval=2, utc=False):
+def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
+                    height=None, activity_offset=0):
     width = max(24, width)
     inner = width - 2
     colored = "NO_COLOR" not in os.environ
@@ -196,17 +270,22 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False):
     lines.append(row("LAST TURN  #%s %s/%s → %s  %s" %
                      (_value(last.get("n")), _value(last.get("agent")), last_model,
                       _value(last.get("to")), _value(last.get("ask_excerpt")))))
-    lines += [sep, row("ACTIVITY", dim)]
-    for event in snapshot.get("activity") or []:
+    events = list(snapshot.get("activity") or [])
+    visible, activity_offset = _activity_window(
+        events, activity_offset, _activity_limit(snapshot, width, height))
+    lines += [sep, row(_activity_label(
+        len(events), activity_offset, len(visible), upper=True), dim)]
+    for event in visible:
         event_model = ((event.get("model") or "—") + ("*" if event.get("model") else ""))
         lines.append(row("  #%s  %s/%s  %s" % (_value(event.get("turn")),
                                              _value(event.get("agent")), event_model,
                                              _value(event.get("summary")))))
-    lines += [sep, row("q quit  ? help  r refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
+    lines += [sep, row("q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
     return "\n".join(lines)
 
 
-def _render_wide(snapshot, width, now=None, interval=2, utc=False):
+def _render_wide(snapshot, width, now=None, interval=2, utc=False,
+                 height=None, activity_offset=0):
     # Tabulated layout for wide terminals: sections lay out in aligned columns,
     # the dash-filled header/separators pin the right edge. Colour is composed
     # AFTER padding (paint replaces a plain segment with an equal-width coloured
@@ -348,16 +427,21 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False):
                          ("#%s %s/%s → %s  %s" %
                           (_value(last.get("n")), _value(last.get("agent")), last_model,
                            _value(last.get("to")), _value(last.get("ask_excerpt"))), 10)])
-    lines += [blank, listen_line, ledger_line, turn_line, blank, framed("├", "┤", "─ activity ")]
+    lines += [blank, listen_line, ledger_line, turn_line, blank]
     # ACTIVITY: recent -> oldest, tabulated (turn | ts-local | hold-dur | agent | action | note).
     stamped = [(_stamp(e.get("ts")), e) for e in (snapshot.get("activity") or [])]
     if any(t for t, _ in stamped):
         stamped.sort(key=lambda p: p[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     else:
         stamped.reverse()  # no ts yet: core is oldest-first, show newest on top
-    for idx, (dt, e) in enumerate(stamped):
+    visible, activity_offset = _activity_window(
+        stamped, activity_offset, _activity_limit(snapshot, width, height))
+    lines.append(framed("├", "┤", "─ %s " % _activity_label(
+        len(stamped), activity_offset, len(visible))))
+    for idx, (dt, e) in enumerate(visible):
         ts_s = _display_time(dt, utc) if dt else "—"
-        older = stamped[idx + 1][0] if idx + 1 < len(stamped) else None
+        absolute_index = activity_offset + idx
+        older = stamped[absolute_index + 1][0] if absolute_index + 1 < len(stamped) else None
         dur = _fmt_dur((dt - older).total_seconds()) if (dt and older) else "—"
         parts = (_value(e.get("summary")) or "").split(None, 1)
         action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
@@ -366,7 +450,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False):
         lines.append("│" + cells([("  %s" % _value(e.get("turn")), 0), (ts_s, 8),
                                    (dur, 29), (clean(e.get("agent"), 8), 37),
                                    (model, 47), (action, 69), (note, 83)]) + "│")
-    lines.append(framed("└", "┘", "─ q quit  ? help  r refresh  ↑/↓ navigate  tick %ss " % interval))
+    lines.append(framed("└", "┘", "─ q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss " % interval))
     return "\n".join(lines)
 
 
@@ -399,6 +483,70 @@ def scroll_fallback(engine, root, extra):
               dict(os.environ, M8SHIFT_ROOT=root))
 
 
+def read_key(stream=None, timeout=.03, selector=select.select):
+    """Read one cbreak key, folding ANSI up/down sequences into one event."""
+    stream = stream or sys.stdin
+    first = stream.read(1)
+    if not first:
+        return None
+    if first != "\x1b":
+        return first
+    ready, _, _ = selector([stream], [], [], timeout)
+    if not ready:
+        return "escape"
+    second = stream.read(1)
+    if second != "[":
+        return "escape"
+    ready, _, _ = selector([stream], [], [], timeout)
+    if not ready:
+        return "escape"
+    return {"A": "up", "B": "down"}.get(stream.read(1), "escape")
+
+
+def key_effect(key, scroll_offset, max_scroll, help_visible):
+    """Return (quit, refresh, offset, help) for one decoded key event."""
+    if key == "q":
+        return True, False, scroll_offset, help_visible
+    if key == "?":
+        return False, True, scroll_offset, not help_visible
+    if key in ("r", "escape"):
+        return False, True, scroll_offset, False
+    if not help_visible and key == "up":
+        return False, True, max(0, scroll_offset - 1), help_visible
+    if not help_visible and key == "down":
+        return False, True, min(max_scroll, scroll_offset + 1), help_visible
+    return False, False, scroll_offset, help_visible
+
+
+def render_help(width, interval=2):
+    """Render the interactive key reference as a frame-fidelity overlay."""
+    width = min(max(24, width), 120)
+    inner = width - 2
+
+    def row(text=""):
+        plain = "" if text == "" else clean(text, inner)
+        return "│" + plain.ljust(inner) + "│"
+
+    top = "┌" + "─" * inner + "┐"
+    sep = "├" + "─" * inner + "┤"
+    bottom = "└" + "─" * inner + "┘"
+    return "\n".join([
+        top,
+        row("M8SHIFT TOP · HELP"),
+        sep,
+        row("q       quit and restore the terminal"),
+        row("r       reload the relay snapshot now"),
+        row("Esc     close help and reload the snapshot"),
+        row("?       open or close this help"),
+        row("↑ / ↓   scroll the activity window"),
+        row(""),
+        row("Automatic refresh: every %ss" % interval),
+        sep,
+        row("Press ? or Esc to return"),
+        bottom,
+    ])
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--interval", type=int, default=2,
@@ -410,7 +558,7 @@ def main(argv=None):
     p.add_argument("--engine", default=os.environ.get("M8SHIFT_ENGINE"))
     args, extra = p.parse_known_args(argv)
     engine = args.engine or os.path.join(args.root, "m8shift.py")
-    tty = sys.stdout.isatty()
+    tty = sys.stdout.isatty() and sys.stdin.isatty()
     no_alt = args.plain or os.environ.get("TERM") == "dumb" or os.environ.get("M8SHIFT_NO_ALT_SCREEN")
     if not tty or no_alt or os.name == "nt":
         forwarded = (["--interval", str(args.interval)] if "--interval" not in extra else []) + extra
@@ -434,24 +582,29 @@ def main(argv=None):
             old[sig] = signal.signal(sig, handler)
     enter()
     previous = None
+    scroll_offset = 0
+    help_visible = False
     try:
         while True:
             snap = load_snapshot(engine, args.root)
-            frame = render(snap, shutil.get_terminal_size((80, 24)).columns,
-                           interval=args.interval, utc=args.utc)
+            size = shutil.get_terminal_size((80, 24))
+            max_scroll = activity_max_scroll(snap, size.columns, size.lines)
+            scroll_offset = min(scroll_offset, max_scroll)
+            frame = (render_help(size.columns, args.interval) if help_visible else
+                     render(snap, size.columns, interval=args.interval, utc=args.utc,
+                            height=size.lines, activity_offset=scroll_offset))
             if frame != previous:
                 sys.stdout.write(HOME + frame + "\x1b[J")
                 sys.stdout.flush()
                 previous = frame
             ready, _, _ = select.select([sys.stdin], [], [], max(.1, args.interval))
             if ready:
-                key = sys.stdin.read(1)
-                if key == "q":
+                key = read_key()
+                quit_requested, refresh, scroll_offset, help_visible = key_effect(
+                    key, scroll_offset, max_scroll, help_visible)
+                if quit_requested:
                     break
-                if key == "?":
-                    previous = None
-                # r and navigation intentionally trigger/no-op a read-only refresh.
-                if key in ("r", "\x1b"):
+                if refresh:
                     previous = None
     finally:
         restore()
