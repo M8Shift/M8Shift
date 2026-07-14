@@ -394,6 +394,7 @@ published site, or use the repository-local docs when working from a clone.
 | 064 | [Effective-work and non-work time accounting](docs/en/rfc/064-rfc-effective-time-accounting.md) | State-duration accounting for effective work vs awaiting, paused, idle, and unknown time | accepted for implementation | 2026-07-14 | `WORKING` proxy; honest partial retroactivity; one primary work item per window; permanent global TIME strip |
 | 065 | [Ticketed, committed, and pushed delivery](docs/en/rfc/065-rfc-ticketed-committed-pushed-delivery.md) | One forge ticket and remotely recoverable Git history for every intentional change | accepted / implemented | 2026-07-14 | advisory offline reminders; named role-based forge gateway |
 | 066 | [Asymmetric solo advance](docs/en/rfc/066-rfc-asymmetric-solo-advance.md) | Bounded solo progress during an explicit peer absence, followed by mandatory deferred reconciliation | accepted / design-only | — | signed project policy; reversible branch-local work; returning peer may require follow-up corrections; implementation deferred |
+| 067 | [Detached, vendor-neutral CLI agent orchestration](docs/en/rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | Passive relay + runtime control plane + generic runner + per-CLI adapters (launch/stop/resume/health) surviving an IDE crash; Codex/Claude phase 1, Gemini/Mistral Vibe later | accepted / design-only | — | no behavior active; relay stays degree-1 and passive; D1-D16 accepted; phased implementation deferred |
 
 ## 🔁 How it works
 
