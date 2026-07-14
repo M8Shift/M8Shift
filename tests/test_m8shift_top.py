@@ -2,8 +2,11 @@ import subprocess
 import sys
 import unittest
 import importlib.util
+import copy
+import hashlib
 import io
 import os
+import signal
 import shutil
 import tempfile
 import time
@@ -185,11 +188,11 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertIn("\x1b[38;2;198;144;38m5h 60%\x1b[0m", output)
         self.assertIn("\x1b[38;2;244;112;103m5h 85%\x1b[0m", output)
 
-    def test_width_capped_near_120(self):
+    def test_width_uses_real_geometry_above_120(self):
         top = load_top()
-        output = top.render(fixture(), 174, self.NOW)  # cap keeps the frame at 120
+        output = top.render(fixture(), 174, self.NOW)
         plain = self._plain(output)
-        self.assertTrue(all(len(line) == 120 for line in plain.splitlines()))
+        self.assertTrue(all(len(line) == 174 for line in plain.splitlines()))
 
     def test_pen_turn_label_describes_live_or_next_turn_at_all_widths(self):
         top = load_top()
@@ -379,13 +382,146 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
     def test_help_overlay_documents_keys_and_preserves_frame_width(self):
         top = load_top()
         for width in (80, 120, 160):
-            output = top.render_help(width, interval=7)
-            expected = min(width, 120)
-            self.assertTrue(all(len(line) == expected for line in output.splitlines()))
+            output = top.render_help(width, interval=7, height=24)
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
+            self.assertEqual(len(output.splitlines()), 24)
             self.assertIn("q       quit", output)
             self.assertIn("Esc     close help", output)
             self.assertIn("↑ / ↓   scroll", output)
             self.assertIn("every 7s", output)
+
+    def test_120_column_plain_frame_is_byte_stable(self):
+        top = load_top()
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+            output = top.render(fixture(), 120, self.NOW)
+        self.assertEqual(
+            hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            "3d12f7c6ce8e37c98d5885cb7320db7ac7e78a4f052a8ad3100cc861b20519b1",
+        )
+
+    def test_weighted_largest_remainder_track_plans_are_exact(self):
+        top = load_top()
+        plans = (
+            ((9, 8, 17, 10, 26, 48), (0, 0, 0, 0, 1, 1), {
+                121: [9, 8, 17, 10, 27, 48],
+                160: [9, 8, 17, 10, 46, 68],
+                240: [9, 8, 17, 10, 86, 108],
+            }),
+            ((10, 30, 12, 66), (0, 0, 0, 1), {
+                121: [10, 30, 12, 67],
+                160: [10, 30, 12, 106],
+                240: [10, 30, 12, 186],
+            }),
+            ((10, 10, 18, 14, 21, 45), (0, 1, 1, 0, 2, 2), {
+                121: [10, 10, 18, 14, 22, 45],
+                160: [10, 17, 25, 14, 34, 58],
+                240: [10, 30, 38, 14, 61, 85],
+            }),
+            ((8, 21, 8, 10, 22, 14, 35), (0, 0, 0, 0, 1, 1, 2), {
+                121: [8, 21, 8, 10, 22, 14, 36],
+                160: [8, 21, 8, 10, 32, 24, 55],
+                240: [8, 21, 8, 10, 52, 44, 95],
+            }),
+        )
+        for baseline, weights, expected_by_width in plans:
+            for width, expected in expected_by_width.items():
+                actual = top._flex_track_widths(width, baseline, weights)
+                self.assertEqual(actual, expected)
+                self.assertEqual(sum(actual), width - 2)
+
+    def test_geometry_acceptance_matrix_plain_and_ansi(self):
+        top = load_top()
+        widths = (24, 80, 99, 100, 120, 121, 160, 240)
+        tiers = ({"NO_COLOR": "1"}, {"COLORTERM": "truecolor"})
+        count_pairs = ((0, 0), (1, 2), (3, 30))
+        template = fixture()["agents"][0]
+        for width in widths:
+            for agent_count, activity_count in count_pairs:
+                snap = fixture()
+                snap["agents"] = []
+                for index in range(agent_count):
+                    agent = copy.deepcopy(template)
+                    agent["id"] = "agent-%d" % index
+                    snap["agents"].append(agent)
+                snap["activity"] = [
+                    {"turn": index + 1, "agent": "agent-0", "model": "model",
+                     "summary": "event %d" % (index + 1)}
+                    for index in range(activity_count)
+                ]
+                chrome = (13 if width >= 100 else 16) + agent_count
+                heights = sorted(set((max(1, chrome - 1), chrome, chrome + 1,
+                                      24, 40, 60)))
+                for env in tiers:
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        for height in heights:
+                            output = top.render(snap, width, self.NOW, height=height)
+                            plain = self._plain(output)
+                            lines = plain.splitlines()
+                            self.assertTrue(all(len(line) == max(24, width)
+                                                for line in lines))
+                            expected_height = height if height >= chrome else chrome
+                            self.assertEqual(len(lines), expected_height)
+                            self.assertTrue(lines[-1].startswith("└"))
+
+    def test_self_pipe_coalesces_resize_bursts(self):
+        top = load_top()
+        read_fd, write_fd = top._open_self_pipe()
+        try:
+            os.write(write_fd, b"r" * 32)
+            self.assertEqual(top._drain_self_pipe(read_fd), 32)
+            self.assertEqual(top._drain_self_pipe(read_fd), 0)
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+    @unittest.skipUnless(hasattr(signal, "SIGWINCH"), "SIGWINCH is POSIX-only")
+    def test_resize_recomputes_geometry_immediately_and_preserves_help(self):
+        top = load_top()
+
+        class TTY(io.StringIO):
+            @staticmethod
+            def isatty():
+                return True
+
+        stdin, stdout = TTY(), TTY()
+        calls = {"select": 0, "size": 0}
+
+        class LoopDone(Exception):
+            pass
+
+        def ready(readers, _writers, _errors, _timeout):
+            calls["select"] += 1
+            if calls["select"] == 1:
+                return [stdin], [], []
+            if calls["select"] == 2:
+                return [reader for reader in readers if isinstance(reader, int)], [], []
+            raise LoopDone
+
+        def terminal_size(_fallback=None):
+            if _fallback is None:  # argparse asks only for help-text wrapping.
+                return os.terminal_size((80, 24))
+            calls["size"] += 1
+            return os.terminal_size(
+                (120, 18) if calls["size"] <= 2 else (160, 24))
+
+        real_help = top.render_help
+        with mock.patch.dict(os.environ, {"TERM": "xterm"}, clear=True), \
+                mock.patch.object(top.sys, "stdin", stdin), \
+                mock.patch.object(top.sys, "stdout", stdout), \
+                mock.patch.object(top, "enter"), mock.patch.object(top, "restore"), \
+                mock.patch.object(top.atexit, "register"), \
+                mock.patch.object(top, "load_snapshot", return_value=fixture()), \
+                mock.patch.object(top.shutil, "get_terminal_size",
+                                  side_effect=terminal_size), \
+                mock.patch.object(top.select, "select", side_effect=ready), \
+                mock.patch.object(top, "read_key", return_value="?"), \
+                mock.patch.object(top, "render_help", wraps=real_help) as help_render:
+            with self.assertRaises(LoopDone):
+                top.main(["--root", str(ROOT), "--interval", "2"])
+        self.assertEqual(
+            [(call.args[0], call.args[2]) for call in help_render.call_args_list],
+            [(120, 18), (160, 24)],
+        )
 
     def test_help_documents_refresh_interval(self):
         proc = subprocess.run(
