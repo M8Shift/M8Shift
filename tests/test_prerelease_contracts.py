@@ -87,9 +87,11 @@ def test_status_role_state_matrix_and_snapshot_shape():
     snap = engine.status_snapshot_v1(
         {"state": "IDLE", "agents": "claude,codex"}, None,
         {"started_at": "-", "duration_seconds": 0}, [])
-    assert set(snap) == {"schema", "agents", "listeners", "last_turn", "ledger", "pen", "activity"}
+    assert set(snap) == {"schema", "agents", "listeners", "last_turn", "ledger", "pen",
+                         "activity", "activity_limit", "activity_truncated"}
     assert snap["schema"] == "m8shift.status/1"
-    assert all(set(row) == {"id", "role_state", "usage"} for row in snap["agents"])
+    assert all(set(row) == {"id", "model", "model_source", "role_state", "usage"}
+               for row in snap["agents"])
 
 
 def test_top_rejects_absent_malformed_and_future_snapshot(tmp_path):

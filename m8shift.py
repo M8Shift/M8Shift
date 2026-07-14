@@ -8418,6 +8418,8 @@ def _usage_signature(lk):
 
 STATUS_SNAPSHOT_SCHEMA = "m8shift.status/1"
 STATUS_SNAPSHOT_TEXT_MAX = 120
+STATUS_ACTIVITY_LIMIT = 200
+STATUS_ACTIVITY_DEFAULT_LIMIT = 8
 
 
 def _status_snapshot_text(value):
@@ -8473,18 +8475,32 @@ def _status_usage_windows(snapshot, last_known=False):
     return out
 
 
-def _status_activity(turns, limit=8):
+def _status_activity_limit(limit):
+    """Clamp caller-controlled snapshot provision without raising."""
+    try:
+        requested = int(limit)
+    except (TypeError, ValueError, OverflowError):
+        requested = STATUS_ACTIVITY_DEFAULT_LIMIT
+    return min(STATUS_ACTIVITY_LIMIT, max(0, requested))
+
+
+def _status_activity(turns, limit=STATUS_ACTIVITY_DEFAULT_LIMIT):
     """Bounded recent relay events; malformed inputs degrade to an empty panel."""
     if not isinstance(turns, list):
         return []
+    limit = _status_activity_limit(limit)
+    if not limit:
+        return []
+    valid = [turn for turn in turns if isinstance(turn, dict)]
     out = []
-    for turn in turns[-limit:]:
-        if not isinstance(turn, dict):
-            continue
+    for turn in valid[-limit:]:
         fields = turn.get("fields") if isinstance(turn.get("fields"), dict) else {}
+        turn_number = turn.get("n")
+        if not isinstance(turn_number, int) or isinstance(turn_number, bool):
+            turn_number = None
         out.append({
-            "turn": turn.get("n"),
-            "ts": fields.get("at") or None,
+            "turn": turn_number,
+            "ts": _status_snapshot_text(fields.get("at")) or None,
             "kind": "turn",
             "agent": _status_snapshot_text(turn.get("agent")),
             "model": _status_snapshot_text(fields.get("model")) or None,
@@ -8568,8 +8584,12 @@ def _status_heartbeat_timestamp(lk):
     return _status_snapshot_text(doc.get("written_at"))
 
 
-def status_snapshot_v1(lk, last, session_info, turns=None):
+def status_snapshot_v1(lk, last, session_info, turns=None,
+                       activity_limit=STATUS_ACTIVITY_DEFAULT_LIMIT):
     """One additive, namespaced snapshot; legacy status keys remain untouched."""
+    effective_activity_limit = _status_activity_limit(activity_limit)
+    valid_turn_count = (sum(isinstance(turn, dict) for turn in turns)
+                        if isinstance(turns, list) else 0)
     usage = {r["agent"]: r for r in _usage_rows(lk)}
     agents = []
     for agent in active_agents(lk):
@@ -8607,7 +8627,9 @@ def status_snapshot_v1(lk, last, session_info, turns=None):
             "note": _status_snapshot_text(lk.get("note")),
             "heartbeat": _status_heartbeat_timestamp(lk),
         },
-        "activity": _status_activity(turns),
+        "activity": _status_activity(turns, effective_activity_limit),
+        "activity_limit": effective_activity_limit,
+        "activity_truncated": valid_turn_count > effective_activity_limit,
     }
 
 
@@ -8743,7 +8765,9 @@ def cmd_status(args):
         if usage is not None:
             out["usage"] = usage
         snapshot_last = parsed_turns[-1] if parsed_turns else None
-        out["snapshot"] = status_snapshot_v1(lk, snapshot_last, session_info, parsed_turns)
+        out["snapshot"] = status_snapshot_v1(
+            lk, snapshot_last, session_info, parsed_turns,
+            getattr(args, "activity_limit", STATUS_ACTIVITY_DEFAULT_LIMIT))
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""),
@@ -9875,6 +9899,8 @@ def main():
 
     st = sub.add_parser("status", help="read-only relay status snapshot (LOCK + roster)")
     st.add_argument("--json", action="store_true", help="machine-readable status (stdlib json)")
+    st.add_argument("--activity-limit", type=int, default=STATUS_ACTIVITY_DEFAULT_LIMIT,
+                    help="snapshot activity rows (default: 8; clamped to 0..200)")
     st.add_argument("--brief", action="store_true",
                     help="compact human output: strict subset of the default status lines")
     st.add_argument("--for", dest="for_agent", default="",

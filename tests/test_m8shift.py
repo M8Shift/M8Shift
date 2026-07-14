@@ -42,6 +42,33 @@ TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 # ───────────────────────────── unit tests: pure functions ───────────────────
 
 class TestPureFunctions(unittest.TestCase):
+    def test_status_activity_boundaries_clamp_and_fail_open(self):
+        turns = [
+            {"n": n, "agent": "codex", "fields": {"done": "turn %d" % n}}
+            for n in range(1, 202)
+        ]
+        for limit, expected in ((0, []), (8, list(range(194, 202))),
+                                (199, list(range(3, 202))),
+                                (200, list(range(2, 202))),
+                                (201, list(range(2, 202)))):
+            actual = cowork._status_activity(turns, limit)
+            self.assertEqual([event["turn"] for event in actual], expected)
+
+        malformed = [
+            None,
+            {"n": 1, "agent": "a" * 500,
+             "fields": {"at": "t" * 500, "model": "m" * 500,
+                        "done": "d" * 500}},
+            {"n": "not-an-int", "fields": "not-a-map"},
+        ]
+        actual = cowork._status_activity(malformed, "not-an-int")
+        self.assertEqual(len(actual), 2)
+        self.assertEqual(actual[-1]["turn"], None)
+        for event in actual:
+            for value in event.values():
+                if isinstance(value, str):
+                    self.assertLessEqual(len(value), cowork.STATUS_SNAPSHOT_TEXT_MAX)
+
     def test_every_cli_parser_has_summary_help(self):
         """Every command remains discoverable in the top-level/subcommand help."""
         with open(SCRIPT, encoding="utf-8") as f:
@@ -1660,15 +1687,38 @@ class TestReadCommands(CLIBase):
         self.assertEqual([a["role_state"] for a in d["snapshot"]["agents"]],
                          ["awaiting", "idle"])
         self.assertEqual(set(d["snapshot"]),
-                         {"schema", "agents", "listeners", "last_turn", "ledger", "pen", "activity"})
+                         {"schema", "agents", "listeners", "last_turn", "ledger", "pen",
+                          "activity", "activity_limit", "activity_truncated"})
         self.assertIsInstance(d["snapshot"]["activity"], list)
         self.assertLessEqual(len(d["snapshot"]["activity"]), 8)
         self.assertEqual([event["turn"] for event in d["snapshot"]["activity"]], [0, 1, 2])
+        self.assertEqual(d["snapshot"]["activity_limit"], 8)
+        self.assertFalse(d["snapshot"]["activity_truncated"])
         self.assertEqual(d["snapshot"]["last_turn"]["to"], "claude")
         self.assertIsInstance(d["snapshot"]["last_turn"]["ask_excerpt"], str)
         ledger = d["snapshot"]["ledger"]
         self.assertEqual(set(("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
                          <= set(ledger), True)
+
+    def test_status_activity_limit_cli_defaults_parameterizes_and_clamps(self):
+        self.init()
+        for index in range(25):
+            self.turn("claude" if index % 2 == 0 else "codex",
+                      "codex" if index % 2 == 0 else "claude",
+                      done="event %d" % index)
+
+        default = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        twenty = json.loads(self.cw(
+            "status", "--json", "--activity-limit", "20").stdout)["snapshot"]
+        clamped = json.loads(self.cw(
+            "status", "--json", "--activity-limit", "5000").stdout)["snapshot"]
+        self.assertEqual((default["activity_limit"], len(default["activity"])), (8, 8))
+        self.assertEqual((twenty["activity_limit"], len(twenty["activity"])), (20, 20))
+        self.assertTrue(default["activity_truncated"])
+        self.assertTrue(twenty["activity_truncated"])
+        self.assertEqual(clamped["activity_limit"], 200)
+        self.assertEqual(len(clamped["activity"]), 26)  # bootstrap turn 0 + 25 posted turns
+        self.assertFalse(clamped["activity_truncated"])
 
     def test_status_snapshot_tasks_open_tracks_task_event_log(self):
         self.init()

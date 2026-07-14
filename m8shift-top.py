@@ -25,6 +25,10 @@ ALT_ON = "\x1b[?1049h\x1b[?25l"
 ALT_OFF = "\x1b[?25h\x1b[?1049l"
 HOME = "\x1b[H"
 SCHEMA_MAJOR = 1
+ACTIVITY_VIEWPORT_MAX = 20
+ACTIVITY_SCROLL_HEADROOM = 180
+ACTIVITY_PROVISION_MAX = 200
+ACTIVITY_BUFFER_EDGE = "<older turns on disk — peek/journal>"
 _active = False
 _keyboard_fd = None
 _keyboard_attrs = None
@@ -252,13 +256,27 @@ def _fmt_dur(seconds):
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%02d:%02d" % (m, s)
 
 
-def _activity_limit(snapshot, width, height):
-    """Rows available to activity while keeping the frame inside the terminal."""
+def _activity_capacity(snapshot, width, height):
+    """Physical activity-zone rows available inside the terminal frame."""
     if height is None:
         return None
     agent_rows = len(snapshot.get("agents") or [])
     fixed_rows = (13 if max(24, width) >= 100 else 16) + agent_rows
     return max(0, height - fixed_rows)
+
+
+def _activity_limit(snapshot, width, height):
+    """Readable event viewport; taller frames retain structural blank fill."""
+    capacity = _activity_capacity(snapshot, width, height)
+    return None if capacity is None else min(capacity, ACTIVITY_VIEWPORT_MAX)
+
+
+def _activity_request_limit(width, height, agent_count=2):
+    """Ask core for the viewport plus bounded scroll headroom."""
+    surrogate = {"agents": [None] * max(0, agent_count)}
+    viewport = _activity_limit(surrogate, width, height)
+    viewport = ACTIVITY_VIEWPORT_MAX if viewport is None else viewport
+    return min(ACTIVITY_PROVISION_MAX, viewport + ACTIVITY_SCROLL_HEADROOM)
 
 
 def _activity_window(events, offset, limit):
@@ -269,13 +287,31 @@ def _activity_window(events, offset, limit):
     return events[offset:offset + limit], offset
 
 
-def _activity_label(total, offset, shown, upper=False):
+def _activity_label(events, visible, upper=False, buffer_edge=False):
     name = "ACTIVITY" if upper else "activity"
-    if not total:
-        return "%s 0/0" % name
-    if not shown:
-        return "%s 0/%d" % (name, total)
-    return "%s %d-%d/%d" % (name, offset + 1, offset + shown, total)
+    numbers = [event.get("turn") for event in events
+               if isinstance(event, dict)
+               and isinstance(event.get("turn"), int)
+               and not isinstance(event.get("turn"), bool)]
+    shown_numbers = [event.get("turn") for event in visible
+                     if isinstance(event, dict)
+                     and isinstance(event.get("turn"), int)
+                     and not isinstance(event.get("turn"), bool)]
+    total = max(numbers) if numbers else 0
+    if shown_numbers:
+        label = "%s turns %d-%d / %d" % (
+            name, min(shown_numbers), max(shown_numbers), total)
+    else:
+        label = "%s turns 0 / %d" % (name, total)
+    if buffer_edge:
+        label += "  " + ACTIVITY_BUFFER_EDGE
+    return label
+
+
+def _activity_buffer_edge(snapshot, events, offset, shown):
+    """True only when the visible window reaches a truncated buffer's floor."""
+    return bool(snapshot.get("activity_truncated") and events and shown
+                and offset >= max(0, len(events) - shown))
 
 
 def activity_max_scroll(snapshot, width, height):
@@ -447,17 +483,19 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     lines.append(row("LAST TURN  #%s %s/%s → %s  %s" %
                      (_value(last.get("n")), _value(last.get("agent")), last_model,
                       _value(last.get("to")), _value(last.get("ask_excerpt")))))
-    events = list(snapshot.get("activity") or [])
+    events = list(reversed(snapshot.get("activity") or []))
     visible, activity_offset = _activity_window(
         events, activity_offset, _activity_limit(snapshot, width, height))
+    at_buffer_edge = _activity_buffer_edge(
+        snapshot, events, activity_offset, len(visible))
     lines += [sep, row(_activity_label(
-        len(events), activity_offset, len(visible), upper=True), dim)]
+        events, visible, upper=True, buffer_edge=at_buffer_edge), dim)]
     for event in visible:
         event_model = ((event.get("model") or "—") + ("*" if event.get("model") else ""))
         lines.append(row("  #%s  %s/%s  %s" % (_value(event.get("turn")),
                                              _value(event.get("agent")), event_model,
                                              _value(event.get("summary")))))
-    capacity = _activity_limit(snapshot, width, height)
+    capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(row("") for _ in range(capacity - len(visible)))
     lines += [sep, row("q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
@@ -644,8 +682,12 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         stamped.reverse()  # no ts yet: core is oldest-first, show newest on top
     visible, activity_offset = _activity_window(
         stamped, activity_offset, _activity_limit(snapshot, width, height))
+    visible_events = [event for _, event in visible]
+    at_buffer_edge = _activity_buffer_edge(
+        snapshot, stamped, activity_offset, len(visible))
     lines.append(framed("├", "┤", "─ %s " % _activity_label(
-        len(stamped), activity_offset, len(visible))))
+        [event for _, event in stamped], visible_events,
+        buffer_edge=at_buffer_edge)))
     for idx, (dt, e) in enumerate(visible):
         ts_s = _display_time(dt, utc) if dt else "—"
         absolute_index = activity_offset + idx
@@ -663,16 +705,17 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
             (0, 0, 0, 0, 1, 1, 2),
         )
         lines.append("│" + activity_row + "│")
-    capacity = _activity_limit(snapshot, width, height)
+    capacity = _activity_capacity(snapshot, width, height)
     if capacity is not None:
         lines.extend(blank for _ in range(capacity - len(visible)))
     lines.append(framed("└", "┘", "─ q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss " % interval))
     return "\n".join(lines)
 
 
-def load_snapshot(engine, root):
+def load_snapshot(engine, root, activity_limit=8):
     env = dict(os.environ, M8SHIFT_ROOT=root)
-    proc = subprocess.run([sys.executable, engine, "status", "--json"], env=env,
+    proc = subprocess.run([sys.executable, engine, "status", "--json",
+                           "--activity-limit", str(activity_limit)], env=env,
                           text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode:
         raise RuntimeError(proc.stderr.strip() or "status failed")
@@ -817,10 +860,14 @@ def main(argv=None):
     previous = None
     scroll_offset = 0
     help_visible = False
+    agent_count = 2
     try:
         while True:
-            snap = load_snapshot(engine, args.root)
             size = shutil.get_terminal_size((80, 24))
+            provision = _activity_request_limit(
+                size.columns, size.lines, agent_count)
+            snap = load_snapshot(engine, args.root, provision)
+            agent_count = len(snap.get("agents") or [])
             max_scroll = activity_max_scroll(snap, size.columns, size.lines)
             scroll_offset = min(scroll_offset, max_scroll)
             frame = (render_help(size.columns, args.interval, size.lines) if help_visible else
