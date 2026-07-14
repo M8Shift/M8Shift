@@ -392,6 +392,7 @@ published site, or use the repository-local docs when working from a clone.
 | 062 | [Listening ends only at DONE](docs/en/rfc/062-rfc-listening-ends-only-at-done.md) | Any halt (incl. holding the pen, PAUSED, a denied action) suspends acting, never listening | implemented | 2026-07-14 | keep a waiter armed until DONE; DONE is the only state that ends listening |
 | 063 | [On-demand expanded activity reader](docs/en/rfc/063-rfc-on-demand-expanded-activity-reader.md) | Toggleable, word-wrapped full done-text blocks fetched by immutable turn number | implemented | 2026-07-14 | `e` toggles; ↑/↓ selects blocks; ←/→ pages text; status snapshot stays lean |
 | 064 | [Effective-work and non-work time accounting](docs/en/rfc/064-rfc-effective-time-accounting.md) | State-duration accounting for effective work vs awaiting, paused, idle, and unknown time | accepted for implementation | 2026-07-14 | `WORKING` proxy; honest partial retroactivity; one primary work item per window; permanent global TIME strip |
+| 065 | [Ticketed, committed, and pushed delivery](docs/en/rfc/065-rfc-ticketed-committed-pushed-delivery.md) | One forge ticket and remotely recoverable Git history for every intentional change | draft / design only | — | explicit forge-gateway flow for network-isolated authors |
 
 ## 🔁 How it works
 
