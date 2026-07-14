@@ -20,6 +20,7 @@ import json
 import os
 import ast
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -10907,22 +10908,68 @@ class TestRFC048PRB(CLIBase):
 
     PACK = "M8SHIFT.agent-pack.md"
     AUDIT_REL = os.path.join(".m8shift", "update-audit.jsonl")
+    UPDATE_TIMEOUT = 30
 
     def setUp(self):
         super().setUp()
+        self._update_processes = set()
         self.src = tempfile.mkdtemp(prefix="m8shift-src-")
         self.addCleanup(shutil.rmtree, self.src, True)
         shutil.copy(SCRIPT, os.path.join(self.src, "m8shift.py"))
         self.out = tempfile.mkdtemp(prefix="m8shift-out-")
         self.addCleanup(shutil.rmtree, self.out, True)
 
+    def tearDown(self):
+        for proc in tuple(self._update_processes):
+            self._kill_and_reap_update(proc)
+        self._update_processes.clear()
+        super().tearDown()
+
+    @staticmethod
+    def _kill_and_reap_update(proc):
+        if os.name == "posix":
+            try:
+                # The group can outlive its leader while a child still owns our pipes.
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        elif proc.poll() is None:
+            proc.kill()
+        try:
+            return proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A descendant may still own an inherited pipe on platforms without
+            # process-group signalling. Close our pipe ends, then reap the parent.
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            return "", ""
+
     def update(self, *extra, src=None, target=None, cwd=None):
         src = src or self.src
-        return subprocess.run(
-            [sys.executable, os.path.join(src, "m8shift.py"), "update",
-             "--target", target or self.d, "--source", src, *extra],
-            cwd=cwd or self.out, capture_output=True, text=True,
+        args = [sys.executable, os.path.join(src, "m8shift.py"), "update",
+                "--target", target or self.d, "--source", src, *extra]
+        proc = subprocess.Popen(
+            args, cwd=cwd or self.out, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+            start_new_session=(os.name == "posix"),
         )
+        self._update_processes.add(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=self.UPDATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = self._kill_and_reap_update(proc)
+            self.fail(
+                "update subprocess exceeded %ss and was killed\nstdout=%s\nstderr=%s"
+                % (self.UPDATE_TIMEOUT, stdout, stderr)
+            )
+        finally:
+            if proc.poll() is not None:
+                self._update_processes.discard(proc)
+        return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
     @staticmethod
     def _reversion(path, version):
