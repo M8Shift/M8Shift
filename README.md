@@ -390,6 +390,7 @@ published site, or use the repository-local docs when working from a clone.
 | 060 | [Adaptive terminal geometry](docs/en/rfc/060-rfc-adaptive-terminal-geometry.md) | Real-width flex tracks, exact-height activity viewport, and immediate resize redraws | implemented | 2026-07-14 | no mode flag or width cap; 120-column baseline is stable |
 | 061 | [Bounded adaptive activity provision](docs/en/rfc/061-rfc-bounded-adaptive-activity.md) | Parameterized snapshot history, capped viewport, true turn positions, and a visible buffer edge | implemented | 2026-07-14 | default 8; consumer limit capped at 200; no archive read |
 | 062 | [Listening ends only at DONE](docs/en/rfc/062-rfc-listening-ends-only-at-done.md) | Any halt (incl. holding the pen, PAUSED, a denied action) suspends acting, never listening | implemented | 2026-07-14 | keep a waiter armed until DONE; DONE is the only state that ends listening |
+| 063 | [On-demand expanded activity reader](docs/en/rfc/063-rfc-on-demand-expanded-activity-reader.md) | Toggleable, word-wrapped full done-text blocks fetched by immutable turn number | implemented | 2026-07-14 | `e` toggles; ↑/↓ selects blocks; ←/→ pages text; status snapshot stays lean |
 
 ## 🔁 How it works
 

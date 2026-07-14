@@ -114,6 +114,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [060-rfc-adaptive-terminal-geometry.md](rfc/060-rfc-adaptive-terminal-geometry.md) | Implemented automatic real-terminal geometry, deterministic wide-track flex, exact-height activity fill, and self-pipe SIGWINCH redraws for the read-only dashboard. |
 | [061-rfc-bounded-adaptive-activity.md](rfc/061-rfc-bounded-adaptive-activity.md) | Implemented parameterized bounded activity provision, a capped adaptive viewport, true turn-position labels, and explicit truncated-buffer edges. |
 | [062-rfc-listening-ends-only-at-done.md](rfc/062-rfc-listening-ends-only-at-done.md) | Strengthened the listening invariant so any halt — including holding the pen, PAUSED, or a denied action — suspends acting but never listening; only DONE ends listening, for every agent. |
+| [063-rfc-on-demand-expanded-activity-reader.md](rfc/063-rfc-on-demand-expanded-activity-reader.md) | Implemented an `e`-toggle expanded ACTIVITY reader with immutable-turn point fetches, full word-wrapped done-text, block navigation, and text paging without widening the status snapshot. |
 
 ## Security docs
 

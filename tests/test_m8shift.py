@@ -1720,6 +1720,27 @@ class TestReadCommands(CLIBase):
         self.assertEqual(len(clamped["activity"]), 26)  # bootstrap turn 0 + 25 posted turns
         self.assertFalse(clamped["activity_truncated"])
 
+    def test_turn_point_lookup_returns_complete_done_without_widening_snapshot(self):
+        self.init()
+        complete = "Delivered " + ("word " * 80).strip()
+        posted = self.turn("claude", "codex", done=complete)
+        self.assertEqual(posted.returncode, 0, posted.stderr)
+
+        status = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        self.assertLessEqual(len(status["activity"][-1]["summary"]), 120)
+        self.assertNotEqual(status["activity"][-1]["summary"], complete)
+
+        fetched = self.cw("turn", "1", "--json")
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+        payload = json.loads(fetched.stdout)
+        self.assertEqual(payload, {
+            "schema": "m8shift.turn/1", "turn": 1,
+            "agent": "claude", "to": "codex", "at": mock.ANY,
+            "done": complete,
+        })
+        self.assertEqual(self.cw("turn", "999", "--json").returncode, 3)
+        self.assertEqual(self.cw("turn", "-1", "--json").returncode, 2)
+
     def test_status_snapshot_tasks_open_tracks_task_event_log(self):
         self.init()
         self.assertEqual(0, self.cw("task", "add", "claude", "real task").returncode)
