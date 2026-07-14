@@ -201,6 +201,7 @@ loop:
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # 只读简报：LOCK + 最近的轮次 + 记忆 + 任务
 ./m8shift.py peek <agent>  # 发给 <agent> 的最后一次交接（不是你的轮次则 rc 3）
 ./m8shift.py log [--limit N] [--all] [--oneline]  # 中继时间线（只读）
+./m8shift.py turn N [--json]  # 获取不可变轮次的完整 done 文本
 ./m8shift.py history [--limit N] [--oneline] [--json]  # 会话历史（只读）
 ./m8shift.py session {list,show,decisions,report} …  # 会话视图 + 可选 Markdown 报告
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
@@ -220,6 +221,7 @@ loop:
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # 追加一条持久记忆笔记（advisory）
+./m8shift.py work-tag <agent> <ref>  # 为 WORKING 窗口指定一个不透明的主要引用
 ./m8shift.py task {add,done,drop,list,show} …  # advisory 任务清单（按代理的待办）
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # 将本班次绑定到唯一的项目中继（RFC 038 §9）；无需持笔；存在歧义且未给出封闭选择器时拒绝
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049：WORKING 持有者的保护性存活心跳（托管生产者；窗口 = max(120, min(2*N, TTL))；claim --refresh 仅记录审计心跳）

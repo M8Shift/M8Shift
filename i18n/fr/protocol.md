@@ -243,6 +243,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # briefing lecture seule : LOCK + derniers tours + mémoire + tâches
 ./m8shift.py peek <agent>  # dernière passation adressée à <agent> (rc 3 si pas ton tour)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # timeline du relais (lecture seule)
+./m8shift.py turn N [--json]  # affiche le texte done complet d'un tour immuable
 ./m8shift.py history [--limit N] [--oneline] [--json]  # historique de session (lecture seule)
 ./m8shift.py session {list,show,decisions,report} …  # vues de session + rapport Markdown optionnel
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
@@ -262,6 +263,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."          # reprend PAUSED pour un agent précis avant claim
 ./m8shift.py remember <agent> "<note>"  # ajoute une note mémoire durable (advisory)
+./m8shift.py work-tag <agent> <ref>  # attribue une référence primaire opaque à la fenêtre WORKING
 ./m8shift.py task {add,done,drop,list,show} …  # registre de tâches advisory (todos par agent)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # épingle ce shift sur UN relais projet (RFC 038 §9) ; sans stylo ; refuse sous ambiguïté sans le sélecteur fermé
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049 : battement de vivacité protecteur d'un porteur WORKING (producteurs managés ; fenêtre = max(120, min(2*N, TTL)) ; claim --refresh n'enregistre que des battements d'audit)
