@@ -88,6 +88,19 @@ def _value(value):
     return "unavailable" if value is None else str(value)
 
 
+def _pen_turn_label(snapshot):
+    """Describe the holder's live/next turn without misattributing the last one."""
+    try:
+        next_turn = "turn %s" % (int(snapshot.get("turn")) + 1)
+    except (TypeError, ValueError):
+        next_turn = "next turn"
+    state = str(snapshot.get("state") or "")
+    if state.startswith(("WORKING_", "AWAITING_")):
+        # Holder + state are already adjacent: "codex [WORKING_CODEX] → turn 8".
+        return "→ %s" % next_turn
+    return "last #%s" % _value(snapshot.get("turn"))
+
+
 def _color(code, text, enabled):
     return "\x1b[%sm%s\x1b[0m" % (code, text) if enabled else text
 
@@ -234,8 +247,8 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     claimed = _display_time(snapshot.get("since"), utc, "%Y-%m-%d %H:%M") or "—"
     heartbeat = _display_time(pen.get("heartbeat"), utc, "%Y-%m-%d %H:%M") or "—"
     pen_prefix = "PEN %s  " % holder
-    pen_suffix = "  turn %s  claimed %s  heartbeat %s" % (
-        _value(snapshot.get("turn")), claimed, heartbeat)
+    pen_suffix = "  %s  claimed %s  heartbeat %s" % (
+        _pen_turn_label(snapshot), claimed, heartbeat)
     # Compose styles after padding so ANSI bytes never affect border alignment.
     pen_plain = clean(pen_prefix + "[%s]" % state + pen_suffix, inner).ljust(inner)
     if colored and ("[%s]" % state) in pen_plain:
@@ -366,7 +379,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
     pen = snapshot.get("pen") or {}
-    turn_seg = "turn %s" % _value(snapshot.get("turn"))
+    turn_seg = _pen_turn_label(snapshot)
     claimed = _display_time(snapshot.get("since"), utc, "%Y-%m-%d %H:%M") or "—"
     heartbeat = _display_time(pen.get("heartbeat"), utc, "%Y-%m-%d %H:%M") or "—"
     hb_seg = "heartbeat %s" % heartbeat
