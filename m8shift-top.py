@@ -548,8 +548,11 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     pen_row = adaptive_cells(
         ("  PEN", holder, "[%s]" % state, turn_seg,
          "claimed %s" % claimed, hb_seg),
-        (0, 9, 17, 34, 44, 70),
-        (9, 8, 17, 10, 26, 48),
+        (0, 7, 14, 31, 44, 70),
+        # The live-turn track stays fixed as the frame grows.  Reserve room for
+        # five-digit turns plus two spare characters; claimed/heartbeat absorb
+        # all flex so wider terminals cannot distort the turn label.
+        (9, 8, 17, 15, 26, 43),
         (0, 0, 0, 0, 1, 1),
     )
     pen_row = paint(pen_row, holder, amber)

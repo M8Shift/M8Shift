@@ -212,6 +212,18 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 self.assertIn("→ turn 8", output)
                 self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
+    def test_pen_turn_track_preserves_realistic_numbers_and_frame_fidelity(self):
+        top = load_top()
+        for turn in (725, 1234):
+            data = fixture()
+            data["turn"] = turn
+            for width in (80, 96, 100, 120, 160):
+                with self.subTest(turn=turn, width=width):
+                    output = self._plain(top.render(data, width, self.NOW))
+                    self.assertIn("→ turn %d" % (turn + 1), output)
+                    self.assertTrue(all(
+                        len(line) == width for line in output.splitlines()))
+
     def test_pen_turn_label_marks_last_turn_when_there_is_no_live_holder(self):
         top = load_top()
         data = fixture()
@@ -396,16 +408,16 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "3d12f7c6ce8e37c98d5885cb7320db7ac7e78a4f052a8ad3100cc861b20519b1",
+            "040feac6c7b2fa5098f68d416ce9bc71e78a809fbe6977b81dbaec9229056061",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
         top = load_top()
         plans = (
-            ((9, 8, 17, 10, 26, 48), (0, 0, 0, 0, 1, 1), {
-                121: [9, 8, 17, 10, 27, 48],
-                160: [9, 8, 17, 10, 46, 68],
-                240: [9, 8, 17, 10, 86, 108],
+            ((9, 8, 17, 15, 26, 43), (0, 0, 0, 0, 1, 1), {
+                121: [9, 8, 17, 15, 27, 43],
+                160: [9, 8, 17, 15, 46, 63],
+                240: [9, 8, 17, 15, 86, 103],
             }),
             ((10, 30, 12, 66), (0, 0, 0, 1), {
                 121: [10, 30, 12, 67],
