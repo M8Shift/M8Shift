@@ -1,6 +1,6 @@
 # RFC 065 — Ticketed, committed, and pushed delivery
 
-- **Status:** draft / design only (#72)
+- **Status:** accepted / implemented (#72; finalization #74)
 - **Date:** 2026-07-14
 - **Scope:** repository contribution and delivery discipline for every agent;
   documentation and advisory local checks only, with no network authority in the core.
@@ -10,7 +10,7 @@
   [RFC 053](053-rfc-shared-rules-governed-habits.md), and
   [RFC 058](058-rfc-go-forward-rfc-discipline.md).
 
-## 0. Proposal summary
+## 0. Decision summary
 
 Every intentional version-controlled change destined for integration has one
 structured forge ticket and reaches review as committed, pushed Git history. A local
@@ -28,9 +28,9 @@ SHA to the gateway. The gateway reviews the immutable handoff, creates/reconcile
 ticket, pushes that exact history, opens the PR, and records the remote evidence. This
 is a transport exception, not a ticket or push waiver.
 
-For the current project topology, Codex is the network-isolated author and Claude is
-the forge gateway. The contract is role-based so another project can assign different
-agents without changing the policy.
+Every gateway handoff names the agent currently assigned the **forge-gateway role**.
+The contract names roles rather than products or fixed agent identities, so projects
+can assign or rotate the author and gateway without changing the policy.
 
 ## 1. Why the existing rules are insufficient
 
@@ -157,7 +157,7 @@ branch names, and SHAs are references; copied status pages and summaries are not
 
 ## 5. Documentation and advisory reminders
 
-Acceptance would amend these surfaces in the implementation PR:
+Acceptance amends these surfaces in the implementation change:
 
 - `M8SHIFT.agent-pack.md`: every change needs a forge ticket and every completed
   checkpoint is committed/pushed; define gateway-pending language.
@@ -172,15 +172,16 @@ Local tooling remains advisory and offline:
 1. **Pre-commit reminder:** for a non-empty staged repository change, print one stable
    reminder to confirm its forge ticket and push the completed checkpoint before
    delivery; an isolated author instead names the gateway-pending handoff. It does not
-   contact a forge, mutate relay state, or block humans.
+   contact a forge, mutate relay state, or change the hook's exit status.
 2. **Doctor upstream advisory:** in a Git checkout, a bounded read-only check may report
    `delivery.no_upstream` for a non-default branch without an upstream and
    `delivery.unpushed` when `HEAD` is ahead of its local upstream ref. It labels this
    local evidence and never claims the remote is current.
 
-Ticket existence is reviewed on the forge. A local heuristic based on `#123`, branch
-names, or commit prose would confuse relay tasks, issues, and PRs, so v1 does not
-pretend to verify it. No core command receives credentials or network access.
+Ticket existence is reviewed on the forge. The hook therefore warns every staged
+change unit to confirm linkage instead of treating `#123`, a branch name, or commit
+prose as proof. Doctor's upstream findings are local-ref evidence only. No core command
+receives credentials or network access.
 
 ## 6. Safety and failure handling
 
@@ -196,17 +197,18 @@ pretend to verify it. No core command receives credentials or network access.
 - Emergency fixes still receive ticket and remote trace before merge; urgency may
   shorten review but does not erase provenance.
 
-## 7. Implementation phases
+## 7. Implementation record
 
-1. **Policy:** accept this RFC; amend RFCs 053/058, the agent pack, guide, and issue
-   lifecycle with direct/gateway contracts.
-2. **Reminders:** add the stable pre-commit reminder and bounded doctor findings,
-   advisory and no-network.
-3. **Verification:** cover staged/no-change reminders; upstream absent, ahead, equal,
-   detached, and non-Git cases; fail-open behavior; generated-pack parity; Python 3.8;
-   and existing checksum/pen-guard ordering.
-4. **Dogfood:** run one direct and one author/gateway change, proving ticket-to-SHA
-   trace without rewriting or overstating remote evidence.
+1. **Policy:** RFCs 053/058, the agent pack, guide, and issue lifecycle carry the
+   active direct/gateway contract.
+2. **Reminders:** the shipped pre-commit hook prints the stable ticket/push reminder;
+   doctor reports `delivery.no_upstream` and `delivery.unpushed` from bounded local
+   Git probes.
+3. **Verification:** tests cover staged reminders plus upstream absent, ahead, equal,
+   detached, default-branch, and non-Git cases. Probes fail open, remain Python 3.8
+   compatible, and preserve checksum/pen-guard ordering.
+4. **Dogfood:** direct and author/gateway changes record ticket-to-SHA evidence without
+   rewriting history or overstating remote evidence.
 
 ## 8. Acceptance criteria
 

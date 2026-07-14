@@ -178,9 +178,9 @@ All mutations use an artifact-local file lock and atomic replacement, which prev
 
 Scope specificity may explain applicability, but it is not an automatic override mechanism. A narrower rule can supersede a broader rule only through an explicit human-approved relationship.
 
-## Relationship to repository delivery policy (proposed RFC 065 clarification)
+## Relationship to repository delivery policy (RFC 065 amendment)
 
-[RFC 065](065-rfc-ticketed-committed-pushed-delivery.md) proposes a standing
+[RFC 065](065-rfc-ticketed-committed-pushed-delivery.md) establishes a standing
 repository contribution rule: every intentional change has a structured forge ticket
 and reaches review as committed, pushed history, with an explicit forge-gateway flow
 for a network-isolated author.

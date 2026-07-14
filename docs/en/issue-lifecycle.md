@@ -51,3 +51,17 @@ cold and know when it is done. A **close** that states outcome + decisions + ver
 future reader reconstruct *what shipped and why* without re-reading every commit. The **decision
 template** in between makes a contested choice auditable — who argued what, and how it was
 reconciled. Together they keep the forge a durable, tool-independent record of the work.
+
+## Direct and forge-gateway delivery (RFC 065)
+
+Every coherent change unit links one structured ticket before its first remote
+publication or integration. A network-capable author commits, pushes the exact review
+head, and records the branch/SHA on the ticket and PR. A network-isolated author commits
+and validates locally, then hands the exact branch/SHA to the agent named for the
+**forge-gateway role**, explicitly marking the checkpoint **gateway pending**.
+
+The gateway independently reviews that SHA, creates or reconciles the structured ticket
+before first push, transports the history without rewriting it, and records the remote
+branch, SHA, PR, verification, merge, and structured close. This is a transport role,
+not authorship and not a ticket/push waiver. Local hook and doctor reminders are
+advisory and offline; the forge record remains the authority for ticket and remote state.
