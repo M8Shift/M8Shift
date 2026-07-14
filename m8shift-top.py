@@ -60,6 +60,28 @@ def _restore_keyboard():
         pass
 
 
+def _open_self_pipe():
+    """Return a nonblocking pipe suitable for signal wakeups."""
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.set_blocking(write_fd, False)
+    return read_fd, write_fd
+
+
+def _drain_self_pipe(read_fd):
+    """Coalesce all queued wakeup bytes without blocking."""
+    drained = 0
+    while True:
+        try:
+            chunk = os.read(read_fd, 4096)
+        except BlockingIOError:
+            break
+        if not chunk:
+            break
+        drained += len(chunk)
+    return drained
+
+
 def restore(stream=None):
     global _active
     _restore_keyboard()
@@ -235,8 +257,8 @@ def _activity_limit(snapshot, width, height):
     if height is None:
         return None
     agent_rows = len(snapshot.get("agents") or [])
-    fixed_rows = (13 if min(max(24, width), 120) >= 100 else 16) + agent_rows
-    return max(1, height - fixed_rows)
+    fixed_rows = (13 if max(24, width) >= 100 else 16) + agent_rows
+    return max(0, height - fixed_rows)
 
 
 def _activity_window(events, offset, limit):
@@ -251,20 +273,57 @@ def _activity_label(total, offset, shown, upper=False):
     name = "ACTIVITY" if upper else "activity"
     if not total:
         return "%s 0/0" % name
+    if not shown:
+        return "%s 0/%d" % (name, total)
     return "%s %d-%d/%d" % (name, offset + 1, offset + shown, total)
 
 
 def activity_max_scroll(snapshot, width, height):
     limit = _activity_limit(snapshot, width, height)
-    return max(0, len(snapshot.get("activity") or []) - (limit or 0)) if limit else 0
+    if limit is None:
+        return 0
+    return max(0, len(snapshot.get("activity") or []) - limit)
+
+
+def _flex_track_widths(width, baseline, weights):
+    """Grow a 120-column track plan by weighted largest remainder."""
+    if width < 120 or len(baseline) != len(weights):
+        raise ValueError("flex tracks require width >= 120 and paired declarations")
+    if sum(baseline) != 118 or any(value <= 0 for value in baseline):
+        raise ValueError("flex track baseline must be positive and sum to 118")
+    if any(weight < 0 for weight in weights) or not any(weights):
+        raise ValueError("flex track weights must include a positive value")
+    extra = width - 120
+    total_weight = sum(weights)
+    additions = [extra * weight // total_weight for weight in weights]
+    residual = extra - sum(additions)
+    order = sorted(
+        range(len(weights)),
+        key=lambda index: (-(extra * weights[index] % total_weight), index),
+    )
+    for index in order[:residual]:
+        additions[index] += 1
+    result = [base + addition for base, addition in zip(baseline, additions)]
+    if sum(result) != width - 2:
+        raise AssertionError("flex tracks do not fill the inner frame")
+    return result
+
+
+def _track_cells(values, widths):
+    """Render values into exact tracks, reserving one separator column each."""
+    if len(values) != len(widths):
+        raise ValueError("track values and widths must have equal length")
+    return "".join(
+        ("" if value == "" else clean(value, track - 1)).ljust(track)
+        for value, track in zip(values, widths)
+    )
 
 
 def render(snapshot, width, now=None, interval=2, utc=False, height=None,
            activity_offset=0):
-    # Operator policy: cap the frame near 120 columns, and tabulate into aligned
-    # columns once there is room (>=100 cols); below that keep the stacked narrow
-    # layout. Frame fidelity (every line == width) holds in both.
-    width = min(max(24, width), 120)
+    # Use the real terminal width. The 100-column breakpoint is stable; the wide
+    # layout grows deterministically above its byte-stable 120-column baseline.
+    width = max(24, width)
     if width >= 100:
         return _render_wide(snapshot, width, now, interval, utc, height,
                             activity_offset)
@@ -300,7 +359,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         return left + style(seg) + rest
 
     def row(text="", style=None):
-        plain = clean(str(text), inner)
+        plain = "" if text == "" else clean(str(text), inner)
         padded = plain.ljust(inner)
         return "│" + (style(padded) if style else padded) + "│"
 
@@ -398,6 +457,9 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         lines.append(row("  #%s  %s/%s  %s" % (_value(event.get("turn")),
                                              _value(event.get("agent")), event_model,
                                              _value(event.get("summary")))))
+    capacity = _activity_limit(snapshot, width, height)
+    if capacity is not None:
+        lines.extend(row("") for _ in range(capacity - len(visible)))
     lines += [sep, row("q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss" % interval, dim), bottom]
     return "\n".join(lines)
 
@@ -447,6 +509,12 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
             out += text[:available]
         return clean(out, inner).ljust(inner)
 
+    def adaptive_cells(values, starts, baseline, weights):
+        if width < 120:
+            return cells(list(zip(values, starts)))
+        widths = _flex_track_widths(width, baseline, weights)
+        return _track_cells(values, widths)
+
     def content(pairs):
         return "│" + cells(pairs) + "│"
 
@@ -477,10 +545,13 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     claimed = _display_time(snapshot.get("since"), utc, "%Y-%m-%d %H:%M") or "—"
     heartbeat = _display_time(pen.get("heartbeat"), utc, "%Y-%m-%d %H:%M") or "—"
     hb_seg = "heartbeat %s" % heartbeat
-    pen_row = cells([
-        ("  PEN", 0), (holder, 9), ("[%s]" % state, 17),
-        (turn_seg, 34), ("claimed %s" % claimed, 44),
-        (hb_seg, 70)])
+    pen_row = adaptive_cells(
+        ("  PEN", holder, "[%s]" % state, turn_seg,
+         "claimed %s" % claimed, hb_seg),
+        (0, 9, 17, 34, 44, 70),
+        (9, 8, 17, 10, 26, 48),
+        (0, 0, 0, 0, 1, 1),
+    )
     pen_row = paint(pen_row, holder, amber)
     pen_row = paint(pen_row, "[%s]" % state, badge)
     pen_row = paint(pen_row, turn_seg, magenta)
@@ -493,15 +564,19 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         current = current.replace(tzinfo=timezone.utc)
     remaining = max(0, int((expires - current).total_seconds())) if expires else 0
     alive = bool(expires and remaining > 0)
-    gw = max(12, min(28, inner - 70))
+    gw = max(12, min(28, inner - 70)) if width < 120 else 28
     filled = min(gw, max(0, round(gw * remaining / 1800)))
     gauge = "█" * filled + "░" * (gw - filled)
     left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
     status_seg = "alive" if alive else "stale"
-    ttl_row = cells([
-        ("  TTL", 0), (gauge, 10), (left_seg, 12 + gw),
-        ("expires %s (%s)" % (_display_time(expires, utc, "%Y-%m-%d %H:%M") or "—",
-                              status_seg), 24 + gw)])
+    ttl_expiry = "expires %s (%s)" % (
+        _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—", status_seg)
+    ttl_row = adaptive_cells(
+        ("  TTL", gauge, left_seg, ttl_expiry),
+        (0, 10, 12 + gw, 24 + gw),
+        (10, 30, 12, 66),
+        (0, 0, 0, 1),
+    )
     ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
     ttl_row = paint(ttl_row, status_seg, green if alive else red)
     lines += ["│" + ttl_row + "│", blank]
@@ -517,9 +592,14 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
             ratios.append(ratio)
             bits.append(bit)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
-        arow = cells([("  AGENTS" if i == 0 else "        ", 0),
-                      ("%s %s" % (marker, name), 10), (model, 20),
-                      ("● %s" % astate, 38), (bits[0], 52), (bits[1], 73)])
+        arow = adaptive_cells(
+            ("  AGENTS" if i == 0 else "        ",
+             "%s %s" % (marker, name), model, "● %s" % astate,
+             bits[0], bits[1]),
+            (0, 10, 20, 38, 52, 73),
+            (10, 10, 18, 14, 21, 45),
+            (0, 1, 1, 0, 2, 2),
+        )
         arow = paint(arow, "●", dot_style(astate))
         arow = paint(arow, bits[0], usage_style(ratios[0]))
         arow = paint(arow, bits[1], usage_style(ratios[1]))
@@ -529,14 +609,17 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     ledger = snapshot.get("ledger") or {}
     last = snapshot.get("last_turn") or {}
     listen_val = _value(snapshot.get("listeners"))
-    listen_line = content([("  LISTEN", 0), (listen_val, 10)])
+    listen_line = "│" + adaptive_cells(
+        ("  LISTEN", listen_val), (0, 10), (10, 108), (0, 1)) + "│"
     listen_line = paint(listen_line, "ALIVE", green)
     if listen_val == "unavailable":
         listen_line = paint(listen_line, listen_val, dim)
     lg = tuple(_value(ledger.get(k)) for k in
                ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
-    ledger_line = content([("  LEDGER", 0),
-                           ("tasks_open=%s  decisions_pending=%s  doctor_findings=%s  gate_armed=%s" % lg, 10)])
+    ledger_payload = (
+        "tasks_open=%s  decisions_pending=%s  doctor_findings=%s  gate_armed=%s" % lg)
+    ledger_line = "│" + adaptive_cells(
+        ("  LEDGER", ledger_payload), (0, 10), (10, 108), (0, 1)) + "│"
     ledger_line = paint(ledger_line, "tasks_open=%s" % lg[0], cyan)
     ledger_line = paint(ledger_line, "decisions_pending=%s" % lg[1], cyan)
     ledger_line = paint(ledger_line, "doctor_findings=%s" % lg[2],
@@ -544,10 +627,11 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     ledger_line = paint(ledger_line, "gate_armed=%s" % lg[3],
                         dim if lg[3] in ("unavailable", "no", "false", "False") else green)
     last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
-    turn_line = content([("  TURN", 0),
-                         ("#%s %s/%s → %s  %s" %
-                          (_value(last.get("n")), _value(last.get("agent")), last_model,
-                           _value(last.get("to")), _value(last.get("ask_excerpt"))), 10)])
+    turn_payload = "#%s %s/%s → %s  %s" % (
+        _value(last.get("n")), _value(last.get("agent")), last_model,
+        _value(last.get("to")), _value(last.get("ask_excerpt")))
+    turn_line = "│" + adaptive_cells(
+        ("  TURN", turn_payload), (0, 10), (10, 108), (0, 1)) + "│"
     lines += [blank, listen_line, ledger_line, turn_line, blank]
     # ACTIVITY: recent -> oldest, tabulated (turn | ts-local | hold-dur | agent | action | note).
     stamped = [(_stamp(e.get("ts")), e) for e in (snapshot.get("activity") or [])]
@@ -568,9 +652,17 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
         note = parts[1] if len(parts) > 1 else ""
         model = clean(e.get("model") or "—", 19) + ("*" if e.get("model") else "")
-        lines.append("│" + cells([("  %s" % _value(e.get("turn")), 0), (ts_s, 8),
-                                   (dur, 29), (clean(e.get("agent"), 8), 37),
-                                   (model, 47), (action, 69), (note, 83)]) + "│")
+        activity_row = adaptive_cells(
+            ("  %s" % _value(e.get("turn")), ts_s, dur,
+             clean(e.get("agent"), 8), model, action, note),
+            (0, 8, 29, 37, 47, 69, 83),
+            (8, 21, 8, 10, 22, 14, 35),
+            (0, 0, 0, 0, 1, 1, 2),
+        )
+        lines.append("│" + activity_row + "│")
+    capacity = _activity_limit(snapshot, width, height)
+    if capacity is not None:
+        lines.extend(blank for _ in range(capacity - len(visible)))
     lines.append(framed("└", "┘", "─ q quit  ? help  r/Esc refresh  ↑/↓ navigate  tick %ss " % interval))
     return "\n".join(lines)
 
@@ -639,9 +731,9 @@ def key_effect(key, scroll_offset, max_scroll, help_visible):
     return False, False, scroll_offset, help_visible
 
 
-def render_help(width, interval=2):
+def render_help(width, interval=2, height=None):
     """Render the interactive key reference as a frame-fidelity overlay."""
-    width = min(max(24, width), 120)
+    width = max(24, width)
     inner = width - 2
 
     def row(text=""):
@@ -651,7 +743,8 @@ def render_help(width, interval=2):
     top = "┌" + "─" * inner + "┐"
     sep = "├" + "─" * inner + "┤"
     bottom = "└" + "─" * inner + "┘"
-    return "\n".join([
+    padding = max(0, height - 13) if height is not None else 0
+    lines = [
         top,
         row("M8SHIFT TOP · HELP"),
         sep,
@@ -662,10 +755,14 @@ def render_help(width, interval=2):
         row("↑ / ↓   scroll the activity window"),
         row(""),
         row("Automatic refresh: every %ss" % interval),
+    ]
+    lines.extend(row("") for _ in range(padding))
+    lines += [
         sep,
         row("Press ? or Esc to return"),
         bottom,
-    ])
+    ]
+    return "\n".join(lines)
 
 
 def main(argv=None):
@@ -686,6 +783,9 @@ def main(argv=None):
         return scroll_fallback(engine, args.root, forwarded)
     atexit.register(restore)
     old = {}
+    resize_pending = False
+    resize_read = resize_write = None
+    previous_wakeup = -1
     def stop(signum, frame):
         restore()
         raise SystemExit(128 + signum)
@@ -696,11 +796,20 @@ def main(argv=None):
     def resume(signum, frame):
         signal.signal(signal.SIGTSTP, suspend)
         enter()
+    def resize(signum, frame):
+        # The runtime writes the wakeup byte; the handler only marks pending work.
+        nonlocal resize_pending
+        resize_pending = True
     for sig, handler in ((signal.SIGINT, stop), (signal.SIGTERM, stop),
                          (getattr(signal, "SIGTSTP", None), suspend),
                          (getattr(signal, "SIGCONT", None), resume)):
         if sig is not None:
             old[sig] = signal.signal(sig, handler)
+    winch = getattr(signal, "SIGWINCH", None)
+    if winch is not None and os.name == "posix":
+        resize_read, resize_write = _open_self_pipe()
+        previous_wakeup = signal.set_wakeup_fd(resize_write, warn_on_full_buffer=False)
+        old[winch] = signal.signal(winch, resize)
     enter()
     previous = None
     scroll_offset = 0
@@ -711,15 +820,20 @@ def main(argv=None):
             size = shutil.get_terminal_size((80, 24))
             max_scroll = activity_max_scroll(snap, size.columns, size.lines)
             scroll_offset = min(scroll_offset, max_scroll)
-            frame = (render_help(size.columns, args.interval) if help_visible else
+            frame = (render_help(size.columns, args.interval, size.lines) if help_visible else
                      render(snap, size.columns, interval=args.interval, utc=args.utc,
                             height=size.lines, activity_offset=scroll_offset))
             if frame != previous:
                 sys.stdout.write(HOME + frame + "\x1b[J")
                 sys.stdout.flush()
                 previous = frame
-            ready, _, _ = select.select([sys.stdin], [], [], max(.1, args.interval))
-            if ready:
+            readers = [sys.stdin] + ([resize_read] if resize_read is not None else [])
+            ready, _, _ = select.select(readers, [], [], max(.1, args.interval))
+            if resize_pending or (resize_read is not None and resize_read in ready):
+                resize_pending = False
+                _drain_self_pipe(resize_read)
+                previous = None
+            if sys.stdin in ready:
                 key = read_key()
                 quit_requested, refresh, scroll_offset, help_visible = key_effect(
                     key, scroll_offset, max_scroll, help_visible)
@@ -728,6 +842,13 @@ def main(argv=None):
                 if refresh:
                     previous = None
     finally:
+        if resize_write is not None:
+            signal.set_wakeup_fd(previous_wakeup)
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+        for fd in (resize_read, resize_write):
+            if fd is not None:
+                os.close(fd)
         restore()
 
 

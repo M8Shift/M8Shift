@@ -111,6 +111,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [057-rfc-index-accurate-checksum-manifest.md](rfc/057-rfc-index-accurate-checksum-manifest.md) | Implemented pre-commit checksum refresh from staged Git-index blobs, after the configured-agent pen guard. |
 | [058-rfc-go-forward-rfc-discipline.md](rfc/058-rfc-go-forward-rfc-discipline.md) | Same-PR RFC discipline for substantive changes plus advisory doctor/pre-commit checks for RFC index integrity. |
 | [059-rfc-terminal-colour-capability-semantic-rendering.md](rfc/059-rfc-terminal-colour-capability-semantic-rendering.md) | Implemented capability-tiered semantic palette for the read-only dashboard, with textual/symbolic meaning independent of colour. |
+| [060-rfc-adaptive-terminal-geometry.md](rfc/060-rfc-adaptive-terminal-geometry.md) | Implemented automatic real-terminal geometry, deterministic wide-track flex, exact-height activity fill, and self-pipe SIGWINCH redraws for the read-only dashboard. |
 
 ## Security docs
 
