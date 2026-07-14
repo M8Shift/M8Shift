@@ -109,6 +109,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [056-rfc-self-declared-agent-model-provenance.md](rfc/056-rfc-self-declared-agent-model-provenance.md) | Implemented optional, bounded, self-declared model provenance in current agent state and immutable turns; explicitly unverified and advisory. |
 | [057-rfc-index-accurate-checksum-manifest.md](rfc/057-rfc-index-accurate-checksum-manifest.md) | Implemented pre-commit checksum refresh from staged Git-index blobs, after the configured-agent pen guard. |
 | [058-rfc-go-forward-rfc-discipline.md](rfc/058-rfc-go-forward-rfc-discipline.md) | Same-PR RFC discipline for substantive changes plus advisory doctor/pre-commit checks for RFC index integrity. |
+| [059-rfc-terminal-colour-capability-semantic-rendering.md](rfc/059-rfc-terminal-colour-capability-semantic-rendering.md) | Implemented capability-tiered semantic palette for the read-only dashboard, with textual/symbolic meaning independent of colour. |
 
 ## Security docs
 

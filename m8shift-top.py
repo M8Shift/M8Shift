@@ -105,16 +105,68 @@ def _color(code, text, enabled):
     return "\x1b[%sm%s\x1b[0m" % (code, text) if enabled else text
 
 
-def _brand(rgb, fallback_256, text, enabled, bold=False):
-    """Paint brand text using truecolour when advertised, else xterm-256."""
-    if not enabled:
-        return text
+_SEMANTIC_COLOURS = {
+    # GitHub Dark Dimmed terminal palette. ANSI-16 fallbacks are semantic slots,
+    # deliberately not RGB-nearest approximations: safety meaning must survive.
+    "green": ((87, 171, 90), "32"),
+    "red": ((244, 112, 103), "31"),
+    "yellow": ((198, 144, 38), "33"),
+    "cyan": ((57, 197, 207), "36"),
+    "magenta": ((176, 131, 240), "35"),
+    "dim": ((99, 110, 123), "90"),
+    "badge": ((205, 217, 229), "97"),
+}
+
+
+def _colour_tier(enabled=True):
+    """Return plain, ansi16, 256, or truecolor for the current terminal."""
+    if not enabled or "NO_COLOR" in os.environ:
+        return "plain"
+    if os.environ.get("TERM", "").strip().lower() == "dumb":
+        return "plain"
     capability = os.environ.get("COLORTERM", "").strip().lower()
     if capability in ("truecolor", "24bit"):
+        return "truecolor"
+    if "256color" in os.environ.get("TERM", "").strip().lower():
+        return "256"
+    return "ansi16"
+
+
+def _xterm_256(rgb):
+    """Return the deterministic nearest xterm-256 cube/grayscale index."""
+    levels = (0, 95, 135, 175, 215, 255)
+    palette = [
+        (16 + 36 * r + 6 * g + b, (levels[r], levels[g], levels[b]))
+        for r in range(6) for g in range(6) for b in range(6)
+    ]
+    palette += [(232 + i, (8 + 10 * i,) * 3) for i in range(24)]
+    return min(
+        palette,
+        key=lambda item: (sum((left - right) ** 2
+                              for left, right in zip(rgb, item[1])), item[0]),
+    )[0]
+
+
+def _brand(rgb, text, enabled, ansi16, bold=False, inverse=False,
+           fallback_256=None):
+    """Paint one role through truecolor, xterm-256, or semantic ANSI-16."""
+    tier = _colour_tier(enabled)
+    if tier == "plain":
+        return text
+    if tier == "truecolor":
         colour = "38;2;%d;%d;%d" % rgb
+    elif tier == "256":
+        colour = "38;5;%d" % (fallback_256 if fallback_256 is not None
+                               else _xterm_256(rgb))
     else:
-        colour = "38;5;%d" % fallback_256
-    return _color(("1;" if bold else "") + colour, text, True)
+        colour = ansi16
+    attributes = (["1"] if bold else []) + (["7"] if inverse else []) + [colour]
+    return _color(";".join(attributes), text, True)
+
+
+def _semantic(role, text, enabled=True):
+    rgb, ansi16 = _SEMANTIC_COLOURS[role]
+    return _brand(rgb, text, enabled, ansi16, inverse=(role == "badge"))
 
 
 def _paint_wordmark(plain, enabled):
@@ -123,8 +175,10 @@ def _paint_wordmark(plain, enabled):
         return plain
     left, right = plain.split("M8SHIFT", 1)
     wordmark = (
-        _brand((255, 122, 24), 208, "M", True, bold=True)
-        + _brand((93, 38, 242), 99, "8", True, bold=True)
+        _brand((255, 122, 24), "M", True, "33", bold=True,
+               fallback_256=208)
+        + _brand((93, 38, 242), "8", True, "35", bold=True,
+                 fallback_256=99)
         + _color("1", "SHIFT", True)
     )
     return left + wordmark + right
@@ -222,10 +276,28 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
                     height=None, activity_offset=0):
     width = max(24, width)
     inner = width - 2
-    colored = "NO_COLOR" not in os.environ
-    amber = lambda text: _color("33", text, colored)
-    dim = lambda text: _color("2", text, colored)
-    badge = lambda text: _color("7", text, colored)
+    colored = _colour_tier() != "plain"
+    amber = lambda text: _semantic("yellow", text, colored)
+    green = lambda text: _semantic("green", text, colored)
+    red = lambda text: _semantic("red", text, colored)
+    cyan = lambda text: _semantic("cyan", text, colored)
+    magenta = lambda text: _semantic("magenta", text, colored)
+    dim = lambda text: _semantic("dim", text, colored)
+    badge = lambda text: _semantic("badge", text, colored)
+
+    def usage_style(ratio):
+        if ratio is None:
+            return dim
+        return red if ratio >= 0.85 else amber if ratio >= 0.60 else green
+
+    def dot_style(role):
+        return green if role == "idle" else amber if role == "working" else dim
+
+    def paint(plain, seg, style):
+        if not colored or not seg or seg not in plain:
+            return plain
+        left, rest = plain.split(seg, 1)
+        return left + style(seg) + rest
 
     def row(text="", style=None):
         plain = clean(str(text), inner)
@@ -236,10 +308,12 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     sep = "├" + "─" * inner + "┤"
     bottom = "└" + "─" * inner + "┘"
     clock = _display_time(now or datetime.now(timezone.utc), utc, "%H:%M:%S")
+    version = _value(snapshot.get("m8shift_version"))
     header = "M8SHIFT · %s · %s · session %s · %s" % (
-        _value(snapshot.get("project")), _value(snapshot.get("m8shift_version")),
+        _value(snapshot.get("project")), version,
         _value(snapshot.get("session")), clock)
-    lines = [top, _paint_wordmark(row(header), colored)]
+    header_row = paint(row(header), version, cyan)
+    lines = [top, _paint_wordmark(header_row, colored)]
 
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
@@ -251,11 +325,11 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         _pen_turn_label(snapshot), claimed, heartbeat)
     # Compose styles after padding so ANSI bytes never affect border alignment.
     pen_plain = clean(pen_prefix + "[%s]" % state + pen_suffix, inner).ljust(inner)
-    if colored and ("[%s]" % state) in pen_plain:
-        left, right = pen_plain.split("[%s]" % state, 1)
-        lines.append("│" + amber(left) + badge("[%s]" % state) + amber(right) + "│")
-    else:
-        lines.append("│" + pen_plain + "│")
+    pen_plain = paint(pen_plain, holder, amber)
+    pen_plain = paint(pen_plain, "[%s]" % state, badge)
+    pen_plain = paint(pen_plain, _pen_turn_label(snapshot), magenta)
+    pen_plain = paint(pen_plain, "heartbeat %s" % heartbeat, green)
+    lines.append("│" + pen_plain + "│")
 
     expires = _stamp(snapshot.get("expires"))
     current = now or datetime.now(timezone.utc)
@@ -266,30 +340,49 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     # The pen lease is 30 minutes; cap protects the gauge after clock skew.
     filled = min(10, max(0, round(10 * remaining / 1800)))
     gauge = "█" * filled + "░" * (10 - filled)
-    ttl = "TTL <%s>  %02d:%02d left  expires %s (%s)" % (
-        gauge, remaining // 60, remaining % 60,
+    left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
+    status_seg = "alive" if alive else "stale"
+    ttl = "TTL <%s>  %s  expires %s (%s)" % (
+        gauge, left_seg,
         _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—",
-        "alive" if alive else "stale")
-    lines += [row(ttl, amber), sep, row("AGENTS", dim)]
+        status_seg)
+    ttl_row = clean(ttl, inner).ljust(inner)
+    ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
+    ttl_row = paint(ttl_row, status_seg, green if alive else red)
+    lines += ["│" + ttl_row + "│", sep, row("AGENTS", dim)]
     for agent in snapshot.get("agents") or []:
         name = clean(agent.get("id"), 18)
         model = clean(agent.get("model") or "—", 24) + ("*" if agent.get("model") else "")
         state = clean(agent.get("role_state") or "unknown", 14)
         usage = agent.get("usage") or {}
         windows = usage.get("windows") or {}
-        bits = []
+        bits, ratios = [], []
         for label in ("session_5h", "weekly"):
-            bit, _ = _usage_cell(windows, label, label, utc)
+            bit, ratio = _usage_cell(windows, label, label, utc)
             bits.append(bit)
+            ratios.append(ratio)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
-        lines.append(row("%s %s | %s | %s | %s" %
-                         (marker, name, model, state, "  ".join(bits))))
+        agent_plain = clean("%s %s | %s | ● %s | %s" %
+                            (marker, name, model, state, "  ".join(bits)),
+                            inner).ljust(inner)
+        agent_plain = paint(agent_plain, marker.strip(), amber)
+        agent_plain = paint(agent_plain, "●", dot_style(state))
+        for bit, ratio in zip(bits, ratios):
+            agent_plain = paint(agent_plain, bit, usage_style(ratio))
+        lines.append("│" + agent_plain + "│")
     lines.append(row("* model self-declared (unverified)", dim))
     ledger = snapshot.get("ledger") or {}
     listeners = snapshot.get("listeners")
-    lines += [sep, row("LISTENERS  %s" % _value(listeners)),
-              row("LEDGER  tasks_open=%s decisions_pending=%s doctor_findings=%s gate_armed=%s" %
-                  tuple(_value(ledger.get(k)) for k in ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed")))]
+    listen_row = row("LISTENERS  %s" % _value(listeners))
+    listen_row = paint(listen_row, "ALIVE", green)
+    lg = tuple(_value(ledger.get(k)) for k in
+               ("tasks_open", "decisions_pending", "doctor_findings", "gate_armed"))
+    ledger_row = row("LEDGER  tasks_open=%s decisions_pending=%s doctor_findings=%s gate_armed=%s" % lg)
+    ledger_row = paint(ledger_row, "doctor_findings=%s" % lg[2],
+                       green if lg[2] == "0" else dim if lg[2] == "unavailable" else red)
+    ledger_row = paint(ledger_row, "gate_armed=%s" % lg[3],
+                       dim if lg[3] in ("unavailable", "no", "false", "False") else green)
+    lines += [sep, listen_row, ledger_row]
     last = snapshot.get("last_turn") or {}
     last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
     lines.append(row("LAST TURN  #%s %s/%s → %s  %s" %
@@ -317,13 +410,14 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     # one), so ANSI bytes never shift a border. Amber is reserved for the pen and
     # the TTL gauge; state carries an inverse badge, never colour alone.
     inner = width - 2
-    colored = "NO_COLOR" not in os.environ
-    amber = lambda text: _color("33", text, colored)
-    green = lambda text: _color("32", text, colored)
-    red = lambda text: _color("31", text, colored)
-    cyan = lambda text: _color("36", text, colored)
-    dim = lambda text: _color("2", text, colored)
-    badge = lambda text: _color("7", text, colored)
+    colored = _colour_tier() != "plain"
+    amber = lambda text: _semantic("yellow", text, colored)
+    green = lambda text: _semantic("green", text, colored)
+    red = lambda text: _semantic("red", text, colored)
+    cyan = lambda text: _semantic("cyan", text, colored)
+    magenta = lambda text: _semantic("magenta", text, colored)
+    dim = lambda text: _semantic("dim", text, colored)
+    badge = lambda text: _semantic("badge", text, colored)
 
     def usage_style(ratio):
         # green ok · amber elevated · red near-limit · dim when unknown.
@@ -389,7 +483,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         (hb_seg, 70)])
     pen_row = paint(pen_row, holder, amber)
     pen_row = paint(pen_row, "[%s]" % state, badge)
-    pen_row = paint(pen_row, turn_seg, cyan)
+    pen_row = paint(pen_row, turn_seg, magenta)
     pen_row = paint(pen_row, hb_seg, green)
     lines.append("│" + pen_row + "│")
 
@@ -403,11 +497,13 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     filled = min(gw, max(0, round(gw * remaining / 1800)))
     gauge = "█" * filled + "░" * (gw - filled)
     left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
+    status_seg = "alive" if alive else "stale"
     ttl_row = cells([
         ("  TTL", 0), (gauge, 10), (left_seg, 12 + gw),
         ("expires %s (%s)" % (_display_time(expires, utc, "%Y-%m-%d %H:%M") or "—",
-                              "alive" if alive else "stale"), 24 + gw)])
+                              status_seg), 24 + gw)])
     ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
+    ttl_row = paint(ttl_row, status_seg, green if alive else red)
     lines += ["│" + ttl_row + "│", blank]
 
     for i, agent in enumerate(snapshot.get("agents") or []):
