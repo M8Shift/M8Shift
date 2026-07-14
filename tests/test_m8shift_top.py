@@ -5,6 +5,7 @@ import importlib.util
 import os
 import shutil
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -111,6 +112,56 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertIn("5h 42% reset", output)
         self.assertIn("weekly 30% reset", output)
 
+    @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone control")
+    def test_every_time_uses_local_default_or_utc_flag_consistently(self):
+        top = load_top()
+        data = fixture()
+        data.update({
+            "since": "2026-07-13T23:30:00Z",
+            "expires": "2026-07-14T00:30:00Z",
+            "pen": {"heartbeat": "2026-07-13T23:40:00Z"},
+            "activity": [{"turn": 6, "agent": "claude", "model": "opus",
+                          "ts": "2026-07-13T23:50:00Z", "summary": "Reviewed x"}],
+        })
+        data["agents"][0]["usage"]["windows"] = {
+            "session_5h": {"used_ratio": .42, "resets_at": "2026-07-13T23:45:00Z"},
+            "weekly": {"used_ratio": .3, "resets_at": "2026-07-14T00:15:00Z"},
+        }
+        now = datetime(2026, 7, 13, 23, 45, tzinfo=timezone.utc)
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC-02"  # POSIX sign: local time is UTC+02:00.
+        time.tzset()
+        try:
+            for width in (80, 100, 120):
+                local_frame = self._plain(top.render(data, width, now))
+                utc_frame = self._plain(top.render(data, width, now, utc=True))
+                self.assertTrue(all(len(line) == width for line in local_frame.splitlines()))
+                self.assertTrue(all(len(line) == width for line in utc_frame.splitlines()))
+
+            local_frame = self._plain(top.render(data, 120, now))
+            self.assertIn("01:45:00", local_frame)  # header clock
+            self.assertIn("claimed 2026-07-14 01:30", local_frame)
+            self.assertIn("heartbeat 2026-07-14 01:40", local_frame)
+            self.assertIn("expires 2026-07-14 02:30", local_frame)
+            self.assertIn("5h 42% reset 01:45", local_frame)
+            self.assertIn("weekly 30% reset 02:15", local_frame)
+            self.assertIn("2026-07-14T01:50:00", local_frame)
+            self.assertNotIn("Z", local_frame)
+
+            utc_frame = self._plain(top.render(data, 120, now, utc=True))
+            for token in (
+                    "23:45:00Z", "claimed 2026-07-13 23:30Z",
+                    "heartbeat 2026-07-13 23:40Z", "expires 2026-07-14 00:30Z",
+                    "5h 42% reset 23:45Z", "weekly 30% reset 00:15Z",
+                    "2026-07-13T23:50:00Z"):
+                self.assertIn(token, utc_frame)
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
     def test_usage_not_provided_is_distinct_from_unavailable_at_all_widths(self):
         top = load_top()
         data = fixture()
@@ -140,6 +191,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("--interval", proc.stdout)
         self.assertIn("refresh interval in seconds", proc.stdout)
+        self.assertIn("--utc", proc.stdout)
+        self.assertIn("every dashboard time in UTC", proc.stdout)
 
     def test_wide_activity_tabulated_recent_first(self):
         top = load_top()
