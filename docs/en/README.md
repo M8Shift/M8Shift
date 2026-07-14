@@ -118,7 +118,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [064-rfc-effective-time-accounting.md](rfc/064-rfc-effective-time-accounting.md) | Accepted effective-work/non-work accounting: exact append-only state durations going forward, honest unclassified legacy spans, one primary work item per work window, and one permanent global dashboard TIME strip. |
 | [065-rfc-ticketed-committed-pushed-delivery.md](rfc/065-rfc-ticketed-committed-pushed-delivery.md) | Accepted delivery discipline: one structured forge ticket and committed, pushed history for every intentional change, with advisory offline reminders and a named role-based gateway. |
 | [066-rfc-asymmetric-solo-advance.md](rfc/066-rfc-asymmetric-solo-advance.md) | Accepted design for policy-authorized bounded solo progress and deferred reconciliation; implementation remains phased and explicitly deferred. |
-| [067-rfc-detached-vendor-neutral-cli-orchestration.md](rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | Draft feasibility design for detached, vendor-neutral CLI agent orchestration (passive relay + runtime control plane + generic runner + per-CLI adapters), IDE-crash-resistant supervision and durable jobs; Codex/Claude phase 1, Gemini and Mistral Vibe as later adapters; 16 operator-gated forks. |
+| [067-rfc-detached-vendor-neutral-cli-orchestration.md](rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | Accepted design for detached, vendor-neutral CLI agent orchestration: all 16 recommended decisions are resolved; implementation remains phased and explicitly deferred. |
 
 ## Security docs
 

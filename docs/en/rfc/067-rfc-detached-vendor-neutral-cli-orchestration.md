@@ -1,7 +1,7 @@
 # RFC 067 — Detached, vendor-neutral CLI agent orchestration
 
-- **Status:** draft / feasibility design only (#65, #66); no runtime authority is
-  granted by this document
+- **Status:** accepted / DESIGN-ONLY; phased implementation deferred (#157); no
+  runtime authority is granted by this document
 - **Date:** 2026-07-14
 - **Scope:** pluggable agent-CLI adapters, detached process supervision, durable
   recovery, relay coordination, scheduling, and model/task routing
@@ -104,6 +104,10 @@ flowchart TD
 The control plane is durable; model invocations are one-shot by default. A
 provider-native long-lived or resumable session is an adapter capability, not a
 new authority layer.
+
+This RFC accepts the architecture and all policy choices D1-D16 in §11. It does
+not authorize implementation or activate detached orchestration. Delivery remains
+explicitly deferred and requires separately scoped, reviewed phases.
 
 ## 4. The relay is the single contract
 
@@ -382,29 +386,33 @@ verification recipe. A user-global CLI default cannot silently change the
 selected model. Onboarding a vendor extends the catalog and adapter registry;
 it does not change the routing algorithm.
 
-## 11. Operator decision forks
+## 11. Accepted policy decisions
 
-Every fork remains unresolved until the operator accepts one option. The
-recommendation is design input, not active policy.
+The operator accepted all 16 recommended options wholesale. These decisions
+finalize the design but do not activate policy or authorize implementation.
 
-| ID | Decision | Alternatives | Recommendation |
-|---|---|---|---|
-| D1 | Control-plane home | extend `m8shift-runtime.py`; or a separately versioned companion package | start in the runtime companion, split only if packaging/size evidence requires it |
-| D2 | Default process model | permanent provider process; or permanent control plane with one-shot attempts | one-shot attempts; provider session resume optional |
-| D3 | Durable backend | local detached only; native user service; or third-party supervisor | native user service as the supported durable tier, local as a visibly weaker fallback |
-| D4 | Phase 1 adapters | Codex only; Codex + Claude; or all named vendors at once | Codex + Claude conformance first, Gemini and Mistral Vibe after the interface stabilizes |
-| D5 | Adapter definition | Python plugin API; declarative argv templates; or hybrid | hybrid: declarative safe argv/capabilities plus narrowly reviewed lifecycle hooks |
-| D6 | Resume policy | require native resume; prefer it; or always rebuild fresh | prefer proven native resume, fall back to a fresh attempt; never require it for compatibility |
-| D7 | Crash ambiguity | automatic retry; automatic provider resume; or stop for reconciliation | fail closed unless one idempotent recovery action is proven safe by policy |
-| D8 | Initial scheduler | sequential queue; bounded DAG; or unrestricted parallel queue | sequential first, then bounded DAG after recovery tests pass |
-| D9 | Parallel mutation | none; isolated worktrees with serialized integration; or concurrent shared checkout | isolated worktrees with degree-1 integration |
-| D10 | Routing authority | recommendation only; preauthorized automatic routing; or unrestricted automatic selection | recommendation first; allow automatic routing only per task class after dogfood evidence |
-| D11 | Cost basis | vendor prices; subscription headroom; or combined operator weights | operator-owned combined weights with source date and observed usage; capability remains the floor |
-| D12 | Stop semantics | immediate kill; fixed grace; or per-adapter grace with hard cap | generic bounded grace/hard kill, with a provider-specific graceful intent when supported |
-| D13 | Network/external actions | no network; broad agent network; or per-run scoped policies | network off by default; scoped per-run policies and separate action authorization |
-| D14 | Secret resolution | inherited environment; repository config; or host resolver references | host resolver references scoped to one attempt; never values in plans/logs/relay |
-| D15 | Retention | indefinite; fixed age/size; or operator policy with active-evidence floor | operator policy, never deleting active/reconciliation evidence |
-| D16 | Onboarding gate | config entry only; adapter tests; or tests plus operator acceptance | probe + conformance suite + explicit operator acceptance for each supported CLI/version |
+| ID | Decision | Accepted resolution |
+|---|---|---|
+| D1 | Control-plane home | Start in `m8shift-runtime.py`; split into a separately versioned companion only if packaging or size evidence requires it. |
+| D2 | Default process model | Keep a permanent control plane with one-shot attempts; provider-session resume is optional. |
+| D3 | Durable backend | Support a native user service as the durable tier and label local detachment as a visibly weaker fallback. |
+| D4 | Phase 1 adapters | Prove Codex and Claude conformance first; add Gemini CLI and Mistral Vibe after the interface stabilizes. |
+| D5 | Adapter definition | Use a hybrid: declarative safe argv and capabilities plus narrowly reviewed lifecycle hooks. |
+| D6 | Resume policy | Prefer proven native resume and fall back to a fresh attempt; never require native resume for compatibility. |
+| D7 | Crash ambiguity | Fail closed to reconciliation unless policy proves one idempotent recovery action safe. |
+| D8 | Initial scheduler | Start sequentially; add a bounded DAG only after recovery tests pass. |
+| D9 | Parallel mutation | Use isolated worktrees with serialized, degree-1 integration. |
+| D10 | Routing authority | Begin with recommendations; allow automatic routing only for preauthorized task classes after dogfood evidence. |
+| D11 | Cost basis | Use operator-owned combined weights with a source date and observed usage; capability remains the floor. |
+| D12 | Stop semantics | Use generic bounded grace then hard kill, with provider-specific graceful intent where supported. |
+| D13 | Network/external actions | Keep network off by default; use scoped per-run policies and separate external-action authorization. |
+| D14 | Secret resolution | Use host-resolver references scoped to one attempt; never persist values in plans, logs, or the relay. |
+| D15 | Retention | Apply operator policy while never deleting active-attempt or reconciliation evidence. |
+| D16 | Onboarding gate | Require a probe, the conformance suite, and explicit operator acceptance for each supported CLI/version. |
+
+Changing any accepted choice requires an explicit follow-up decision. An
+implementation phase must cite the applicable decisions and may not silently
+substitute a former alternative.
 
 ## 12. Failure and threat handling
 
@@ -423,7 +431,10 @@ recommendation is design input, not active policy.
 | secret or session-ref exposure | scoped resolver, restricted sidecar, redaction, log tests |
 | stop requested during external mutation | finish/abort according to the action's idempotency contract, then reconcile; never assume rollback |
 
-## 13. Implementation sequence after acceptance
+## 13. Deferred implementation sequence
+
+The accepted design remains DESIGN-ONLY. No phase is authorized merely because
+this RFC is accepted; each requires a separately scoped, reviewed change unit.
 
 ### Phase 0 — stabilize evidence
 
@@ -511,8 +522,8 @@ Platform acceptance must additionally prove:
     policies; shared-checkout claim races are not scheduled.
 11. Secrets, external actions, network, retries, retention, and provider
     onboarding await explicit operator policy.
-12. D1–D16 are resolved or deliberately deferred before implementation claims
-    acceptance.
+12. D1–D16 remain reflected exactly in any future implementation, or a follow-up
+    decision records and reviews the change before that implementation proceeds.
 
 ## 16. References
 
