@@ -7574,7 +7574,7 @@ def _delivery_git_findings(root=None):
     malformed local metadata fails open. Ticket existence and actual remote state
     cannot be proven locally and remain review/gateway responsibilities.
     """
-    root = os.path.abspath(root or os.path.dirname(COWORK))
+    root = os.path.abspath(root or os.getcwd())
     inside = _delivery_git_probe(root, "rev-parse", "--is-inside-work-tree")
     if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
         return []

@@ -1487,6 +1487,13 @@ class TestRFC065DeliveryAdvisories(unittest.TestCase):
         self.assertEqual([f["check"] for f in findings], ["delivery.no_upstream"])
         self.assertEqual(findings[0]["severity"], "info")
 
+    def test_default_probe_uses_invoking_checkout_not_relay_root(self):
+        self.init_repo()
+        self.git("switch", "-q", "-c", "issue/74-delivery")
+        with mock.patch.object(cowork.os, "getcwd", return_value=self.d):
+            findings = cowork._delivery_git_findings()
+        self.assertEqual([f["check"] for f in findings], ["delivery.no_upstream"])
+
     def test_equal_upstream_is_clean_then_ahead_is_unpushed(self):
         self.init_repo()
         self.git("switch", "-q", "-c", "issue/74-delivery")
