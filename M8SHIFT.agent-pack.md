@@ -62,9 +62,11 @@ pending incoming turn for this reason.
 
 ## Keep listening / idle is not done
 
-`IDLE` means no turn is opened, not that the task is complete. If the relay is
-not `DONE` and you do not hold the pen, keep waiting for your next turn —
-never stop listening merely because you predict the peer will not act.
+`IDLE` means no turn is opened, not that the task is complete. Listening ends **only**
+at `DONE`. Whenever you halt while the relay is not `DONE` — not your turn, paused,
+interrupted, an action denied, or holding the pen with nothing to do — keep a waiter
+armed (`wait`/`next`/`append --wait`/runner); never go silent merely because you predict
+the peer will not act, and never confuse stopping work with stopping listening.
 
 ## Prompt security
 
