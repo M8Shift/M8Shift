@@ -2,10 +2,12 @@ import subprocess
 import sys
 import unittest
 import importlib.util
+import io
 import os
 import shutil
 import tempfile
 import time
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -183,6 +185,90 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         for width in (80, 120):
             output = self._plain(top.render(fixture(), width, self.NOW, interval=7))
             self.assertIn("tick 7s", output)
+
+    @unittest.skipUnless(os.name == "posix", "cbreak is POSIX-only")
+    def test_enter_sets_cbreak_and_restore_reinstates_terminal(self):
+        top = load_top()
+
+        class FakeStdin:
+            @staticmethod
+            def isatty():
+                return True
+
+            @staticmethod
+            def fileno():
+                return 17
+
+        saved = ["original terminal attributes"]
+        screen = io.StringIO()
+        with mock.patch.object(top.sys, "stdin", FakeStdin()), \
+                mock.patch.object(top.termios, "tcgetattr", return_value=saved) as get, \
+                mock.patch.object(top.tty_module, "setcbreak") as cbreak, \
+                mock.patch.object(top.termios, "tcsetattr") as restore_attrs:
+            top.enter(screen)
+            get.assert_called_once_with(17)
+            cbreak.assert_called_once_with(17, top.termios.TCSANOW)
+            top.restore(screen)
+            restore_attrs.assert_called_once_with(
+                17, top.termios.TCSADRAIN, saved)
+            top.restore(screen)
+            self.assertEqual(restore_attrs.call_count, 1)
+        self.assertEqual(screen.getvalue(), top.ALT_ON + top.ALT_OFF)
+
+    def test_read_key_decodes_arrows_and_standalone_escape(self):
+        top = load_top()
+
+        def ready(readers, _writers, _errors, _timeout):
+            return readers, [], []
+
+        self.assertEqual(top.read_key(io.StringIO("\x1b[A"), selector=ready), "up")
+        self.assertEqual(top.read_key(io.StringIO("\x1b[B"), selector=ready), "down")
+        self.assertEqual(
+            top.read_key(io.StringIO("\x1b"), selector=lambda *_: ([], [], [])),
+            "escape")
+        self.assertEqual(top.read_key(io.StringIO("q"), selector=ready), "q")
+
+    def test_every_advertised_key_has_a_real_state_effect(self):
+        top = load_top()
+        self.assertEqual(top.key_effect("q", 2, 4, False), (True, False, 2, False))
+        self.assertEqual(top.key_effect("?", 2, 4, False), (False, True, 2, True))
+        self.assertEqual(top.key_effect("?", 2, 4, True), (False, True, 2, False))
+        self.assertEqual(top.key_effect("r", 2, 4, True), (False, True, 2, False))
+        self.assertEqual(top.key_effect("escape", 2, 4, True),
+                         (False, True, 2, False))
+        self.assertEqual(top.key_effect("up", 2, 4, False), (False, True, 1, False))
+        self.assertEqual(top.key_effect("down", 2, 4, False), (False, True, 3, False))
+        self.assertEqual(top.key_effect("down", 4, 4, False), (False, True, 4, False))
+
+    def test_activity_arrows_address_a_clamped_height_aware_window(self):
+        top = load_top()
+        snap = fixture()
+        snap["activity"] = [
+            {"turn": n, "agent": "codex", "model": "gpt", "summary": "event %d" % n}
+            for n in range(1, 11)
+        ]
+        # One agent makes the wide frame's fixed portion 14 rows, leaving four
+        # activity rows in an 18-line terminal.
+        self.assertEqual(top.activity_max_scroll(snap, 120, 18), 6)
+        output = self._plain(top.render(
+            snap, 120, self.NOW, height=18, activity_offset=1))
+        self.assertEqual(len(output.splitlines()), 18)
+        self.assertIn("activity 2-5/10", output)
+        self.assertIn("│  9", output)
+        self.assertNotIn("│  10", output)
+        self.assertIn("│  6", output)
+        self.assertNotIn("│  5", output)
+
+    def test_help_overlay_documents_keys_and_preserves_frame_width(self):
+        top = load_top()
+        for width in (80, 120, 160):
+            output = top.render_help(width, interval=7)
+            expected = min(width, 120)
+            self.assertTrue(all(len(line) == expected for line in output.splitlines()))
+            self.assertIn("q       quit", output)
+            self.assertIn("Esc     close help", output)
+            self.assertIn("↑ / ↓   scroll", output)
+            self.assertIn("every 7s", output)
 
     def test_help_documents_refresh_interval(self):
         proc = subprocess.run(
