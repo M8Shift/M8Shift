@@ -485,6 +485,51 @@ def _track_cells(values, widths):
     )
 
 
+def _scaled_track_widths(total, baseline):
+    """Fit positive tracks into a smaller total by proportional remainder."""
+    if total < len(baseline) or any(value <= 0 for value in baseline):
+        raise ValueError("scaled tracks require room for positive declarations")
+    if total >= sum(baseline):
+        result = list(baseline)
+        result[-1] += total - sum(result)
+        return result
+    remaining = total - len(baseline)
+    weights = [value - 1 for value in baseline]
+    total_weight = sum(weights)
+    additions = [remaining * weight // total_weight for weight in weights]
+    residual = remaining - sum(additions)
+    order = sorted(
+        range(len(weights)),
+        key=lambda index: (-(remaining * weights[index] % total_weight), index),
+    )
+    for index in order[:residual]:
+        additions[index] += 1
+    return [1 + addition for addition in additions]
+
+
+def _pen_ttl_track_widths(width):
+    """Return shared PEN/TTL tracks: label, A, B, C, trailing heartbeat."""
+    width = max(24, width)
+    inner = width - 2
+    if width >= 120:
+        # Keep the three semantic column starts fixed as the frame grows; only
+        # the trailing heartbeat track absorbs extra width.
+        return _flex_track_widths(
+            width, (10, 31, 15, 31, 31), (0, 0, 0, 0, 1))
+    if width >= 100:
+        result = [10, 31, 15, 31, 11]
+        result[-1] += inner - sum(result)
+        return result
+    # The stacked view uses the same shared-column contract with a shorter
+    # label track. At very small widths, scale the four payload tracks while
+    # keeping enough room for the complete PEN/TTL label.
+    if inner < 78:
+        return [4] + _scaled_track_widths(inner - 4, (25, 13, 26, 10))
+    result = [4, 25, 13, 26, 10]
+    result[-1] += inner - sum(result)
+    return result
+
+
 def render(snapshot, width, now=None, interval=2, utc=False, height=None,
            activity_offset=0, expanded_activity=None, text_offset=0):
     # Use the real terminal width. The 100-column breakpoint is stable; the wide
@@ -550,14 +595,16 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     heartbeat, heartbeat_role = _heartbeat_display(snapshot, current, slim=True)
     heartbeat_style = {"green": green, "yellow": amber, "red": red}.get(
         heartbeat_role, dim)
-    pen_prefix = "PEN %s  " % holder
-    pen_suffix = "  %s  claimed %s  %s" % (
-        _pen_turn_label(snapshot), claimed, heartbeat)
+    pen_tracks = _pen_ttl_track_widths(width)
+    turn_seg = _pen_turn_label(snapshot)
+    pen_plain = _track_cells(
+        ("PEN", "%s [%s]" % (holder, state), turn_seg,
+         "claimed %s" % claimed, heartbeat),
+        pen_tracks)
     # Compose styles after padding so ANSI bytes never affect border alignment.
-    pen_plain = clean(pen_prefix + "[%s]" % state + pen_suffix, inner).ljust(inner)
     pen_plain = paint(pen_plain, holder, amber)
     pen_plain = paint(pen_plain, "[%s]" % state, badge)
-    pen_plain = paint(pen_plain, _pen_turn_label(snapshot), magenta)
+    pen_plain = paint(pen_plain, turn_seg, magenta)
     pen_plain = paint(pen_plain, heartbeat, heartbeat_style)
     lines.append("│" + pen_plain + "│")
 
@@ -569,11 +616,12 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     gauge = "█" * filled + "░" * (10 - filled)
     left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
     status_seg = "alive" if alive else "stale"
-    ttl = "TTL <%s>  %s  expires %s (%s)" % (
-        gauge, left_seg,
-        _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—",
-        status_seg)
-    ttl_row = clean(ttl, inner).ljust(inner)
+    gauge_seg = "<%s>" % gauge
+    ttl_expiry = "expires %s (%s)" % (
+        _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—", status_seg)
+    ttl_row = _track_cells(
+        ("TTL", gauge_seg, left_seg, ttl_expiry),
+        pen_tracks[:3] + [sum(pen_tracks[3:])])
     ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
     ttl_row = paint(ttl_row, status_seg, green if alive else red)
     lines += ["│" + ttl_row + "│", sep, row("AGENTS", dim)]
@@ -736,16 +784,11 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     hb_seg, heartbeat_role = _heartbeat_display(snapshot, current)
     heartbeat_style = {"green": green, "yellow": amber, "red": red}.get(
         heartbeat_role, dim)
-    pen_row = adaptive_cells(
-        ("  PEN", holder, "[%s]" % state, turn_seg,
+    pen_tracks = _pen_ttl_track_widths(width)
+    pen_row = _track_cells(
+        ("  PEN", "%s [%s]" % (holder, state), turn_seg,
          "claimed %s" % claimed, hb_seg),
-        (0, 7, 14, 31, 44, 70),
-        # The live-turn track stays fixed as the frame grows.  Reserve room for
-        # five-digit turns plus two spare characters; claimed/heartbeat absorb
-        # all flex so wider terminals cannot distort the turn label.
-        (9, 8, 17, 15, 26, 43),
-        (0, 0, 0, 0, 1, 1),
-    )
+        pen_tracks)
     pen_row = paint(pen_row, holder, amber)
     pen_row = paint(pen_row, "[%s]" % state, badge)
     pen_row = paint(pen_row, turn_seg, magenta)
@@ -762,12 +805,9 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     status_seg = "alive" if alive else "stale"
     ttl_expiry = "expires %s (%s)" % (
         _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—", status_seg)
-    ttl_row = adaptive_cells(
+    ttl_row = _track_cells(
         ("  TTL", gauge, left_seg, ttl_expiry),
-        (0, 10, 12 + gw, 24 + gw),
-        (10, 30, 12, 66),
-        (0, 0, 0, 1),
-    )
+        pen_tracks[:3] + [sum(pen_tracks[3:])])
     ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
     ttl_row = paint(ttl_row, status_seg, green if alive else red)
     lines += ["│" + ttl_row + "│", blank]

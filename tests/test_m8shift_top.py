@@ -82,6 +82,22 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 # colour is emitted in a colour-capable env (stripped for the width check)
                 self.assertIn("\x1b[", output)
 
+    def test_pen_and_ttl_share_semantic_column_offsets_at_all_layouts(self):
+        top = load_top()
+        for width in (80, 120, 160):
+            with self.subTest(width=width), \
+                    mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                lines = top.render(fixture(), width, self.NOW).splitlines()
+            pen = next(line for line in lines if "PEN" in line)
+            ttl = next(line for line in lines if "TTL" in line)
+            gauge = "<" if width < 100 else "█"
+            self.assertEqual(pen.index("codex"), ttl.index(gauge))
+            self.assertEqual(pen.index("→ turn 8"), ttl.index("15:00 left"))
+            self.assertEqual(pen.index("claimed"), ttl.index("expires"))
+            self.assertGreater(pen.index("hb " if width < 100 else "heartbeat "),
+                               pen.index("claimed"))
+            self.assertTrue(all(len(line) == width for line in lines))
+
     def test_header_wordmark_uses_truecolour_when_terminal_advertises_it(self):
         top = load_top()
         for capability in ("truecolor", "24bit"):
@@ -551,7 +567,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "eb47013abcfbb8bccbb57ff9e5bea3cfe730c3bf6738726d6a72f112662ac3f6",
+            "931564037da8ff5a5724cad569fd3f56ee4f6346af691e1b1b4ca05a54b1270e",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
