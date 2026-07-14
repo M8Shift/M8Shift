@@ -1513,6 +1513,9 @@ class TestRoster(CLIBase):
         # generated protocol no longer overpromises full autonomy and carries the UI caveat
         self.assertNotIn("operate without human help", proto)
         self.assertIn("does not wake your chat UI", proto)
+        self.assertIn("Pickup liveness", proto)
+        self.assertIn("long read-only review", proto)
+        self.assertIn("`AWAITING_<you>` has no heartbeat", proto)
 
     def test_invalid_token_in_agents_rejected(self):
         """NR-token: a malformed --agents token is rejected, not silently filtered."""
@@ -5423,9 +5426,13 @@ class TestRuntimeCompanion(CLIBase):
         self.assertIn(r.returncode, (0, 1), r.stdout + r.stderr)
         messages = [f["message"] for f in json.loads(r.stdout)["findings"]
                     if f["check"] == "runtime.stale_state"]
+        liveness = [f["message"] for f in json.loads(r.stdout)["findings"]
+                    if f["check"] == "runtime.awaiting_unclaimed"]
         self.assertTrue(any("no live listener" in m for m in messages), messages)
         self.assertTrue(any("none are fresh" in m for m in messages), messages)
         self.assertFalse(any("advisory unavailable" in m for m in messages), messages)
+        self.assertTrue(any("read-only review" in m and "WORKING_CLAUDE" in m
+                            for m in liveness), liveness)
 
     def test_stale_awaiting_equal_to_threshold_is_not_stale(self):
         import importlib.util
@@ -5451,6 +5458,8 @@ class TestRuntimeCompanion(CLIBase):
             findings = runtime.stale_state_findings(60)
 
         self.assertFalse(any(f["check"] == "runtime.stale_state" for f in findings), findings)
+        self.assertTrue(any(f["check"] == "runtime.awaiting_unclaimed" for f in findings),
+                        findings)
 
     def test_wait_and_next_lifecycle_notice_is_tty_only(self):
         notice = "host lifecycle:"
@@ -10620,6 +10629,8 @@ class TestRFC048PRA(CLIBase):
         # RFC 048 pack content floor, including the #99 delivery discipline verbatim.
         for needle in (
             "wait → claim → work → validate → append",   # work loop w/ validation
+            "## Claim on pickup",                         # #47 pickup liveness
+            "long\nread-only review or verification",    # claim read-only work too
             "may-i-write",                                # write-after-claim rule
             "shell or runtime loop",                      # waiting rule (not chat polling)
             "Never hold `WORKING_<you>` with no active task",   # no-parking rule
@@ -10688,6 +10699,8 @@ class TestRFC048PRA(CLIBase):
             # The five RFC 048 floor items, asserted literally: 1. write guard,
             # 2. status guard, 3. idle-is-not-done, 4. prompt security, 5. pointers.
             self.assertIn("Write guard", content, name)
+            self.assertIn("Claim on pickup", content, name)
+            self.assertIn("long read-only review/verification", content, name)
             self.assertIn("Status guard", content, name)
             self.assertIn("Idle is not done", content, name)
             self.assertIn("Prompt security", content, name)

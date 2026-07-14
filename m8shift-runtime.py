@@ -3206,13 +3206,21 @@ def stale_state_findings(stale_after_seconds):
     status = run_core_json("status", "--json")
     state = status.get("state", "")
     since = parse_timestamp(status.get("since"))
-    if state.startswith("AWAITING_") and since:
+    if state.startswith("AWAITING_"):
         agent = state[len("AWAITING_"):].lower()
-        _exists, pid = read_listener_pid(agent)
-        if ((dt.datetime.now(dt.timezone.utc) - since).total_seconds() > stale_after_seconds
-                and not (pid and listener_pid_alive(pid))):
-            findings.append({"severity": "info", "check": "runtime.stale_state",
-                             "message": f"{state} is stale and {agent} has no live listener; a human wake-up may be required"})
+        findings.append({
+            "severity": "info",
+            "check": "runtime.awaiting_unclaimed",
+            "message": (f"{agent} holds the handed-off turn but has not claimed it; "
+                        "if working, claim now — even for read-only review — so peers "
+                        f"receive a WORKING_{agent.upper()} expiry/liveness signal"),
+        })
+        if since:
+            _exists, pid = read_listener_pid(agent)
+            if ((dt.datetime.now(dt.timezone.utc) - since).total_seconds() > stale_after_seconds
+                    and not (pid and listener_pid_alive(pid))):
+                findings.append({"severity": "info", "check": "runtime.stale_state",
+                                 "message": f"{state} is stale and {agent} has no live listener; a human wake-up may be required"})
     rows, _problems = read_usage_ledger_diagnostic()
     snapshots = []
     for row in rows:

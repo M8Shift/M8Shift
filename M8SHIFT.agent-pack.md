@@ -24,6 +24,13 @@ session ends). Validation is part of the loop: a step is "done" when it is
 exercised and verified by the project's own definition (build, tests, lint,
 review) — not merely written.
 
+## Claim on pickup
+
+Claim as soon as you pick up a handed-off turn to work, even for a long
+read-only review or verification. `AWAITING_<you>` has no lease or heartbeat;
+`WORKING_<you>` plus `expires` is the liveness signal your peer can see. Refresh
+that claim during long work.
+
 ## May I write?
 
 Write only after a successful `./m8shift.py claim <you>`; verify with
