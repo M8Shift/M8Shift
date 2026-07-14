@@ -149,6 +149,59 @@ for line in indexed.splitlines():
         listed.add(path)
 
 targets = changed & listed
+
+# --- RFC 058: same-PR discipline + staged index integrity (advisory) ---------
+# This runs only in the M8Shift source repository (identified by docs/en/rfc).
+# It intentionally never changes the exit status: reviewers/CI enforce the policy;
+# the hook supplies immediate, index-accurate feedback.
+rfc_dir = os.path.join(root, "docs", "en", "rfc")
+if os.path.isdir(rfc_dir):
+    rfc_re = re.compile(r"^docs/en/rfc/([0-9]{3}-rfc-[a-z0-9-]+[.]md)$")
+
+    def substantive(path):
+        if path.startswith(("tests/", "docs/", "i18n/")):
+            return False
+        if path in ("README.md", "CHANGELOG.md", "checksums.sha256", "LICENSE", "NOTICE"):
+            return False
+        return (path.endswith((".py", ".sh", ".ps1")) or
+                path.startswith(("hooks/", "skills/", ".github/workflows/",
+                                 ".gitea/workflows/", ".gitlab/")))
+
+    staged_rfcs = {match.group(1) for path in changed for match in [rfc_re.match(path)] if match}
+    substantive_paths = sorted(path for path in changed if substantive(path))
+    if substantive_paths and not staged_rfcs:
+        print("m8shift pre-commit: RFC 058 advisory — substantive staged change has no "
+              "same-commit RFC/amendment: %s" % ", ".join(substantive_paths[:8]))
+
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "-z", "--", "docs/en/rfc"]
+    ).decode("utf-8", "surrogateescape").split("\0")
+    rfc_files = {match.group(1) for path in tracked for match in [rfc_re.match(path)] if match}
+
+    def index_links(path, prefix, marker):
+        try:
+            text = subprocess.check_output(["git", "show", ":" + path]).decode("utf-8")
+        except (subprocess.CalledProcessError, UnicodeDecodeError):
+            return []
+        start = text.find(marker)
+        if start < 0:
+            return []
+        end = text.find("\n## ", start + len(marker))
+        section = text[start:end if end >= 0 else len(text)]
+        return re.findall(re.escape(prefix) + r"([0-9]{3}-rfc-[a-z0-9-]+[.]md)", section)
+
+    drift = []
+    for path, prefix, marker in (
+        ("README.md", "docs/en/rfc/", "| № | RFC |"),
+        ("docs/en/README.md", "rfc/", "## RFCs"),
+    ):
+        links = index_links(path, prefix, marker)
+        if set(links) != rfc_files or len(links) != len(rfc_files):
+            drift.append(path)
+    if drift:
+        print("m8shift pre-commit: RFC 058 advisory — staged RFC index drift in %s" %
+              ", ".join(drift))
+
 if not targets:
     raise SystemExit(0)
 if unstaged == 1:

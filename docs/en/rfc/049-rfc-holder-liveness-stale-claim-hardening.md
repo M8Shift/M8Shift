@@ -1,6 +1,6 @@
 # RFC 049 — Holder liveness and stale-claim hardening
 
-Status: design rev 4 APPROVED / PR A + PR B + PR C implemented (2026-07-10 — protective-vs-audit heartbeat model exact [CLI --source/--cadence-seconds, claim-refresh audit-only], deterministic one-attempt phase-2 with three pinned refusal branches, pinned force+release-back audit sequence, listener liveness producer, worktree ownership sidecar/guard + companion doctor, editorial fixes)
+Status: design rev 4 APPROVED / PR A + PR B + PR C implemented (2026-07-10; amendment A7 claim-on-pickup liveness implemented 2026-07-13)
 Target: next minor after RFC 052
 Related issues: #6, #104 (incident analysis + recurrences)
 Owner: core relay + runtime/worktree companions
@@ -132,6 +132,14 @@ prevents expiry without ever proving liveness after it.
 - **A6 — no automatic double-holder.** No recovery path may ever produce two
   `WORKING_*` holders: the A2 grace recheck plus under-lock validation keep the
   single-pen invariant, and the race is pinned by tests.
+- **A7 — claim on pickup, including read-only work (#47).** `AWAITING_<agent>`
+  has neither a lease nor a holder heartbeat. An agent that has started a handed-off
+  review, investigation, or verification MUST claim immediately even when it does not
+  yet expect to edit files. `WORKING_<agent>` plus `expires` is the peer-visible
+  liveness signal; long pickup work follows A1 refresh/checkpoint discipline. The
+  runtime doctor emits advisory `runtime.awaiting_unclaimed` whenever a handed-off
+  turn remains unclaimed. This signal cannot prove whether work actually started and
+  never auto-claims or changes routing.
 
 ## Goals
 
@@ -431,7 +439,7 @@ Worktree companion doctor findings:
   cross-owner protection as advisory companion enforcement only.
 - Tests cover malformed, stale, orphaned, fresh, wrong-session, wrong-turn, and
   mixed-version/no-heartbeat behavior.
-- **Incident-derived test families (A1-A6)**:
+- **Incident-derived test families (A1-A7)**:
   - refresh-vs-reclaim race: the TWO-PHASE flow (observe+capture identity ->
     release -> grace -> reacquire+revalidate) never steals a lock refreshed
     during the grace, and never blocks the holder's own refresh during it;
@@ -452,6 +460,9 @@ Worktree companion doctor findings:
     never yield two `WORKING_*` states (first transition wins, others refuse);
   - RFC 052 two-relay: `heartbeat` refuses under unresolved ambiguity; a bound
     producer writes only the bound root's sidecar.
+  - claim-on-pickup guidance is present in generated protocol/agent-pack/anchor
+    surfaces, and runtime doctor reports `runtime.awaiting_unclaimed` without
+    mutating the relay or suppressing the older stale-state diagnostic.
 - `heartbeat` is classified in the RFC 052 mutator matrix (actor-bearing) and
   covered by the matrix meta-test; the protocol core stays under its byte
   budget after the wording update; mixed-version behavior (peer without RFC

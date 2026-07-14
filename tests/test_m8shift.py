@@ -1105,6 +1105,66 @@ class TestPreCommitHook(unittest.TestCase):
         with open(manifest_path, encoding="utf-8") as f:
             self.assertIn("# keep my unstaged note", f.read())
 
+    def test_precommit_warns_for_substantive_change_without_rfc(self):
+        """RFC 058 reminder is index-aware but advisory (commit still succeeds)."""
+        rfc_dir = os.path.join(self.d, "docs", "en", "rfc")
+        os.makedirs(rfc_dir, exist_ok=True)
+        with open(os.path.join(rfc_dir, "001-rfc-example.md"), "w", encoding="utf-8") as f:
+            f.write("# RFC 001 — Example\n")
+        with open(os.path.join(self.d, "README.md"), "w", encoding="utf-8") as f:
+            f.write("| № | RFC |\n|---:|-----|\n"
+                    "| 001 | [Example](docs/en/rfc/001-rfc-example.md) |\n\n## Next\n")
+        with open(os.path.join(self.d, "docs", "en", "README.md"), "w", encoding="utf-8") as f:
+            f.write("## RFCs\n\n| Document | Purpose |\n|---|---|\n"
+                    "| [001-rfc-example.md](rfc/001-rfc-example.md) | Example |\n\n"
+                    "## Next\n")
+        with open(os.path.join(self.d, "checksums.sha256"), "w", encoding="utf-8") as f:
+            f.write("")
+        subprocess.run(["git", "add", "README.md", "docs", "checksums.sha256"],
+                       cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "rfc baseline"], cwd=self.d, check=True,
+                       capture_output=True, text=True, env=self._local_env())
+
+        core = os.path.join(self.d, "m8shift.py")
+        with open(core, "a", encoding="utf-8") as f:
+            f.write("\n# staged substantive test change\n")
+        subprocess.run(["git", "add", "m8shift.py"], cwd=self.d, check=True,
+                       capture_output=True, text=True)
+        r = subprocess.run(["git", "commit", "-m", "substantive"], cwd=self.d,
+                           capture_output=True, text=True, env=self._local_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RFC 058 advisory", r.stderr)
+        self.assertIn("no same-commit RFC/amendment", r.stderr)
+
+
+class TestRFC058Governance(unittest.TestCase):
+    def test_rfc_index_doctor_is_clean_for_repository(self):
+        self.assertEqual(cowork._rfc_governance_findings(REPO), [])
+
+    def test_rfc_index_doctor_reports_drift_advisory(self):
+        root = tempfile.mkdtemp(prefix="m8shift-rfc-drift-")
+        try:
+            os.makedirs(os.path.join(root, "docs", "en", "rfc"))
+            with open(os.path.join(root, "docs", "en", "rfc", "001-rfc-one.md"),
+                      "w", encoding="utf-8") as f:
+                f.write("# RFC 001 — One\n")
+            with open(os.path.join(root, "README.md"), "w", encoding="utf-8") as f:
+                f.write("| № | RFC |\n|---:|---|\n\n## Next\n")
+            with open(os.path.join(root, "docs", "en", "README.md"),
+                      "w", encoding="utf-8") as f:
+                f.write("## RFCs\n\n"
+                        "[Ghost](rfc/999-rfc-ghost.md)\n\n## Next\n")
+            findings = cowork._rfc_governance_findings(root)
+            self.assertTrue(findings)
+            self.assertTrue(all(f["check"] == "rfc.index_drift" for f in findings))
+            self.assertTrue(all(f["severity"] == "warning" for f in findings))
+            messages = " ".join(f["message"] for f in findings)
+            self.assertIn("missing 001-rfc-one.md", messages)
+            self.assertIn("orphaned 999-rfc-ghost.md", messages)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 # ───────────────────────────── robustness / inputs ─────────────────────────
 

@@ -7021,6 +7021,86 @@ def _skills_findings():
     return findings
 
 
+RFC_FILE_RE = re.compile(r"\A([0-9]{3})-rfc-[a-z0-9-]+\.md\Z")
+
+
+def _rfc_index_links(text, prefix):
+    """Return canonical RFC filenames linked from one bounded README index section."""
+    if prefix == "docs/en/rfc/":
+        marker = "| № | RFC |"
+        start = text.find(marker)
+        if start < 0:
+            return []
+        end = text.find("\n## ", start)
+    else:
+        marker = "## RFCs"
+        start = text.find(marker)
+        if start < 0:
+            return []
+        end = text.find("\n## ", start + len(marker))
+    section = text[start:end if end >= 0 else len(text)]
+    return re.findall(re.escape(prefix) + r"([0-9]{3}-rfc-[a-z0-9-]+\.md)", section)
+
+
+def _rfc_governance_findings(root=None):
+    """RFC 058: bounded repository-only index integrity advisory.
+
+    Installed/adopter projects normally have no docs/en/rfc directory and receive no
+    finding. This checker is read-only, fail-open on unrelated I/O, and never affects
+    relay validity or claimability.
+    """
+    root = os.path.abspath(root or os.path.dirname(COWORK))
+    rfc_dir = os.path.join(root, "docs", "en", "rfc")
+    if not os.path.isdir(rfc_dir):
+        return []
+    findings = []
+    try:
+        names = sorted(name for name in os.listdir(rfc_dir) if RFC_FILE_RE.fullmatch(name))
+        files = set(names)
+        by_number = {}
+        for name in names:
+            number = RFC_FILE_RE.fullmatch(name).group(1)
+            by_number.setdefault(number, []).append(name)
+        for number, same_number in sorted(by_number.items()):
+            if len(same_number) > 1:
+                findings.append(doctor_finding(
+                    "rfc.index_drift", "warning",
+                    "RFC filename prefix %s is assigned to multiple files: %s." %
+                    (number, ", ".join(same_number)), "docs/en/rfc"))
+
+        for rel, prefix in (("README.md", "docs/en/rfc/"),
+                            ("docs/en/README.md", "rfc/")):
+            path = os.path.join(root, *rel.split("/"))
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    links = _rfc_index_links(fh.read(), prefix)
+            except (OSError, UnicodeError) as exc:
+                findings.append(doctor_finding(
+                    "rfc.index_drift", "warning", "%s cannot be read: %s." % (rel, exc), rel))
+                continue
+            counts = {}
+            for name in links:
+                counts[name] = counts.get(name, 0) + 1
+            missing = sorted(files - set(counts))
+            orphaned = sorted(set(counts) - files)
+            duplicated = sorted(name for name, count in counts.items() if count != 1)
+            if missing or orphaned or duplicated:
+                parts = []
+                if missing:
+                    parts.append("missing " + ", ".join(missing))
+                if orphaned:
+                    parts.append("orphaned " + ", ".join(orphaned))
+                if duplicated:
+                    parts.append("duplicated " + ", ".join(duplicated))
+                findings.append(doctor_finding(
+                    "rfc.index_drift", "warning", "%s RFC index: %s." %
+                    (rel, "; ".join(parts)), rel,
+                    "make this index match docs/en/rfc exactly"))
+    except OSError:
+        return findings
+    return findings
+
+
 def collect_doctor_findings(security=False, contracts=False, update_source="",
                             install_report=None, hygiene=False,
                             hygiene_verbose=False, hygiene_anchors=False):
@@ -7048,6 +7128,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
         # RFC 050 Phase 1b: skills/ validation is repo-scoped like hygiene —
         # it runs with or without a relay (advisory, fail-open, bounded).
         out.extend(_skills_findings())
+        out.extend(_rfc_governance_findings())
         return out
     try:
         text = read()
@@ -7401,6 +7482,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
     # RFC 050 Phase 1b: advisory open-format skill validation (always-on when a
     # skills/ directory exists; bounded, fail-open, never gates --lint).
     findings.extend(_skills_findings())
+    findings.extend(_rfc_governance_findings())
     return findings
 
 
@@ -7480,10 +7562,11 @@ def cmd_doctor(args):
     enforce = os.environ.get(HYGIENE_SCRUB_ENFORCE_ENV, "") == "1"
     advisory_checks = ("hygiene.denylist", "hygiene.anchor_foreign_path",
                        "hygiene.anchor_roots_unset")
-    # RFC 050: skills.* findings are advisory ALWAYS — they never flip the
+    # RFC 050/058: skills.* and rfc.* findings are advisory ALWAYS — they never flip the
     # --lint exit code, even under M8SHIFT_SCRUB_ENFORCE (rc 0 contract).
     gating = [f for f in visible
               if not f["check"].startswith("skills.")
+              and not f["check"].startswith("rfc.")
               and (f["check"] not in advisory_checks or enforce)]
     return 1 if args.lint and gating else 0
 

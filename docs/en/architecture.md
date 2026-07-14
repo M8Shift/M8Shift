@@ -1,11 +1,14 @@
 # 🏛️ Architecture Document — M8Shift
 
-> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-07-12 (v3.60.0)
+> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-07-14
 >
 > This architecture reflects the current v3 model: active roster of ≥2 agents, one
 > core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
-> holder liveness (RFC 049: protective `heartbeat` beats + two-phase force recovery),
-> a read-only usage advisory in the core display (RFC 051), the opt-in
+> holder liveness (RFC 049: protective `heartbeat` beats, two-phase force recovery,
+> and A7 claim-on-pickup), a read-only usage advisory in the core display (RFC 051,
+> including structural-absence semantics), self-declared model provenance (RFC 056),
+> index-accurate checksum maintenance (RFC 057), the RFC/index governance advisory
+> (RFC 058), and the opt-in
 > [`m8shift-worktree.py`](rfc/008-rfc-worktree-companion.md) companion for degree-2 isolated worktree
 > concurrency (with an advisory ownership sidecar since RFC 049 PR C), and the local
 > `m8shift-runtime.py` companion for presence/inbox/progress/listener/usage sidecars.
@@ -204,7 +207,7 @@ flowchart TB
         LEDG["append-only ledgers<br/>memory · tasks · sessions · requests"]
         INIT["init<br/>anchors (stanza) · host .gitignore block"]
         DEC["decisions<br/>target · scaffold (ADR + issue templates)"]
-        HOOK["commit-msg hook<br/>Agent-Model + Coordinated-With trailers"]
+        HOOK["local Git hooks<br/>commit provenance · staged checksums (RFC 057)<br/>RFC same-PR/index advisory (RFC 058)"]
     end
     class LOCK,LEDG,INIT,DEC,HOOK core
 
@@ -395,6 +398,8 @@ afterwards. Decisions and their contradictions are recorded through the **forge 
 | agent | `M8SHIFT.memory.md`, `M8SHIFT.tasks.md` | local file system | W (append), R for recap/list/show |
 | agent/operator | `M8SHIFT.requests.md` | local file system | W (append), R for status/next hints |
 | agent wrapper / listener | `.m8shift/holder-heartbeats/<agent>.json` (via `heartbeat` verb) | local file system | W (protective liveness beats, RFC 049) |
+| agent process | LOCK `models` + immutable turn `model` (via `M8SHIFT_AGENT_MODEL`) | local environment → relay file | W while claiming/appending (self-declared, unverified, advisory; RFC 056) |
+| local pre-commit hook | Git index + `checksums.sha256`; RFC files + both README indices | local Git | W only for checksum refresh; RFC governance read-only/advisory (RFC 057/058) |
 | `m8shift-worktree.py` | `.m8shift/worktrees/*`, `.m8shift/worktree-owners/*` (ownership sidecars + takeover ledger), canonical `M8SHIFT.md` | local file system + Git | W, serialized integration |
 | `m8shift-runtime.py` | `.m8shift/runtime/*`, `.m8shift/usage/*` (adapter registry + snapshot ledger) | local file system | W (advisory sidecars only) |
 
