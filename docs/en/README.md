@@ -113,6 +113,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [059-rfc-terminal-colour-capability-semantic-rendering.md](rfc/059-rfc-terminal-colour-capability-semantic-rendering.md) | Implemented capability-tiered semantic palette for the read-only dashboard, with textual/symbolic meaning independent of colour. |
 | [060-rfc-adaptive-terminal-geometry.md](rfc/060-rfc-adaptive-terminal-geometry.md) | Implemented automatic real-terminal geometry, deterministic wide-track flex, exact-height activity fill, and self-pipe SIGWINCH redraws for the read-only dashboard. |
 | [061-rfc-bounded-adaptive-activity.md](rfc/061-rfc-bounded-adaptive-activity.md) | Implemented parameterized bounded activity provision, a capped adaptive viewport, true turn-position labels, and explicit truncated-buffer edges. |
+| [062-rfc-listening-ends-only-at-done.md](rfc/062-rfc-listening-ends-only-at-done.md) | Strengthened the listening invariant so any halt — including holding the pen, PAUSED, or a denied action — suspends acting but never listening; only DONE ends listening, for every agent. |
 
 ## Security docs
 

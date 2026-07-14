@@ -3274,8 +3274,11 @@ class TestAuditFixes(CLIBase):
         self.assertIn("idle` is **not** `DONE`", cowork.PROTOCOL["en"])
         self.assertIn("keep `wait <you>` armed", cowork.PROTOCOL["en"])
         self.assertIn("read it before any\nempty handback", cowork.PROTOCOL["en"])
+        # RFC 062: listening ends ONLY at DONE; the invariant covers pen-holders too.
+        self.assertIn("ends **only** at `DONE`", cowork.PROTOCOL["en"])
         s = cowork.stanza_for("claude")
         self.assertIn("idle` is not `DONE`", s)
+        self.assertIn("even holding the pen", s)
         # RFC 048: the compact floor stanza keeps the keep-listening rule on one line.
         self.assertIn("keep `./m8shift.py wait claude` armed", s)
         self.assertIn("Never bounce unread work", s)
