@@ -123,6 +123,35 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         plain = self._plain(output)
         self.assertTrue(all(len(line) == 120 for line in plain.splitlines()))
 
+    def test_pen_turn_label_describes_live_or_next_turn_at_all_widths(self):
+        top = load_top()
+        cases = (
+            ("WORKING_CODEX", "codex", "claude"),
+            ("AWAITING_CODEX", "codex", "claude"),
+            # Even when holder and last author match, a live claim is building N+1.
+            ("WORKING_CLAUDE", "claude", "claude"),
+        )
+        for state, holder, author in cases:
+            data = fixture()
+            data.update({"state": state, "holder": holder})
+            data["last_turn"].update({"n": 7, "agent": author})
+            for width in (80, 100, 120):
+                output = self._plain(top.render(data, width, self.NOW))
+                self.assertIn("[%s]" % state, output)
+                self.assertIn("→ turn 8", output)
+                self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
+    def test_pen_turn_label_marks_last_turn_when_there_is_no_live_holder(self):
+        top = load_top()
+        data = fixture()
+        data.update({"state": "IDLE", "holder": "none"})
+        data["last_turn"].update({"n": 7, "agent": "claude"})
+        for width in (80, 100, 120):
+            output = self._plain(top.render(data, width, self.NOW))
+            self.assertIn("last #7", output)
+            self.assertIn("#7 claude", output)
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
     def test_usage_columns_include_reset_time(self):
         top = load_top()
         data = fixture()
