@@ -109,10 +109,12 @@ never auto-force. The single-file core is the only authority on turns.
 
 ## Delivery discipline (incident #99)
 
-An issue, branch, PR, or MR being opened is not "done"; done requires
-implemented, verified, committed, pushed, and handed off or closed according
-to the relay. Never append or report "done" for work that only exists as an
-opened ticket, an unpushed branch, or an unreviewed draft.
+Every intentional change unit has one structured forge ticket and reaches review
+as validated, committed, pushed history. An issue, branch, PR, or MR being opened
+is not "done" by itself. A network-isolated author commits locally and records a
+named role-based gateway handoff as **gateway pending**; the gateway reviews and
+pushes that exact SHA before anyone claims remote delivery. Never report "done"
+for an opened ticket, local-only commit, unpushed branch, or unreviewed draft.
 
 ## When in doubt
 

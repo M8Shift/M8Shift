@@ -49,6 +49,26 @@ tests, generated checksums, release notes, assets, and the RFC/index files thems
 not trigger the same-PR reminder. This classification is intentionally conservative and
 may miss a novel category; reviewers apply the normative policy, not the heuristic.
 
+## Amendment A — ticketed, committed, pushed delivery
+
+[RFC 065](065-rfc-ticketed-committed-pushed-delivery.md) establishes the companion
+go-forward delivery rule for **every** intentional repository change, not only the
+substantive changes that trigger this RFC's same-PR reminder:
+
+- one structured forge ticket per coherent change unit;
+- validated, committed checkpoints before handoff;
+- the exact review head pushed before it is represented as remotely delivered;
+- an explicit named-gateway flow when the author cannot reach the forge.
+
+The gateway path is a transport exception, never a ticket/push waiver. A relay task may
+hold temporary intake during an outage or isolated-author turn, but it must be
+reconciled before first remote publication or integration. Local reminders remain
+advisory and no-network; forge review supplies the remote proof.
+
+This amendment is active. RFC 065's acceptance shipped the policy, documentation,
+stable pre-commit ticket/push reminder, and local-only doctor upstream advisories
+together; RFC 058's same-PR rule remains independently applicable.
+
 ## Acceptance criteria
 
 1. The four retroactive changes are documented under their locked dispositions.

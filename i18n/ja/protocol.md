@@ -202,7 +202,9 @@ loop:
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # 読み取り専用の要約：LOCK + 直近のターン + メモリ + タスク
 ./m8shift.py peek <agent>  # <agent> 宛の最後のハンドオフ（自分の番でなければ rc 3）
 ./m8shift.py log [--limit N] [--all] [--oneline]  # リレーのタイムライン（読み取り専用）
+./m8shift.py turn N [--json]  # 不変ターンの完全な done テキストを取得
 ./m8shift.py history [--limit N] [--oneline] [--json]  # セッション履歴（読み取り専用）
+./m8shift.py time [current|SESSION_ID] [--json]  # 有効作業時間と非作業時間（読み取り専用）
 ./m8shift.py session {list,show,decisions,report} …  # セッション表示 + 任意のMarkdownレポート
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # あなたの番を待つ ; --once = 1回チェック（あなたの番でなければ rc 3）
@@ -221,6 +223,7 @@ loop:
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # 永続的なメモリのメモを追記（advisory）
+./m8shift.py work-tag <agent> <ref>  # WORKING ウィンドウに不透明な主要参照を割り当てる
 ./m8shift.py task {add,done,drop,list,show} …  # advisory なタスク台帳（エージェントごとの ToDo）
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # このシフトを一つのプロジェクトリレーに固定（RFC 038 §9）。ペン不要。曖昧な場合はクローズドセレクタなしでは拒否
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049：WORKING保持者を保護する生存ハートビート（管理プロデューサー用。ウィンドウ = max(120, min(2*N, TTL))。claim --refresh は監査用のみ）

@@ -83,6 +83,7 @@ VERSION = "3.60.0"       # m8shift.py script version (bump on release). Surfaced
                          # taken from (run `m8shift.py --version` in each location and compare).
 MAX_BODY_BYTES = 256 * 1024       # default append body limit; opt out with --allow-large-body
 MAX_FIELD_BYTES = 64 * 1024       # single-line ask/done/files/field/etc. cap
+MAX_WORK_ITEM_BYTES = 256         # opaque accounting label; bounded for JSON/status consumers
 MAX_LEDGER_BYTES = 1024 * 1024    # doctor --security warning threshold for local ledger files
 DEFAULT_LANG = "en"              # default / ultimate fallback language
 # Well-formed language tags M8Shift recognizes — a curated SUPERSET of LANGS. The LOCK `lang`
@@ -576,12 +577,14 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N] [--brief]  # read-only briefing: LOCK + last turns + memory + tasks
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
 ./m8shift.py log [--limit N] [--all] [--oneline]  # read-only relay timeline
+./m8shift.py turn N [--json]  # fetch one immutable turn's complete done text
 ./m8shift.py history [--limit N] [--oneline] [--json]  # session history (read-only)
+./m8shift.py time [current|SESSION_ID] [--json]  # read-only effective-work and non-work accounting
 ./m8shift.py session {list,show,decisions,report} …  # read-only session views + optional Markdown report
 ./m8shift.py decisions {target,scaffold} …  # advisory decision trace target + Markdown/ADR scaffold
 ./m8shift.py wait <agent> [--once] [--interval N]  # waits for your turn ; --once = 1 check (rc 3 if not your turn)
-./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."]  # wait if needed, then claim + peek
-./m8shift.py claim <agent> [--force|--refresh]     # ACQUIRE the pen (exclusive) — from your turn /
+./m8shift.py next <agent> [--once] [--interval N] [--force] [--resume --reason "..."] [--work-item REF]  # wait if needed, then claim + peek
+./m8shift.py claim <agent> [--force|--refresh] [--work-item REF]  # ACQUIRE the pen (exclusive) — from your turn /
                                                   #   IDLE / your own lock ; --force = stale lock ONLY ;
                                                   #   --refresh = extend YOUR OWN WORKING lock only (runner heartbeat)
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
@@ -596,6 +599,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
 ./m8shift.py remember <agent> "<note>"  # append a durable memory note (advisory)
+./m8shift.py work-tag <agent> <ref>  # replace the current WORKING window's opaque primary item
 ./m8shift.py task {add,done,drop,list,show} …  # advisory task ledger (per-agent to-dos)
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # pin this shift to ONE project relay (RFC 038 §9); penless; refuses under ambiguity without the closed selector
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: protective liveness beat for a WORKING holder (managed producers; window = max(120, min(2*N, TTL)); claim --refresh records audit-only beats)
@@ -611,8 +615,10 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
   A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
   advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
-  valid pen, and with it unset it skips (humans are never blocked). See the agents
-  guide and `CONTRIBUTING.md` for install instructions.
+  valid pen, and with it unset it skips that pen gate (humans are never blocked).
+  Every non-empty staged change also gets a non-blocking, offline RFC 065 reminder
+  to confirm its forge ticket and push/gateway-pending path. See the agents guide
+  and `CONTRIBUTING.md` for install instructions.
 - **SEC-7 / TOCTOU — honest limit**: `may-i-write` is a **point-in-time read** that
   holds **no lock**. It reports the relay state *at the instant it runs*; the state can
   change between that check and the write completing (e.g. the lock expires, or another
@@ -659,6 +665,9 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   the project's git checkout carries uncommitted changes (coordinate/stash
   before an update lands generated writes in a shared checkout — never clear
   the state with destructive git operations without explicit human authorization).
+  RFC 065 also adds local-only `delivery.no_upstream` and `delivery.unpushed`
+  reminders. They use bounded Git reads, never contact a forge, and never present
+  local refs as proof of remote delivery.
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
@@ -965,10 +974,12 @@ never auto-force. The single-file core is the only authority on turns.
 
 ## Delivery discipline (incident #99)
 
-An issue, branch, PR, or MR being opened is not "done"; done requires
-implemented, verified, committed, pushed, and handed off or closed according
-to the relay. Never append or report "done" for work that only exists as an
-opened ticket, an unpushed branch, or an unreviewed draft.
+Every intentional change unit has one structured forge ticket and reaches review
+as validated, committed, pushed history. An issue, branch, PR, or MR being opened
+is not "done" by itself. A network-isolated author commits locally and records a
+named role-based gateway handoff as **gateway pending**; the gateway reviews and
+pushes that exact SHA before anyone claims remote delivery. Never report "done"
+for an opened ticket, local-only commit, unpushed branch, or unreviewed draft.
 
 ## Operational disciplines (extract)
 
@@ -3531,7 +3542,10 @@ def cmd_init(args):
             # the living relay file.
             if args.force and existing_lk and existing_lk.get("session") and existing_lk.get("state") != "DONE":
                 turn_end = as_int(existing_lk.get("turn"), 0)
-                append_session_event(
+                reset_lk = dict(existing_lk)
+                reset_lk.update(holder="none", state="DONE", since=iso(t0), expires="-")
+                append_state_transition(existing_lk, reset_lk, "init", "reset", t0)
+                append_session_event_observational(
                     "reset", existing_lk["session"], timestamp=t0,
                     closed_at=iso(t0), closed_by="init --force",
                     state_before=existing_lk.get("state", "-"),
@@ -3548,10 +3562,16 @@ def cmd_init(args):
             guard.require_owned()
             write(text, COWORK)
             guard.require_owned()
-            append_session_event(
+            append_session_event_observational(
                 "start", session_id, timestamp=t0,
                 started_at=iso(t0), project=name, agents=",".join(full),
                 lang=LANG, turn_start=0,
+                accounting_schema="m8shift.time-accounting/1",
+            )
+            append_state_transition(
+                {"session": session_id, "state": "-", "turn": "0", "since": iso(t0)},
+                {"session": session_id, "state": "IDLE", "turn": "0", "since": iso(t0)},
+                "init", "init", t0,
             )
             results.append(tr("cowork_written", file=os.path.basename(COWORK), name=name))
 
@@ -3710,6 +3730,17 @@ def append_session_event(event, session_id, timestamp=None, **fields):
     write(prev + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n", SESSIONS)
 
 
+def append_session_event_observational(event, session_id, timestamp=None, **fields):
+    """Best-effort ledger append after an authoritative relay mutation."""
+    try:
+        append_session_event(event, session_id, timestamp=timestamp, **fields)
+    except OSError as exc:
+        print("WARNING: %s session evidence write failed (%s); the LOCK transition "
+              "remains authoritative." % (event, exc.__class__.__name__), file=sys.stderr)
+        return False
+    return True
+
+
 def parse_session_events(text):
     """Parse the append-only session ledger.
 
@@ -3732,6 +3763,394 @@ def parse_session_events(text):
 
 def read_session_events():
     return parse_session_events(read(SESSIONS)) if os.path.exists(SESSIONS) else []
+
+
+def clean_work_item(value, label="--work-item"):
+    """Validate one opaque primary-work reference without resolving it anywhere.
+
+    Work items are accounting metadata, never task-board or forge authority.  Keep the
+    persisted label short and terminal-safe because later read surfaces render it.
+    """
+    value = clean_field(label, value)
+    if not value:
+        return ""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        sys.exit("refused: %s contains a terminal control character." % label)
+    size = len(value.encode("utf-8"))
+    if size > MAX_WORK_ITEM_BYTES:
+        sys.exit("refused: %s is %d bytes (limit %d)." %
+                 (label, size, MAX_WORK_ITEM_BYTES))
+    return value
+
+
+def _working_agent(state):
+    """Return the normalized agent in a supported WORKING state, else None."""
+    if not isinstance(state, str) or not state.startswith("WORKING_"):
+        return None
+    agent = state[len("WORKING_"):].lower()
+    return agent if re.fullmatch(AGENT_RE, agent) else None
+
+
+def work_window_id(session_id, state, turn, since):
+    """Deterministic, opaque correlation id for one WORKING interval."""
+    agent = _working_agent(state)
+    if not (isinstance(session_id, str) and session_id and agent and
+            isinstance(since, str) and parse_iso(since) is not None):
+        return None
+    material = "%s\0%s\0%s\0%s" % (session_id, agent, as_int(turn, 0), since)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:8]
+
+
+def append_state_transition(before, after, actor, operation, timestamp,
+                            work_item=""):
+    """Best-effort observability for an already-authoritative LOCK transition.
+
+    The caller holds ``file_lock`` and has already committed the LOCK mutation.  A
+    ledger failure therefore warns but never rolls back or masks that baton change.
+    """
+    from_state = str(before.get("state") or "-")
+    to_state = str(after.get("state") or "-")
+    if from_state == to_state or not after.get("session"):
+        return True
+    fields = {
+        "from_state": from_state,
+        "to_state": to_state,
+        "actor": str(actor or "system"),
+        "turn": as_int(after.get("turn"), 0),
+        "operation": str(operation),
+    }
+    old_window = work_window_id(before.get("session"), from_state,
+                                before.get("turn"), before.get("since"))
+    new_window = work_window_id(after.get("session"), to_state,
+                                after.get("turn"), after.get("since"))
+    if new_window:
+        fields["work_window_id"] = new_window
+        if work_item:
+            fields["work_item"] = work_item
+        if old_window:
+            fields["previous_work_window_id"] = old_window
+    elif old_window:
+        fields["work_window_id"] = old_window
+    try:
+        append_session_event("state", after["session"], timestamp=timestamp, **fields)
+    except OSError as exc:
+        print("WARNING: accounting transition evidence write failed (%s); "
+              "the LOCK transition remains authoritative."
+              % exc.__class__.__name__, file=sys.stderr)
+        return False
+    return True
+
+
+def _transition_identity(event):
+    return tuple(event.get(key) for key in (
+        "session_id", "at", "from_state", "to_state", "actor", "turn",
+        "operation", "work_window_id"))
+
+
+def _time_bucket(state):
+    if _working_agent(state):
+        return "effective_work"
+    if isinstance(state, str) and state.startswith("AWAITING_"):
+        agent = state[len("AWAITING_"):].lower()
+        if re.fullmatch(AGENT_RE, agent):
+            return "awaiting"
+    if state == "PAUSED":
+        return "paused"
+    if state == "IDLE":
+        return "idle"
+    return "unclassified"
+
+
+def fold_time_accounting(events, session_id, as_of=None, current_lock=None):
+    """Fold canonical RFC-064 transition evidence into mutually exclusive buckets.
+
+    Append order is authoritative.  Broken, regressive, unsupported, or legacy spans
+    are made visibly unclassified; this observer never invents a claim boundary.
+    """
+    as_of = as_of or now()
+    diagnostics = []
+
+    def diagnose(code):
+        if code not in diagnostics:
+            diagnostics.append(code)
+
+    rows = [row for row in (events or [])
+            if isinstance(row, dict) and row.get("session_id") == session_id]
+    start_row = next((row for row in rows
+                      if row.get("event") == "start" and parse_iso(row.get("at"))), None)
+    if start_row is None:
+        diagnose("start_event_missing")
+        return {
+            "schema": "m8shift.time-accounting/1", "session_id": session_id,
+            "as_of": iso(as_of), "quality": "exact", "wall_seconds": 0,
+            "effective_work_seconds": 0, "non_work_seconds": 0,
+            "awaiting_seconds": 0, "paused_seconds": 0, "idle_seconds": 0,
+            "unclassified_seconds": 0, "coverage_ratio": None,
+            "unattributed_work_seconds": 0, "agents": [], "work_items": [],
+            "telemetry_started_at": None, "diagnostics": diagnostics,
+        }
+    started = parse_iso(start_row["at"])
+    terminal_row = next((row for row in rows
+                         if row.get("event") in ("done", "reset")
+                         and parse_iso(row.get("at")) is not None), None)
+    ended = parse_iso(terminal_row["at"]) if terminal_row else as_of
+    if ended < started:
+        diagnose("terminal_clock_regression")
+        ended = started
+    wall = int((ended - started).total_seconds())
+
+    # A work_tag is audit-only and can arrive anywhere after a claim.  The last
+    # valid tag for a window wins without duplicating that window's seconds.
+    tags = {}
+    for row in rows:
+        if row.get("event") not in ("state", "work_tag") or "work_item" not in row:
+            continue
+        window = row.get("work_window_id")
+        item = row.get("work_item")
+        if isinstance(window, str) and re.fullmatch(r"[0-9a-f]{8}", window) and \
+                isinstance(item, str) and item:
+            tags[window] = item
+        else:
+            diagnose("malformed_work_tag")
+
+    state_rows = []
+    seen = set()
+    for row in rows:
+        if row.get("event") != "state":
+            continue
+        identity = _transition_identity(row)
+        try:
+            if identity in seen:
+                continue
+            seen.add(identity)
+        except TypeError:
+            # Unhashable identity fields are malformed evidence, not a reader crash.
+            pass
+        state_rows.append(row)
+
+    totals = {"effective_work": 0, "awaiting": 0, "paused": 0,
+              "idle": 0, "unclassified": 0}
+    agent_totals = {}
+    item_totals = {}
+    unattributed = 0
+
+    def add_span(state, seconds, window=None, forced_unknown=False):
+        nonlocal unattributed
+        seconds = max(0, int(seconds))
+        bucket = "unclassified" if forced_unknown else _time_bucket(state)
+        totals[bucket] += seconds
+        if bucket != "effective_work":
+            return
+        agent = _working_agent(state)
+        agent_totals[agent] = agent_totals.get(agent, 0) + seconds
+        item = tags.get(window)
+        if item:
+            item_totals[item] = item_totals.get(item, 0) + seconds
+        else:
+            unattributed += seconds
+
+    cursor = started
+    current_state = None
+    current_window = None
+    telemetry_started = None
+    broken = False
+    for row in state_rows:
+        required = ("at", "from_state", "to_state", "actor", "turn", "operation")
+        event_at = parse_iso(row.get("at"))
+        bad_required = (
+            any(key not in row for key in required)
+            or any(not isinstance(row.get(key), str)
+                   for key in ("from_state", "to_state", "actor", "operation"))
+            or not ((isinstance(row.get("turn"), int) and
+                     not isinstance(row.get("turn"), bool))
+                    or (isinstance(row.get("turn"), str) and
+                        re.fullmatch(r"\d+", row["turn"])))
+        )
+        touches_work = bool(_working_agent(row.get("from_state")) or
+                            _working_agent(row.get("to_state")))
+        window = row.get("work_window_id")
+        bad_window = touches_work and not (
+            isinstance(window, str) and re.fullmatch(r"[0-9a-f]{8}", window))
+        if event_at is None or bad_required or bad_window:
+            diagnose("malformed_transition_event")
+            broken = True
+            continue
+        if event_at < started or event_at > ended:
+            diagnose("transition_outside_session")
+            continue
+        if event_at < cursor:
+            diagnose("transition_clock_regression")
+            broken = True
+            continue
+        if telemetry_started is None:
+            telemetry_started = event_at
+            if event_at > cursor:
+                add_span(None, (event_at - cursor).total_seconds(), forced_unknown=True)
+                diagnose("legacy_claim_boundaries_missing")
+            current_state = row.get("to_state")
+            current_window = row.get("work_window_id") if _working_agent(current_state) else None
+            cursor = event_at
+            broken = False
+            if _time_bucket(current_state) == "unclassified" and current_state != "DONE":
+                diagnose("unsupported_state")
+            continue
+        if broken or row.get("from_state") != current_state:
+            add_span(None, (event_at - cursor).total_seconds(), forced_unknown=True)
+            diagnose("state_chain_broken")
+        else:
+            add_span(current_state, (event_at - cursor).total_seconds(), current_window)
+        current_state = row.get("to_state")
+        current_window = row.get("work_window_id") if _working_agent(current_state) else None
+        cursor = event_at
+        broken = False
+        if _time_bucket(current_state) == "unclassified" and current_state != "DONE":
+            diagnose("unsupported_state")
+
+    if telemetry_started is None:
+        # Legacy evidence can prove the current open interval only.  It cannot split
+        # any earlier inter-turn span, so that history stays unknown.
+        lock_since = parse_iso((current_lock or {}).get("since"))
+        lock_state = (current_lock or {}).get("state")
+        if not terminal_row and lock_since and started <= lock_since <= ended:
+            add_span(None, (lock_since - started).total_seconds(), forced_unknown=True)
+            add_span(lock_state, (ended - lock_since).total_seconds())
+            if lock_since > started:
+                diagnose("legacy_claim_boundaries_missing")
+        else:
+            add_span(None, wall, forced_unknown=True)
+            if wall:
+                diagnose("legacy_claim_boundaries_missing")
+    else:
+        lock_matches = True
+        if not terminal_row and current_lock:
+            lock_since = parse_iso(current_lock.get("since"))
+            lock_matches = (current_lock.get("state") == current_state and
+                            lock_since == cursor)
+            if not lock_matches:
+                diagnose("current_lock_timeline_gap")
+        add_span(current_state, (ended - cursor).total_seconds(), current_window,
+                 forced_unknown=(broken or not lock_matches))
+
+    non_work = totals["awaiting"] + totals["paused"] + totals["idle"]
+    accounted = totals["effective_work"] + non_work + totals["unclassified"]
+    if accounted != wall:  # defensive: preserve the public invariant even on bad input
+        totals["unclassified"] += wall - accounted
+        diagnose("accounting_invariant_repaired")
+    quality = "exact" if totals["unclassified"] == 0 else "partial"
+    return {
+        "schema": "m8shift.time-accounting/1", "session_id": session_id,
+        "as_of": iso(as_of), "quality": quality, "wall_seconds": wall,
+        "effective_work_seconds": totals["effective_work"],
+        "non_work_seconds": non_work,
+        "awaiting_seconds": totals["awaiting"],
+        "paused_seconds": totals["paused"], "idle_seconds": totals["idle"],
+        "unclassified_seconds": totals["unclassified"],
+        "coverage_ratio": ((wall - totals["unclassified"]) / float(wall)
+                           if wall else None),
+        "unattributed_work_seconds": unattributed,
+        "agents": [{"id": key, "effective_work_seconds": agent_totals[key]}
+                   for key in sorted(agent_totals)],
+        "work_items": [{"ref": key, "effective_work_seconds": item_totals[key]}
+                       for key in sorted(item_totals)],
+        "telemetry_started_at": iso(telemetry_started) if telemetry_started else None,
+        "diagnostics": diagnostics,
+    }
+
+
+TIME_ACCOUNTING_STATUS_KEYS = (
+    "schema", "quality", "wall_seconds", "effective_work_seconds",
+    "non_work_seconds", "awaiting_seconds", "paused_seconds", "idle_seconds",
+    "unclassified_seconds", "coverage_ratio",
+)
+
+
+def status_time_accounting(accounting):
+    """Bounded RFC-064 projection kept outside the frozen status snapshot v1."""
+    return {key: accounting.get(key) for key in TIME_ACCOUNTING_STATUS_KEYS}
+
+
+def current_time_accounting(lk, as_of=None, events=None):
+    """Fold the current session at one caller-owned observation instant."""
+    return fold_time_accounting(
+        read_session_events() if events is None else events,
+        lk.get("session", ""), as_of=as_of or now(), current_lock=lk,
+    )
+
+
+def _accounting_duration(seconds):
+    """Compact human duration for accounting blocks (whole-second, never signed)."""
+    if seconds is None:
+        return "-"
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return "%dh %02dm %02ds" % (hours, minutes, secs)
+
+
+def _print_time_accounting(accounting, heading="── TIME ───────────────────────────────"):
+    partial = accounting.get("quality") != "exact"
+    lower = "≥ " if partial else ""
+    agents = " · ".join(
+        "%s %s" % (row.get("id", "?"), _accounting_duration(
+            row.get("effective_work_seconds")))
+        for row in accounting.get("agents", []) if isinstance(row, dict)
+    )
+    effective_tail = "  (%s)" % agents if agents else ""
+    print(heading)
+    print("  effective*  %s%s%s" % (
+        lower, _accounting_duration(accounting.get("effective_work_seconds")),
+        effective_tail))
+    print("  non-work    %s%s  (await %s · pause %s · idle %s)" % (
+        lower, _accounting_duration(accounting.get("non_work_seconds")),
+        _accounting_duration(accounting.get("awaiting_seconds")),
+        _accounting_duration(accounting.get("paused_seconds")),
+        _accounting_duration(accounting.get("idle_seconds"))))
+    if partial:
+        coverage = accounting.get("coverage_ratio")
+        coverage_text = "-" if coverage is None else "%d%%" % round(coverage * 100)
+        print("  unclassified %s   coverage %s" % (
+            _accounting_duration(accounting.get("unclassified_seconds")),
+            coverage_text))
+    print("  * WORKING-state proxy; not productivity")
+
+
+def cmd_time(args):
+    """Read-only full RFC-064 accounting for the current or named session."""
+    text = load_or_die()
+    lk, _, _ = _status_info(text)
+    requested = getattr(args, "session", "current") or "current"
+    session_id = lk.get("session") if requested == "current" else requested
+    if not session_id or not SESSION_ID_RE.fullmatch(session_id):
+        sys.exit("unknown or invalid session id: %s" % requested)
+    events = read_session_events()
+    if not any(row.get("session_id") == session_id for row in events):
+        sys.exit("session not found: %s" % session_id)
+    observed = now()
+    accounting = fold_time_accounting(
+        events, session_id, as_of=observed,
+        current_lock=lk if session_id == lk.get("session") else None,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(accounting, ensure_ascii=False, sort_keys=True))
+        return 0
+    print("m8shift.py time · session %s · as of %s" % (
+        session_id, accounting.get("as_of", "-")))
+    _print_time_accounting(accounting)
+    if accounting.get("work_items"):
+        print("── WORK ITEMS ─────────────────────────")
+        for row in accounting["work_items"]:
+            print("  %-24s %s" % (
+                row.get("ref", "?"),
+                _accounting_duration(row.get("effective_work_seconds"))))
+    if accounting.get("unattributed_work_seconds"):
+        print("  %-24s %s" % (
+            "unattributed", _accounting_duration(
+                accounting.get("unattributed_work_seconds"))))
+    if accounting.get("diagnostics"):
+        print("── DIAGNOSTICS ────────────────────────")
+        for code in accounting["diagnostics"]:
+            print("  %s" % code)
+    return 0
 
 
 REQUEST_RE = re.compile(
@@ -4703,7 +5122,7 @@ def write_report_atomic(path, text, force=False):
                 os.unlink(tmp)
 
 
-def current_session_info(lk, turns=None):
+def current_session_info(lk, turns=None, as_of=None):
     """Best-effort, read-only session start/duration metadata for `status`.
 
     The LOCK records when the current state started (`since`), not necessarily when the session
@@ -4726,7 +5145,7 @@ def current_session_info(lk, turns=None):
     closed_at = (close_event or {}).get("closed_at") or (close_event or {}).get("at") or "open"
     end = parse_iso(closed_at) if closed_at not in ("", "-", "open") else None
     if end is None:
-        end = now()
+        end = as_of or now()
     seconds = max(0, int((end - start).total_seconds()))
     return {
         "started_at": started_at,
@@ -5642,6 +6061,39 @@ def _doctor_session_identity_findings(events, turns, lk):
                 "review `./m8shift.py history` and close/reset stale sessions explicitly",
             ))
     return findings
+
+
+def _doctor_accounting_timeline_findings(events, lk):
+    """Report broken RFC-064 evidence without treating legacy absence as corruption."""
+    session_id = (lk or {}).get("session")
+    session_rows = [row for row in (events or []) if row.get("session_id") == session_id]
+    expected = any(row.get("event") == "start" and
+                   row.get("accounting_schema") == "m8shift.time-accounting/1"
+                   for row in session_rows)
+    has_state = any(row.get("event") == "state" for row in session_rows)
+    if not session_id or (not has_state and not expected):
+        return []
+    if expected and not has_state:
+        return [doctor_finding(
+            "accounting.timeline_gap", "warning",
+            "time-accounting transition evidence is missing after an accounting-enabled start.",
+            os.path.basename(SESSIONS),
+            "keep the LOCK authoritative; inspect the append-only session ledger before relying on totals",
+        )]
+    folded = fold_time_accounting(events, session_id, current_lock=lk)
+    gap_codes = {
+        "malformed_transition_event", "transition_clock_regression",
+        "state_chain_broken", "current_lock_timeline_gap", "transition_outside_session",
+    }
+    found = [code for code in folded.get("diagnostics", []) if code in gap_codes]
+    if not found:
+        return []
+    return [doctor_finding(
+        "accounting.timeline_gap", "warning",
+        "time-accounting transition evidence has a gap: %s." % ", ".join(found),
+        os.path.basename(SESSIONS),
+        "keep the LOCK authoritative; inspect the append-only session ledger before relying on totals",
+    )]
 
 
 def _security_doctor_findings(lk):
@@ -6743,7 +7195,7 @@ _MUTATOR_ACTORS = {
     "claim": "agent", "append": "agent", "next": "agent", "request-turn": "agent",
     "yield-turn": "agent", "decline-turn": "agent", "steer-turn": "agent",
     "pause": "agent", "resume": "agent", "release": "agent", "done": "agent",
-    "remember": "agent", "cooldown": None, "archive": None,
+    "remember": "agent", "work-tag": "agent", "cooldown": None, "archive": None,
     "heartbeat": "agent",
 }
 
@@ -7101,6 +7553,80 @@ def _rfc_governance_findings(root=None):
     return findings
 
 
+def _delivery_git_probe(root, *args):
+    """Bounded, read-only local Git probe for RFC 065 delivery reminders."""
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=2, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _delivery_git_findings(root=None):
+    """Report local-only upstream evidence; never contact a forge or mutate Git.
+
+    A detached HEAD, default branch, non-Git directory, unavailable Git binary, or
+    malformed local metadata fails open. Ticket existence and actual remote state
+    cannot be proven locally and remain review/gateway responsibilities.
+    """
+    root = os.path.abspath(root or os.getcwd())
+    inside = _delivery_git_probe(root, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
+        return []
+
+    head = _delivery_git_probe(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return []
+    branch = head.stdout.strip()
+
+    default_names = {"main", "master", "trunk", "default"}
+    remote_heads = _delivery_git_probe(
+        root, "for-each-ref", "--format=%(symref:short)", "refs/remotes/*/HEAD",
+    )
+    if remote_heads is not None and remote_heads.returncode == 0:
+        for ref in remote_heads.stdout.splitlines():
+            if "/" in ref.strip():
+                default_names.add(ref.strip().rsplit("/", 1)[-1])
+
+    upstream = _delivery_git_probe(
+        root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}",
+    )
+    if upstream is None:
+        return []
+    if upstream.returncode != 0 or not upstream.stdout.strip():
+        if branch in default_names:
+            return []
+        return [doctor_finding(
+            "delivery.no_upstream", "info",
+            "local branch %s has no configured upstream; a pushed review head cannot be inferred." % branch,
+            ".git",
+            "link the forge ticket, then push the branch directly or record a named gateway-pending handoff",
+        )]
+
+    upstream_name = upstream.stdout.strip()
+    ahead = _delivery_git_probe(root, "rev-list", "--count", upstream_name + "..HEAD")
+    if ahead is None or ahead.returncode != 0:
+        return []
+    try:
+        ahead_count = int(ahead.stdout.strip())
+    except ValueError:
+        return []
+    if ahead_count <= 0:
+        return []
+    return [doctor_finding(
+        "delivery.unpushed", "info",
+        "local HEAD is %d commit(s) ahead of %s; this is local-ref evidence, not proof of forge state." %
+        (ahead_count, upstream_name),
+        ".git",
+        "push the exact review head or record a named gateway-pending handoff",
+    )]
+
+
 def collect_doctor_findings(security=False, contracts=False, update_source="",
                             install_report=None, hygiene=False,
                             hygiene_verbose=False, hygiene_anchors=False):
@@ -7129,6 +7655,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
         # it runs with or without a relay (advisory, fail-open, bounded).
         out.extend(_skills_findings())
         out.extend(_rfc_governance_findings())
+        out.extend(_delivery_git_findings())
         return out
     try:
         text = read()
@@ -7298,7 +7825,8 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
                     ))
                     break
                 if (not isinstance(row, dict)
-                        or row.get("event") not in {"start", "done", "reset", "force", "pause", "resume"}
+                        or row.get("event") not in {"start", "done", "reset", "force", "pause", "resume",
+                                                     "state", "work_tag"}
                         or not isinstance(row.get("session_id"), str)):
                     findings.append(doctor_finding(
                         "sessions.event_invalid", "warning",
@@ -7313,6 +7841,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
                 os.path.basename(SESSIONS),
             ))
     findings.extend(_doctor_session_identity_findings(session_events, turns, lk))
+    findings.extend(_doctor_accounting_timeline_findings(session_events, lk))
     findings.extend(_doctor_request_ledger_findings())
 
     if not os.path.exists(PROTO):
@@ -7483,6 +8012,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
     # skills/ directory exists; bounded, fail-open, never gates --lint).
     findings.extend(_skills_findings())
     findings.extend(_rfc_governance_findings())
+    findings.extend(_delivery_git_findings())
     return findings
 
 
@@ -8665,7 +9195,8 @@ def status_snapshot_v1(lk, last, session_info, turns=None,
     }
 
 
-def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False):
+def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=False,
+                        accounting=None):
     session_info = session_info or current_session_info(lk)
     print(f"m8shift.py v{VERSION}")
     print(f"project  {project_display_name()}")
@@ -8725,6 +9256,8 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
         print(tr("status_next", action=next_action_for(lk, stale=stale)))
     if last:
         print(tr("last_turn", n=last["n"], who=last["agent"]))
+    if accounting is not None and not brief:
+        _print_time_accounting(accounting)
     _print_usage_block(lk)   # RFC 051: after the LOCK block; absent when no usable snapshot
 
 
@@ -8761,7 +9294,9 @@ def cmd_status(args):
     text = load_or_die()
     lk, stale, last = _status_info(text)
     parsed_turns = parse_turns(text)
-    session_info = current_session_info(lk, parsed_turns)
+    observed = now()
+    session_info = current_session_info(lk, parsed_turns, as_of=observed)
+    accounting = current_time_accounting(lk, as_of=observed)
     if getattr(args, "json", False):
         out = dict(lk)                       # raw LOCK fields…
         out["agents_active"] = active_agents(lk)  # full active roster (N)
@@ -8789,6 +9324,7 @@ def cmd_status(args):
         )
         out["session_duration_seconds"] = session_info["duration_seconds"]
         out["session_duration"] = None if session_info["duration"] == "-" else session_info["duration"]
+        out["time_accounting"] = status_time_accounting(accounting)
         if getattr(args, "for_agent", ""):
             agent = need_agent(args.for_agent)
             out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
@@ -8803,7 +9339,7 @@ def cmd_status(args):
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""),
-                        getattr(args, "brief", False))
+                        getattr(args, "brief", False), accounting)
     return 0
 
 
@@ -8822,14 +9358,18 @@ def cmd_watch(args):
         while True:
             text = load_or_die()
             lk, stale, last = _status_info(text)
+            observed = now()
+            accounting = current_time_accounting(lk, as_of=observed)
             sig = _status_signature(lk, stale, last, args.for_agent)
             should_print = (sig != last_sig) or not args.changes_only
             if should_print:
                 if args.clear:
                     print("\033[2J\033[H", end="")
                 print(tr("watch_header", ts=display_time(iso(now())), project=project_display_name(), cwd=(os.getcwd() if relay_ambiguity_snapshot() is None else _ambiguity_safe_path(os.getcwd()))))
-                _print_status_block(lk, stale, last, current_session_info(lk, parse_turns(text)),
-                                    args.for_agent)
+                _print_status_block(
+                    lk, stale, last,
+                    current_session_info(lk, parse_turns(text), as_of=observed),
+                    args.for_agent, accounting=accounting)
                 print("", flush=True)
             last_sig = sig
             if args.once:
@@ -8902,10 +9442,11 @@ def cmd_wait(args):
         time.sleep(args.interval)
 
 
-def _claim_and_print_handoff(agent, force=False, grace_s=0):
+def _claim_and_print_handoff(agent, force=False, grace_s=0, work_item=""):
     cmd_claim(argparse.Namespace(
         agent=agent, force=force, check=False, files="", turns=0,
-        grace_s=grace_s, reason="", live_override=False,
+        grace_s=grace_s, reason="", live_override=False, refresh=False,
+        work_item=work_item,
     ))
     print(tr("next_peek_header", agent=agent))
     print_peek_for(agent)
@@ -8917,6 +9458,7 @@ def cmd_next(args):
     if sys.stdout.isatty():
         print("host lifecycle: next detects and claims a ready turn; it cannot reactivate a completed agent session — use a resident listener or a human wake-up.")
     resume_reason = clean_field("--reason", getattr(args, "reason", "")) if getattr(args, "resume", False) else ""
+    work_item = clean_work_item(getattr(args, "work_item", ""))
     if getattr(args, "resume", False) and not resume_reason:
         sys.exit("refused: --resume requires --reason.")
     if not args.once and args.interval < 1:
@@ -8929,14 +9471,17 @@ def cmd_next(args):
         target = f"AWAITING_{agent.upper()}"
         working = f"WORKING_{agent.upper()}"
         if st in (target, "IDLE"):
-            return _claim_and_print_handoff(agent)
+            return _claim_and_print_handoff(agent, work_item=work_item)
         if st == "PAUSED":
             if args.resume:
                 cmd_resume(argparse.Namespace(agent=agent, reason=resume_reason))
-                return _claim_and_print_handoff(agent)
+                return _claim_and_print_handoff(agent, work_item=work_item)
             print("paused: waiting for user scope; rerun with `--resume --reason \"...\"` only after new work is assigned.")
             return 3
         if st == working:
+            if work_item:
+                sys.exit("refused: --work-item only applies when entering a WORKING window; "
+                         "use `work-tag %s %s` for the current window." % (agent, work_item))
             print(tr("next_already_working", agent=agent))
             return 0
         if st == "DONE":
@@ -8958,7 +9503,8 @@ def cmd_next(args):
                 # ONE two-phase attempt; grace = own interval clamped to [5s, 60s]
                 return _claim_and_print_handoff(
                     agent, force=True,
-                    grace_s=max(5, min(int(args.interval or 5), 60)))
+                    grace_s=max(5, min(int(args.interval or 5), 60)),
+                    work_item=work_item)
             print(tr("wait_stale", other=lk.get("holder")))
             print(tr("status_next", action=next_action_for(lk, agent=agent, stale=True)))
             return 3
@@ -9082,7 +9628,10 @@ def _guard_integrating(args, lk, op):
 
 
 def cmd_claim(args):
+    work_item = clean_work_item(getattr(args, "work_item", ""))
     if args.check:                       # read-only probe — never reaches the file_lock body below
+        if work_item:
+            sys.exit("refused: --work-item opens a work window and cannot be used with --check.")
         return cmd_claim_check(args)
     if args.files or args.turns:         # probe-only flags on a real claim = a likely typo, not a no-op
         sys.exit(tr("check_flags_need_check"))
@@ -9176,11 +9725,16 @@ def cmd_claim(args):
                 sys.exit(tr("claim_active", holder=holder, expires=lk.get("expires")))
             sys.exit(tr("claim_refused", st=st, holder=holder))
         reclaim = args.force and stale and holder not in (agent, "none")
+        same_window = st == f"WORKING_{agent.upper()}" and holder == agent
+        if work_item and same_window:
+            sys.exit("refused: --work-item only applies when entering a WORKING window; "
+                     "use `work-tag %s %s` for the current window." % (agent, work_item))
+        before = dict(lk)
         t = now()
         lk.update(
             holder=agent,
             state=f"WORKING_{agent.upper()}",
-            since=iso(t),
+            since=(lk.get("since") if same_window else iso(t)),
             expires=iso(t + dt.timedelta(minutes=TTL_MIN)),
             note=(tr("note_reclaim", holder=holder) if reclaim
                   else tr("note_holds", agent=agent)),
@@ -9188,6 +9742,8 @@ def cmd_claim(args):
         capture_agent_model(lk, agent)
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "claim", t, work_item=work_item)
         if getattr(args, "refresh", False):
             # RFC 049: an AUDIT beat (never protective) — sidecar failure is a
             # warning only, the TTL refresh stands (sidecar is not authority).
@@ -9200,7 +9756,7 @@ def cmd_claim(args):
             # RFC 049: the stale recovery is AUDITED with the captured identity.
             guard.require_owned()
             fi = force_identity or ("-", "-", holder, "-", "-")
-            append_session_event(
+            append_session_event_observational(
                 "force", lk["session"], timestamp=t,
                 op="claim", by=agent, from_holder=fi[2], reason=clean_field(
                     "--reason", getattr(args, "reason", "") or ""),
@@ -9353,6 +9909,7 @@ def cmd_yield_turn(args):
         if lk.get("holder") != agent or st not in (f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}"):
             sys.exit(f"refused: {agent} is not the current holder (state={st}, holder={lk.get('holder')}).")
         t = now()
+        before = dict(lk)
         lk.update(
             holder=to,
             state=f"AWAITING_{to.upper()}",
@@ -9362,6 +9919,8 @@ def cmd_yield_turn(args):
         )
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "yield-turn", t)
         guard.require_owned()
         append_request_event(
             args.request,
@@ -9426,6 +9985,7 @@ def cmd_steer_turn(args):
         if st != f"AWAITING_{from_agent.upper()}":
             sys.exit(f"refused: steer-turn only redirects an idle AWAITING holder, not {st}.")
         t = now()
+        before = dict(lk)
         lk.update(
             holder=agent,
             state=f"AWAITING_{agent.upper()}",
@@ -9435,6 +9995,8 @@ def cmd_steer_turn(args):
         )
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "steer-turn", t)
         guard.require_owned()
         append_request_event(
             args.request,
@@ -9449,7 +10011,7 @@ def cmd_steer_turn(args):
         )
         if lk.get("session"):
             guard.require_owned()
-            append_session_event(
+            append_session_event_observational(
                 "force", lk["session"], timestamp=t,
                 op="steer-turn", by=agent, from_holder=from_agent, to=agent,
                 reason=reason, force="true", request=str(args.request),
@@ -9483,13 +10045,14 @@ def cmd_append(args):
             sys.exit(tr("append_need_claim", st=st, agent=agent))
         n = int(lk.get("turn", "0")) + 1
         model = capture_agent_model(lk, agent)
+        t = now()
         block = render_turn(n, agent, to, ask=ask, done=done, files=files, body=body,
-                            advisory=advisory, at=iso(now()), model=model)
+                            advisory=advisory, at=iso(t), model=model)
 
         # insert the turn at the end of the file (append-only journal)
         text = text.rstrip("\n") + "\n\n" + block
 
-        t = now()
+        before = dict(lk)
         lk.update(
             holder=to,
             state=f"AWAITING_{to.upper()}",
@@ -9500,6 +10063,8 @@ def cmd_append(args):
         )
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "append", t)
     print(tr("append_ok", n=n, agent=agent, to=to))
     if getattr(args, "wait", False):
         print(tr("append_waiting", agent=agent))
@@ -9524,6 +10089,7 @@ def cmd_pause(args):
             sys.exit(f"refused: only the current holder may pause (holder={holder}).")
         t = now()
         session_id = lk.get("session")
+        before = dict(lk)
         lk.update(
             holder="none",
             state="PAUSED",
@@ -9533,9 +10099,11 @@ def cmd_pause(args):
         )
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "pause", t)
         if session_id:
             guard.require_owned()
-            append_session_event(
+            append_session_event_observational(
                 "pause", session_id, timestamp=t,
                 by=agent, reason=reason, previous_state=st,
                 turn=lk.get("turn", "0"),
@@ -9580,18 +10148,21 @@ def cmd_cooldown(args):
 
         t = now()
         session_id = lk.get("session")
+        before = dict(lk)
         lk.update(
             holder="none",
             state="PAUSED",
-            since=iso(t),
+            since=(lk.get("since") if st == "PAUSED" else iso(t)),
             expires="-",
             note=f"cooldown until {until_raw} for {resume_for}: {reason}",
         )
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, "system", "cooldown", t)
         if session_id:
             guard.require_owned()
-            append_session_event(
+            append_session_event_observational(
                 "pause", session_id, timestamp=t,
                 kind="usage_cooldown",
                 until=until_raw,
@@ -9619,6 +10190,7 @@ def cmd_resume(args):
             sys.exit(f"refused: resume is only valid from PAUSED (state={st}).")
         t = now()
         session_id = lk.get("session")
+        before = dict(lk)
         lk.update(
             holder=agent,
             state=f"AWAITING_{agent.upper()}",
@@ -9628,13 +10200,46 @@ def cmd_resume(args):
         )
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "resume", t)
         if session_id:
             guard.require_owned()
-            append_session_event(
+            append_session_event_observational(
                 "resume", session_id, timestamp=t,
                 by=agent, reason=reason, turn=lk.get("turn", "0"),
             )
     print(f"✓ session resumed for {agent}.")
+    return 0
+
+
+def cmd_work_tag(args):
+    """Attribute the holder's entire current work window to one opaque reference."""
+    item = clean_work_item(args.work_item, label="work_item")
+    if not item:
+        sys.exit("refused: work-tag requires a non-empty work item.")
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        lk = get_lock(text)
+        state = lk.get("state", "")
+        if state != f"WORKING_{agent.upper()}" or lk.get("holder") != agent:
+            sys.exit("refused: work-tag is only valid for the current WORKING holder "
+                     "(state=%s, holder=%s)." % (state, lk.get("holder")))
+        session_id = lk.get("session")
+        window = work_window_id(session_id, state, lk.get("turn"), lk.get("since"))
+        if not session_id or not window:
+            sys.exit("refused: the current work window has no valid accounting identity.")
+        guard.require_owned()
+        try:
+            append_session_event(
+                "work_tag", session_id, actor=agent, turn=as_int(lk.get("turn"), 0),
+                work_window_id=window, work_item=item,
+            )
+        except OSError as exc:
+            print("refused: work-tag ledger write failed (%s)."
+                  % exc.__class__.__name__, file=sys.stderr)
+            return 2
+    print("✓ work window %s tagged %s." % (window, item))
     return 0
 
 
@@ -9661,6 +10266,7 @@ def cmd_release(args):
         t = now()
         forced = bool(args.force)   # RFC 049: an EXPLICIT --force release is
         # always audited (recovery-release), even when the releaser is the holder.
+        before = dict(lk)
         lk.update(
             holder=to, state=f"AWAITING_{to.upper()}",
             since=iso(t), expires="-",
@@ -9670,9 +10276,11 @@ def cmd_release(args):
         )
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "release", t)
         if forced and lk.get("session"):
             guard.require_owned()
-            append_session_event(
+            append_session_event_observational(
                 "force", lk["session"], timestamp=t,
                 op="release", by=agent, from_holder=holder, to=to,
                 reason=reason, force="true",
@@ -9699,17 +10307,20 @@ def cmd_done(args):
         forced = bool(args.force and holder not in (agent, "none"))
         session_id = lk.get("session")
         turn_end = as_int(lk.get("turn"), 0)
+        before = dict(lk)
         lk.update(holder="none", state="DONE", since=iso(t), expires="-",
                   note=(tr("note_force_done", agent=agent, reason=reason)
                         if forced else tr("note_done", agent=agent)))
         guard.require_owned()
         write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "done", t)
         remove_heartbeat(agent)      # RFC 049: best-effort orphan cleanup
         if holder not in (agent, "none"):
             remove_heartbeat(holder)
         if session_id and prev_state != "DONE":
             guard.require_owned()
-            append_session_event(
+            append_session_event_observational(
                 "done", session_id, timestamp=t,
                 closed_at=iso(t), closed_by=agent,
                 turn_end=turn_end, turns=max(0, turn_end),
@@ -9939,6 +10550,14 @@ def main():
                     help="show the next safe action for this agent")
     st.set_defaults(fn=cmd_status)
 
+    tm = sub.add_parser(
+        "time", help="read-only effective-work and non-work session accounting")
+    tm.add_argument("session", nargs="?", default="current",
+                    help="session id to inspect (default: current)")
+    tm.add_argument("--json", action="store_true",
+                    help="machine-readable full accounting breakdown")
+    tm.set_defaults(fn=cmd_time)
+
     mw = sub.add_parser("may-i-write",
                         help="read-only hard guard: rc 0 only while this agent holds a valid pen")
     mw.add_argument("agent", help="agent whose pen ownership is checked")
@@ -10114,6 +10733,8 @@ def main():
     nx.add_argument("--resume", action="store_true",
                     help="resume a PAUSED session for this agent before claiming")
     nx.add_argument("--reason", default="", help="required with --resume")
+    nx.add_argument("--work-item", default="",
+                    help="opaque primary work reference for the new WORKING window")
     nx.set_defaults(fn=cmd_next)
 
     c = sub.add_parser("claim",
@@ -10136,6 +10757,8 @@ def main():
     c.add_argument("--files", default="", help="with --check: files you plan to touch (CSV)")
     c.add_argument("--turns", type=int, default=0,
                    help="with --check: overlap window (<=0 = since your last turn; N = last N turns)")
+    c.add_argument("--work-item", default="",
+                   help="opaque primary work reference for the new WORKING window")
     c.set_defaults(fn=cmd_claim)
 
     a = sub.add_parser("append",  # requires WORKING_<agent>: run `claim` first
@@ -10256,6 +10879,12 @@ def main():
     rs.add_argument("agent", help="roster agent the PAUSED session is resumed for")
     rs.add_argument("--reason", required=True, help="new user scope / reason for resuming")
     rs.set_defaults(fn=cmd_resume)
+
+    wt = sub.add_parser("work-tag",
+                        help="tag the current WORKING window with one opaque primary work item")
+    wt.add_argument("agent", help="agent currently holding the WORKING pen")
+    wt.add_argument("work_item", help="opaque primary work reference (no task-board lookup)")
+    wt.set_defaults(fn=cmd_work_tag)
 
     tk = sub.add_parser("task", help="shared append-only to-do ledger (no pen needed)")
     tk.set_defaults(fn=cmd_task)

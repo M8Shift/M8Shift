@@ -1,5 +1,5 @@
 #!/bin/sh
-# M8Shift pre-commit guard — checksum refresh + one-pen write rule + hygiene lint.
+# M8Shift pre-commit guard — delivery reminder + checksum refresh + one-pen write rule + hygiene lint.
 #
 # This hook is ADVISORY and LOCAL: it does not contact the network and it is not a
 # security boundary. It only narrows the window in which a misconfigured agent can
@@ -19,6 +19,9 @@
 #      listed in checksums.sha256 is staged, hash its INDEX blob (never an unstaged
 #      worktree edit), rewrite the manifest, and stage the manifest automatically.
 #      A refresh error blocks the commit so a stale manifest cannot be committed.
+#   4. Delivery reminder (RFC 065): every non-empty staged change prints one stable
+#      reminder to confirm its linked forge ticket and to push the completed
+#      checkpoint (or name its gateway-pending handoff). This is always advisory.
 #
 # Resolution:
 #   - The relay root is resolved by m8shift.py itself via $M8SHIFT_ROOT (opt-in);
@@ -78,6 +81,17 @@ if [ -n "${M8SHIFT_AGENT:-}" ]; then
 		printf '%s\n' "m8shift pre-commit: '${M8SHIFT_AGENT}' does not hold a valid write pen — commit blocked. Acquire the pen (m8shift.py claim ${M8SHIFT_AGENT}) or follow the next action above." >&2
 		exit 1
 	fi
+fi
+
+# --- RFC 065: stable ticket/push reminder (advisory, offline, fail-open) ----------
+# `git diff --cached` reads only the local index. A probe error is visible but never
+# blocks a commit; ticket existence and authoritative remote state remain forge facts.
+staged_rc=0
+git diff --cached --quiet -- || staged_rc=$?
+if [ "${staged_rc}" -eq 1 ]; then
+	printf '%s\n' "m8shift pre-commit: RFC 065 delivery advisory — confirm this change unit has a linked forge ticket; after commit, push the completed checkpoint or record a named gateway-pending handoff." >&2
+elif [ "${staged_rc}" -gt 1 ]; then
+	printf '%s\n' "m8shift pre-commit: delivery reminder could not inspect the staged change (rc ${staged_rc}) — continuing." >&2
 fi
 
 # --- #51: regenerate the release manifest from staged content -------------------

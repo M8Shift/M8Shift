@@ -35,6 +35,13 @@ def fixture():
         "agents": [{"id": "codex", "model": "gpt-5.4", "model_source": "self_declared",
                     "role_state": "working", "usage": {"windows": {}}}],
         "ledger": {}, "listeners": [],
+        "time_accounting": {
+            "schema": "m8shift.time-accounting/1", "quality": "partial",
+            "wall_seconds": 65160, "effective_work_seconds": 19080,
+            "non_work_seconds": 34860, "awaiting_seconds": 7800,
+            "paused_seconds": 26400, "idle_seconds": 660,
+            "unclassified_seconds": 11220, "coverage_ratio": 0.8278,
+        },
         "last_turn": {"agent": "claude", "model": "claude-opus-4-8", "ask_excerpt": "x"},
         "activity": [{"turn": 6, "agent": "claude", "model": "claude-opus-4-8",
                       "summary": "x" * 200}],
@@ -81,6 +88,22 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 self.assertIn("│" + " " * (width - 2) + "│", lines)
                 # colour is emitted in a colour-capable env (stripped for the width check)
                 self.assertIn("\x1b[", output)
+
+    def test_pen_and_ttl_share_semantic_column_offsets_at_all_layouts(self):
+        top = load_top()
+        for width in (80, 120, 160):
+            with self.subTest(width=width), \
+                    mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                lines = top.render(fixture(), width, self.NOW).splitlines()
+            pen = next(line for line in lines if "PEN" in line)
+            ttl = next(line for line in lines if "TTL" in line)
+            gauge = "<" if width < 100 else "█"
+            self.assertEqual(pen.index("codex"), ttl.index(gauge))
+            self.assertEqual(pen.index("→ turn 8"), ttl.index("15:00 left"))
+            self.assertEqual(pen.index("claimed"), ttl.index("expires"))
+            self.assertGreater(pen.index("hb " if width < 100 else "heartbeat "),
+                               pen.index("claimed"))
+            self.assertTrue(all(len(line) == width for line in lines))
 
     def test_header_wordmark_uses_truecolour_when_terminal_advertises_it(self):
         top = load_top()
@@ -150,6 +173,61 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                               {"TERM": "dumb", "COLORTERM": "truecolor"}):
                 with mock.patch.dict(os.environ, plain_env, clear=True):
                     self.assertEqual(top._semantic(role, "meaning"), "meaning")
+
+    def test_heartbeat_uses_relative_full_and_slim_formats_with_liveness_tiers(self):
+        top = load_top()
+        cases = (
+            ("fresh", "2026-07-13T00:14:48Z", "12 s", (87, 171, 90)),
+            ("alive-expired", "2026-07-13T00:12:00Z", "3 m", (198, 144, 38)),
+            ("ordinary-stale", "2026-07-12T23:15:00Z", "1 h", (244, 112, 103)),
+        )
+        for liveness, stamp, age, rgb in cases:
+            data = fixture()
+            data["liveness"] = liveness
+            data["pen"]["heartbeat"] = stamp
+            with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+                wide = top.render(data, 120, self.NOW)
+            colour = "\x1b[38;2;%d;%d;%dm" % rgb
+            self.assertIn(colour + "heartbeat %s ago\x1b[0m" % age, wide)
+            with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                slim = top.render(data, 80, self.NOW)
+            self.assertIn("hb %s" % age, slim)
+            self.assertNotIn("hb %s ago" % age, slim)
+            for width in (80, 120, 160):
+                output = self._plain(top.render(data, width, self.NOW))
+                self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
+    def test_ledger_uses_readable_full_and_slim_formats_with_semantic_colours(self):
+        top = load_top()
+        data = fixture()
+        data["ledger"] = {
+            "tasks_open": 3, "decisions_pending": 2,
+            "doctor_findings": 0, "gate_armed": True,
+        }
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+            wide = top.render(data, 120, self.NOW)
+        plain = self._plain(wide)
+        self.assertIn(
+            "tasks 3 open   decisions 2 pending   doctor 0 findings   gate armed",
+            plain)
+        self.assertIn("\x1b[38;2;57;197;207m3\x1b[0m", wide)
+        self.assertIn("\x1b[38;2;57;197;207m2\x1b[0m", wide)
+        self.assertIn("\x1b[38;2;87;171;90m0\x1b[0m", wide)
+        self.assertIn("\x1b[38;2;87;171;90marmed\x1b[0m", wide)
+
+        data["ledger"].update({"doctor_findings": 4, "gate_armed": False})
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+            warning = top.render(data, 120, self.NOW)
+        self.assertIn("\x1b[38;2;244;112;103m4\x1b[0m", warning)
+        self.assertIn("\x1b[38;2;198;144;38mdisarmed\x1b[0m", warning)
+
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+            slim = top.render(data, 80, self.NOW)
+        self.assertIn("tasks 3 . decisions 2 . doctor 4 . gate disarmed", slim)
+        self.assertNotIn("\x1b[", slim)
+        for width in (80, 120, 160):
+            output = self._plain(top.render(data, width, self.NOW))
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
     def test_all_capabilities_preserve_frame_and_non_colour_meaning(self):
         top = load_top()
@@ -279,7 +357,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             local_frame = self._plain(top.render(data, 120, now))
             self.assertIn("01:45:00", local_frame)  # header clock
             self.assertIn("claimed 2026-07-14 01:30", local_frame)
-            self.assertIn("heartbeat 2026-07-14 01:40", local_frame)
+            self.assertIn("heartbeat 5 m ago", local_frame)
             self.assertIn("expires 2026-07-14 02:30", local_frame)
             self.assertIn("5h 42% reset Tue 07-14 01:45", local_frame)
             self.assertIn("weekly 30% reset Tue 07-14 02:15", local_frame)
@@ -289,7 +367,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             utc_frame = self._plain(top.render(data, 120, now, utc=True))
             for token in (
                     "23:45:00Z", "claimed 2026-07-13 23:30Z",
-                    "heartbeat 2026-07-13 23:40Z", "expires 2026-07-14 00:30Z",
+                    "heartbeat 5 m ago", "expires 2026-07-14 00:30Z",
                     "5h 42% reset Mon 07-13 23:45Z",
                     "weekly 30% reset Tue 07-14 00:15Z",
                     "2026-07-13T23:50:00Z"):
@@ -387,28 +465,28 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             {"turn": n, "agent": "codex", "model": "gpt", "summary": "event %d" % n}
             for n in range(1, 11)
         ]
-        # One agent makes the wide frame's fixed portion 14 rows, leaving four
-        # activity rows in an 18-line terminal.
-        self.assertEqual(top.activity_max_scroll(snap, 120, 18), 6)
+        # RFC 064's permanent TIME strip makes the one-agent wide chrome 15
+        # rows, leaving three activity rows in an 18-line terminal.
+        self.assertEqual(top.activity_max_scroll(snap, 120, 18), 7)
         output = self._plain(top.render(
             snap, 120, self.NOW, height=18, activity_offset=1))
         self.assertEqual(len(output.splitlines()), 18)
-        self.assertIn("activity turns 6-9 / 10", output)
+        self.assertIn("activity turns 7-9 / 10", output)
         self.assertIn("│  9", output)
         self.assertNotIn("│  10", output)
-        self.assertIn("│  6", output)
+        self.assertIn("│  7", output)
         self.assertNotIn("│  5", output)
 
     def test_activity_viewport_caps_at_twenty_but_physical_fill_keeps_height(self):
         top = load_top()
         snap = fixture()
-        for width, fixed in ((80, 17), (120, 14)):
+        for width, fixed in ((80, 18), (120, 15)):
             for capacity in (0, 7, 8, 16, 20, 24):
                 height = fixed + capacity
                 self.assertEqual(top._activity_capacity(snap, width, height), capacity)
                 self.assertEqual(top._activity_limit(snap, width, height), min(capacity, 20))
-        self.assertEqual(top._activity_request_limit(120, 14, 1), 180)
-        self.assertEqual(top._activity_request_limit(120, 34, 1), 200)
+        self.assertEqual(top._activity_request_limit(120, 15, 1), 180)
+        self.assertEqual(top._activity_request_limit(120, 35, 1), 200)
 
     def test_true_turn_denominator_and_truncated_buffer_edge_marker(self):
         top = load_top()
@@ -421,17 +499,17 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         snap["activity_truncated"] = True
         for width, height in ((80, 37), (120, 34)):
             before_floor = self._plain(top.render(
-                snap, width, self.NOW, height=height, activity_offset=179))
-            at_floor = self._plain(top.render(
                 snap, width, self.NOW, height=height, activity_offset=180))
-            self.assertIn("turns 536-555 / 734", before_floor)
+            at_floor = self._plain(top.render(
+                snap, width, self.NOW, height=height, activity_offset=181))
+            self.assertIn("turns 536-554 / 734", before_floor)
             self.assertNotIn(top.ACTIVITY_BUFFER_EDGE, before_floor)
-            self.assertIn("turns 535-554 / 734", at_floor)
+            self.assertIn("turns 535-553 / 734", at_floor)
             self.assertIn(top.ACTIVITY_BUFFER_EDGE, at_floor)
 
         snap["activity_truncated"] = False
         complete = self._plain(top.render(
-            snap, 120, self.NOW, height=34, activity_offset=180))
+            snap, 120, self.NOW, height=34, activity_offset=181))
         self.assertNotIn(top.ACTIVITY_BUFFER_EDGE, complete)
 
     def test_expanded_reader_wraps_complete_text_and_preserves_frame_matrix(self):
@@ -490,13 +568,68 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertIn("← / →   page complete", output)
             self.assertIn("every 7s", output)
 
+    def test_permanent_time_strip_preserves_priority_geometry_and_one_row_budget(self):
+        top = load_top()
+        for width in (80, 120, 160):
+            with self.subTest(width=width), \
+                    mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                output = top.render(fixture(), width, self.NOW, height=30)
+            lines = output.splitlines()
+            time_rows = [index for index, line in enumerate(lines) if "TIME" in line]
+            self.assertEqual(len(time_rows), 1)
+            self.assertIn("effective* 5h18", lines[time_rows[0]])
+            self.assertIn("non-work 9h41", lines[time_rows[0]])
+            self.assertIn("unknown 3h07", lines[time_rows[0]])
+            self.assertIn("q quit", lines[time_rows[0] + 1])
+            self.assertEqual(len(lines), 30)
+            self.assertTrue(all(len(line) == width for line in lines))
+
+        exact = fixture()
+        exact["time_accounting"] = dict(exact["time_accounting"], quality="exact",
+                                         unclassified_seconds=0)
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+            exact_output = top.render(exact, 120, self.NOW)
+        exact_time = next(line for line in exact_output.splitlines() if "TIME" in line)
+        self.assertNotIn("unknown", exact_time)
+
+        # D4: compared with the pre-strip chrome, exactly one activity row is spent.
+        self.assertEqual(top._activity_capacity(fixture(), 80, 30), 12)
+        self.assertEqual(top._activity_capacity(fixture(), 120, 30), 15)
+
+    def test_time_strip_uses_non_judgmental_colours_and_keeps_unknown_visible(self):
+        top = load_top()
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+            output = top.render(fixture(), 120, self.NOW)
+        self.assertIn("\x1b[38;2;57;197;207meffective* 5h18\x1b[0m", output)
+        self.assertIn("\x1b[38;2;57;197;207mnon-work 9h41\x1b[0m", output)
+        self.assertIn("\x1b[38;2;198;144;38munknown 3h07\x1b[0m", output)
+
+    def test_status_accounting_sibling_survives_snapshot_merge(self):
+        top = load_top()
+        payload = fixture()
+        accounting = payload.pop("time_accounting")
+        snapshot = {
+            key: payload[key] for key in (
+                "agents", "listeners", "last_turn", "ledger", "pen", "activity")
+        }
+        snapshot.update({
+            "schema": "m8shift.status/1", "activity_limit": 8,
+            "activity_truncated": False,
+        })
+        wire = dict(payload, time_accounting=accounting, snapshot=snapshot)
+        proc = mock.Mock(returncode=0, stdout=json.dumps(wire), stderr="")
+        with mock.patch.object(top.subprocess, "run", return_value=proc):
+            merged = top.load_snapshot("engine.py", "/relay")
+        self.assertEqual(merged["time_accounting"], accounting)
+        self.assertEqual(merged["schema"], "m8shift.status/1")
+
     def test_120_column_plain_frame_is_byte_stable(self):
         top = load_top()
         with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "e51cc5be2ad6092162d0e76585aa018f978069445c25aef79ea3bf699eb9e118",
+            "d398de5da289eb7c780848465d8b7e61f14144e6632fb8e8fea17c8300a68982",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
@@ -548,7 +681,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                      "summary": "event %d" % (index + 1)}
                     for index in range(activity_count)
                 ]
-                chrome = (13 if width >= 100 else 16) + agent_count
+                chrome = (14 if width >= 100 else 17) + agent_count
                 heights = sorted(set((max(1, chrome - 1), chrome, chrome + 1,
                                       24, 40, 60)))
                 for env in tiers:

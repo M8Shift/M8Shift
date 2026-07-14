@@ -209,7 +209,7 @@ Every change follows the same branch-based flow.
 > **`main` only ever receives a stabilized version through a merge request — never a
 > direct intermediate commit.**
 
-1. **Open a tracking item on the forge** before starting: an issue (or a sprint
+1. **Open a structured tracking item on the forge** before starting: an issue (or a sprint
    grouping several issues) describing the goal, the acceptance criteria, and the
    target version. Every version/feature is traceable to an issue.
 2. **Create a work branch** off `main`, named for the change
@@ -226,8 +226,11 @@ Every change follows the same branch-based flow.
 5. **Documentation, systematically.** Update the affected docs in the same change:
    specs, RFC status, protocol/reference, `docs/`, and regenerate derived docs with
    `scripts/gen_docs.py` when the protocol changes.
-6. **Push the branch to the forge** and open a **merge request** to `main`. The MR
-   description links the issue and lists the logical commits.
+6. **Push the exact branch head to the forge** and open a **merge request** to `main`.
+   The MR description links the issue and lists the logical commits. A network-isolated
+   author instead hands the committed SHA to the named forge-gateway role and labels it
+   **gateway pending**; the gateway reviews and pushes that exact history before claiming
+   remote delivery.
 7. **Independent review** (the other agent): hygiene, tests green, docs updated, links
    valid, scope clean. The reviewer approves or returns ranked findings.
 8. **Stabilize, then merge.** `main` receives the change **only once the version is
@@ -494,7 +497,7 @@ explicit stop. `idle`/`PAUSED` is not a stop signal: park cleanly and wait for t
 next authorized scope. The author never closes their own review; only an explicit
 human stop ends the loop.
 
-## 9. Refresh checksums and enforce the pen — `hooks/pre-commit`
+## 9. Refresh checksums, remind delivery, and enforce the pen — `hooks/pre-commit`
 
 The relay coordinates *who writes when*, but nothing stops a misconfigured agent from
 running `git commit` without holding the pen. `hooks/pre-commit` closes that gap: a
@@ -517,6 +520,14 @@ chmod +x .git/hooks/pre-commit
   stages `checksums.sha256` automatically. Unstaged bytes are never folded into the
   commit. A configured agent passes the pen guard before this index mutation.
   Refresh errors block the commit; pre-push verification stays as a backstop.
+- **Any non-empty staged change exists** → the hook prints one stable RFC 065 reminder
+  to confirm the linked forge ticket and, after commit, push the checkpoint or record a
+  named gateway-pending handoff. The reminder reads only the local index and never blocks.
+
+`doctor` adds two bounded, read-only local Git reminders: `delivery.no_upstream` for a
+non-default branch without an upstream, and `delivery.unpushed` when `HEAD` is ahead of
+its configured local upstream ref. Detached, default-branch, non-Git, and probe-error
+cases fail open. These findings never contact a forge and never prove remote state.
 
 > [!NOTE]
 > **Zero-memory by design.** A fresh agent does not have to *remember* the write rule:
