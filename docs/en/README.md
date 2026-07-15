@@ -37,6 +37,7 @@ M8Shift is **free and open source**, released under the
 | [security-research-and-frameworks.md](security-research-and-frameworks.md) | M8Shift against external security frameworks (arXiv, MITRE ATLAS, NIST/CISA/ANSSI, IBM AI Risk Atlas). |
 | [stage2-rationale.md](stage2-rationale.md) | Design rationale behind the N-agent relay model. |
 | [context-pack-measurements.md](context-pack-measurements.md) | DoD evidence log: measured token reduction + output equivalence of the context companion (RFC 034), for Claude and Codex. |
+| [status-performance-investigation.md](status-performance-investigation.md) | Measured `status --json` scaling, interpreter/build comparison, and incremental turn-fold prototype evidence. |
 | [rtk-shell-output-policy.md](rtk-shell-output-policy.md) | Usage policy for the optional RTK shell-output adapter: recommended modes, forbidden diff mode, self-declared RTK visibility, and `rtk discover` audit guidance. |
 
 ## Design decisions
