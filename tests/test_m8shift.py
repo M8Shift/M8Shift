@@ -16312,7 +16312,28 @@ class TestRFC072FleetPlan(ListenerCLIBase):
         supervisor = self.rt("fleet", "supervise", "--spec", spec,
                              "--dry-run", "--json")
         self.assertEqual(supervisor.returncode, 0, supervisor.stderr)
-        self.assertEqual(json.loads(supervisor.stdout)["service_count"], 1)
+        supervisor_doc = json.loads(supervisor.stdout)
+        self.assertEqual(supervisor_doc["service_count"], 1)
+        self.assertEqual(supervisor_doc["durability_tier"], "foreground")
+
+        # Deterministic service-manager seam: render one native service without
+        # touching launchctl, and keep the same single control plane payload.
+        native = self.rt(
+            "fleet", "supervise", "--spec", spec, "--backend", "auto",
+            "--detach", "--dry-run", "--json", env={
+                "M8SHIFT_LISTENER_BACKEND_PROBE": json.dumps({
+                    "platform": "darwin", "launchctl": True,
+                    "gui_session": True, "protected_folder": False,
+                }),
+            })
+        self.assertEqual(native.returncode, 0, native.stderr)
+        native_doc = json.loads(native.stdout)
+        self.assertEqual(native_doc["durability_tier"], "native-service")
+        self.assertEqual(native_doc["restart_policy"], "native-on-failure")
+        self.assertEqual(native_doc["backend"], "launchd")
+        self.assertEqual(len(native_doc["service"]["install_argv"]), 2)
+        self.assertIn("KeepAlive", native_doc["service"]["content"])
+        self.assertIn("<true/>", native_doc["service"]["content"])
 
     def test_reconcile_refuses_unbootstrapped_identity_before_process_work(self):
         self.init()
@@ -16321,6 +16342,145 @@ class TestRFC072FleetPlan(ListenerCLIBase):
                          "--dry-run", "--json")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fleet bootstrap is incomplete", result.stderr)
+
+    def _durable_fleet_fixture(self):
+        self.init()
+        self.rt("providers", "init")
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        spec_path = self.fleet_spec([{
+            "name": "codex-2", "template": "codex",
+            "model": "gpt-test-exact", "desired": "running",
+        }])
+        applied = self.rt("fleet", "apply", "--spec", spec_path, "--by", "codex")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        path = os.path.join(self.d, "m8shift-runtime.py")
+        module_spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_durable_fleet_test", path)
+        runtime = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(runtime)
+        spec = runtime.load_fleet_spec(os.path.join(self.d, spec_path))
+        args = runtime.argparse.Namespace(
+            backend="local", runner="", grace=0.0, dry_run=False)
+        return runtime, spec, args
+
+    def test_crash_restart_adopts_surviving_listener_without_duplicate_launch(self):
+        runtime, spec, args = self._durable_fleet_fixture()
+        survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                    cwd=self.d)
+        try:
+            with mock.patch.object(
+                    runtime, "fleet_process_start_ref",
+                    side_effect=lambda pid: f"test-start:{pid}" if pid else ""):
+                runtime.write_listener_pid("codex-2", survivor.pid)
+                item = spec["agents"][0]
+                row = runtime.fleet_provider_rows()["codex-2"]
+                lane = runtime.persist_fleet_lane(
+                    item, row, runtime.fleet_listener_health("codex-2"), "local")
+                self.assertTrue(lane["process_start_ref"])
+
+                # A new supervisor instance sees the exact persisted start identity,
+                # adopts the survivor, and performs no provider launch.
+                adapter = runtime.provider_adapter("openai-codex")
+                with mock.patch.object(runtime, "fleet_listener_command") as launch, \
+                        mock.patch.object(adapter, "health", wraps=adapter.health) as health:
+                    actions = runtime.fleet_reconcile_once(spec, args)
+                self.assertEqual(actions, [])
+                launch.assert_not_called()
+                health.assert_called_once()
+                adopted = runtime.load_fleet_lane("codex-2")
+                self.assertEqual(adopted["pid"], survivor.pid)
+                self.assertEqual(adopted["status"], "running")
+        finally:
+            survivor.terminate()
+            survivor.wait(timeout=5)
+
+    def test_resume_restarts_missing_listener_once_then_adopts_it(self):
+        runtime, spec, args = self._durable_fleet_fixture()
+        missing = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                   cwd=self.d)
+        replacement = None
+        try:
+            with mock.patch.object(
+                    runtime, "fleet_process_start_ref",
+                    side_effect=lambda pid: f"test-start:{pid}" if pid else ""):
+                runtime.write_listener_pid("codex-2", missing.pid)
+                item = spec["agents"][0]
+                row = runtime.fleet_provider_rows()["codex-2"]
+                runtime.persist_fleet_lane(
+                    item, row, runtime.fleet_listener_health("codex-2"), "local")
+                missing.terminate()
+                missing.wait(timeout=5)
+
+                launches = []
+                def fake_start(agent, action, _args, provider_row=None, lane=None):
+                    nonlocal replacement
+                    self.assertEqual((agent, action), ("codex-2", "start_listener"))
+                    self.assertEqual(provider_row["provider"], "openai-codex")
+                    replacement = subprocess.Popen(
+                        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=self.d)
+                    runtime.write_listener_pid(agent, replacement.pid)
+                    launches.append(replacement.pid)
+                    return {"action": action, "agent": agent, "output": "fake"}
+
+                with mock.patch.object(runtime, "fleet_listener_command", side_effect=fake_start):
+                    first = runtime.fleet_reconcile_once(spec, args)
+                    second = runtime.fleet_reconcile_once(spec, args)
+                self.assertEqual(len(first), 1)
+                self.assertEqual(second, [])
+                self.assertEqual(launches, [replacement.pid])
+                self.assertEqual(runtime.load_fleet_lane("codex-2")["pid"], replacement.pid)
+        finally:
+            if missing.poll() is None:
+                missing.terminate()
+                missing.wait(timeout=5)
+            if replacement is not None and replacement.poll() is None:
+                replacement.terminate()
+                replacement.wait(timeout=5)
+
+    def test_corrupt_durable_lane_fails_closed_before_launch(self):
+        runtime, spec, args = self._durable_fleet_fixture()
+        path = runtime.fleet_lane_path("codex-2")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{half-written")
+        with mock.patch.object(runtime, "fleet_listener_command") as launch:
+            with self.assertRaisesRegex(ValueError, "durable lane codex-2 is corrupt"):
+                runtime.fleet_reconcile_once(spec, args)
+        launch.assert_not_called()
+
+    def test_half_written_control_fails_before_supervisor_or_listener_launch(self):
+        runtime, _spec, _args = self._durable_fleet_fixture()
+        os.makedirs(os.path.dirname(runtime.FLEET_CONTROL), exist_ok=True)
+        with open(runtime.FLEET_CONTROL, "w", encoding="utf-8") as fh:
+            fh.write("{half-written")
+        result = self.rt("fleet", "supervise", "--spec", "fleet.json",
+                         "--max-ticks", "1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("durable fleet control is corrupt", result.stderr)
+        self.assertFalse(os.path.exists(runtime.FLEET_SUPERVISOR_PID))
+        self.assertFalse(os.path.exists(runtime.listener_paths("codex-2")["pid"]))
+
+    def test_fleet_lifecycle_dispatches_resume_health_and_stop_through_adapter(self):
+        runtime, _spec, args = self._durable_fleet_fixture()
+        row = runtime.fleet_provider_rows()["codex-2"]
+        adapter = runtime.provider_adapter("openai-codex")
+        lane = {"pid": 123, "process_start_ref": "start-123",
+                "session_ref": "a" * 32}
+        completed = subprocess.CompletedProcess([], 0, stdout="ok\n", stderr="")
+        with mock.patch.object(adapter, "resume", side_effect=ValueError("unsupported")) \
+                as resume, mock.patch.object(runtime.subprocess, "run",
+                                             return_value=completed):
+            runtime.fleet_listener_command(
+                "codex-2", "start_listener", args, row, lane)
+        resume.assert_called_once()
+
+        with mock.patch.object(adapter, "stop", wraps=adapter.stop) as stop, \
+                mock.patch.object(runtime.subprocess, "run", return_value=completed):
+            runtime.fleet_listener_command(
+                "codex-2", "stop_listener", args, row, lane)
+        stop.assert_called_once_with(
+            {"pid": 123, "process_start_ref": "start-123"}, "graceful")
+
 
     def test_immutable_jobs_require_designated_live_integrator(self):
         self.init("--agents", "claude,codex,codex-2")

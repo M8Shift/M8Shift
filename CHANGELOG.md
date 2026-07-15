@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Detached durable fleet control plane (#65, RFC 073 slice 2).** The RFC 072
+  supervisor now persists schema-versioned, project/identity/provider/model-
+  bound control, lane, and opaque-session records with fsync + atomic replace.
+  Startup distinguishes live survivors by PID start identity, adopts exact
+  matches, restarts missing desired-running lanes once, and fails closed on
+  corrupt, stale, reused, or ambiguous evidence. Adapter `health`, `resume`, and
+  `stop` lifecycle hooks now mediate generic reconciliation without gaining
+  relay authority. `fleet supervise --detach` installs the same single control
+  plane through launchd/systemd/Windows service definitions when available, or
+  reports the weaker local process-group-detached tier explicitly.
 - **Vendor-neutral agent CLI adapter spine (#65/#66, RFC 073 slice 1).** The
   runtime companion now dispatches a formal `launch_argv`/`stop`/`resume`/`health`
   contract through a provider-keyed registry. Existing Codex and Claude managed

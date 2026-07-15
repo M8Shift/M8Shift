@@ -1,6 +1,6 @@
 # RFC 073 — Adapter registry and detached orchestration delivery slices
 
-- **Status:** slice 1 implemented; slices 2–4 accepted for implementation in
+- **Status:** slices 1–2 implemented; slices 3–4 accepted for implementation in
   separately reviewed batches
 - **Date:** 2026-07-15
 - **Scope:** concrete delivery plan for backlog #65/#66 and RFC 067 D1–D16
@@ -106,7 +106,7 @@ second daemon beside it.
 | user `systemd` alone | backend, not architecture | correct Linux durable tier under the same control-plane contract |
 
 The existing listener backend selection remains the OS abstraction. Slice 2
-will make the fleet supervisor itself service-installable and service-observable
+makes the fleet supervisor itself service-installable and service-observable
 using the established launchd/systemd/native-Windows adapters. A local detached
 backend remains available but must report that it does not guarantee logout,
 reboot, or automatic restart survival.
@@ -183,6 +183,20 @@ Acceptance gates:
    project binding fails before launch.
 6. launchd, user-systemd, native-Windows, and local fallback selection use the
    existing backend seam; deterministic tests require no real service manager.
+
+Implemented in this change:
+
+- crash-consistent `control.json`, strict per-identity lane records, and opaque
+  project/agent/adapter/model-bound session records;
+- PID start-identity reconciliation that adopts exact live survivors, restarts
+  a missing desired-running listener once, and refuses reused or ambiguous PIDs;
+- adapter-dispatched health, optional resume with fresh-listener fallback, and
+  process-group stop intent, with active usage holds checked before launch;
+- one `fleet supervise --detach` surface using native launchd, user-systemd, or
+  Windows service definitions through the existing probe seam, with an honest
+  local detached fallback;
+- deterministic conformance tests for survivor adoption, restart without a
+  duplicate launch, corrupt-record refusal, and native-service plan rendering.
 
 ### Slice 3 — live Gemini and resume
 
