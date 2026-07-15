@@ -194,6 +194,7 @@ FLEET_JOBS_SCHEMA = "m8shift.fleet.jobs.v1"
 FLEET_JOB_SCHEMA = "m8shift.fleet.job.v1"
 FLEET_ATTEMPT_SCHEMA = "m8shift.fleet.attempt.v1"
 FLEET_ASSIGNMENT_SCHEMA = "m8shift.fleet.assignment.v1"
+FLEET_INTEGRATION_SCHEMA = "m8shift.fleet.integration.v1"
 FLEET_JOBS_DIR = os.path.join(FLEET_DIR, "jobs")
 FLEET_JOB_ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}\Z")
 FLEET_VERIFY_TIMEOUT_MAX_S = 900
@@ -278,6 +279,7 @@ def canonical_json_bytes(data):
 
 def write_json_immutable(path, data):
     """Create one immutable sidecar, accepting only a byte-identical retry."""
+    reject_symlinked_runtime_path(path)
     raw = canonical_json_bytes(data)
     try:
         with open(path, "rb") as fh:
@@ -289,6 +291,7 @@ def write_json_immutable(path, data):
             raise ValueError(f"immutable record conflicts at {os.path.relpath(path, HERE)}")
         return False
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    reject_symlinked_runtime_path(path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -2789,7 +2792,10 @@ def read_fleet_job(job_id):
         raise ValueError("fleet job id is invalid")
     path = fleet_job_path(job_id, "spec.json")
     doc, err = read_json_diagnostic(path, {})
-    if err or not isinstance(doc, dict) or doc.get("schema") != FLEET_JOB_SCHEMA:
+    fields = {"schema", "sequence", "integrator", "target", "id", "agent",
+              "base", "branch", "objective", "done_criteria", "verify"}
+    if err or not isinstance(doc, dict) or set(doc) != fields \
+            or doc.get("schema") != FLEET_JOB_SCHEMA or doc.get("id") != job_id:
         raise ValueError(f"unknown or malformed fleet job {job_id}")
     return doc
 
@@ -2806,6 +2812,15 @@ def fleet_attempt_numbers(job_id):
 
 
 def fleet_job_status(job_id):
+    completion, completion_err = read_json_diagnostic(
+        fleet_job_path(job_id, "completion.json"), {})
+    completion_fields = {"schema", "job_id", "integrator", "producer", "target",
+                         "handoff_to", "verification_attempt", "worktree_dropped"}
+    if not completion_err and set(completion) == completion_fields \
+            and completion.get("schema") == FLEET_INTEGRATION_SCHEMA \
+            and completion.get("job_id") == job_id \
+            and completion.get("worktree_dropped") is True:
+        return "integrated"
     numbers = fleet_attempt_numbers(job_id)
     if not numbers:
         assignment, err = read_json_diagnostic(
@@ -2815,7 +2830,12 @@ def fleet_job_status(job_id):
     latest = numbers[-1]
     result, err = read_json_diagnostic(
         fleet_job_path(job_id, "attempts", f"{latest}.result.json"), {})
-    if err:
+    result_fields = {"schema", "job_id", "attempt", "provider_exit",
+                     "verification_exit", "verification_timed_out",
+                     "verification_passed", "output_tail"}
+    if err or not isinstance(result, dict) or set(result) != result_fields \
+            or result.get("schema") != "m8shift.fleet.attempt-result.v1" \
+            or result.get("job_id") != job_id or result.get("attempt") != latest:
         return "verifying"
     return "verified" if result.get("verification_passed") is True else "failed"
 
@@ -2882,7 +2902,10 @@ def cmd_fleet_jobs_submit(args):
 # worktrees.  The existing worktree companion remains the only worktree owner.
 def fleet_assignment(job_id):
     doc, err = read_json_diagnostic(fleet_job_path(job_id, "assignment.json"), {})
-    if err or not isinstance(doc, dict) or doc.get("schema") != FLEET_ASSIGNMENT_SCHEMA:
+    fields = {"schema", "job_id", "agent", "integrator", "worktree", "branch", "base"}
+    if err or not isinstance(doc, dict) or set(doc) != fields \
+            or doc.get("schema") != FLEET_ASSIGNMENT_SCHEMA \
+            or doc.get("job_id") != job_id:
         return None
     return doc
 
@@ -2950,11 +2973,139 @@ def cmd_fleet_jobs_assign(args):
     return 0
 
 
+# RFC 072 slice 6 — only the relay-designated integrator may invoke the
+# serialized worktree merge, core handoff, and subsequent safe worktree drop.
+def cmd_fleet_jobs_integrate(args):
+    try:
+        job = read_fleet_job(args.id)
+        if args.by != job["integrator"]:
+            raise ValueError(
+                f"only designated integrator {job['integrator']} may integrate this job")
+        if args.by == job["agent"]:
+            raise ValueError("parallel producer may never self-integrate")
+        if not AGENT_RE.fullmatch(args.to or "") or args.to == args.by:
+            raise ValueError("--to must be a different valid roster identity")
+        assignment = fleet_assignment(args.id)
+        if not assignment or assignment.get("agent") != job["agent"]:
+            raise ValueError(f"job {args.id} has no valid producer worktree assignment")
+        if fleet_job_status(args.id) != "verified":
+            raise ValueError(f"job {args.id} is not explicitly verified")
+        relay = fleet_relay_snapshot()
+        allowed = {"IDLE", f"AWAITING_{args.by.upper()}",
+                   f"WORKING_{args.by.upper()}"}
+        if relay["state"] not in allowed or args.by not in relay["agents"] \
+                or args.to not in relay["agents"]:
+            raise ValueError(
+                f"relay has not designated {args.by} for integration "
+                f"(state={relay['state']})")
+        plan = {"schema": "m8shift.fleet.integration-plan.v1", "job_id": args.id,
+                "integrator": args.by, "producer": job["agent"],
+                "target": job["target"], "handoff_to": args.to,
+                "verification_attempt": fleet_attempt_numbers(args.id)[-1]}
+        write_json_immutable(fleet_job_path(args.id, "integration.plan.json"), plan)
+        reason = f"fleet job {args.id} passed its explicit verification recipe"
+        integrate_argv = [sys.executable, WORKTREE_PATH, "integrate", args.id,
+                          args.by, "--into", job["target"], "--to", args.to,
+                          "--takeover", "--reason", reason]
+        integrated = subprocess.run(
+            integrate_argv, cwd=HERE, capture_output=True, text=True)
+        if integrated.returncode != 0:
+            detail = (integrated.stderr or integrated.stdout or
+                      "worktree integration failed").strip()
+            raise ValueError(f"integrate {args.id} failed: {detail}")
+        drop_argv = [sys.executable, WORKTREE_PATH, "drop", args.id, args.by, "--yes"]
+        dropped = subprocess.run(drop_argv, cwd=HERE, capture_output=True, text=True)
+        if dropped.returncode != 0:
+            detail = (dropped.stderr or dropped.stdout or "worktree drop failed").strip()
+            append_jsonl(FLEET_EVENTS, {"schema": "m8shift.fleet.event.v1",
+                         "event": "fleet.job_drop_failed", "at": iso(),
+                         "by": args.by, "job": args.id, "message": detail})
+            raise ValueError(f"integrated and handed off, but drop {args.id} failed: {detail}")
+        completion = {"schema": FLEET_INTEGRATION_SCHEMA, "job_id": args.id,
+                      "integrator": args.by, "producer": job["agent"],
+                      "target": job["target"], "handoff_to": args.to,
+                      "verification_attempt": fleet_attempt_numbers(args.id)[-1],
+                      "worktree_dropped": True}
+        write_json_immutable(fleet_job_path(args.id, "completion.json"), completion)
+        append_jsonl(FLEET_EVENTS, {"schema": "m8shift.fleet.event.v1",
+                     "event": "fleet.job_integrated", "at": iso(), "by": args.by,
+                     "job": args.id, "handoff_to": args.to, "worktree_dropped": True})
+    except (OSError, ValueError) as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    if args.json:
+        print(json.dumps(completion, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"✓ integrated {args.id}, handed to {args.to}, and dropped its worktree")
+    return 0
+
+
+def fleet_job_doctor_findings():
+    """Read-only consistency checks for immutable jobs and degree-2 lanes."""
+    findings = []
+    batch_path = os.path.join(FLEET_JOBS_DIR, "batch.json")
+    if not os.path.exists(batch_path):
+        return findings
+    batch, err = read_json_diagnostic(batch_path, {})
+    if err:
+        if os.path.exists(FLEET_JOBS_DIR):
+            findings.append({"severity": "warning", "check": "fleet.jobs_batch",
+                             "message": f"fleet job batch is unreadable: {err}"})
+        return findings
+    if not isinstance(batch.get("job_ids"), list) or not isinstance(
+            batch.get("max_concurrency"), int):
+        return [{"severity": "error", "check": "fleet.jobs_batch",
+                 "message": "fleet job batch has an invalid immutable manifest"}]
+    active = []
+    for job_id in batch["job_ids"]:
+        try:
+            job = read_fleet_job(job_id)
+        except ValueError as exc:
+            findings.append({"severity": "error", "check": "fleet.job_spec",
+                             "message": str(exc)})
+            continue
+        state = fleet_job_status(job_id)
+        assignment = fleet_assignment(job_id)
+        tree_exists = os.path.isdir(os.path.join(HERE, ".m8shift", "worktrees", job_id))
+        if assignment and tree_exists:
+            active.append(assignment)
+        if state == "verifying":
+            findings.append({"severity": "warning", "check": "fleet.job_reconcile",
+                             "message": f"{job_id}: immutable attempt has no result"})
+        if state in {"assigned", "failed", "verified"} and not tree_exists:
+            findings.append({"severity": "error", "check": "fleet.job_worktree",
+                             "message": f"{job_id}: {state} job is missing its worktree"})
+        if state == "submitted" and tree_exists and not assignment:
+            findings.append({"severity": "error", "check": "fleet.job_assignment",
+                             "message": f"{job_id}: worktree exists without assignment evidence"})
+        if state == "integrated" and tree_exists:
+            findings.append({"severity": "warning", "check": "fleet.job_drop",
+                             "message": f"{job_id}: integrated job still has a worktree"})
+        if assignment and assignment.get("agent") != job.get("agent"):
+            findings.append({"severity": "error", "check": "fleet.job_owner",
+                             "message": f"{job_id}: assignment producer differs from job spec"})
+    cap = batch.get("max_concurrency", 0)
+    if len(active) > min(2, cap):
+        findings.append({"severity": "error", "check": "fleet.job_concurrency",
+                         "message": f"{len(active)} active producer worktrees exceed cap {cap}"})
+    producers = [row.get("agent") for row in active]
+    duplicates = sorted({agent for agent in producers if producers.count(agent) > 1})
+    if duplicates:
+        findings.append({"severity": "error", "check": "fleet.job_concurrency",
+                         "message": "producer owns multiple active lanes: " + ",".join(duplicates)})
+    return findings
+
+
 def cmd_fleet_jobs_attempt(args):
     try:
         job = read_fleet_job(args.id)
         if args.by != job["agent"]:
             raise ValueError(f"only assigned producer {job['agent']} may record this attempt")
+        assignment = fleet_assignment(args.id)
+        if not assignment or assignment.get("agent") != args.by:
+            raise ValueError(f"job {args.id} has no valid assignment for {args.by}")
+        worktree = os.path.join(HERE, ".m8shift", "worktrees", args.id)
+        if not os.path.isdir(worktree):
+            raise ValueError(f"assigned worktree is missing for {args.id}")
         numbers = fleet_attempt_numbers(args.id)
         if numbers and not os.path.exists(fleet_job_path(
                 args.id, "attempts", f"{numbers[-1]}.result.json")):
@@ -2966,9 +3117,6 @@ def cmd_fleet_jobs_attempt(args):
                 "verification": job["verify"]}
         write_json_immutable(
             fleet_job_path(args.id, "attempts", f"{number}.plan.json"), plan)
-        worktree = os.path.join(HERE, ".m8shift", "worktrees", args.id)
-        if not os.path.isdir(worktree):
-            raise ValueError(f"assigned worktree is missing for {args.id}")
         verification_rc = None
         verification_output = "provider exit was non-zero; verification not run"
         timed_out = False
@@ -4151,6 +4299,11 @@ def cmd_doctor(args):
         findings.extend(listener_doctor_findings())
     except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
         findings.append({"severity": "warning", "check": "runtime.listener", "message": str(e)})
+    try:
+        findings.extend(fleet_job_doctor_findings())
+    except Exception as e:  # noqa: BLE001 - fleet jobs remain advisory sidecars
+        findings.append({"severity": "warning", "check": "fleet.jobs",
+                         "message": f"fleet job diagnostics unavailable: {e}"})
     try:
         findings.extend(usage_doctor_findings())
     except Exception as e:  # noqa: BLE001 - runtime diagnostics must not traceback
@@ -8285,6 +8438,16 @@ def main():
     fja.add_argument("--json", action="store_true",
                      help="emit machine-readable JSON instead of human output")
     fja.set_defaults(fn=cmd_fleet_jobs_attempt)
+    fji = fjobs_sub.add_parser(
+        "integrate", help="integrator-only verified merge, relay handoff, and worktree drop")
+    fji.add_argument("--id", required=True, help="verified immutable fleet job id")
+    fji.add_argument("--by", required=True,
+                     help="relay-designated integrator from the immutable job")
+    fji.add_argument("--to", required=True,
+                     help="different roster identity receiving the core handoff")
+    fji.add_argument("--json", action="store_true",
+                     help="emit machine-readable JSON instead of human output")
+    fji.set_defaults(fn=cmd_fleet_jobs_integrate)
 
     route = sub.add_parser("route", help="advisory model/task routing")
     route_sub = route.add_subparsers(dest="route_verb", required=True)
