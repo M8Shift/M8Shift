@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="860" viewBox="0 0 1440 860" role="img" aria-labelledby="title desc">
+  <title id="title">Fabricated m8shift-top dashboard</title>
+  <desc id="desc">A public-safe terminal facsimile for my-project using fictional agents, turns, timestamps, models, and usage.</desc>
+  <defs>
+    <style>
+      .shell { fill: #22272e; stroke: #444c56; stroke-width: 2; }
+      .bar { fill: #2d333b; }
+      .frame { fill: none; stroke: #768390; stroke-width: 1; }
+      .rule { stroke: #444c56; stroke-width: 1; }
+      .text { fill: #cdd9e5; font: 17px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .small { fill: #768390; font: 14px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .dim { fill: #768390; }
+      .green { fill: #57ab5a; }
+      .red { fill: #f47067; }
+      .amber { fill: #c69026; }
+      .cyan { fill: #39c5cf; }
+      .magenta { fill: #b083f0; }
+      .badge { fill: #22272e; stroke: #cdd9e5; stroke-width: 1; }
+      .badge-text { fill: #cdd9e5; font: 15px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .bold { font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="860" rx="18" fill="#1c2128"/>
+  <rect class="shell" x="24" y="24" width="1392" height="812" rx="12"/>
+  <path class="bar" d="M36 24h1368a12 12 0 0 1 12 12v38H24V36a12 12 0 0 1 12-12z"/>
+  <circle cx="52" cy="49" r="7" fill="#f47067"/>
+  <circle cx="76" cy="49" r="7" fill="#c69026"/>
+  <circle cx="100" cy="49" r="7" fill="#57ab5a"/>
+  <text x="720" y="55" text-anchor="middle" class="small">PUBLIC-SAFE PLACEHOLDER · NO LIVE RELAY DATA</text>
+
+  <rect class="frame" x="44" y="92" width="1352" height="720" rx="2"/>
+  <line class="rule" x1="44" y1="196" x2="1396" y2="196"/>
+  <line class="rule" x1="44" y1="314" x2="1396" y2="314"/>
+  <line class="rule" x1="44" y1="454" x2="1396" y2="454"/>
+  <line class="rule" x1="44" y1="704" x2="1396" y2="704"/>
+  <line class="rule" x1="44" y1="756" x2="1396" y2="756"/>
+
+  <text class="text" x="64" y="126">
+    <tspan class="amber bold">M</tspan><tspan class="magenta bold">8</tspan><tspan class="bold">SHIFT</tspan>
+    <tspan> · my-project · </tspan><tspan class="cyan">vX.Y.Z</tspan><tspan> · session demo-session</tspan>
+  </text>
+  <text class="text" x="1376" y="126" text-anchor="end">14:26:03</text>
+
+  <text class="text" x="64" y="164"><tspan class="dim">PEN</tspan></text>
+  <text class="text" x="164" y="164"><tspan class="amber">agent-a</tspan></text>
+  <rect class="badge" x="252" y="142" width="182" height="29" rx="3"/>
+  <text class="badge-text" x="265" y="162">WORKING_AGENT-A</text>
+  <text class="text magenta" x="474" y="164">→ turn 43</text>
+  <text class="text" x="650" y="164">claimed 2030-01-15 14:25</text>
+  <text class="text green" x="1125" y="164">heartbeat 12 s ago</text>
+
+  <text class="text" x="64" y="188"><tspan class="dim">TTL</tspan></text>
+  <text class="text amber" x="164" y="188">█████████████████████████░░░</text>
+  <text class="text amber" x="650" y="188">26:49 left</text>
+  <text class="text" x="872" y="188">expires 2030-01-15 14:55 <tspan class="green">(alive)</tspan></text>
+
+  <text class="text dim" x="64" y="230">AGENTS</text>
+  <text class="text" x="184" y="230"><tspan class="amber">✦</tspan> agent-a</text>
+  <text class="text" x="380" y="230">model-alpha*</text>
+  <text class="text amber" x="615" y="230">● working</text>
+  <text class="text green" x="780" y="230">5h 38% reset 17:00</text>
+  <text class="text amber" x="1080" y="230">weekly 62% reset Mon</text>
+
+  <text class="text" x="184" y="266">  agent-b</text>
+  <text class="text" x="380" y="266">model-beta*</text>
+  <text class="text green" x="615" y="266">● idle</text>
+  <text class="text green" x="780" y="266">5h 12% reset 18:30</text>
+  <text class="text green" x="1080" y="266">weekly 24% reset Tue</text>
+  <text class="small" x="184" y="298">* model self-declared (unverified)</text>
+
+  <text class="text dim" x="64" y="346">LISTEN</text>
+  <text class="text green" x="184" y="346">agent-a ALIVE</text>
+
+  <text class="text dim" x="64" y="382">LEDGER</text>
+  <text class="text" x="184" y="382">tasks <tspan class="cyan">3</tspan> open</text>
+  <text class="text" x="390" y="382">decisions <tspan class="cyan">1</tspan> pending</text>
+  <text class="text" x="685" y="382">doctor <tspan class="green">0</tspan> findings</text>
+  <text class="text" x="955" y="382">gate <tspan class="green">armed</tspan></text>
+
+  <text class="text dim" x="64" y="418">TURN</text>
+  <text class="text" x="184" y="418">#42 agent-b/model-beta* → agent-a  draft public-safe dashboard reference</text>
+
+  <text class="text dim" x="64" y="488">ACTIVITY · turns 39-42 / 42</text>
+  <text class="small" x="64" y="522">TURN</text>
+  <text class="small" x="160" y="522">TIME</text>
+  <text class="small" x="390" y="522">HOLD</text>
+  <text class="small" x="490" y="522">AGENT</text>
+  <text class="small" x="620" y="522">MODEL</text>
+  <text class="small" x="840" y="522">ACTION</text>
+  <text class="small" x="1030" y="522">NOTE</text>
+
+  <text class="text" x="64" y="558">42</text>
+  <text class="text" x="160" y="558">2030-01-15 14:25</text>
+  <text class="text" x="390" y="558">00:18</text>
+  <text class="text" x="490" y="558">agent-b</text>
+  <text class="text" x="620" y="558">model-beta*</text>
+  <text class="text" x="840" y="558">Append</text>
+  <text class="text" x="1030" y="558">help draft handed off</text>
+
+  <text class="text" x="64" y="594">41</text>
+  <text class="text" x="160" y="594">2030-01-15 14:07</text>
+  <text class="text" x="390" y="594">00:24</text>
+  <text class="text" x="490" y="594">agent-a</text>
+  <text class="text" x="620" y="594">model-alpha*</text>
+  <text class="text" x="840" y="594">Review</text>
+  <text class="text" x="1030" y="594">placeholder data verified</text>
+
+  <text class="text" x="64" y="630">40</text>
+  <text class="text" x="160" y="630">2030-01-15 13:43</text>
+  <text class="text" x="390" y="630">00:31</text>
+  <text class="text" x="490" y="630">agent-b</text>
+  <text class="text" x="620" y="630">model-beta*</text>
+  <text class="text" x="840" y="630">Draft</text>
+  <text class="text" x="1030" y="630">SVG capture composed</text>
+
+  <text class="text" x="64" y="666">39</text>
+  <text class="text" x="160" y="666">2030-01-15 13:12</text>
+  <text class="text" x="390" y="666">00:11</text>
+  <text class="text" x="490" y="666">agent-a</text>
+  <text class="text" x="620" y="666">model-alpha*</text>
+  <text class="text" x="840" y="666">Plan</text>
+  <text class="text" x="1030" y="666">fictional session started</text>
+
+  <text class="text" x="64" y="738"><tspan class="dim">TIME</tspan><tspan>  </tspan><tspan class="cyan">effective* 0h48</tspan><tspan> · </tspan><tspan class="cyan">non-work 1h16</tspan><tspan> (await 0h31 · pause 0h35 · idle 0h10) · </tspan><tspan class="amber">unknown 0h07</tspan></text>
+
+  <text class="small" x="64" y="790">q quit   ? help   e expand   r/Esc refresh   ↑/↓ navigate</text>
+  <text class="small" x="1376" y="790" text-anchor="end">auto-refresh 2s</text>
+</svg>
