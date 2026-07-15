@@ -101,6 +101,48 @@ def load_engine(path):
     return module
 
 
+def load_top(path):
+    spec = importlib.util.spec_from_file_location("m8shift_benchmark_top", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def measure_production_top(top, engine, root, turns, body_bytes, runs):
+    """Measure RFC 069's shipped reader, not the earlier parse-only prototype."""
+    reader = top.IncrementalStatusReader(str(engine), str(root))
+    reader._prepare_engine()
+    if reader._core is None:
+        raise RuntimeError("production top reader could not import lockstep core")
+
+    full_samples = []
+    for _ in range(runs):
+        reader._cache = None
+        started = time.perf_counter_ns()
+        reader.load(200)
+        full_samples.append((time.perf_counter_ns() - started) / 1_000_000)
+        if reader.mode != "full":
+            raise AssertionError("production reader full benchmark did not use full mode")
+
+    hit_result, _ = timed(lambda: reader.load(200), runs)
+    if reader.mode != "incremental":
+        raise AssertionError("production reader hit benchmark did not use incremental mode")
+
+    append_samples = []
+    for offset in range(1, runs + 1):
+        append_turn_atomic(root, turns + offset, body_bytes)
+        started = time.perf_counter_ns()
+        reader.load(200)
+        append_samples.append((time.perf_counter_ns() - started) / 1_000_000)
+        if reader.mode != "incremental":
+            raise AssertionError("production reader append benchmark fell back unexpectedly")
+    return {
+        "full": summary(full_samples),
+        "cache_hit": hit_result,
+        "one_append": summary(append_samples),
+    }
+
+
 def measure_status_variants(engine, root, python, runs):
     env = {key: value for key, value in os.environ.items() if not key.startswith("M8SHIFT_")}
     env["M8SHIFT_ROOT"] = str(root)
@@ -202,6 +244,7 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     engine_path = repo / "m8shift.py"
     engine = load_engine(engine_path)
+    top = load_top(repo / "m8shift-top.py")
     result = {"host": {"python": subprocess.check_output([args.python, "--version"], text=True,
                                                             stderr=subprocess.STDOUT).strip(),
                        "platform": sys.platform, "runs": args.runs},
@@ -221,6 +264,8 @@ def main():
         for count in [int(value) for value in args.sizes.split(",")]:
             root = base / str(count)
             make_relay(root, count, args.body_bytes)
+            production_root = base / (str(count) + "-production")
+            make_relay(production_root, count, args.body_bytes)
             path = root / "M8SHIFT.md"
             text = path.read_text(encoding="utf-8")
             read_result, _ = timed(lambda: path.read_text(encoding="utf-8"), args.runs)
@@ -239,6 +284,8 @@ def main():
             if delta_turns != full_turns:
                 raise AssertionError("incremental result differs from full parse at %d turns" % count)
             variants = measure_status_variants(engine_path, root, args.python, args.runs)
+            production_top = measure_production_top(
+                top, engine_path, production_root, count, args.body_bytes, args.runs)
             fallbacks_before_rotation = cache.fallbacks
             make_relay(root, 6, args.body_bytes)
             rotated_turns = cache.refresh(path)
@@ -265,6 +312,7 @@ def main():
                 "turns": count, "bytes": len(text.encode()), "read": read_result,
                 "parse": parse_result,
                 **variants,
+                "production_top": production_top,
                 "cache_hit": hit_result, "cache_one_append": delta_result,
                 "cache_fallbacks": cache.fallbacks,
                 "rotation_fallback_equivalent": rotation_fallback,

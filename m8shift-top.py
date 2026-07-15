@@ -2,8 +2,11 @@
 """Read-only, dependency-free dashboard for the M8Shift status snapshot."""
 import argparse
 import atexit
+import hashlib
+import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import select
@@ -31,6 +34,8 @@ ACTIVITY_SCROLL_HEADROOM = 180
 ACTIVITY_PROVISION_MAX = 200
 ACTIVITY_BUFFER_EDGE = "<older turns on disk — peek/journal>"
 TURN_SCHEMA = "m8shift.turn/1"
+TURN_MARKER = b"<!-- M8SHIFT:TURN "
+TURN_BEGIN_RE = re.compile(r"M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN")
 _active = False
 _keyboard_fd = None
 _keyboard_attrs = None
@@ -981,14 +986,8 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     return "\n".join(lines)
 
 
-def load_snapshot(engine, root, activity_limit=8):
-    env = dict(os.environ, M8SHIFT_ROOT=root)
-    proc = subprocess.run([sys.executable, engine, "status", "--json",
-                           "--activity-limit", str(activity_limit)], env=env,
-                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.strip() or "status failed")
-    payload = json.loads(proc.stdout)
+def _merge_status_payload(payload):
+    """Validate snapshot v1 and preserve flat RFC-064/status siblings."""
     snap = payload.get("snapshot")
     if not isinstance(snap, dict):
         raise RuntimeError("status snapshot unavailable")
@@ -999,11 +998,251 @@ def load_snapshot(engine, root, activity_limit=8):
         raise RuntimeError("unsupported status snapshot schema: %s" % clean(schema, 80))
     if major != SCHEMA_MAJOR:
         raise RuntimeError("unsupported status snapshot major: %s" % major)
-    # Snapshot owns the structured sections; status owns relay-wide flat keys.
     merged = dict(payload)
     merged.pop("snapshot", None)
     merged.update(snap)
     return merged
+
+
+def load_snapshot(engine, root, activity_limit=8):
+    env = dict(os.environ, M8SHIFT_ROOT=root)
+    proc = subprocess.run([sys.executable, engine, "status", "--json",
+                           "--activity-limit", str(activity_limit)], env=env,
+                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "status failed")
+    payload = json.loads(proc.stdout)
+    return _merge_status_payload(payload)
+
+
+class _IncrementalInvalid(RuntimeError):
+    """Detected loss of the append-only fast-path preconditions."""
+
+
+class IncrementalStatusReader:
+    """Top-owned, in-memory fold of the living turn journal.
+
+    The cache is deliberately private to one interactive process.  The command
+    line ``status`` remains the full oracle and no sidecar or relay authority is
+    introduced.  ``mode`` and ``stats`` are diagnostic/test instrumentation;
+    invalid evidence always reports ``full`` after rebuilding from the oracle.
+    """
+
+    PREFIX_LIMIT = 64 * 1024
+    ANCHOR_BYTES = 256
+    MAX_CARRY = 256 * 1024
+    RETAINED_TURNS = 200
+
+    def __init__(self, engine, root, validation_hook=None):
+        self.engine = os.path.abspath(engine)
+        self.root = os.path.abspath(root)
+        self.validation_hook = validation_hook
+        self.mode = "full"
+        self.stats = {}
+        self._engine_signature = None
+        self._core = None
+        self._cache = None
+
+    @staticmethod
+    def _signature(path):
+        st = os.stat(path)
+        return (st.st_dev, st.st_ino, st.st_size,
+                getattr(st, "st_mtime_ns", int(st.st_mtime * 1000000000)))
+
+    def _load_core(self, signature):
+        name = "_m8shift_top_engine_%s" % hashlib.sha256(
+            (self.engine + repr(signature)).encode("utf-8")).hexdigest()[:16]
+        # Execute the exact source bytes instead of accepting a timestamp/size
+        # matched ``__pycache__`` entry.  Atomic same-size engine replacement
+        # can occur inside one filesystem timestamp tick; stale bytecode would
+        # otherwise defeat the lockstep version gate.
+        spec = importlib.util.spec_from_loader(name, loader=None, origin=self.engine)
+        if spec is None:
+            raise RuntimeError("engine cannot be imported")
+        module = importlib.util.module_from_spec(spec)
+        module.__file__ = self.engine
+        with open(self.engine, "rb") as fh:
+            source = fh.read()
+        exec(compile(source, self.engine, "exec"), module.__dict__)
+        if getattr(module, "VERSION", None) != VERSION:
+            raise RuntimeError("engine/companion version mismatch")
+        for attr in ("configure_root", "get_lock", "parse_turns",
+                     "status_json_payload_v1", "validate_relay_text",
+                     "TURN_RE", "now"):
+            if not hasattr(module, attr):
+                raise RuntimeError("engine lacks incremental status API")
+        module.configure_root(self.root)
+        return module
+
+    def _prepare_engine(self):
+        signature = self._signature(self.engine)
+        if signature == self._engine_signature:
+            return
+        self._engine_signature = signature
+        self._cache = None
+        self._core = None
+        try:
+            self._core = self._load_core(signature)
+        except Exception:
+            # Compatibility path: the exact existing subprocess surface stays
+            # authoritative for an older, newer, or non-importable engine.
+            self._core = None
+
+    def _read(self, fh, size=-1):
+        data = fh.read(size)
+        self.stats["bytes_read"] = self.stats.get("bytes_read", 0) + len(data)
+        return data
+
+    def _read_at(self, fh, offset, size):
+        fh.seek(offset)
+        return self._read(fh, size)
+
+    def _parse(self, data):
+        self.stats["parse_calls"] = self.stats.get("parse_calls", 0) + 1
+        self.stats["parse_bytes"] = self.stats.get("parse_bytes", 0) + len(data)
+        return self._core.parse_turns(data.decode("utf-8"))
+
+    @staticmethod
+    def _legacy_last(text, previous=None):
+        markers = TURN_BEGIN_RE.findall(text)
+        return ({"n": int(markers[-1][0]), "agent": markers[-1][1]}
+                if markers else previous)
+
+    def _split_carry(self, text):
+        matches = list(self._core.TURN_RE.finditer(text))
+        suffix = text[matches[-1].end():] if matches else text
+        return suffix.encode("utf-8")
+
+    def _payload(self, cache, lk, observed, activity_limit):
+        payload = self._core.status_json_payload_v1(
+            lk, cache["turns"], observed, activity_limit,
+            legacy_last=cache["legacy_last"],
+            valid_turn_count=cache["valid_turn_count"])
+        return _merge_status_payload(payload)
+
+    def _full(self, activity_limit):
+        self.mode = "full"
+        self.stats = {"mode": "full", "bytes_read": 0,
+                      "parse_bytes": 0, "parse_calls": 0}
+        path = self._core.COWORK
+        try:
+            with open(path, "rb") as fh:
+                data = self._read(fh)
+        except OSError as exc:
+            raise RuntimeError(str(exc))
+        text = data.decode("utf-8")
+        try:
+            lk = self._core.validate_relay_text(text)
+        except SystemExit as exc:
+            raise RuntimeError(str(exc))
+        first = data.find(TURN_MARKER)
+        if first < 0:
+            first = len(data)
+        turns = self._parse(data)
+        relative = data[first:]
+        anchor_len = min(self.ANCHOR_BYTES, len(relative))
+        carry = self._split_carry(text[first:]) if first < len(data) else b""
+        cache = {
+            "watermark": len(relative),
+            "head": relative[:anchor_len],
+            "tail_hash": hashlib.sha256(
+                relative[max(0, len(relative) - self.ANCHOR_BYTES):]).digest(),
+            "turns": turns[-self.RETAINED_TURNS:],
+            "valid_turn_count": len(turns),
+            "carry": carry,
+            "legacy_last": self._legacy_last(text),
+        }
+        observed = self._core.now()
+        result = self._payload(cache, lk, observed, activity_limit)
+        # A complete full snapshot is still authoritative, but an oversized
+        # incomplete suffix cannot seed a bounded incremental cache.  Retry the
+        # full oracle until that manual/truncated record becomes complete.
+        self._cache = cache if len(carry) <= self.MAX_CARRY else None
+        return result
+
+    def _incremental(self, activity_limit):
+        self.stats = {"mode": "incremental", "bytes_read": 0,
+                      "parse_bytes": 0, "parse_calls": 0}
+        cache = self._cache
+        path = self._core.COWORK
+        with open(path, "rb") as fh:
+            opened = os.fstat(fh.fileno())
+            prefix = self._read(fh, self.PREFIX_LIMIT)
+            first = prefix.find(TURN_MARKER)
+            if first < 0:
+                raise _IncrementalInvalid("first turn outside bounded prefix")
+            try:
+                # Decode only the complete mutable header.  The fixed-size read
+                # may split a multibyte code point later in a turn body.
+                prefix_text = prefix[:first].decode("utf-8")
+                lk = self._core.validate_relay_text(prefix_text)
+            except (UnicodeError, ValueError, KeyError, IndexError, SystemExit):
+                raise _IncrementalInvalid("invalid mutable prefix")
+            relative_size = opened.st_size - first
+            watermark = cache["watermark"]
+            if relative_size < watermark:
+                raise _IncrementalInvalid("journal shrank or rotated")
+            head = self._read_at(fh, first, len(cache["head"]))
+            if head != cache["head"]:
+                raise _IncrementalInvalid("first-turn anchor changed")
+            tail_len = min(self.ANCHOR_BYTES, watermark)
+            tail = self._read_at(fh, first + watermark - tail_len, tail_len)
+            if hashlib.sha256(tail).digest() != cache["tail_hash"]:
+                raise _IncrementalInvalid("tail anchor changed")
+            delta = self._read_at(fh, first + watermark, relative_size - watermark)
+            opened_after = os.fstat(fh.fileno())
+            if (opened_after.st_dev, opened_after.st_ino, opened_after.st_size) != (
+                    opened.st_dev, opened.st_ino, opened.st_size):
+                raise _IncrementalInvalid("open stream changed during read")
+            if self.validation_hook is not None:
+                self.validation_hook(self)
+            current = os.stat(path)
+            if (current.st_dev, current.st_ino, current.st_size) != (
+                    opened_after.st_dev, opened_after.st_ino, opened_after.st_size):
+                raise _IncrementalInvalid("pathname replaced during read")
+
+        combined = cache["carry"] + delta
+        try:
+            combined_text = combined.decode("utf-8")
+        except UnicodeError:
+            raise _IncrementalInvalid("invalid UTF-8 delta")
+        turns = self._parse(combined)
+        carry = self._split_carry(combined_text)
+        if len(carry) > self.MAX_CARRY:
+            raise _IncrementalInvalid("incomplete turn exceeds carry bound")
+        recent = (cache["turns"] + turns)[-self.RETAINED_TURNS:]
+        new_watermark = relative_size
+        candidate = {
+            "watermark": new_watermark,
+            "head": cache["head"],
+            "tail_hash": hashlib.sha256(
+                (tail + delta)[-self.ANCHOR_BYTES:]).digest(),
+            "turns": recent,
+            "valid_turn_count": cache["valid_turn_count"] + len(turns),
+            "carry": carry,
+            "legacy_last": self._legacy_last(combined_text, cache["legacy_last"]),
+        }
+        observed = self._core.now()
+        result = self._payload(candidate, lk, observed, activity_limit)
+        self._cache = candidate
+        self.mode = "incremental"
+        return result
+
+    def load(self, activity_limit=8):
+        try:
+            self._prepare_engine()
+        except OSError as exc:
+            raise RuntimeError(str(exc))
+        if self._core is None:
+            self.mode = "full"
+            self.stats = {"mode": "full", "compatibility_subprocess": True}
+            return load_snapshot(self.engine, self.root, activity_limit)
+        if self._cache is None:
+            return self._full(activity_limit)
+        try:
+            return self._incremental(activity_limit)
+        except (_IncrementalInvalid, OSError):
+            return self._full(activity_limit)
 
 
 def load_activity_turn(engine, root, turn):
@@ -1144,6 +1383,7 @@ def main(argv=None):
         previous_wakeup = signal.set_wakeup_fd(resize_write, warn_on_full_buffer=False)
         old[winch] = signal.signal(winch, resize)
     enter()
+    status_reader = IncrementalStatusReader(engine, args.root)
     previous = None
     scroll_offset = 0
     expanded = False
@@ -1157,7 +1397,7 @@ def main(argv=None):
             size = shutil.get_terminal_size((80, 24))
             provision = _activity_request_limit(
                 size.columns, size.lines, agent_count)
-            snap = load_snapshot(engine, args.root, provision)
+            snap = status_reader.load(provision)
             agent_count = len(snap.get("agents") or [])
             max_scroll = activity_max_scroll(snap, size.columns, size.lines)
             scroll_offset = min(scroll_offset, max_scroll)

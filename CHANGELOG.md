@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Top-owned incremental status fold (#79, RFC 069).** The long-lived
+  interactive dashboard now parses the living relay once, then verifies a
+  relative watermark and bounded head/tail anchors before folding only parser
+  carry plus appended bytes. One-shot `status` remains the full oracle;
+  shrink, rotation, mismatch, invalid UTF-8/carry, engine skew, and concurrent
+  replacement all fall back to full. Canonical byte-equivalence and
+  instrumented O(delta) tests preserve snapshot v1, RFC 061 bounds, and the
+  RFC 064 accounting sibling.
 - **Checksums cannot be forgotten at commit time (#51).** The shipped pre-commit
   hook now detects staged files listed in `checksums.sha256`, hashes their exact
   Git-index blobs, regenerates and stages the manifest automatically, and fails

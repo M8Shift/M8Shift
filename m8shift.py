@@ -207,12 +207,15 @@ def project_root():
     return os.path.dirname(os.path.abspath(COWORK))
 
 
-def _session_project_name():
+def _session_project_name(lk=None):
     """RFC 046: the label the operator gave at `init --name`, recorded on the session start
     event (`project=` field). Returns None when unavailable — no live session, a pre-3.45
     ledger, or any read error — so callers fall back to the folder name."""
     try:
-        lk = get_lock(read(COWORK))
+        # Long-lived consumers may already have parsed the mutable LOCK prefix.
+        # Accept it so a display-name lookup never forces a second full journal
+        # read and defeats an incremental reader's O(delta) boundary.
+        lk = lk if isinstance(lk, dict) else get_lock(read(COWORK))
         sid = lk.get("session")
         if not sid:
             return None
@@ -224,11 +227,12 @@ def _session_project_name():
     return None
 
 
-def project_display_name():
+def project_display_name(lk=None):
     """RFC 046: human-facing project label for status/watch headers, so multiple
     terminals/tabs are distinguishable at a glance. Prefers the operator's `init --name`
     (persisted on the session start event); falls back to the relay-root folder name."""
-    return _session_project_name() or os.path.basename(project_root().rstrip(os.sep)) or "project"
+    return (_session_project_name(lk)
+            or os.path.basename(project_root().rstrip(os.sep)) or "project")
 
 
 def decisions_dir():
@@ -1650,6 +1654,16 @@ def load_or_die():
     traceback). Validates the M8Shift LOCK markers."""
     require_cowork()
     text = read()
+    validate_relay_text(text)
+    return text
+
+
+def validate_relay_text(text):
+    """Validate already-read living relay text exactly as ``load_or_die`` does.
+
+    The separate seam lets a bounded-prefix/in-memory consumer preserve the
+    full command's LOCK refusal semantics without rereading the journal.
+    """
     begin, end = LOCK_BEGIN, LOCK_END
     if begin not in text or end not in text:
         sys.exit(tr("lock_missing", file=os.path.basename(COWORK)))
@@ -1688,7 +1702,7 @@ def load_or_die():
     if errs:
         sys.exit(tr("lock_invalid", file=os.path.basename(COWORK), errs=", ".join(errs)))
     globals()["ROSTER"] = roster
-    return text
+    return lk
 
 def clean_field(label, val):
     """Single-line field: rejects line breaks and reserved markers (injection-safe).
@@ -9147,11 +9161,13 @@ def _status_heartbeat_timestamp(lk):
 
 
 def status_snapshot_v1(lk, last, session_info, turns=None,
-                       activity_limit=STATUS_ACTIVITY_DEFAULT_LIMIT):
+                       activity_limit=STATUS_ACTIVITY_DEFAULT_LIMIT,
+                       valid_turn_count=None):
     """One additive, namespaced snapshot; legacy status keys remain untouched."""
     effective_activity_limit = _status_activity_limit(activity_limit)
-    valid_turn_count = (sum(isinstance(turn, dict) for turn in turns)
-                        if isinstance(turns, list) else 0)
+    if valid_turn_count is None:
+        valid_turn_count = (sum(isinstance(turn, dict) for turn in turns)
+                            if isinstance(turns, list) else 0)
     usage = {r["agent"]: r for r in _usage_rows(lk)}
     agents = []
     for agent in active_agents(lk):
@@ -9290,54 +9306,74 @@ def _status_signature(lk, stale, last, for_agent=""):
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
+def status_json_payload_v1(lk, parsed_turns, observed, activity_limit,
+                           legacy_last=None, valid_turn_count=None, stale=None):
+    """Build the existing status JSON payload from already-observed journal state.
+
+    This internal read-only seam is shared by the one-shot full parser and the
+    top-owned in-memory fold.  It deliberately does not read ``M8SHIFT.md``;
+    all mutable-prefix and turn evidence arrives through the arguments.  Every
+    non-journal sibling (usage, heartbeat, ledgers, listeners, RFC-064 time
+    accounting) is still observed afresh on each call.
+    """
+    parsed_turns = parsed_turns if isinstance(parsed_turns, list) else []
+    session_info = current_session_info(lk, parsed_turns, as_of=observed)
+    accounting = current_time_accounting(lk, as_of=observed)
+    exp = parse_iso(lk.get("expires"))
+    if stale is None:
+        stale = bool(lk.get("state", "").startswith("WORKING_")
+                     and exp is not None and observed > exp)
+    out = dict(lk)
+    out["agents_active"] = active_agents(lk)
+    out["stale"] = stale
+    out["liveness"] = lock_liveness(lk)
+    hb_meta = heartbeat_meta(lk)
+    if hb_meta is not None:
+        out["heartbeat"] = hb_meta
+    out["last_turn"] = legacy_last
+    out["m8shift_version"] = VERSION
+    out["project"] = project_display_name(lk)
+    amb = relay_ambiguity_snapshot()
+    out["cwd"] = os.getcwd() if amb is None else _ambiguity_safe_path(os.getcwd())
+    if amb is not None:
+        out["root"] = _foreign_root_disp(project_root())
+        out["relay_ambiguity"] = amb
+    else:
+        out["root"] = project_root()
+    out["session_started_at"] = (
+        None if session_info["started_at"] == "-" else session_info["started_at"])
+    out["session_duration_seconds"] = session_info["duration_seconds"]
+    out["session_duration"] = (
+        None if session_info["duration"] == "-" else session_info["duration"])
+    out["time_accounting"] = status_time_accounting(accounting)
+    usage = _usage_json(lk)
+    if usage is not None:
+        out["usage"] = usage
+    snapshot_last = parsed_turns[-1] if parsed_turns else None
+    out["snapshot"] = status_snapshot_v1(
+        lk, snapshot_last, session_info, parsed_turns, activity_limit,
+        valid_turn_count=valid_turn_count)
+    return out
+
+
 def cmd_status(args):
     text = load_or_die()
     lk, stale, last = _status_info(text)
     parsed_turns = parse_turns(text)
     observed = now()
-    session_info = current_session_info(lk, parsed_turns, as_of=observed)
-    accounting = current_time_accounting(lk, as_of=observed)
     if getattr(args, "json", False):
-        out = dict(lk)                       # raw LOCK fields…
-        out["agents_active"] = active_agents(lk)  # full active roster (N)
-        out["stale"] = stale
-        out["liveness"] = lock_liveness(lk)      # RFC 049: fresh/alive-expired/ordinary-stale/None
-        hb_meta = heartbeat_meta(lk)
-        if hb_meta is not None:
-            out["heartbeat"] = hb_meta           # RFC 049: bounded, sanitized projection
-        out["last_turn"] = last
-        out["m8shift_version"] = VERSION     # the RUNNING script's version (dogfooding skew check)
-        out["project"] = project_display_name()
-        amb = relay_ambiguity_snapshot()
-        out["cwd"] = (os.getcwd() if amb is None
-                      else _ambiguity_safe_path(os.getcwd()))
-        if amb is not None:
-            # §9.5: under unresolved ambiguity the JSON must not retain a raw
-            # foreign candidate path — the effective (env-wins) root is redacted
-            # and both candidates are surfaced as structured, redacted labels.
-            out["root"] = _foreign_root_disp(project_root())
-            out["relay_ambiguity"] = amb
-        else:
-            out["root"] = project_root()
-        out["session_started_at"] = (
-            None if session_info["started_at"] == "-" else session_info["started_at"]
-        )
-        out["session_duration_seconds"] = session_info["duration_seconds"]
-        out["session_duration"] = None if session_info["duration"] == "-" else session_info["duration"]
-        out["time_accounting"] = status_time_accounting(accounting)
+        out = status_json_payload_v1(
+            lk, parsed_turns, observed,
+            getattr(args, "activity_limit", STATUS_ACTIVITY_DEFAULT_LIMIT),
+            legacy_last=last, stale=stale)
         if getattr(args, "for_agent", ""):
             agent = need_agent(args.for_agent)
             out["next_action"] = next_action_for(lk, agent=agent, stale=stale)
             out["turn_requests"] = turn_requests_for_agent(agent)
-        usage = _usage_json(lk)              # RFC 051: OMIT the key entirely when no usable snapshot
-        if usage is not None:
-            out["usage"] = usage
-        snapshot_last = parsed_turns[-1] if parsed_turns else None
-        out["snapshot"] = status_snapshot_v1(
-            lk, snapshot_last, session_info, parsed_turns,
-            getattr(args, "activity_limit", STATUS_ACTIVITY_DEFAULT_LIMIT))
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
+    session_info = current_session_info(lk, parsed_turns, as_of=observed)
+    accounting = current_time_accounting(lk, as_of=observed)
     _print_status_block(lk, stale, last, session_info, getattr(args, "for_agent", ""),
                         getattr(args, "brief", False), accounting)
     return 0

@@ -121,6 +121,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [065-rfc-ticketed-committed-pushed-delivery.md](rfc/065-rfc-ticketed-committed-pushed-delivery.md) | Accepted delivery discipline: one structured forge ticket and committed, pushed history for every intentional change, with advisory offline reminders and a named role-based gateway. |
 | [066-rfc-asymmetric-solo-advance.md](rfc/066-rfc-asymmetric-solo-advance.md) | Accepted design for policy-authorized bounded solo progress and deferred reconciliation; implementation remains phased and explicitly deferred. |
 | [067-rfc-detached-vendor-neutral-cli-orchestration.md](rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | Accepted design for detached, vendor-neutral CLI agent orchestration: all 16 recommended decisions are resolved; implementation remains phased and explicitly deferred. |
+| [069-rfc-top-incremental-status-fold.md](rfc/069-rfc-top-incremental-status-fold.md) | Implemented top-owned in-memory incremental status fold with a byte-equivalent full oracle, bounded O(delta) refreshes, and mandatory full fallback on invalidation. |
 
 ## Security docs
 

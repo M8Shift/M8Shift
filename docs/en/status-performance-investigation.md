@@ -125,6 +125,31 @@ at most about 9% of the 156-ms CLI call.  At 5k it can remove roughly 37%; at
 10k, roughly 51%.  The remaining interpreter/import/argparse and bounded status
 work stays fixed.
 
+### Shipped RFC 069 reader
+
+After implementation, the same harness was extended to exercise the production
+`IncrementalStatusReader`, including the shared status builder and all bounded
+non-journal sibling reads. Five runs on the implementation host (CPython 3.14.6,
+macOS arm64) produced these medians:
+
+| Journal | Production full rebuild (ms) | Stable hit (ms) | One appended turn (ms) | Full-to-append speedup |
+|---|---:|---:|---:|---:|
+| Synthetic 1k | 16.260 | 0.813 | 1.244 | 13× |
+| Synthetic 5k | 81.596 | 0.961 | 1.029 | 79× |
+| Synthetic 10k | 161.213 | 0.786 | 1.114 | 145× |
+
+These production numbers are not directly comparable to the earlier Python
+3.8 host timings; the useful comparison is full versus hit/append within each
+row. The shipped path stays near one millisecond as journal size grows from 1k
+to 10k turns, while a mandatory full rebuild retains the expected O(N) cost.
+No wall-clock threshold is enforced in CI: structural instrumentation proves
+the fast path reads bounded prefix + anchors + delta and parses only carry +
+delta. Reproduce both prototype and shipped-reader columns with:
+
+```console
+python scripts/benchmark-status-scale.py --runs 5 --sizes 1000,5000,10000
+```
+
 ## Recommendation
 
 Do not adopt `python -O`, Nuitka, or another compiled distribution as the status

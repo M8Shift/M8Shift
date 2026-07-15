@@ -16,7 +16,12 @@ remain lean at eight events.
 
 The dashboard requests its current event viewport plus 180 rows of scroll
 headroom, capped at 200. It performs no archive read, journal paging, or extra
-journal I/O. Optionally paging the complete history in-dashboard is additive
+journal I/O. [RFC 069](069-rfc-top-incremental-status-fold.md) amends only how
+this living-journal provision is produced for the long-lived dashboard: an
+in-memory fold may reuse verified complete turns and parse appended bytes,
+while the full builder remains the byte-equivalent oracle. The bound, fields,
+ordering, truncation semantics, and one-shot status behavior defined here do
+not change. Optionally paging the complete history in-dashboard is additive
 future work, not part of this contract; deeper history remains available via
 the existing peek/journal surfaces.
 
