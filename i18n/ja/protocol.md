@@ -194,6 +194,7 @@ loop:
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # ここにキットを（再）生成
+./m8shift.py roster add <agent> --by <holder>  # live enrollment; changes only LOCK agents and never edits anchors
 ./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: ソース駆動のローカル更新 — 新しいソースコピーを実行し、すべての書き込みは --target に入る
 ./m8shift.py status                                # ロック + 直近のターン（非ブロッキング）
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # ローカルのライブ監視（読み取り専用）

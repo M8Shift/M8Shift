@@ -195,6 +195,7 @@ Salvaguarda:
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)genera el kit aquí
+./m8shift.py roster add <agent> --by <holder>  # live enrollment; changes only LOCK agents and never edits anchors
 ./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: actualización local dirigida por la fuente — ejecutar la NUEVA copia fuente; cada escritura aterriza en --target
 ./m8shift.py status                                # bloqueo + último turno (NO bloqueante)
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # monitor local en vivo, solo lectura

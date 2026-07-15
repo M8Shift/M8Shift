@@ -193,6 +193,7 @@ loop:
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generates the kit here
+./m8shift.py roster add <agent> --by <holder>  # live enrollment; changes only LOCK agents and never edits anchors
 ./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: 源驱动的本地更新 — 运行新的源副本；所有写入都进入 --target
 ./m8shift.py status                                # lock + last turn (NON-blocking)
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # 本地实时监视（只读）
