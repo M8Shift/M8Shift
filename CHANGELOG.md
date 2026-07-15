@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Per-agent usage throttles (#88, RFC 040 amendment).** A `limit_hit` now
+  gates only the affected agent's claim/next/wait and managed-listener launch;
+  peers keep their normal relay rights and new applies never set global
+  `PAUSED`. Independent v2 hold records preserve concurrent limits, explicit
+  `usage resume --agent` clears only a freshly recovered target, and legacy v1
+  singleton/global-cooldown recovery remains supported. Hold deadlines now
+  come from the exact normalized `decision_window` that triggered the verdict,
+  including ratio-native weekly windows; invalid or unrelated reset fallbacks
+  are refused. Advancing past an awaited throttled agent remains a separate
+  RFC 066 solo-open dependency—there is no implicit reroute.
 - **Provider-pinned agent models (#86, RFC 070).** Managed Codex and Claude
   provider rows now require an explicit valid model before headless launch,
   compile model/profile/effort from one source into shell-free argv, and reject

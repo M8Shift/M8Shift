@@ -4794,6 +4794,26 @@ class ListenerCLIBase(CLIBase):
             json.dump(doc, fh)
         return doc
 
+    def seed_usage_hold(self, agent="claude", *, malformed=False):
+        path = os.path.join(self.d, ".m8shift", "runtime", "usage-holds",
+                            f"{agent}.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            if malformed:
+                fh.write("{malformed")
+            else:
+                reset = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                      time.gmtime(time.time() + 3600))
+                json.dump({
+                    "schema": "m8shift.usage.hold.v2", "agent": agent,
+                    "placed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "resets_at": reset, "reason": "test usage limit",
+                    "source": "usage-monitor",
+                    "snapshot_ref": ".m8shift/runtime/usage.jsonl#test",
+                    "binding_window": {"kind": "weekly", "resets_at": reset},
+                }, fh)
+        return path
+
     def working_me_stuck(self, failures=1):
         """AWAITING_CLAUDE → claim → an own WORKING_CLAUDE lock, with a persisted
         sidecar recording that the previous run was classified stuck_working."""
@@ -5033,6 +5053,20 @@ class TestRFC047ListenerPR1(ListenerCLIBase):
         self.assertEqual(doc["phase"], "polling")
         self.assertEqual(doc["consecutive_failures"], 0)
         self.assertTrue(doc["last_run_id"])
+
+    def test_listener_launch_gate_blocks_active_and_malformed_target_hold(self):
+        self.awaiting_me()
+        for malformed in (False, True):
+            with self.subTest(malformed=malformed):
+                self.seed_usage_hold(malformed=malformed)
+                prof = self.profile_path()
+                stub = self.stub_runner(take_turn=True)
+                r = self.rt("listener", "start", "--agent", "claude",
+                            "--cmd-file", prof, "--runner", stub, "--foreground",
+                            "--max-ticks", "3", "--poll-interval", "0.01")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(self.launches(), [])
+                self.assertIn("usage throttle blocks listener launch", r.stdout)
 
     def test_stuck_retry_launches_one_resume_working_run_and_resets_counter(self):
         # RFC 047 PR 2 (replaces the PR 1 no-retry test): an own WORKING lock whose
@@ -11025,14 +11059,15 @@ class TestRFC040UsagePRB(CLIBase):
     codes (pinned in the RFC "PR B scope" subsection): 0 ok, 10 near_limit
     advisory, 11 limit_hit (hold recommended/applied), 12 working-holder
     advisory, 20 unknown fail-open, 30 policy error, 40 malformed hold,
-    64 CLI usage error, 75 wait still held. The relay is only ever parked
-    THROUGH the core cooldown/resume argv calls; nothing resumes automatically."""
+    64 CLI usage error, 75 wait still held. New holds are target-only admission
+    gates; the legacy singleton/global cooldown remains recoverable."""
 
     LEDGER_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
-    HOLD_REL = os.path.join(".m8shift", "runtime", "usage-hold.json")
+    HOLD_DIR_REL = os.path.join(".m8shift", "runtime", "usage-holds")
+    LEGACY_HOLD_REL = os.path.join(".m8shift", "runtime", "usage-hold.json")
     ADAPTERS_REL = os.path.join(".m8shift", "usage", "adapters.json")
     HOLD_KEYS = {"schema", "agent", "placed_at", "resets_at", "reason",
-                 "source", "snapshot_ref"}
+                 "source", "snapshot_ref", "binding_window"}
 
     def setUp(self):
         super().setUp()
@@ -11055,8 +11090,8 @@ class TestRFC040UsagePRB(CLIBase):
     def ledger_path(self):
         return os.path.join(self.d, self.LEDGER_REL)
 
-    def hold_path(self):
-        return os.path.join(self.d, self.HOLD_REL)
+    def hold_path(self, agent="claude"):
+        return os.path.join(self.d, self.HOLD_DIR_REL, f"{agent}.json")
 
     def read_hold(self):
         with open(self.hold_path(), encoding="utf-8") as fh:
@@ -11076,20 +11111,27 @@ class TestRFC040UsagePRB(CLIBase):
             pass
 
     def seed_snapshot(self, *, agent="claude", used=50000, limit=100000,
-                      resets_at=None, captured_at=None, adapter="seeded"):
+                      resets_at=None, captured_at=None, adapter="seeded",
+                      windows=None, decision_window=None, decision_ratio=None,
+                      bind=True):
         """Append one m8shift.usage.snapshot.v1 event to the ledger (the guard
         family reads the freshest snapshot per agent from here)."""
         captured = captured_at or self.fresh_iso()
-        ratio = round(used / limit, 4) if used is not None and limit else None
-        windows = []
-        if resets_at:
-            windows = [{"kind": "session_5h", "resets_at": resets_at,
-                        "used": used, "limit": limit}]
+        ratio = (decision_ratio if decision_ratio is not None else
+                 (round(used / limit, 4) if used is not None and limit else None))
+        if windows is None:
+            windows = []
+            if resets_at:
+                windows = [{"kind": "session_5h", "resets_at": resets_at,
+                            "used": used, "limit": limit}]
+        if decision_window is None and bind and resets_at:
+            decision_window = {"kind": "session_5h", "resets_at": resets_at}
         snapshot = {
             "schema": "m8shift.usage.snapshot.v1", "agent": agent,
             "source": {"adapter": adapter, "kind": "fixture", "provenance": "manual"},
             "captured_at": captured, "used_tokens": used, "limit_tokens": limit,
-            "decision_ratio": ratio, "windows": windows,
+            "decision_ratio": ratio, "decision_window": decision_window,
+            "windows": windows,
         }
         event = {"schema": "m8shift.runtime.event.v1", "type": "usage.snapshot",
                  "ts": captured, "agent": agent, "payload": {"snapshot": snapshot}}
@@ -11122,11 +11164,11 @@ class TestRFC040UsagePRB(CLIBase):
                          "used": 12500, "limit": 100000}],
         }
 
-    def place_cooldown_via_guard(self, resets_at):
-        """init → seeded limit_hit → guard --apply; returns the guard result."""
+    def place_hold_via_guard(self, resets_at, *, agent="claude"):
+        """init → seeded limit_hit → target-only guard --apply."""
         self.init()
-        self.seed_snapshot(used=100000, limit=100000, resets_at=resets_at)
-        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.seed_snapshot(agent=agent, used=100000, limit=100000, resets_at=resets_at)
+        r = self.rt("usage", "guard", "--agent", agent, "--apply", "--json")
         self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
         return r
 
@@ -11160,21 +11202,21 @@ class TestRFC040UsagePRB(CLIBase):
 
     # ── guard --apply on limit_hit ──
 
-    def test_guard_apply_limit_hit_places_hold_and_calls_core_cooldown(self):
+    def test_guard_apply_places_target_hold_without_global_cooldown(self):
         resets = self.iso_in(7200)
-        r = self.place_cooldown_via_guard(resets)
+        r = self.place_hold_via_guard(resets)
         payload = json.loads(r.stdout)
-        self.assertEqual(payload["applied"]["action"], "cooldown_applied")
+        self.assertEqual(payload["applied"]["action"], "hold_placed")
         lk = self.lock()
-        self.assertEqual(lk["state"], "PAUSED")           # via the CORE, never inline
+        self.assertEqual(lk["state"], "IDLE")
         self.assertEqual(lk["holder"], "none")
-        self.assertTrue(lk["note"].startswith(f"cooldown until {resets} for claude:"),
-                        lk["note"])
         hold = self.read_hold()
-        self.assertEqual(set(hold), self.HOLD_KEYS)       # exactly the pinned seven keys
-        self.assertEqual(hold["schema"], "m8shift.usage.hold.v1")
+        self.assertEqual(set(hold), self.HOLD_KEYS)
+        self.assertEqual(hold["schema"], "m8shift.usage.hold.v2")
         self.assertEqual(hold["agent"], "claude")
         self.assertEqual(hold["resets_at"], resets)
+        self.assertEqual(hold["binding_window"],
+                         {"kind": "session_5h", "resets_at": resets})
         self.assertEqual(hold["source"], "usage-monitor")
         self.assertIn(".m8shift/runtime/usage.jsonl#", hold["snapshot_ref"])
         events = self.ledger_events()
@@ -11182,23 +11224,22 @@ class TestRFC040UsagePRB(CLIBase):
         self.assertEqual(len(placed), 1)
         audit = placed[0]["payload"]
         self.assertEqual(audit["relay_state_before"], "IDLE")
-        self.assertEqual(audit["relay_state_after"], "PAUSED")
-        self.assertEqual(audit["core"]["returncode"], 0)
-        self.assertEqual(audit["core"]["argv"][:3], ["python3", "m8shift.py", "cooldown"])
+        self.assertEqual(audit["relay_state_after"], "IDLE")
+        self.assertIsNone(audit["core"])
         self.assertEqual(audit["snapshot_ref"], hold["snapshot_ref"])
 
-    def test_guard_apply_peer_working_is_advisory_only(self):
+    def test_guard_apply_peer_working_records_target_hold_peer_unaffected(self):
         self.init()
         self.assertEqual(self.cw("claim", "codex").returncode, 0)  # WORKING_CODEX
         self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
         before = self.md()
         r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
-        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
         self.assertEqual(self.md(), before)               # relay byte-identical
-        self.assertFalse(os.path.exists(self.hold_path()))  # nothing written
+        self.assertTrue(os.path.exists(self.hold_path()))
         holds = [e for e in self.ledger_events() if e["type"].startswith("usage.hold")]
-        self.assertEqual(holds, [])
-        self.assertEqual(json.loads(r.stdout)["applied"]["action"], "peer_working_advisory")
+        self.assertEqual(len(holds), 1)
+        self.assertEqual(json.loads(r.stdout)["applied"]["action"], "hold_placed")
 
     def test_guard_apply_own_working_posts_advisory_hold_only(self):
         self.init()
@@ -11233,12 +11274,12 @@ class TestRFC040UsagePRB(CLIBase):
         self.assertEqual(r.returncode, 30, r.stdout + r.stderr)  # never invents a reset
         self.assertEqual(self.md(), before)
         self.assertFalse(os.path.exists(self.hold_path()))
-        self.assertIn("usage.no_reset",
+        self.assertIn("usage.no_binding_reset",
                       {f["check"] for f in json.loads(r.stdout)["findings"]})
 
     def test_hold_idempotency_and_replace_only_on_later_reset(self):
         r1 = self.iso_in(3600)
-        self.place_cooldown_via_guard(r1)
+        self.place_hold_via_guard(r1)
         with open(self.hold_path(), encoding="utf-8") as fh:
             hold_bytes = fh.read()
         again = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
@@ -11246,13 +11287,13 @@ class TestRFC040UsagePRB(CLIBase):
         self.assertEqual(json.loads(again.stdout)["applied"]["action"], "hold_already_active")
         with open(self.hold_path(), encoding="utf-8") as fh:
             self.assertEqual(fh.read(), hold_bytes)        # byte-identical, placed_at kept
-        self.assertTrue(self.lock()["note"].startswith(f"cooldown until {r1} "))
+        self.assertEqual(self.lock()["state"], "IDLE")
         r2 = self.iso_in(7200)                             # reset moved LATER => --replace
         self.seed_snapshot(used=100000, limit=100000, resets_at=r2)
         extended = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
         self.assertEqual(extended.returncode, 11, extended.stdout + extended.stderr)
-        self.assertEqual(json.loads(extended.stdout)["applied"]["action"], "cooldown_applied")
-        self.assertTrue(self.lock()["note"].startswith(f"cooldown until {r2} for claude:"))
+        self.assertEqual(json.loads(extended.stdout)["applied"]["action"], "hold_placed")
+        self.assertEqual(self.lock()["state"], "IDLE")
         self.assertEqual(self.read_hold()["resets_at"], r2)
 
     def test_guard_apply_never_converts_operator_pause(self):
@@ -11263,9 +11304,161 @@ class TestRFC040UsagePRB(CLIBase):
         before = self.md()
         r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
         self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
-        self.assertEqual(json.loads(r.stdout)["applied"]["action"], "operator_pause_left_alone")
+        self.assertEqual(json.loads(r.stdout)["applied"]["action"], "hold_placed")
         self.assertEqual(self.md(), before)
+        self.assertTrue(os.path.exists(self.hold_path()))
+        resumed = self.cw("next", "claude", "--once", "--resume", "--reason", "new scope")
+        self.assertEqual(resumed.returncode, 3)
+        self.assertEqual(self.md(), before)               # hold gate precedes core resume
+
+    def test_binding_reset_is_exact_for_ratio_native_weekly_window(self):
+        self.init()
+        five_h = self.iso_in(3600)
+        weekly = self.iso_in(7 * 24 * 3600)
+        windows = [
+            {"kind": "session_5h", "resets_at": five_h,
+             "used": 20, "limit": 100},
+            {"kind": "weekly", "resets_at": weekly,
+             "used": None, "limit": None, "used_ratio": 1.0},
+        ]
+        self.seed_snapshot(
+            used=None, limit=None, windows=windows, decision_ratio=1.0,
+            decision_window={"kind": "weekly", "resets_at": weekly})
+        before = self.md()
+        r = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertEqual(self.read_hold()["resets_at"], weekly)
+        self.assertEqual(json.loads(r.stdout)["applied"]["binding_window"],
+                         {"kind": "weekly", "resets_at": weekly})
+        self.assertEqual(self.md(), before)
+
+    def test_binding_reset_mismatch_and_past_reset_refuse_without_mutation(self):
+        self.init()
+        real_reset = self.iso_in(3600)
+        self.seed_snapshot(
+            used=100000, limit=100000, resets_at=real_reset,
+            decision_window={"kind": "weekly", "resets_at": real_reset})
+        before = self.md()
+        mismatch = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(mismatch.returncode, 30, mismatch.stdout + mismatch.stderr)
         self.assertFalse(os.path.exists(self.hold_path()))
+        self.assertEqual(self.md(), before)
+        self.clear_ledger()
+        past = "2026-01-01T00:00:00Z"
+        self.seed_snapshot(
+            used=100000, limit=100000, resets_at=past,
+            captured_at=self.fresh_iso())
+        refused = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(refused.returncode, 30, refused.stdout + refused.stderr)
+        self.assertFalse(os.path.exists(self.hold_path()))
+        self.assertEqual(self.md(), before)
+
+    def test_target_claim_next_blocked_while_peer_can_claim_normally(self):
+        self.place_hold_via_guard(self.iso_in(3600))
+        before = self.md()
+        target = self.cw("claim", "claude")
+        self.assertNotEqual(target.returncode, 0)
+        self.assertIn("usage hold is active", target.stderr)
+        next_target = self.cw("next", "claude", "--once")
+        self.assertEqual(next_target.returncode, 3)
+        self.assertEqual(self.md(), before)
+        peer = self.cw("claim", "codex")
+        self.assertEqual(peer.returncode, 0, peer.stdout + peer.stderr)
+        self.assertEqual(self.lock()["state"], "WORKING_CODEX")
+
+    def test_awaiting_held_target_does_not_implicitly_reroute(self):
+        self.init()
+        self.assertEqual(self.turn("codex", "claude").returncode, 0)
+        self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
+        before = self.md()
+        applied = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(applied.returncode, 11, applied.stdout + applied.stderr)
+        self.assertIn("usage.solo_open_required",
+                      {f["check"] for f in json.loads(applied.stdout)["findings"]})
+        self.assertEqual(self.md(), before)
+        self.assertNotEqual(self.cw("claim", "claude").returncode, 0)
+        peer = self.cw("claim", "codex")
+        self.assertNotEqual(peer.returncode, 0)
+        self.assertIn("AWAITING_CLAUDE", peer.stderr)
+
+    def test_two_agent_holds_coexist_and_clear_independently(self):
+        self.init()
+        self.seed_snapshot(agent="claude", used=100000, limit=100000,
+                           resets_at=self.iso_in(3600))
+        self.assertEqual(self.rt("usage", "guard", "--agent", "claude",
+                                 "--apply", "--json").returncode, 11)
+        self.seed_snapshot(agent="codex", used=100000, limit=100000,
+                           resets_at=self.iso_in(7200))
+        self.assertEqual(self.rt("usage", "guard", "--agent", "codex",
+                                 "--apply", "--json").returncode, 11)
+        self.assertTrue(os.path.exists(self.hold_path("claude")))
+        self.assertTrue(os.path.exists(self.hold_path("codex")))
+        self.seed_snapshot(agent="claude", used=10000, limit=100000)
+        cleared = self.rt("usage", "resume", "--agent", "claude", "--json")
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        self.assertFalse(os.path.exists(self.hold_path("claude")))
+        self.assertTrue(os.path.exists(self.hold_path("codex")))
+
+    def test_malformed_target_hold_fails_only_that_agent_lane(self):
+        self.init()
+        os.makedirs(os.path.dirname(self.hold_path()), exist_ok=True)
+        with open(self.hold_path(), "w", encoding="utf-8") as fh:
+            fh.write("{malformed")
+        claude = self.cw("claim", "claude")
+        self.assertNotEqual(claude.returncode, 0)
+        self.assertIn("fails closed", claude.stderr)
+        codex = self.cw("claim", "codex")
+        self.assertEqual(codex.returncode, 0, codex.stdout + codex.stderr)
+
+    @unittest.skipIf(not hasattr(os, "symlink"), "symlink support required")
+    def test_symlinked_target_hold_fails_closed_without_external_write(self):
+        self.init()
+        outside = tempfile.mkdtemp(prefix="m8shift-hold-outside-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        hold_dir = os.path.dirname(self.hold_path())
+        os.makedirs(os.path.dirname(hold_dir), exist_ok=True)
+        os.symlink(outside, hold_dir)
+        with open(os.path.join(outside, "claude.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        before = sorted(os.listdir(outside))
+        claude = self.cw("claim", "claude")
+        self.assertNotEqual(claude.returncode, 0)
+        self.assertIn("fails closed", claude.stderr)
+        self.seed_snapshot(used=100000, limit=100000, resets_at=self.iso_in(3600))
+        applied = self.rt("usage", "guard", "--agent", "claude", "--apply", "--json")
+        self.assertEqual(applied.returncode, 40, applied.stdout + applied.stderr)
+        self.assertEqual(sorted(os.listdir(outside)), before)
+        peer = self.cw("claim", "codex")
+        self.assertEqual(peer.returncode, 0, peer.stdout + peer.stderr)
+
+    def test_apply_and_claim_race_serializes_at_admission_boundary(self):
+        self.init()
+        self.seed_snapshot(used=100000, limit=100000,
+                           resets_at=self.iso_in(3600))
+        guard = subprocess.Popen(
+            [sys.executable, "m8shift-runtime.py", "usage", "guard",
+             "--agent", "claude", "--apply", "--json"],
+            cwd=self.d, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        claim = subprocess.Popen(
+            [sys.executable, "m8shift.py", "claim", "claude"],
+            cwd=self.d, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        guard_out, guard_err = guard.communicate(timeout=30)
+        claim_out, claim_err = claim.communicate(timeout=30)
+        self.assertIn(guard.returncode, (11, 12), guard_out + guard_err)
+        self.assertTrue(os.path.exists(self.hold_path()))
+        actions = [e for e in self.ledger_events()
+                   if e["type"] in ("usage.hold_placed", "usage.hold_advisory")]
+        self.assertEqual(len(actions), 1)
+        observed = actions[0]["payload"]["relay_state_before"]
+        if claim.returncode == 0:
+            self.assertEqual(observed, "WORKING_CLAUDE")
+            self.assertEqual(actions[0]["type"], "usage.hold_advisory")
+            self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")
+        else:
+            self.assertEqual(observed, "IDLE")
+            self.assertEqual(actions[0]["type"], "usage.hold_placed")
+            self.assertIn("usage hold is active", claim_err)
+            self.assertEqual(self.lock()["state"], "IDLE")
 
     # ── watch ──
 
@@ -11328,44 +11521,64 @@ class TestRFC040UsagePRB(CLIBase):
     # ── resume ──
 
     def test_resume_refuses_while_limit_still_hit(self):
-        self.place_cooldown_via_guard(self.iso_in(3600))
+        self.place_hold_via_guard(self.iso_in(3600))
         r = self.rt("usage", "resume", "--agent", "claude", "--json")
         self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
         self.assertEqual(json.loads(r.stdout)["action"], "refused_still_limit_hit")
-        self.assertEqual(self.lock()["state"], "PAUSED")   # relay untouched
+        self.assertEqual(self.lock()["state"], "IDLE")     # relay untouched
         self.assertTrue(os.path.exists(self.hold_path()))  # hold untouched
 
-    def test_resume_clears_hold_and_calls_core_resume_when_ok(self):
-        self.place_cooldown_via_guard(self.iso_in(3600))
+    def test_resume_clears_only_target_hold_when_ok(self):
+        self.place_hold_via_guard(self.iso_in(3600))
         self.seed_snapshot(used=10000, limit=100000)       # window recovered
         r = self.rt("usage", "resume", "--agent", "claude", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         payload = json.loads(r.stdout)
-        self.assertEqual(payload["action"], "resumed")
+        self.assertEqual(payload["action"], "target_hold_cleared")
         lk = self.lock()
-        self.assertEqual(lk["state"], "AWAITING_CLAUDE")   # via CORE resume
-        self.assertEqual(lk["holder"], "claude")
+        self.assertEqual(lk["state"], "IDLE")
+        self.assertEqual(lk["holder"], "none")
         self.assertFalse(os.path.exists(self.hold_path()))
         cleared = [e for e in self.ledger_events() if e["type"] == "usage.hold_cleared"]
         self.assertEqual(len(cleared), 1)
-        self.assertEqual(cleared[0]["payload"]["core"]["argv"][:3],
-                         ["python3", "m8shift.py", "resume"])
-        self.assertEqual(cleared[0]["payload"]["relay_state_after"], "AWAITING_CLAUDE")
+        self.assertIsNone(cleared[0]["payload"]["core"])
+        self.assertEqual(cleared[0]["payload"]["relay_state_after"], "IDLE")
 
-    def test_resume_agent_defaults_to_cooldown_resume_for(self):
-        self.place_cooldown_via_guard(self.iso_in(3600))
+    def test_resume_agent_defaults_to_single_target_hold(self):
+        self.place_hold_via_guard(self.iso_in(3600))
         self.seed_snapshot(used=10000, limit=100000)
-        r = self.rt("usage", "resume", "--json")           # no --agent: note resume_for wins
+        r = self.rt("usage", "resume", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(json.loads(r.stdout)["agent"], "claude")
+        self.assertEqual(self.lock()["state"], "IDLE")
+
+    def test_legacy_singleton_global_cooldown_remains_recoverable(self):
+        self.init()
+        reset = self.iso_in(3600)
+        cd = self.cw("cooldown", "--until", reset, "--reason", "legacy limit",
+                     "--source", "usage-monitor", "--for", "claude")
+        self.assertEqual(cd.returncode, 0, cd.stderr)
+        legacy_path = os.path.join(self.d, self.LEGACY_HOLD_REL)
+        os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+        with open(legacy_path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.usage.hold.v1", "agent": "claude",
+                       "placed_at": self.fresh_iso(), "resets_at": reset,
+                       "reason": "legacy limit", "source": "usage-monitor",
+                       "snapshot_ref": ".m8shift/runtime/usage.jsonl#legacy"}, fh)
+        self.seed_snapshot(used=10000, limit=100000)
+        resumed = self.rt("usage", "resume", "--agent", "claude", "--json")
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertEqual(json.loads(resumed.stdout)["action"], "resumed")
         self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+        self.assertFalse(os.path.exists(legacy_path))
 
     def test_resume_never_touches_an_operator_pause(self):
         self.init()
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
         self.assertEqual(self.cw("pause", "claude", "--reason", "operator break").returncode, 0)
-        os.makedirs(os.path.dirname(self.hold_path()), exist_ok=True)
-        with open(self.hold_path(), "w", encoding="utf-8") as fh:
+        legacy_path = os.path.join(self.d, self.LEGACY_HOLD_REL)
+        os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+        with open(legacy_path, "w", encoding="utf-8") as fh:
             json.dump({"schema": "m8shift.usage.hold.v1", "agent": "claude",
                        "placed_at": self.fresh_iso(), "resets_at": None,
                        "reason": "stale advisory hold", "source": "usage-monitor",
@@ -11374,9 +11587,9 @@ class TestRFC040UsagePRB(CLIBase):
         self.seed_snapshot(used=10000, limit=100000)       # verdict ok
         r = self.rt("usage", "resume", "--agent", "claude", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(json.loads(r.stdout)["action"], "stale_hold_cleared")
+        self.assertEqual(json.loads(r.stdout)["action"], "target_hold_cleared")
         self.assertEqual(self.lock()["state"], "PAUSED")   # operator pause NOT resumed
-        self.assertFalse(os.path.exists(self.hold_path()))
+        self.assertFalse(os.path.exists(legacy_path))
 
     def test_resume_nothing_to_do_and_unknown_refusal(self):
         self.init()
