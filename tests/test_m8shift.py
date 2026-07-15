@@ -16058,6 +16058,22 @@ class TestRFC072FleetPlan(ListenerCLIBase):
             json.dump(doc, fh)
         return "fleet.json"
 
+    def jobs_spec(self, verify_argv=None, jobs=None):
+        rows = jobs or [{
+            "id": "job-one", "agent": "codex-2", "base": "main",
+            "branch": "fleet/job-one", "objective": "write the marker",
+            "done_criteria": ["marker exists"],
+            "verify": {"argv": verify_argv or [
+                sys.executable, "-c", "import os,sys;sys.exit(0 if os.path.exists('marker') else 1)"
+            ], "timeout_seconds": 10},
+        }]
+        doc = {"schema": "m8shift.fleet.jobs.v1", "integrator": "claude",
+               "target": "main", "max_concurrency": 2, "jobs": rows}
+        path = os.path.join(self.d, "jobs.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return "jobs.json"
+
     def test_pure_plan_reports_structured_diff_without_writes(self):
         self.init("--agents", "claude,codex")
         self.assertEqual(self.rt("providers", "init").returncode, 0)
@@ -16192,6 +16208,62 @@ class TestRFC072FleetPlan(ListenerCLIBase):
                          "--dry-run", "--json")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fleet bootstrap is incomplete", result.stderr)
+
+    def test_immutable_jobs_require_designated_live_integrator(self):
+        self.init("--agents", "claude,codex,codex-2")
+        spec = self.jobs_spec()
+        before = self.md()
+        denied = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                         "--by", "claude", "--json")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertEqual(self.md(), before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "fleet", "jobs", "batch.json")))
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        submitted = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                            "--by", "claude", "--json")
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        self.assertEqual(json.loads(submitted.stdout)["created"], ["job-one"])
+        # Byte-identical retries are no-ops; changed specs conflict instead of mutating.
+        again = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                        "--by", "claude", "--json")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout)["created"], [])
+        with open(os.path.join(self.d, spec), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["jobs"][0]["objective"] = "silently changed"
+        with open(os.path.join(self.d, spec), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        conflict = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                           "--by", "claude")
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertIn("immutable record conflicts", conflict.stderr)
+
+    def test_provider_exit_never_completes_without_recipe_pass(self):
+        self.init("--agents", "claude,codex,codex-2")
+        spec = self.jobs_spec()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.rt("fleet", "jobs", "submit", "--spec", spec,
+                                 "--by", "claude").returncode, 0)
+        worktree = os.path.join(self.d, ".m8shift", "worktrees", "job-one")
+        os.makedirs(worktree, exist_ok=True)
+        failed = self.rt("fleet", "jobs", "attempt", "--id", "job-one",
+                         "--by", "codex-2", "--provider-exit", "0", "--json")
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        self.assertFalse(json.loads(failed.stdout)["verification_passed"])
+        with open(os.path.join(
+                self.d, ".m8shift", "runtime", "fleet", "jobs", "job-one",
+                "attempts", "1.plan.json"), encoding="utf-8") as fh:
+            plan = json.load(fh)
+        self.assertEqual(plan["provider_exit"], 0)
+        with open(os.path.join(worktree, "marker"), "w", encoding="utf-8") as fh:
+            fh.write("verified\n")
+        passed = self.rt("fleet", "jobs", "attempt", "--id", "job-one",
+                         "--by", "codex-2", "--provider-exit", "0", "--json")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertTrue(json.loads(passed.stdout)["verification_passed"])
+        planned = self.rt("fleet", "jobs", "plan", "--spec", spec, "--json")
+        self.assertEqual(json.loads(planned.stdout)["jobs"][0]["state"], "verified")
 
 
 class TestUpdateBackcompatCompanionHint(unittest.TestCase):
