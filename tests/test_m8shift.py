@@ -12358,6 +12358,15 @@ class TestDetailedHelpCoverage(unittest.TestCase):
         "m8shift-e2e.py",
     ]
 
+    CORE_COMMANDS = [
+        "init", "update", "status", "time", "may-i-write", "guard", "watch",
+        "doctor", "contract", "recap", "peek", "log", "turn", "history",
+        "decisions", "session", "wait", "next", "claim", "append",
+        "request-turn", "yield-turn", "decline-turn", "steer-turn", "remember",
+        "pause", "cooldown", "resume", "work-tag", "task", "release", "done",
+        "archive", "bind", "heartbeat",
+    ]
+
     @staticmethod
     def _calls_missing_help(path, attr):
         with open(path, encoding="utf-8") as fh:
@@ -12386,6 +12395,37 @@ class TestDetailedHelpCoverage(unittest.TestCase):
                     os.path.join(REPO, name), "add_parser")
                 self.assertEqual(missing, [],
                                  f"{name}: add_parser calls without help=")
+
+    def test_core_top_level_help_shows_positional_invocation_and_examples(self):
+        result = subprocess.run(
+            [sys.executable, os.path.join(REPO, "m8shift.py"), "--help"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage: m8shift.py [--version] <command> [args]", result.stdout)
+        self.assertIn("Commands are positional", result.stdout)
+        self.assertIn("examples:", result.stdout)
+        self.assertIn("m8shift.py init", result.stdout)
+        self.assertIn("m8shift.py claim agent-a", result.stdout)
+        self.assertIn("m8shift.py append agent-a --to agent-b", result.stdout)
+
+    def test_every_core_command_has_plain_parameter_help(self):
+        script = os.path.join(REPO, "m8shift.py")
+        help_paths = [[command] for command in self.CORE_COMMANDS] + [
+            ["contract", "validate"],
+            ["decisions", "target"], ["decisions", "scaffold"],
+            ["session", "list"], ["session", "show"],
+            ["session", "decisions"], ["session", "report"],
+            ["task", "add"], ["task", "done"], ["task", "drop"],
+            ["task", "list"], ["task", "show"],
+        ]
+        for path in help_paths:
+            with self.subTest(command=" ".join(path)):
+                result = subprocess.run(
+                    [sys.executable, script, *path, "-h"],
+                    capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage:", result.stdout)
+                self.assertNotRegex(result.stdout, r"\bRFC\s+\d")
 
 
 # ───────────────── RFC 051: read-only usage advisory in core status/watch ────

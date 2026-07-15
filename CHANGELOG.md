@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Positional CLI help and command reference (#83).** Top-level help now
+  spells out `m8shift.py <command> [args]`, includes safe real-form examples,
+  and describes commands in plain language without design-document citations.
+  Every command's parameters remain discoverable through `<command> -h`; a
+  site-ready reference covers every core command with parameters and examples.
 - **Top-owned incremental status fold (#79, RFC 069).** The long-lived
   interactive dashboard now parses the living relay once, then verifies a
   relative watermark and bounded head/tail anchors before folding only parser
