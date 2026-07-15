@@ -743,7 +743,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 mock.patch.object(top.sys, "stdout", stdout), \
                 mock.patch.object(top, "enter"), mock.patch.object(top, "restore"), \
                 mock.patch.object(top.atexit, "register"), \
-                mock.patch.object(top, "load_snapshot", return_value=fixture()), \
+                mock.patch.object(top.IncrementalStatusReader, "load",
+                                  return_value=fixture()), \
                 mock.patch.object(top.shutil, "get_terminal_size",
                                   side_effect=terminal_size), \
                 mock.patch.object(top.select, "select", side_effect=ready), \
@@ -869,6 +870,239 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("invalid int value", proc.stderr)
         self.assertNotIn("\x1b[?1049", proc.stdout + proc.stderr)
+
+
+class IncrementalStatusReaderTests(unittest.TestCase):
+    NOW = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.engine = self.root / "m8shift.py"
+        shutil.copy(str(ROOT / "m8shift.py"), str(self.engine))
+        self.journal = self.root / "M8SHIFT.md"
+        self.top = load_top()
+        self.write_turns(12)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @staticmethod
+    def turn(number, body_size=0):
+        agent = "alice" if number % 2 == 0 else "bob"
+        other = "bob" if agent == "alice" else "alice"
+        padding = "x" * body_size
+        return (
+            "<!-- M8SHIFT:TURN %d %s BEGIN -->\n"
+            "- from:    %s\n- to:      %s\n- ask:     next\n"
+            "- done:    event %d%s\n- files:   —\n- handoff: %s\n"
+            "- at:      2026-07-15T07:%02d:00Z\n\n"
+            "<!-- M8SHIFT:TURN %d %s END -->\n" % (
+                number, agent, agent, other, number, padding, other,
+                number % 60, number, agent))
+
+    @classmethod
+    def relay(cls, numbers, note="fixture", body_size=0):
+        last = max(numbers) if numbers else 0
+        header = (
+            "# M8Shift — fixture\n\n"
+            "<!-- M8SHIFT:LOCK:BEGIN -->\n"
+            "holder: none\nstate: IDLE\nagents: alice,bob\nlang: en\n"
+            "session: 20260715T070000Z-deadbeef\nturn: %d\n"
+            "since: 2026-07-15T07:00:00Z\nexpires: -\nnote: %s\n"
+            "<!-- M8SHIFT:LOCK:END -->\n\n" % (last, note))
+        return header + "".join(cls.turn(n, body_size) for n in numbers)
+
+    def write_turns(self, count, note="fixture", body_size=0):
+        self.journal.write_text(
+            self.relay(list(range(count)), note=note, body_size=body_size),
+            encoding="utf-8")
+
+    def reader(self):
+        reader = self.top.IncrementalStatusReader(
+            str(self.engine), str(self.root))
+        reader._prepare_engine()
+        self.assertIsNotNone(reader._core)
+        reader._core.now = lambda: self.NOW
+        return reader
+
+    def oracle(self, reader, limit):
+        data = self.journal.read_bytes()
+        text = data.decode("utf-8")
+        turns = reader._core.parse_turns(text)
+        payload = reader._core.status_json_payload_v1(
+            reader._core.get_lock(text), turns, self.NOW, limit,
+            legacy_last=reader._legacy_last(text),
+            valid_turn_count=len(turns))
+        return self.top._merge_status_payload(payload)
+
+    @staticmethod
+    def canonical(value):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+    def assert_equivalent(self, reader, limit, expected_mode):
+        actual = reader.load(limit)
+        self.assertEqual(reader.mode, expected_mode)
+        self.assertEqual(self.canonical(actual), self.canonical(self.oracle(reader, limit)))
+        return actual
+
+    def test_full_oracle_then_stable_one_and_many_appends_are_byte_identical(self):
+        reader = self.reader()
+        self.assert_equivalent(reader, 20, "full")
+        self.assert_equivalent(reader, 20, "incremental")
+        with self.journal.open("a", encoding="utf-8") as fh:
+            fh.write(self.turn(12))
+        self.assert_equivalent(reader, 20, "incremental")
+        with self.journal.open("a", encoding="utf-8") as fh:
+            for number in range(13, 63):
+                fh.write(self.turn(number))
+        self.assert_equivalent(reader, 20, "incremental")
+
+    def test_lock_length_changes_do_not_invalidate_relative_watermark(self):
+        reader = self.reader()
+        self.assert_equivalent(reader, 8, "full")
+        self.journal.write_text(
+            self.relay(list(range(12)), note="x"), encoding="utf-8")
+        self.assert_equivalent(reader, 8, "incremental")
+        self.journal.write_text(
+            self.relay(list(range(12)), note="a much longer mutable lock note"),
+            encoding="utf-8")
+        self.assert_equivalent(reader, 8, "incremental")
+
+    def test_rotation_forces_full_then_next_append_returns_incremental(self):
+        reader = self.reader()
+        self.assert_equivalent(reader, 200, "full")
+        retained = [0] + list(range(6, 12))
+        self.journal.write_text(self.relay(retained), encoding="utf-8")
+        self.assert_equivalent(reader, 200, "full")
+        with self.journal.open("a", encoding="utf-8") as fh:
+            fh.write(self.turn(12))
+        self.assert_equivalent(reader, 200, "incremental")
+
+    def test_truncated_turn_is_carried_then_completed_without_guessing(self):
+        reader = self.reader()
+        before = self.assert_equivalent(reader, 20, "full")
+        partial = (
+            "<!-- M8SHIFT:TURN 12 alice BEGIN -->\n- from:    alice\n"
+            "- to:      bob\n- done:    carried")
+        with self.journal.open("a", encoding="utf-8") as fh:
+            fh.write(partial)
+        truncated = self.assert_equivalent(reader, 20, "incremental")
+        self.assertEqual(truncated["activity"], before["activity"])
+        self.assert_equivalent(reader, 20, "incremental")
+        with self.journal.open("a", encoding="utf-8") as fh:
+            fh.write("\n<!-- M8SHIFT:TURN 12 alice END -->\n")
+        completed = self.assert_equivalent(reader, 20, "incremental")
+        self.assertEqual(completed["activity"][-1]["turn"], 12)
+
+    def test_atomic_replacement_during_validation_forces_full(self):
+        replacement = self.relay(list(range(13)), note="atomic replacement")
+        fired = {"value": False}
+
+        def replace(reader):
+            if fired["value"]:
+                return
+            fired["value"] = True
+            staged = self.root / "M8SHIFT.next"
+            staged.write_text(replacement, encoding="utf-8")
+            os.replace(str(staged), str(self.journal))
+            reader.validation_hook = None
+
+        reader = self.top.IncrementalStatusReader(
+            str(self.engine), str(self.root), validation_hook=replace)
+        reader._prepare_engine()
+        reader._core.now = lambda: self.NOW
+        self.assert_equivalent(reader, 20, "full")
+        self.assert_equivalent(reader, 20, "full")
+        self.assertTrue(fired["value"])
+
+    def test_shrink_and_tail_mismatch_each_force_full(self):
+        reader = self.reader()
+        self.assert_equivalent(reader, 20, "full")
+        self.journal.write_text(self.relay(list(range(5))), encoding="utf-8")
+        self.assert_equivalent(reader, 20, "full")
+
+        text = self.journal.read_text(encoding="utf-8")
+        self.journal.write_text(text.replace("event 4", "Event 4"), encoding="utf-8")
+        self.assert_equivalent(reader, 20, "full")
+
+    def test_engine_replacement_and_version_mismatch_use_full_subprocess(self):
+        reader = self.reader()
+        self.assert_equivalent(reader, 8, "full")
+        source = self.engine.read_text(encoding="utf-8")
+        replacement = self.root / "m8shift.next.py"
+        replacement.write_text(
+            source.replace('VERSION = "3.60.0"', 'VERSION = "3.60.1"', 1),
+            encoding="utf-8")
+        os.replace(str(replacement), str(self.engine))
+        actual = reader.load(8)
+        self.assertEqual(reader.mode, "full")
+        expected = self.top.load_snapshot(str(self.engine), str(self.root), 8)
+        self.assertEqual(self.canonical(actual), self.canonical(expected))
+
+    def test_invalid_utf8_delta_falls_back_to_full_oracle_error(self):
+        reader = self.reader()
+        self.assert_equivalent(reader, 8, "full")
+        with self.journal.open("ab") as fh:
+            fh.write(b"\xff")
+        with self.assertRaises(UnicodeDecodeError):
+            reader.load(8)
+        self.assertEqual(reader.mode, "full")
+
+    def test_oversized_incomplete_carry_never_seeds_incremental_state(self):
+        reader = self.reader()
+        self.assert_equivalent(reader, 8, "full")
+        partial = ("<!-- M8SHIFT:TURN 12 alice BEGIN -->\n- done:    "
+                   + "x" * (reader.MAX_CARRY + 1))
+        with self.journal.open("a", encoding="utf-8") as fh:
+            fh.write(partial)
+        self.assert_equivalent(reader, 8, "full")
+        self.assertIsNone(reader._cache)
+        self.assert_equivalent(reader, 8, "full")
+
+    def test_activity_limits_and_rfc064_sibling_match_full_oracle(self):
+        self.write_turns(230)
+        reader = self.reader()
+        for index, limit in enumerate((0, 8, 20, 200)):
+            actual = self.assert_equivalent(
+                reader, limit, "full" if index == 0 else "incremental")
+            self.assertEqual(actual["activity_limit"], limit)
+            self.assertIn("time_accounting", actual)
+            self.assertEqual(actual["time_accounting"], self.oracle(
+                reader, limit)["time_accounting"])
+
+    def test_stable_and_one_append_reads_and_parses_only_bounded_delta(self):
+        self.write_turns(1000, body_size=500)
+        reader = self.reader()
+        self.assert_equivalent(reader, 200, "full")
+        total = self.journal.stat().st_size
+        self.assertGreater(total, reader.PREFIX_LIMIT * 4)
+
+        self.assert_equivalent(reader, 200, "incremental")
+        self.assertLess(reader.stats["bytes_read"], total // 2)
+        self.assertLess(reader.stats["parse_bytes"], 1024)
+        self.assertEqual(reader.stats["parse_calls"], 1)
+
+        appended = self.turn(1000, body_size=500).encode("utf-8")
+        with self.journal.open("ab") as fh:
+            fh.write(appended)
+        self.assert_equivalent(reader, 200, "incremental")
+        self.assertLessEqual(
+            reader.stats["bytes_read"],
+            reader.PREFIX_LIMIT + 2 * reader.ANCHOR_BYTES + len(appended))
+        self.assertLessEqual(reader.stats["parse_bytes"], len(appended) + 2)
+
+    def test_importing_engine_has_no_cli_side_effects(self):
+        code = (
+            "import importlib.util; "
+            "s=importlib.util.spec_from_file_location('engine', %r); "
+            "m=importlib.util.module_from_spec(s); s.loader.exec_module(m)" % str(self.engine))
+        proc = subprocess.run(
+            [sys.executable, "-c", code], cwd=str(self.root),
+            text=True, capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(proc.stderr, "")
 
 
 if __name__ == "__main__":
