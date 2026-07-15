@@ -13,6 +13,7 @@ M8Shift is **free and open source**, released under the
 | [tutorial.md](tutorial.md) | Step-by-step first relay run. |
 | [vscode-guide.md](vscode-guide.md) | Practical setup for agent UIs in VS Code-style workspaces. |
 | [macos-iterm2.md](macos-iterm2.md) | Recommended macOS/iTerm2 truecolour setup for the read-only dashboard. |
+| [m8shift-top-reference.md](m8shift-top-reference.md) | Every dashboard element, key, colour, fallback, and the public-safe placeholder capture. |
 | [windows.md](windows.md) | Windows installation and execution notes. |
 
 ## Reference
