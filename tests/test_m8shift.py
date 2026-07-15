@@ -16047,6 +16047,51 @@ class TestRFC049PRBListenerProducer(CLIBase):
             self.d, ".m8shift", "holder-heartbeats", "claude.json")))
 
 
+class TestRFC072FleetPlan(ListenerCLIBase):
+    def fleet_spec(self, agents=None):
+        doc = {"schema": "m8shift.fleet.spec.v1", "agents": agents or [{
+            "name": "codex-2", "template": "codex",
+            "model": "gpt-test-exact", "desired": "stopped",
+        }]}
+        path = os.path.join(self.d, "fleet.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return "fleet.json"
+
+    def test_pure_plan_reports_structured_diff_without_writes(self):
+        self.init("--agents", "claude,codex")
+        self.assertEqual(self.rt("providers", "init").returncode, 0)
+        before = self.md()
+        registry = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry, "rb") as fh:
+            providers_before = fh.read()
+        result = self.rt("fleet", "plan", "--spec", self.fleet_spec(), "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual([row["action"] for row in payload["actions"]],
+                         ["write_identity", "upsert_provider", "roster_add"])
+        self.assertEqual(payload["health"][0]["listener"]["status"], "stopped")
+        self.assertEqual(self.md(), before)
+        with open(registry, "rb") as fh:
+            self.assertEqual(fh.read(), providers_before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "identities", "codex-2.md")))
+
+    def test_spec_requires_template_and_explicit_model(self):
+        self.init()
+        self.rt("providers", "init")
+        bad_model = self.fleet_spec([{
+            "name": "codex-2", "template": "codex", "model": "UNSET"}])
+        result = self.rt("fleet", "plan", "--spec", bad_model, "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("explicit valid model", result.stderr)
+        missing = self.fleet_spec([{
+            "name": "codex-2", "template": "missing", "model": "m"}])
+        result = self.rt("fleet", "plan", "--spec", missing, "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing provider template", result.stderr)
+
+
 class TestUpdateBackcompatCompanionHint(unittest.TestCase):
     """#29 backward-compat: a pre-RFC044 adopter (no companions installed) who
     runs `update` sees the companions component skipped. The skip detail must

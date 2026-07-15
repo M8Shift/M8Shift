@@ -179,6 +179,16 @@ LISTENER_RESUME_PROMPT = (
     "finish the work, then append (or done) and exit."
 )
 
+# RFC 072 (slices 1-3) — declarative multi-listener fleet bootstrap.  The
+# portable spec is operator-authored; generated identities and observed state
+# stay under the already git-ignored runtime directory.
+FLEET_SPEC_SCHEMA = "m8shift.fleet.spec.v1"
+FLEET_IDENTITY_SCHEMA = "m8shift.agent-identity.v1"
+FLEET_DIR = os.path.join(RUNTIME_DIR, "fleet")
+FLEET_IDENTITIES_DIR = os.path.join(RUNTIME_DIR, "identities")
+FLEET_EVENTS = os.path.join(FLEET_DIR, "events.jsonl")
+FLEET_DESIRED = {"running", "stopped"}
+
 
 def now():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
@@ -232,6 +242,16 @@ def write_json_if_missing(path, data, force=False):
         fh.write("\n")
     os.replace(tmp, path)
     return True
+
+
+def write_json_atomic(path, data):
+    """Replace one local sidecar atomically (never the portable relay)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, sort_keys=True, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
 
 
 def read_text(path):
@@ -2164,6 +2184,189 @@ def cmd_providers_render(args):
     else:
         print(json.dumps(argv, ensure_ascii=False))
     return 0
+
+
+def load_fleet_spec(path):
+    doc, err = read_json_diagnostic(os.path.abspath(path), {})
+    if err:
+        raise ValueError(f"cannot read fleet spec: {err}")
+    if not isinstance(doc, dict) or doc.get("schema") != FLEET_SPEC_SCHEMA:
+        raise ValueError(f"fleet spec must use schema {FLEET_SPEC_SCHEMA}")
+    rows = doc.get("agents")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("fleet spec agents must be a non-empty list")
+    seen = set()
+    normalized = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"agents[{index}] must be an object")
+        name = row.get("name", "")
+        template = row.get("template", "")
+        model = row.get("model", "")
+        desired = row.get("desired", "running")
+        if not isinstance(name, str) or not AGENT_RE.fullmatch(name):
+            raise ValueError(f"agents[{index}].name is invalid")
+        if name in seen:
+            raise ValueError(f"duplicate fleet agent {name}")
+        seen.add(name)
+        if not isinstance(template, str) or not AGENT_RE.fullmatch(template):
+            raise ValueError(f"{name} template must name a provider example")
+        if not isinstance(model, str) or model == PROVIDER_MODEL_UNSET \
+                or MODEL_ID_RE.fullmatch(model) is None:
+            raise ValueError(f"{name} requires an explicit valid model")
+        if desired not in FLEET_DESIRED:
+            raise ValueError(f"{name} desired must be running or stopped")
+        normalized.append({
+            "name": name, "template": template, "model": model,
+            "desired": desired,
+        })
+    return {"schema": FLEET_SPEC_SCHEMA, "agents": normalized}
+
+
+def fleet_templates(registry):
+    out = {}
+    for row in registry.get("examples", []):
+        if isinstance(row, dict) and isinstance(row.get("name"), str):
+            out[row["name"]] = row
+    return out
+
+
+def fleet_identity_relpath(agent):
+    return os.path.join(".m8shift", "runtime", "identities", f"{agent}.md")
+
+
+def fleet_identity_path(agent):
+    return os.path.join(FLEET_IDENTITIES_DIR, f"{agent}.md")
+
+
+def fleet_identity_text(agent):
+    return (
+        "# M8Shift exact agent identity\n\n"
+        f"You are the exact M8Shift roster identity `{agent}`.\n"
+        f"For this process, `M8SHIFT_AGENT={agent}` is authoritative.\n"
+        "Never claim, append, release, or report work as a similar identity. "
+        "Read M8SHIFT.protocol.md and use only the exact identity above.\n"
+    )
+
+
+def fleet_provider_row(item, template):
+    row = {key: value for key, value in template.items() if key != "//"}
+    row["name"] = item["name"]
+    row["model"] = item["model"]
+    row["identity_schema"] = FLEET_IDENTITY_SCHEMA
+    row["identity_file"] = fleet_identity_relpath(item["name"])
+    return row
+
+
+def fleet_relay_snapshot():
+    try:
+        core = load_core()
+        lk = core.get_lock(core.load_or_die())
+        return {
+            "state": lk.get("state", ""), "holder": lk.get("holder", ""),
+            "agents": list(core.active_agents(lk)), "turn": int(lk.get("turn", "0")),
+            "session": lk.get("session", ""),
+        }
+    except (SystemExit, ValueError, TypeError):
+        return {"state": "invalid", "holder": "", "agents": [], "turn": 0,
+                "session": ""}
+
+
+def fleet_listener_health(agent):
+    exists, pid = read_listener_pid(agent)
+    alive = bool(pid and listener_pid_alive(pid))
+    state = read_listener_state(agent)
+    if alive:
+        status = "running"
+    elif exists:
+        status = "stale"
+    elif state.get("phase") == "halted":
+        status = "halted"
+    else:
+        status = "stopped"
+    return {"status": status, "pid": pid if alive else None,
+            "phase": state.get("phase", ""),
+            "last_classification": state.get("last_classification", "")}
+
+
+def build_fleet_plan(spec):
+    registry = load_provider_registry()
+    templates = fleet_templates(registry)
+    providers = {row.get("name"): row for row in registry.get("agents", [])
+                 if isinstance(row, dict)}
+    relay = fleet_relay_snapshot()
+    actions = []
+    health = []
+    for item in spec["agents"]:
+        template = templates.get(item["template"])
+        if template is None:
+            raise ValueError(f"{item['name']} references missing provider template "
+                             f"{item['template']}")
+        candidate = fleet_provider_row(item, template)
+        identity_ok = False
+        try:
+            identity_ok = read_text(fleet_identity_path(item["name"])) == \
+                fleet_identity_text(item["name"])
+        except OSError:
+            pass
+        listener = fleet_listener_health(item["name"])
+        row = {
+            "name": item["name"], "desired": item["desired"],
+            "member": item["name"] in relay["agents"],
+            "provider_ready": providers.get(item["name"]) == candidate,
+            "identity_ready": identity_ok, "listener": listener,
+        }
+        health.append(row)
+        if not row["identity_ready"]:
+            actions.append({"action": "write_identity", "agent": item["name"]})
+        if not row["provider_ready"]:
+            actions.append({"action": "upsert_provider", "agent": item["name"]})
+        if not row["member"]:
+            actions.append({"action": "roster_add", "agent": item["name"]})
+        observed_running = listener["status"] == "running"
+        if item["desired"] == "running" and not observed_running:
+            actions.append({"action": "start_listener", "agent": item["name"]})
+        if item["desired"] == "stopped" and observed_running:
+            actions.append({"action": "stop_listener", "agent": item["name"]})
+    return {"schema": "m8shift.fleet.plan.v1", "relay": relay,
+            "health": health, "actions": actions}
+
+
+def cmd_fleet_plan(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        plan = build_fleet_plan(spec)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    if args.json:
+        print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
+    else:
+        for action in plan["actions"]:
+            print(f"{action['action']} {action['agent']}")
+        if not plan["actions"]:
+            print("✓ fleet matches desired state")
+    return 0
+
+
+def cmd_fleet_health(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        plan = build_fleet_plan(spec)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    ok = all(row["member"] and row["provider_ready"] and row["identity_ready"]
+             and ((row["desired"] == "running" and row["listener"]["status"] == "running")
+                  or (row["desired"] == "stopped" and row["listener"]["status"] != "running"))
+             for row in plan["health"])
+    payload = {"ok": ok, "health": plan["health"], "relay": plan["relay"]}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        for row in plan["health"]:
+            print(f"{row['name']} desired={row['desired']} listener={row['listener']['status']} "
+                  f"member={str(row['member']).lower()} identity={str(row['identity_ready']).lower()} "
+                  f"provider={str(row['provider_ready']).lower()}")
+    return 0 if ok else 1
 
 
 def routing_order(manifest, key, default):
@@ -7342,6 +7545,24 @@ def main():
                      help="optional run id substituted for the $M8SHIFT_RUN_ID placeholder")
     pvr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     pvr.set_defaults(fn=cmd_providers_render)
+
+    fleet = sub.add_parser(
+        "fleet", help="plan and reconcile a declarative batch of exact agent identities")
+    fleet_sub = fleet.add_subparsers(dest="fleet_verb", required=True)
+    fp = fleet_sub.add_parser(
+        "plan", help="validate a fleet spec and print its pure desired/observed diff")
+    fp.add_argument("--spec", required=True,
+                    help="path to a m8shift.fleet.spec.v1 JSON document")
+    fp.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of human output")
+    fp.set_defaults(fn=cmd_fleet_plan)
+    fh = fleet_sub.add_parser(
+        "health", help="report exact identity, provider, roster, and listener health")
+    fh.add_argument("--spec", required=True,
+                    help="path to a m8shift.fleet.spec.v1 JSON document")
+    fh.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of human output")
+    fh.set_defaults(fn=cmd_fleet_health)
 
     route = sub.add_parser("route", help="advisory model/task routing")
     route_sub = route.add_subparsers(dest="route_verb", required=True)
