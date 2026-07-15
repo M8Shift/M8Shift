@@ -72,7 +72,12 @@ def csv_ints(value):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        usage="%(prog)s [--terms N,...] [--commits N,...] [--repeats N] [--json PATH]",
+        description="Benchmark confidential denylist scanning with fabricated repositories.",
+        epilog="""example:
+  benchmark-scrub-check.py --terms 1,10 --commits 100,1000 --repeats 2""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--terms", type=csv_ints, default=csv_ints("1,10"))
     ap.add_argument("--commits", type=csv_ints, default=csv_ints("100"))
     ap.add_argument("--repeats", type=int, default=2)

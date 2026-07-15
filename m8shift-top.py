@@ -1338,14 +1338,24 @@ def render_help(width, interval=2, height=None):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        usage="%(prog)s [dashboard options] [m8shift.py watch options]",
+        description="Open the read-only M8Shift terminal dashboard.",
+        epilog="""examples:
+  m8shift-top.py
+  m8shift-top.py --interval 5 --utc
+  m8shift-top.py --plain --for agent-a""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--interval", type=int, default=2,
                    help="refresh interval in seconds (default: 2)")
-    p.add_argument("--plain", action="store_true")
+    p.add_argument("--plain", action="store_true",
+                   help="use the scrolling fallback instead of the alternate-screen dashboard")
     p.add_argument("--utc", action="store_true",
                    help="render every dashboard time in UTC with a Z suffix")
-    p.add_argument("--root", default=os.environ.get("M8SHIFT_ROOT", os.getcwd()))
-    p.add_argument("--engine", default=os.environ.get("M8SHIFT_ENGINE"))
+    p.add_argument("--root", metavar="DIR", default=os.environ.get("M8SHIFT_ROOT", os.getcwd()),
+                   help="relay project root (default: $M8SHIFT_ROOT or current directory)")
+    p.add_argument("--engine", metavar="PATH", default=os.environ.get("M8SHIFT_ENGINE"),
+                   help="m8shift.py engine path (default: <root>/m8shift.py)")
     args, extra = p.parse_known_args(argv)
     engine = args.engine or os.path.join(args.root, "m8shift.py")
     tty = sys.stdout.isatty() and sys.stdin.isatty()

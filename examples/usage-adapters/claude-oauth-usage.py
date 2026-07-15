@@ -257,4 +257,13 @@ def main(env=None, fetch=_fetch, token_loader=_load_access_token, out=None, now=
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        if sys.argv[1:] in (["-h"], ["--help"]):
+            print("usage: claude-oauth-usage.py\n\n"
+                  "Read Claude OAuth usage and emit a normalized JSON snapshot.\n\n"
+                  "example:\n  claude-oauth-usage.py")
+            raise SystemExit(0)
+        print("claude-oauth-usage.py: error: no arguments are accepted\n"
+              "try: claude-oauth-usage.py --help", file=sys.stderr)
+        raise SystemExit(2)
     sys.exit(main())

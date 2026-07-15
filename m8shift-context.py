@@ -20,6 +20,27 @@ import sys
 import threading
 import time
 
+
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Print command help plus a valid required-argument shape on errors."""
+
+    def error(self, message):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                value = action.metavar or action.dest.upper()
+                parts.append(str(value[0] if isinstance(value, tuple) else value))
+        old = self.epilog
+        self.epilog = ((old + "\n\n") if old else "") + \
+            "required invocation example:\n  " + " ".join(parts)
+        self.print_help(sys.stderr)
+        self.epilog = old
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
 VERSION = "3.60.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
@@ -2740,7 +2761,14 @@ def cmd_doctor(args):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="Optional M8Shift context companion (native Phase 1).")
+    p = HelpfulArgumentParser(
+        usage="%(prog)s [--root DIR] <command> [args]",
+        description="Build, compress, inspect, and retrieve bounded M8Shift context records.",
+        epilog="""examples:
+  m8shift-context.py init
+  m8shift-context.py pack --profile reviewer
+  m8shift-context.py retrieve RECORD_ID""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"m8shift-context.py {VERSION}",
                    help="show tool version and exit")
     p.add_argument("--root", help="project root (default: $M8SHIFT_ROOT or script directory)")

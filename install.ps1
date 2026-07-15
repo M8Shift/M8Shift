@@ -62,6 +62,11 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex"
   .\install.ps1 [options]
 
+Examples:
+  .\install.ps1 -Agents agent-a,agent-b
+  .\install.ps1 -Dir .\my-project -Name my-project -DryRun
+  .\install.ps1 -SourceDir .\release -NoInit
+
 Options:
   -Dir DIR             Install into DIR instead of the current directory.
   -Agents A,B          Active roster passed to m8shift.py init (default: claude,codex).

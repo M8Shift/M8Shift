@@ -56,6 +56,27 @@ import sys
 import time
 import uuid
 
+
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Print command help plus a valid required-argument shape on errors."""
+
+    def error(self, message):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                value = action.metavar or action.dest.upper()
+                parts.append(str(value[0] if isinstance(value, tuple) else value))
+        old = self.epilog
+        self.epilog = ((old + "\n\n") if old else "") + \
+            "required invocation example:\n  " + " ".join(parts)
+        self.print_help(sys.stderr)
+        self.epilog = old
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
 VERSION = "3.60.0"
@@ -596,8 +617,9 @@ def maybe_refresh_ttl(args, me, me_working, run_id):
 
 
 def main():
-    p = argparse.ArgumentParser(
-        description="Headless M8Shift runner for one agent.",
+    p = HelpfulArgumentParser(
+        usage="%(prog)s AGENT [options] --cmd COMMAND [ARG ...]",
+        description="Run one bounded M8Shift agent turn from a persistent listener.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "exit codes (RFC 047, one-shot --once):\n"
@@ -617,6 +639,10 @@ def main():
             "  heartbeats the TTL via `claim <agent> --refresh` and classifies the run with\n"
             "  the normal table (authored newer turn => advanced; still WORKING same turn =>\n"
             "  stuck_working). The marker is never exported for AWAITING/IDLE launches.\n"
+            "\n"
+            "examples:\n"
+            "  headless_runner.py agent-a --once --cmd codex exec --full-auto\n"
+            "  headless_runner.py agent-b --start-on-idle --cmd claude -p\n"
         ),
     )
     p.add_argument("--version", action="version", version=f"headless_runner.py {VERSION}")
@@ -655,7 +681,7 @@ def main():
                    help="run at most one eligible turn, then exit")
     p.add_argument("--dry-run", action="store_true",
                    help="validate configuration, print the command argv as JSON, then exit")
-    p.add_argument("--cmd", nargs=argparse.REMAINDER, required=True,
+    p.add_argument("--cmd", metavar="COMMAND", nargs=argparse.REMAINDER, required=True,
                    help="the headless agent command (static argv; runs ONE turn)")
     args = p.parse_args()
     if not args.cmd:

@@ -29,6 +29,33 @@ import tempfile
 import time
 import uuid
 
+
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Keep argparse exit codes while making missing-input errors actionable."""
+
+    def _required_invocation(self):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                metavar = action.metavar or action.dest.upper()
+                if isinstance(metavar, tuple):
+                    metavar = metavar[0]
+                parts.append(str(metavar))
+        return " ".join(parts)
+
+    def error(self, message):
+        example = getattr(self, "required_example", "") or self._required_invocation()
+        previous_epilog = self.epilog
+        self.epilog = ((previous_epilog + "\n\n") if previous_epilog else "") + \
+            "required invocation example:\n  " + example
+        self.print_help(sys.stderr)
+        self.epilog = previous_epilog
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Persistent file names (M8Shift-only; the living-file path keeps the internal name COWORK).
 COWORK = os.path.join(HERE, "M8SHIFT.md")            # the living relay file
@@ -10484,7 +10511,7 @@ def cmd_archive(args):
 
 def main():
     # prog follows the invoked name (m8shift.py).
-    p = argparse.ArgumentParser(
+    p = HelpfulArgumentParser(
         prog=os.path.basename(sys.argv[0]),
         usage="%(prog)s [--version] <command> [args]",
         description=("Single-file multi-agent relay (M8Shift), portable. "
@@ -10806,12 +10833,15 @@ def main():
 
     a = sub.add_parser("append",  # requires WORKING_<agent>: run `claim` first
                        help="close your turn and hand off the pen (requires a prior claim)")
-    a.add_argument("agent", help="roster agent closing its turn (must hold the pen via claim)")
-    a.add_argument("--to", required=True,
+    a.required_example = ('m8shift.py append agent-a --to agent-b '
+                          '--ask "review the change" --done "implemented it"')
+    a.add_argument("agent", metavar="AGENT",
+                   help="roster agent closing its turn (must hold the pen via claim)")
+    a.add_argument("--to", metavar="AGENT", required=True,
                    help="recipient roster agent handed the pen (must differ from <agent>)")
-    a.add_argument("--ask", default="",
+    a.add_argument("--ask", metavar="TEXT", default="",
                    help="single-line actionable request for the recipient (empty = the — placeholder)")
-    a.add_argument("--done", default="",
+    a.add_argument("--done", metavar="TEXT", default="",
                    help="single-line summary of what you just did (empty = the — placeholder)")
     a.add_argument("--files", default="",
                    help="files touched this turn, comma-separated (empty = the — placeholder)")

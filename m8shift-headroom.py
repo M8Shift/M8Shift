@@ -21,6 +21,26 @@ import sys
 from typing import Any, Iterable
 
 
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Print command help plus a valid required-argument shape on errors."""
+
+    def error(self, message):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                parts.append(str(action.metavar or action.dest.upper()))
+        old = self.epilog
+        self.epilog = ((old + "\n\n") if old else "") + \
+            "required invocation example:\n  " + " ".join(parts)
+        self.print_help(sys.stderr)
+        self.epilog = old
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
+
 VERSION = "3.60.0"
 OFFLINE_ENV = {
     "HEADROOM_OFFLINE": "1",
@@ -223,7 +243,12 @@ def run_transform(mode: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="M8Shift offline Headroom adapter wrapper.")
+    parser = HelpfulArgumentParser(
+        usage="%(prog)s [--version] <command> [args]",
+        description="Compress redacted stdin through the optional offline Headroom adapter.",
+        epilog="""example:
+  m8shift-headroom.py m8shift-transform report < redacted-input.txt""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--version",
         action="version",

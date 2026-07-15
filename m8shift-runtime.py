@@ -28,6 +28,27 @@ import threading
 import time
 import uuid
 
+
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Print command help plus a valid required-argument shape on errors."""
+
+    def error(self, message):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                value = action.metavar or action.dest.upper()
+                parts.append(str(value[0] if isinstance(value, tuple) else value))
+        old = self.epilog
+        self.epilog = ((old + "\n\n") if old else "") + \
+            "required invocation example:\n  " + " ".join(parts)
+        self.print_help(sys.stderr)
+        self.epilog = old
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
 VERSION = "3.60.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
@@ -6847,9 +6868,15 @@ def _binding_a1_preflight(args):
 
 
 def main():
-    p = argparse.ArgumentParser(
+    p = HelpfulArgumentParser(
         prog=os.path.basename(sys.argv[0]),
-        description="Local runtime companion for M8Shift sidecars.")
+        usage="%(prog)s [--version] <command> [args]",
+        description="Manage local M8Shift runtime presence, listeners, routing, and reports.",
+        epilog="""examples:
+  m8shift-runtime.py init
+  m8shift-runtime.py status-runtime --json
+  m8shift-runtime.py listener status --agent agent-a""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"m8shift-runtime.py {VERSION}",
                    help="show the runtime companion version and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -7047,7 +7074,7 @@ def main():
 
     listener = sub.add_parser(
         "listener",
-        help="supervise headless runner lifecycles (RFC 047: local/launchd/systemd/windows backends)")
+        help="supervise headless runner lifecycles across local and service backends")
     listener_sub = listener.add_subparsers(dest="verb", required=True)
     lst = listener_sub.add_parser(
         "start", help="start (or dry-run plan) one agent's listener loop")
@@ -7106,8 +7133,7 @@ def main():
 
     usage = sub.add_parser(
         "usage",
-        help="AI session usage monitoring (RFC 040: read-only snapshots + advisory "
-             "guard family; the relay is only ever parked THROUGH core cooldown/resume)")
+        help="monitor AI session usage with read-only snapshots and advisory guards")
     usage_sub = usage.add_subparsers(dest="verb", required=True)
 
     def usage_threshold_flags(sp):
@@ -7163,7 +7189,7 @@ def main():
     ust.set_defaults(fn=cmd_usage_status)
     ugd = usage_sub.add_parser(
         "guard",
-        help="advisory verdict from the freshest ledger snapshots (RFC 040 PR B); "
+        help="advisory verdict from the freshest ledger snapshots; "
              "--apply parks the relay ONLY through the core cooldown command")
     ugd.add_argument("--agent", default="",
                      help="agent whose usage verdict to evaluate (required with --apply)")

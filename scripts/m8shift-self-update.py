@@ -11,6 +11,26 @@ import sys
 import tempfile
 
 
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Print command help plus a valid required-argument shape on errors."""
+
+    def error(self, message):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                parts.append(str(action.metavar or action.dest.upper()))
+        old = self.epilog
+        self.epilog = ((old + "\n\n") if old else "") + \
+            "required invocation example:\n  " + " ".join(parts)
+        self.print_help(sys.stderr)
+        self.epilog = old
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
+
 LIVE_SCRIPTS = (
     "m8shift.py", "m8shift-top.py", "m8shift-runtime.py", "m8shift-context.py",
     "m8shift-worktree.py", "m8shift-headroom.py", "m8shift-i18n.py", "m8shift-e2e.py",
@@ -69,13 +89,20 @@ def restore(target, backup, rels, absent=()):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--source", required=True, help="clean checkout containing merged release")
-    p.add_argument("--target", required=True, help="initialized live relay directory")
+    p = HelpfulArgumentParser(
+        usage="%(prog)s --source DIR --target DIR [--expected-ref REF] [--apply]",
+        description="Validate and reversibly refresh an adopted relay from a clean release checkout.",
+        epilog="""example:
+  m8shift-self-update.py --source ./release --target ./my-project --apply""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--source", metavar="DIR", required=True,
+                   help="clean checkout containing merged release")
+    p.add_argument("--target", metavar="DIR", required=True,
+                   help="initialized live relay directory")
     p.add_argument("--expected-ref", default="origin/main",
                    help="source ref HEAD must equal (default: origin/main)")
     p.add_argument("--apply", action="store_true",
-                   help="perform the refresh; without this flag only RFC 048 dry-run is run")
+                   help="perform the refresh; without this flag only a dry-run is run")
     args = p.parse_args(argv)
     source, target = map(os.path.realpath, (args.source, args.target))
     ok, authority = source_authority(source, args.expected_ref)

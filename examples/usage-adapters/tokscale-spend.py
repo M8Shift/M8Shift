@@ -36,6 +36,7 @@ enabling it.
 """
 
 import contextlib
+import argparse
 import datetime as dt
 import json
 import subprocess
@@ -255,4 +256,13 @@ def main(out=None, now=None, read_spend=None, agent="claude"):
 
 
 if __name__ == "__main__":
-    sys.exit(main(agent=sys.argv[1] if len(sys.argv) > 1 else "claude"))
+    parser = argparse.ArgumentParser(
+        usage="%(prog)s [AGENT]",
+        description="Read local tokscale spend and emit a normalized JSON snapshot.",
+        epilog="""example:
+  tokscale-spend.py agent-a""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("agent", nargs="?", default="claude",
+                        help="provider lane label in the output (default: claude)")
+    cli = parser.parse_args()
+    sys.exit(main(agent=cli.agent))
