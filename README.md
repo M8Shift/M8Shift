@@ -399,6 +399,7 @@ published site, or use the repository-local docs when working from a clone.
 | 070 | [Provider-pinned model launch](docs/en/rfc/070-rfc-provider-pinned-model-launch.md) | Fail-closed per-agent model pins compiled into managed provider argv | implemented | 2026-07-15 | Codex/Claude adapters; RFC 056 provenance stays self-declared/unverified |
 | 071 | [Pen-guarded live roster addition](docs/en/rfc/071-rfc-live-roster-add.md) | Add one exact routing identity without resetting or rewriting relay state | implemented | 2026-07-15 | holder-only live pen; anchors remain manual and untouched |
 | 072 | [Exact-identity fleet bootstrap](docs/en/rfc/072-rfc-exact-identity-fleet-bootstrap.md) | Bootstrap listeners and schedule verified isolated jobs | implemented | 2026-07-15 | O1–O6; slices 1–6 implemented |
+| 073 | [Adapter registry and detached durability](docs/en/rfc/073-rfc-adapter-registry-detached-durability.md) | Deliver RFC 067 as adapter, durable-supervisor, live-provider, and routing slices | slice 1 implemented | 2026-07-15 | provider-keyed interface; Codex/Claude migrated; Gemini validated stub |
 
 ## 🔁 How it works
 
