@@ -39,6 +39,15 @@ LOCK map. Thus a later declaration does not rewrite historical attribution.
 - `model` is engine-reserved so arbitrary `--field` input cannot shadow it.
 - Old relays and turns without the field remain valid and render an em dash.
 
+## Launch-time model pins
+
+[RFC 070](070-rfc-provider-pinned-model-launch.md) adds an orthogonal launch-time
+source: a managed provider row pins the requested model and the reference runner
+exports it as `M8SHIFT_AGENT_MODEL`. That makes the launched process's default
+declaration deterministic, but it does not upgrade this RFC's trust level. The
+relay still records self-declared, unverified provenance rather than attestation,
+routing authority, or billing truth.
+
 ## Acceptance criteria
 
 1. Valid declarations persist on claim, stamp subsequent turns, and appear on current

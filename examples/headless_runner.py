@@ -92,6 +92,7 @@ RESUME_ENV = "M8SHIFT_RESUME_WORKING"
 AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 TURN_BEGIN_RE = re.compile(r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN -->")
 # RFC 047 total classification vocabulary (verify_post_run status values).
 SUCCESS_STATUSES = ("completed", "advanced", "not_required")
@@ -279,6 +280,9 @@ def validate_run_plan(plan):
         raise SystemExit("run plan kill_grace must be a non-negative integer")
     if not isinstance(plan.get("resume_working", False), bool):
         raise SystemExit("run plan resume_working must be a boolean")
+    agent_model = plan.get("agent_model", "")
+    if not isinstance(agent_model, str) or (agent_model and not MODEL_ID_RE.fullmatch(agent_model)):
+        raise SystemExit("run plan agent_model must be a valid 1-128 character model id")
     resolve_argv(plan["argv"])
     expected = plan["expected_transition"]
     if not isinstance(expected, dict) or expected.get("type") not in {"core_state_advanced", "none"}:
@@ -333,6 +337,7 @@ def make_run_plan(args, run_id, me, lk, resumed=False):
         "created_at": iso_now(),
         "run_id": run_id,
         "agent": me,
+        "agent_model": getattr(args, "agent_model", "") or "",
         "argv": argv,
         "cwd": cwd,
         "prompt_hash": prompt_hash_for_argv(argv),
@@ -491,6 +496,10 @@ def child_env_for_plan(plan, lk, m8shift_path):
         # carries the marker — a normal AWAITING/IDLE launch must never suggest to
         # the provider that a claim can be skipped.
         env[RESUME_ENV] = "1"
+    if plan.get("agent_model"):
+        # A provider pin is injected directly and wins over any ambient allowlisted
+        # declaration. RFC 056 still records it as self-declared/unverified provenance.
+        env["M8SHIFT_AGENT_MODEL"] = plan["agent_model"]
     return env
 
 
@@ -547,6 +556,8 @@ def validate_args(args):
     if args.resume_working and not args.once:
         raise SystemExit("--resume-working requires --once (it is a one-shot recovery "
                          "launch for an already-held WORKING lock, not a polling mode)")
+    if args.agent_model and not MODEL_ID_RE.fullmatch(args.agent_model):
+        raise SystemExit("invalid agent model: expected a 1-128 character safe model id")
 
 
 def stop_child(proc, grace):
@@ -672,6 +683,8 @@ def main():
     p.add_argument("--cwd", default=".", help="working directory for the child command; default current directory")
     p.add_argument("--env-allowlist", default=DEFAULT_ENV_ALLOWLIST,
                    help="comma-separated host env vars copied to the child; M8SHIFT_* vars are always added")
+    p.add_argument("--agent-model", default="",
+                   help="validated provider model pin exported as M8SHIFT_AGENT_MODEL")
     p.add_argument("--expected-transition", choices=("core_state_advanced", "none"),
                    default="core_state_advanced",
                    help="post-run relay transition expectation; default requires core state progress")

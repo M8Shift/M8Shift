@@ -396,6 +396,7 @@ published site, or use the repository-local docs when working from a clone.
 | 066 | [Asymmetric solo advance](docs/en/rfc/066-rfc-asymmetric-solo-advance.md) | Bounded solo progress during an explicit peer absence, followed by mandatory deferred reconciliation | accepted / design-only | — | signed project policy; reversible branch-local work; returning peer may require follow-up corrections; implementation deferred |
 | 067 | [Detached, vendor-neutral CLI agent orchestration](docs/en/rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | Passive relay + runtime control plane + generic runner + per-CLI adapters (launch/stop/resume/health) surviving an IDE crash; Codex/Claude phase 1, Gemini/Mistral Vibe later | accepted / design-only | — | no behavior active; relay stays degree-1 and passive; D1-D16 accepted; phased implementation deferred |
 | 069 | [Top-owned incremental status fold](docs/en/rfc/069-rfc-top-incremental-status-fold.md) | In-memory verified tail fold for the long-lived interactive dashboard | implemented | 2026-07-15 | one-shot status stays full; frozen snapshot v1 and RFC 064 preserved; every invalidation falls back to the full oracle |
+| 070 | [Provider-pinned model launch](docs/en/rfc/070-rfc-provider-pinned-model-launch.md) | Fail-closed per-agent model pins compiled into managed provider argv | implemented | 2026-07-15 | Codex/Claude adapters; RFC 056 provenance stays self-declared/unverified |
 
 ## 🔁 How it works
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Provider-pinned agent models (#86, RFC 070).** Managed Codex and Claude
+  provider rows now require an explicit valid model before headless launch,
+  compile model/profile/effort from one source into shell-free argv, and reject
+  competing embedded selectors. Listener plans pass the pin through the
+  immutable reference-runner plan into `M8SHIFT_AGENT_MODEL`, overriding ambient
+  inheritance while preserving RFC 056's self-declared/unverified trust level.
 - **Positional CLI help and command reference (#83).** Top-level help now
   spells out `m8shift.py <command> [args]`, includes safe real-form examples,
   and describes commands in plain language without design-document citations.
