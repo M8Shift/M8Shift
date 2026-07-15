@@ -69,6 +69,11 @@ SESSIONS = os.path.join(HERE, "M8SHIFT.sessions.jsonl")  # append-only session l
 REQUESTS = os.path.join(HERE, "M8SHIFT.requests.md")  # append-only cooperative turn-request ledger
 SESSION_REPORTS = os.path.join(HERE, "M8SHIFT.session-reports")
 LOCKFILE = os.path.join(HERE, ".m8shift.lock")       # inter-process lock (O_EXCL)
+USAGE_HOLDS_REL = os.path.join(".m8shift", "runtime", "usage-holds")
+USAGE_HOLD_LEGACY_REL = os.path.join(".m8shift", "runtime", "usage-hold.json")
+USAGE_HOLD_SCHEMA = "m8shift.usage.hold.v2"
+USAGE_HOLD_LEGACY_SCHEMA = "m8shift.usage.hold.v1"
+USAGE_HOLD_MAX_BYTES = 64 * 1024
 
 
 def configure_root(root):
@@ -1453,6 +1458,126 @@ def parse_iso(s):
         return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     except ValueError:
         return None
+
+
+def _usage_hold_read_json(path):
+    """Bounded, no-follow JSON read used by the claim gate.
+
+    The usage sidecar is advisory data written by the runtime companion, but an
+    active target hold is a fail-closed admission gate.  Never follow a
+    symlinked path and never let a malformed hold for one agent affect a peer.
+    """
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return None, "hold path is not a plain file"
+        if st.st_size > USAGE_HOLD_MAX_BYTES:
+            return None, "hold file exceeds the size limit"
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                return None, "hold path changed to a non-regular file"
+            if opened.st_size > USAGE_HOLD_MAX_BYTES:
+                return None, "hold file exceeds the size limit"
+            raw = os.read(fd, USAGE_HOLD_MAX_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(raw) > USAGE_HOLD_MAX_BYTES:
+            return None, "hold file exceeds the size limit"
+        doc = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, "hold file is unreadable or malformed (%s)" % exc.__class__.__name__
+    if not isinstance(doc, dict):
+        return None, "hold document is not an object"
+    return doc, None
+
+
+def _usage_hold_ancestor_error(path):
+    root = os.path.dirname(COWORK)
+    current = root
+    for part in os.path.relpath(path, root).split(os.sep)[:-1]:
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and os.path.islink(current):
+            return "hold directory is symlinked"
+        if not os.path.exists(current):
+            break
+    return None
+
+
+def _validate_usage_hold(doc, agent, *, legacy=False):
+    schema = USAGE_HOLD_LEGACY_SCHEMA if legacy else USAGE_HOLD_SCHEMA
+    required = {"schema", "agent", "placed_at", "resets_at", "reason",
+                "source", "snapshot_ref"}
+    if not legacy:
+        required.add("binding_window")
+    if set(doc) != required or doc.get("schema") != schema:
+        return "hold schema or fields are invalid"
+    if doc.get("agent") != agent:
+        return "hold agent does not match the target"
+    if parse_iso(doc.get("placed_at")) is None:
+        return "hold timestamps are invalid"
+    if legacy:
+        if doc.get("resets_at") is not None and parse_iso(doc.get("resets_at")) is None:
+            return "hold timestamps are invalid"
+    elif parse_iso(doc.get("resets_at")) is None:
+        return "hold timestamps are invalid"
+    if doc.get("source") != "usage-monitor":
+        return "hold source is invalid"
+    for field in ("reason", "snapshot_ref"):
+        if not isinstance(doc.get(field), str) or not doc[field]:
+            return "hold %s is invalid" % field
+    if not legacy:
+        binding = doc.get("binding_window")
+        if (not isinstance(binding, dict) or set(binding) != {"kind", "resets_at"}
+                or not isinstance(binding.get("kind"), str) or not binding["kind"]
+                or binding.get("resets_at") != doc.get("resets_at")
+                or parse_iso(binding.get("resets_at")) is None):
+            return "hold binding_window is invalid"
+    return None
+
+
+def agent_usage_hold(agent):
+    """Return (hold, error) for *agent* only.
+
+    New per-agent records fail closed for their named lane.  A valid legacy
+    singleton remains readable for upgrade recovery; malformed legacy data is
+    ignored here because it cannot be safely attributed to any one target and
+    therefore must not freeze the whole roster.
+    """
+    root = os.path.dirname(COWORK)
+    path = os.path.join(root, USAGE_HOLDS_REL, "%s.json" % agent)
+    if os.path.lexists(path):
+        ancestor_error = _usage_hold_ancestor_error(path)
+        if ancestor_error:
+            return None, ancestor_error
+        doc, err = _usage_hold_read_json(path)
+        if err:
+            return None, err
+        validation = _validate_usage_hold(doc, agent)
+        return (None, validation) if validation else (doc, None)
+    legacy = os.path.join(root, USAGE_HOLD_LEGACY_REL)
+    if not os.path.lexists(legacy) or _usage_hold_ancestor_error(legacy):
+        return None, None
+    doc, err = _usage_hold_read_json(legacy)
+    if err or doc.get("agent") != agent:
+        return None, None
+    validation = _validate_usage_hold(doc, agent, legacy=True)
+    return (None, validation) if validation else (doc, None)
+
+
+def usage_throttle_message(agent, error=None):
+    if error:
+        return ("refused: usage hold for '%s' is malformed (%s); this agent lane "
+                "fails closed while peers remain unaffected." % (agent, error))
+    return ("refused: usage hold is active for '%s'; wait for a fresh ok verdict "
+            "and clear it with `python3 m8shift-runtime.py usage resume --agent %s`."
+            % (agent, agent))
 
 def local_timezone_prefix(local):
     zone = (local.tzname() or local.strftime("%z") or "").strip()
@@ -9538,6 +9663,17 @@ def cmd_wait(args):
         st = lk.get("state", "")
         target = f"AWAITING_{agent.upper()}"
         if st in (target, "IDLE"):
+            hold, hold_error = agent_usage_hold(agent)
+            if hold or hold_error:
+                msg = usage_throttle_message(agent, hold_error)
+                if args.once:
+                    print(msg)
+                    return 3
+                if last_state != "USAGE_THROTTLED":
+                    print(msg, flush=True)
+                last_state = "USAGE_THROTTLED"
+                time.sleep(args.interval)
+                continue
             key = "wait_your_turn" if st == target else "wait_free"
             print(tr(key, st=st, agent=agent))
             return 0
@@ -9575,6 +9711,17 @@ def cmd_wait(args):
                 if last_state != "ALIVE_EXPIRED":
                     print(msg, flush=True)
                 last_state = "ALIVE_EXPIRED"
+                time.sleep(args.interval)
+                continue
+            hold, hold_error = agent_usage_hold(agent)
+            if hold or hold_error:
+                msg = usage_throttle_message(agent, hold_error)
+                if args.once:
+                    print(msg)
+                    return 3
+                if last_state != "USAGE_THROTTLED":
+                    print(msg, flush=True)
+                last_state = "USAGE_THROTTLED"
                 time.sleep(args.interval)
                 continue
             print(tr("wait_stale", other=lk.get("holder")))
@@ -9616,9 +9763,22 @@ def cmd_next(args):
         target = f"AWAITING_{agent.upper()}"
         working = f"WORKING_{agent.upper()}"
         if st in (target, "IDLE"):
+            hold, hold_error = agent_usage_hold(agent)
+            if hold or hold_error:
+                msg = usage_throttle_message(agent, hold_error)
+                if args.once:
+                    print(msg)
+                    return 3
+                print(msg, flush=True)
+                time.sleep(args.interval)
+                continue
             return _claim_and_print_handoff(agent, work_item=work_item)
         if st == "PAUSED":
             if args.resume:
+                hold, hold_error = agent_usage_hold(agent)
+                if hold or hold_error:
+                    print(usage_throttle_message(agent, hold_error))
+                    return 3
                 cmd_resume(argparse.Namespace(agent=agent, reason=resume_reason))
                 return _claim_and_print_handoff(agent, work_item=work_item)
             print("paused: waiting for user scope; rerun with `--resume --reason \"...\"` only after new work is assigned.")
@@ -9717,8 +9877,13 @@ def cmd_claim_check(args):
     # `claim` refuses a DONE session, so DONE is reported NOT claimable (rc 3), not ready=True
     # like `wait` (whose rc 0 only means "stop waiting"). See cmd_wait for the wait contract.
     if st in (f"AWAITING_{agent.upper()}", "IDLE"):
-        print(tr("wait_your_turn" if st != "IDLE" else "wait_free", st=st, agent=agent))
-        ready = True
+        hold, hold_error = agent_usage_hold(agent)
+        if hold or hold_error:
+            print(usage_throttle_message(agent, hold_error))
+            ready = False
+        else:
+            print(tr("wait_your_turn" if st != "IDLE" else "wait_free", st=st, agent=agent))
+            ready = True
     elif st == "DONE":
         print(tr("check_done"))
         ready = False
@@ -9729,8 +9894,13 @@ def cmd_claim_check(args):
                   "fresh (alive-expired) — do not force-claim." % lk.get("holder"))
             ready = False
         else:
-            print(tr("wait_stale", other=lk.get("holder")))
-            ready = True
+            hold, hold_error = agent_usage_hold(agent)
+            if hold or hold_error:
+                print(usage_throttle_message(agent, hold_error))
+                ready = False
+            else:
+                print(tr("wait_stale", other=lk.get("holder")))
+                ready = True
     else:
         print(tr("wait_not_yet", st=st, holder=lk.get("holder")))
         ready = False
@@ -9874,6 +10044,10 @@ def cmd_claim(args):
         if work_item and same_window:
             sys.exit("refused: --work-item only applies when entering a WORKING window; "
                      "use `work-tag %s %s` for the current window." % (agent, work_item))
+        if not same_window:
+            hold, hold_error = agent_usage_hold(agent)
+            if hold or hold_error:
+                sys.exit(usage_throttle_message(agent, hold_error))
         before = dict(lk)
         t = now()
         lk.update(

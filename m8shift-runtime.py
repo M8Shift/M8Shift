@@ -4667,6 +4667,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
     else:
         say(f"{agent}: persisted halted phase found ({reason or 'max retries reached'}) — "
             "supervising without launches; clear it with `listener start --restart`.")
+    usage_throttled = False
 
     def save():
         write_listener_state(agent, phase=phase, consecutive_failures=fails,
@@ -4725,6 +4726,23 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     save()
                 time.sleep(poll)
                 continue
+            hold, hold_error = read_usage_hold(agent)
+            if hold or hold_error:
+                if not usage_throttled:
+                    detail = (f"malformed target hold ({hold_error})"
+                              if hold_error else
+                              f"active target hold until {hold.get('resets_at', '-')}")
+                    say(f"{agent}: usage throttle blocks listener launch: {detail}; "
+                        "peer listeners remain unaffected.")
+                usage_throttled = True
+                if phase != "polling":
+                    phase = "polling"
+                    save()
+                time.sleep(poll)
+                continue
+            if usage_throttled:
+                say(f"{agent}: usage throttle cleared; listener launch gate re-opened.")
+                usage_throttled = False
             run_id = new_listener_run_id(agent)
             resume = wake == "stuck_retry"
             argv = listener_runner_argv(agent, profile, runner_path, run_id,
@@ -5099,8 +5117,11 @@ USAGE_REDACT_PATTERNS = (
     re.compile(r"\b[A-Za-z0-9+/_-]{32,}={0,2}\b"),
 )
 # ── RFC 040 PR B — guard/watch/wait/resume constants ──
-USAGE_HOLD = os.path.join(RUNTIME_DIR, "usage-hold.json")
-USAGE_HOLD_SCHEMA = "m8shift.usage.hold.v1"
+USAGE_HOLD_LEGACY = os.path.join(RUNTIME_DIR, "usage-hold.json")
+USAGE_HOLDS_DIR = os.path.join(RUNTIME_DIR, "usage-holds")
+USAGE_HOLD_SCHEMA = "m8shift.usage.hold.v2"
+USAGE_HOLD_LEGACY_SCHEMA = "m8shift.usage.hold.v1"
+USAGE_HOLD_MAX_BYTES = 64 * 1024
 USAGE_HOLD_SOURCE = "usage-monitor"
 USAGE_CORE_TIMEOUT_S = 30
 USAGE_WATCH_INTERVAL_DEFAULT_S = 60.0
@@ -6353,14 +6374,14 @@ def cmd_usage_status(args):
 
 # ── RFC 040 PR B — guard / watch / wait / resume (completes the usage block) ──
 #
-# PR B charter: guard/watch/wait are read-only with respect to everything but
-# their own verdict output; `--apply` may write ONLY the usage-hold.json
-# sidecar plus a usage.jsonl audit event, and may transition the relay ONLY by
-# calling the core `cooldown` command as an argv subprocess (usage `resume`
-# likewise calls core `resume`). The companion never edits M8SHIFT.md/LOCK
-# itself, never interrupts or force-claims a WORKING_* lock, never launches a
-# provider, never opens the network, and NEVER resumes automatically — the
-# only road back is an explicit `usage resume` invocation. Exit codes follow
+# PR B charter + #88 amendment: guard/watch/wait are read-only except that
+# `--apply` may write one target record under usage-holds/ plus a usage.jsonl
+# audit event. New applies NEVER transition the relay; only legacy singleton +
+# global-cooldown recovery may call core `resume`. The companion never edits
+# M8SHIFT.md/LOCK itself, never interrupts or force-claims a WORKING_* lock,
+# never launches a provider, never opens the network, and NEVER resumes
+# automatically — the only road back is an explicit `usage resume` invocation.
+# Exit codes follow
 # the RFC 040 GENERAL table (PR B constants above), not the PR A read-only
 # mapping, which stays pinned to the five read-only commands.
 
@@ -6419,26 +6440,195 @@ def core_argv_display(argv_tail):
     return ["python3", "m8shift.py"] + [str(a) for a in argv_tail]
 
 
-def read_usage_hold():
-    """Returns (hold, error). Missing file => (None, None); a hold that does not
-    parse or does not match m8shift.usage.hold.v1 => (None, message) — PR B
-    commands map that to exit 40 (malformed usage sidecar)."""
-    if not os.path.exists(USAGE_HOLD):
-        return None, None
-    rel = os.path.relpath(USAGE_HOLD, HERE)
-    doc, err = read_json_diagnostic(USAGE_HOLD, {})
-    if err:
-        return None, f"{rel}: {err}"
-    if doc.get("schema") != USAGE_HOLD_SCHEMA:
-        return None, f"{rel}: expected schema {USAGE_HOLD_SCHEMA}"
+def usage_hold_path(agent):
+    return os.path.join(USAGE_HOLDS_DIR, f"{agent}.json")
+
+
+def validate_usage_hold_doc(doc, path, *, expected_agent="", legacy=False):
+    rel = os.path.relpath(path, HERE)
+    schema = USAGE_HOLD_LEGACY_SCHEMA if legacy else USAGE_HOLD_SCHEMA
+    keys = {"schema", "agent", "placed_at", "resets_at", "reason",
+            "source", "snapshot_ref"}
+    if not legacy:
+        keys.add("binding_window")
+    if not isinstance(doc, dict) or set(doc) != keys or doc.get("schema") != schema:
+        return f"{rel}: expected exact {schema} fields"
     agent = doc.get("agent")
     if not isinstance(agent, str) or not AGENT_RE.fullmatch(agent):
-        return None, f"{rel}: agent is invalid"
-    for field in ("placed_at", "resets_at"):
-        value = doc.get(field)
-        if value is not None and (not isinstance(value, str) or not parse_utc(value)):
-            return None, f"{rel}: {field} must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ) or null"
-    return doc, None
+        return f"{rel}: agent is invalid"
+    if expected_agent and agent != expected_agent:
+        return f"{rel}: agent does not match target {expected_agent}"
+    if not isinstance(doc.get("placed_at"), str) or not parse_utc(doc["placed_at"]):
+        return f"{rel}: placed_at must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)"
+    reset = doc.get("resets_at")
+    if ((not legacy and (not isinstance(reset, str) or not parse_utc(reset)))
+            or (legacy and reset is not None
+                and (not isinstance(reset, str) or not parse_utc(reset)))):
+        return f"{rel}: resets_at must be UTC ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)" \
+               + (" or null" if legacy else "")
+    if doc.get("source") != USAGE_HOLD_SOURCE:
+        return f"{rel}: source must be {USAGE_HOLD_SOURCE}"
+    for field in ("reason", "snapshot_ref"):
+        if not isinstance(doc.get(field), str) or not doc[field]:
+            return f"{rel}: {field} must be a non-empty string"
+    if not legacy:
+        binding = doc.get("binding_window")
+        if (not isinstance(binding, dict) or set(binding) != {"kind", "resets_at"}
+                or not isinstance(binding.get("kind"), str) or not binding["kind"]
+                or binding.get("resets_at") != doc.get("resets_at")
+                or not parse_utc(binding.get("resets_at"))):
+            return f"{rel}: binding_window is invalid"
+    return None
+
+
+def _read_usage_hold_path(path, *, expected_agent="", legacy=False):
+    try:
+        reject_symlinked_runtime_path(path)
+        if os.name == "nt":  # pragma: no cover - Windows lacks openat dir_fd support
+            st = os.lstat(path)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return None, f"{os.path.relpath(path, HERE)}: hold is not a plain file"
+            if st.st_size > USAGE_HOLD_MAX_BYTES:
+                return None, f"{os.path.relpath(path, HERE)}: hold exceeds the size limit"
+            with open(path, "rb") as fh:
+                raw = fh.read(USAGE_HOLD_MAX_BYTES + 1)
+            if len(raw) > USAGE_HOLD_MAX_BYTES:
+                return None, f"{os.path.relpath(path, HERE)}: hold exceeds the size limit"
+            doc = json.loads(raw.decode("utf-8"))
+            validation = validate_usage_hold_doc(
+                doc, path, expected_agent=expected_agent, legacy=legacy)
+            return (None, validation) if validation else (doc, None)
+        dir_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            dir_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            dir_flags |= os.O_NOFOLLOW
+        dir_fd = os.open(os.path.dirname(path), dir_flags)
+        try:
+            file_flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                file_flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_NONBLOCK"):
+                file_flags |= os.O_NONBLOCK
+            fd = os.open(os.path.basename(path), file_flags, dir_fd=dir_fd)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    return None, f"{os.path.relpath(path, HERE)}: hold is not a plain file"
+                if st.st_size > USAGE_HOLD_MAX_BYTES:
+                    return None, f"{os.path.relpath(path, HERE)}: hold exceeds the size limit"
+                raw = os.read(fd, USAGE_HOLD_MAX_BYTES + 1)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(dir_fd)
+        if len(raw) > USAGE_HOLD_MAX_BYTES:
+            return None, f"{os.path.relpath(path, HERE)}: hold exceeds the size limit"
+        doc = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError,
+            ValueError, SystemExit) as exc:
+        return None, f"{os.path.relpath(path, HERE)}: unreadable or malformed ({exc.__class__.__name__})"
+    if not isinstance(doc, dict):
+        return None, f"{os.path.relpath(path, HERE)}: expected object"
+    validation = validate_usage_hold_doc(
+        doc, path, expected_agent=expected_agent, legacy=legacy)
+    return (None, validation) if validation else (doc, None)
+
+
+def atomic_write_usage_hold(agent, row):
+    """Write one target record through a pinned, no-follow directory fd."""
+    reject_symlinked_runtime_path(USAGE_HOLDS_DIR)
+    os.makedirs(USAGE_HOLDS_DIR, exist_ok=True)
+    reject_symlinked_runtime_path(USAGE_HOLDS_DIR)
+    if os.name == "nt":  # pragma: no cover - Windows lacks openat dir_fd support
+        atomic_write_json(usage_hold_path(agent), row)
+        return
+    dir_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        dir_flags |= os.O_NOFOLLOW
+    dir_fd = os.open(USAGE_HOLDS_DIR, dir_flags)
+    tmp = f".{agent}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    target = f"{agent}.json"
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
+        try:
+            data = (json.dumps(row, ensure_ascii=False, sort_keys=True, indent=2)
+                    + "\n").encode("utf-8")
+            with os.fdopen(fd, "wb", closefd=False) as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, target, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        os.close(dir_fd)
+
+
+def unlink_usage_hold_path(path):
+    reject_symlinked_runtime_path(path)
+    if os.name == "nt":  # pragma: no cover - Windows lacks openat dir_fd support
+        os.remove(path)
+        return
+    dir_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        dir_flags |= os.O_NOFOLLOW
+    dir_fd = os.open(os.path.dirname(path), dir_flags)
+    try:
+        os.unlink(os.path.basename(path), dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def read_usage_hold(agent=None):
+    """Read one target hold, with a legacy-singleton fallback.
+
+    New records are independently addressable, so malformed data fails closed
+    only for the requested agent.  With no target, return a hold only when it is
+    unambiguous; callers that need to clear one of several holds must pass
+    ``--agent``.
+    """
+    if agent:
+        path = usage_hold_path(agent)
+        if os.path.lexists(path):
+            return _read_usage_hold_path(path, expected_agent=agent)
+        if os.path.lexists(USAGE_HOLD_LEGACY):
+            hold, err = _read_usage_hold_path(
+                USAGE_HOLD_LEGACY, expected_agent=agent, legacy=True)
+            if err and "agent does not match target" in err:
+                return None, None
+            return hold, err
+        return None, None
+    records = []
+    if os.path.lexists(USAGE_HOLD_LEGACY):
+        hold, err = _read_usage_hold_path(USAGE_HOLD_LEGACY, legacy=True)
+        if err:
+            return None, err
+        records.append(hold)
+    if os.path.isdir(USAGE_HOLDS_DIR) and not os.path.islink(USAGE_HOLDS_DIR):
+        for name in sorted(os.listdir(USAGE_HOLDS_DIR)):
+            if not name.endswith(".json"):
+                continue
+            target = name[:-5]
+            if not AGENT_RE.fullmatch(target):
+                continue
+            hold, err = _read_usage_hold_path(
+                usage_hold_path(target), expected_agent=target)
+            if err:
+                return None, err
+            records.append(hold)
+    return (records[0], None) if len(records) == 1 else (None, None)
 
 
 def usage_snapshot_ref(snapshot):
@@ -6447,33 +6637,47 @@ def usage_snapshot_ref(snapshot):
             f"{snapshot.get('captured_at', '')}/{snapshot.get('agent', '')}/{adapter}")
 
 
-def usage_reset_candidate(snapshot, limit_threshold):
-    """core `--until` candidate: the earliest resets_at among windows at/above
-    the limit threshold; fallback the earliest known resets_at; None when the
-    snapshot names no reset (the monitor never invents a provider reset)."""
-    limited, known = [], []
+def usage_binding_window(snapshot, limit_threshold):
+    """Return the exact window that produced ``decision_ratio``.
+
+    Applying a hold is refused unless the normalized ``decision_window`` maps
+    back to a real at-limit window and names a future reset.  There is no
+    fallback to an earlier unrelated window and no invented deadline.
+    """
+    binding = snapshot.get("decision_window")
+    if (not isinstance(binding, dict) or set(binding) != {"kind", "resets_at"}
+            or not isinstance(binding.get("kind"), str) or not binding["kind"]
+            or not isinstance(binding.get("resets_at"), str)):
+        return None, "snapshot has no valid decision_window binding"
+    reset = parse_utc(binding["resets_at"])
+    if not reset or reset <= now():
+        return None, "decision_window reset is invalid or not in the future"
+    decision_ratio = snapshot.get("decision_ratio")
+    matched = False
     for win in snapshot.get("windows") or []:
         if not isinstance(win, dict):
             continue
-        resets = win.get("resets_at")
-        t = parse_utc(resets) if isinstance(resets, str) else None
-        if not t:
+        if win.get("kind") != binding["kind"] or win.get("resets_at") != binding["resets_at"]:
             continue
-        known.append((t, resets))
-        used, limit = win.get("used"), win.get("limit")
-        if isinstance(used, int) and isinstance(limit, int) and limit > 0 \
-                and used / limit >= limit_threshold:
-            limited.append((t, resets))
-    pool = limited or known
-    return min(pool)[1] if pool else None
+        ratio = win.get("used_ratio")
+        if ratio is None:
+            used, limit = win.get("used"), win.get("limit")
+            ratio = _usage_safe_ratio(used, limit) if isinstance(limit, int) and limit > 0 else None
+        if (isinstance(ratio, (int, float)) and not isinstance(ratio, bool)
+                and math.isfinite(ratio) and ratio >= limit_threshold
+                and isinstance(decision_ratio, (int, float))
+                and round(float(ratio), 4) == round(float(decision_ratio), 4)):
+            matched = True
+            break
+    if not matched:
+        return None, "decision_window does not match the at-limit decision ratio"
+    return {"kind": binding["kind"], "resets_at": binding["resets_at"]}, None
 
 
-def post_usage_hold(agent, resets_at, reason, snapshot_ref):
-    """Idempotent hold write (RFC 040 PR B bytes: exactly seven keys). An
-    existing hold for the same agent whose resets_at is at/after the candidate
-    is kept byte-identical (placed_at preserved). Returns (written, hold_row,
-    error)."""
-    existing, err = read_usage_hold()
+def post_usage_hold(agent, binding_window, reason, snapshot_ref):
+    """Atomically place/extend one agent's hold; peer records are untouched."""
+    resets_at = binding_window["resets_at"]
+    existing, err = read_usage_hold(agent)
     if err:
         return False, None, err
     if existing and existing.get("agent") == agent:
@@ -6489,25 +6693,30 @@ def post_usage_hold(agent, resets_at, reason, snapshot_ref):
         "reason": reason,
         "source": USAGE_HOLD_SOURCE,
         "snapshot_ref": snapshot_ref,
+        "binding_window": dict(binding_window),
     }
     try:
-        reject_symlinked_runtime_path(USAGE_HOLD)
-        atomic_write_json(USAGE_HOLD, row)
-    except OSError as e:
-        return False, None, f"cannot write {os.path.relpath(USAGE_HOLD, HERE)}: {e}"
+        path = usage_hold_path(agent)
+        atomic_write_usage_hold(agent, row)
+    except (OSError, SystemExit) as e:
+        return False, None, f"cannot write {os.path.relpath(path, HERE)}: {e}"
     return True, row, None
 
 
-def clear_usage_hold():
-    """Delete the hold file (clearing = deletion; the audit trail lives in
-    usage.jsonl). Returns (cleared, error)."""
-    if not os.path.exists(USAGE_HOLD):
+def clear_usage_hold(agent):
+    """Delete only *agent*'s hold, falling back to its legacy singleton."""
+    path = usage_hold_path(agent)
+    if not os.path.lexists(path):
+        legacy, legacy_err = read_usage_hold(agent)
+        if legacy_err:
+            return False, legacy_err
+        path = USAGE_HOLD_LEGACY if legacy else path
+    if not os.path.exists(path):
         return False, None
     try:
-        reject_symlinked_runtime_path(USAGE_HOLD)
-        os.remove(USAGE_HOLD)
-    except OSError as e:
-        return False, f"cannot remove {os.path.relpath(USAGE_HOLD, HERE)}: {e}"
+        unlink_usage_hold_path(path)
+    except (OSError, SystemExit) as e:
+        return False, f"cannot remove {os.path.relpath(path, HERE)}: {e}"
     return True, None
 
 
@@ -6533,9 +6742,12 @@ def usage_pick_code(codes):
 
 
 def usage_apply_hold(agent, row, snapshot, relay, args):
-    """The `guard --apply` decision table (limit_hit only; RFC 040 "PR B scope").
-    Returns (exit_code, applied_payload, findings). Relay transitions happen
-    ONLY through the core cooldown argv call below."""
+    """Place a target-only admission hold for a ``limit_hit`` agent.
+
+    The relay LOCK is deliberately read-only here: no global cooldown, no
+    interrupt, no reroute.  A current target holder may finish its work; the
+    hold is enforced at its next claim/listener boundary.
+    """
     findings = []
     state = relay.get("state", "")
     ratio = row.get("decision_ratio")
@@ -6543,93 +6755,62 @@ def usage_apply_hold(agent, row, snapshot, relay, args):
     reason = (f"{agent} usage limit_hit (decision_ratio {ratio_txt} >= "
               f"limit threshold {args.limit_threshold:g})")
     ref = usage_snapshot_ref(snapshot)
-    resets_at = usage_reset_candidate(snapshot, args.limit_threshold)
+    binding_window, binding_error = usage_binding_window(
+        snapshot, args.limit_threshold)
 
     def warn(check, message):
         findings.append({"severity": "warning", "check": check, "message": message})
 
-    if state == f"WORKING_{agent.upper()}":
-        # Own lock: cooperative advisory only — hold sidecar + audit event,
-        # exit 12. No core call, no interrupt, no force (RFC 040 PR B).
-        written, hold_row, io_err = post_usage_hold(agent, resets_at, reason, ref)
-        if io_err:
-            findings.append({"severity": "error", "check": "usage.hold_io", "message": io_err})
-            return USAGE_GUARD_EXIT_IO, None, findings
-        append_usage_action_event("usage.hold_advisory", agent, {
-            "action": "advisory_hold" if written else "advisory_hold_already_active",
-            "relay_state_before": state, "relay_state_after": state,
-            "hold": hold_row, "snapshot_ref": ref, "core": None,
-        })
-        warn("usage.working",
-             f"{agent} holds the pen (state={state}): advisory hold "
-             f"{'posted' if written else 'already active'}; pause at the next safe "
-             "point (no core call, no interrupt, no force)")
-        return USAGE_GUARD_EXIT_WORKING, {"action": "advisory_hold", "written": written,
-                                          "hold": hold_row}, findings
-    if state.startswith("WORKING_"):
-        warn("usage.working_peer",
-             f"relay is {state} for another agent: nothing written or called "
-             "(the next guard tick re-evaluates)")
-        return USAGE_GUARD_EXIT_WORKING, {"action": "peer_working_advisory"}, findings
-    if state == "DONE":
-        warn("usage.done", "relay session is DONE: left alone, no hold placed")
-        return USAGE_GUARD_EXIT_HOLD, {"action": "done_left_alone"}, findings
-
-    if state == "PAUSED":
-        cool = parse_usage_cooldown_note(relay.get("note", ""))
-        if not cool:
-            warn("usage.operator_pause",
-                 "relay is PAUSED by an operator pause (not a usage cooldown): "
-                 "never converted, nothing written")
-            return USAGE_GUARD_EXIT_HOLD, {"action": "operator_pause_left_alone"}, findings
-        existing_until = parse_utc(cool["until"])
-        candidate = parse_utc(resets_at or "")
-        if not candidate or (existing_until and existing_until >= candidate):
-            warn("usage.hold_active",
-                 f"usage cooldown already active until {cool['until']}; nothing to extend")
-            return USAGE_GUARD_EXIT_HOLD, {"action": "hold_already_active",
-                                           "until": cool["until"]}, findings
-        argv_tail = ["cooldown", "--until", resets_at, "--reason", reason,
-                     "--source", USAGE_HOLD_SOURCE, "--replace"]
-        if cool["resume_for"] != "any":
-            argv_tail += ["--for", cool["resume_for"]]
-    else:
-        if not resets_at:
-            findings.append({
-                "severity": "error", "check": "usage.no_reset",
-                "message": f"{agent} hit its limit but no window names a resets_at; "
-                           "refusing to invent one — place a manual cooldown via "
-                           "`python3 m8shift.py cooldown --until ... --reason ...`"})
-            return USAGE_GUARD_EXIT_ERROR, None, findings
-        argv_tail = ["cooldown", "--until", resets_at, "--reason", reason,
-                     "--source", USAGE_HOLD_SOURCE]
-        if state in ("IDLE", f"AWAITING_{agent.upper()}"):
-            # From AWAITING_<peer>, --for is omitted so the core keeps its own
-            # awaited-agent inference (it refuses a mismatched --for).
-            argv_tail += ["--for", agent]
-
-    rc, _out, err_txt, run_err = run_core_command(argv_tail)
-    if run_err or rc != 0:
-        detail = run_err or redact_usage_excerpt(err_txt) or f"exit {rc}"
-        findings.append({"severity": "error", "check": "usage.core_call",
-                         "message": f"core cooldown call failed: {detail}"})
+    if binding_error:
+        findings.append({
+            "severity": "error", "check": "usage.no_binding_reset",
+            "message": f"{agent} hit its limit but {binding_error}; refusing "
+                       "without changing the hold or relay"})
         return USAGE_GUARD_EXIT_ERROR, None, findings
-    relay_after = usage_relay_snapshot()
-    written, hold_row, io_err = post_usage_hold(agent, resets_at, reason, ref)
+    # Serialize target-hold publication with core claim. If claim wins first,
+    # the agent is already WORKING and may finish; if the hold wins first, the
+    # claim's in-lock gate observes it and refuses the new window.
+    try:
+        core = load_core()
+        with core.file_lock():
+            _text, locked = load_status(core)
+            state = locked.get("state", "")
+            written, hold_row, io_err = post_usage_hold(
+                agent, binding_window, reason, ref)
+    except (OSError, SystemExit) as exc:
+        findings.append({"severity": "error", "check": "usage.hold_io",
+                         "message": f"cannot serialize target hold with claim: {exc}"})
+        return USAGE_GUARD_EXIT_IO, None, findings
     if io_err:
         findings.append({"severity": "error", "check": "usage.hold_io", "message": io_err})
         return USAGE_GUARD_EXIT_IO, None, findings
-    append_usage_action_event("usage.hold_placed", agent, {
-        "action": "cooldown_applied",
-        "relay_state_before": state, "relay_state_after": relay_after.get("state", ""),
+    own_working = state == f"WORKING_{agent.upper()}"
+    event_type = "usage.hold_advisory" if own_working else "usage.hold_placed"
+    action = ("advisory_hold" if own_working
+              else ("hold_placed" if written else "hold_already_active"))
+    append_usage_action_event(event_type, agent, {
+        "action": action,
+        "relay_state_before": state, "relay_state_after": state,
         "hold": hold_row, "snapshot_ref": ref,
-        "core": {"argv": core_argv_display(argv_tail), "returncode": rc},
+        "binding_window": binding_window, "core": None,
     })
-    warn("usage.hold_placed",
-         f"usage hold placed for {agent} until {resets_at}; relay is "
-         f"{relay_after.get('state', 'PAUSED')}")
-    return USAGE_GUARD_EXIT_HOLD, {"action": "cooldown_applied", "until": resets_at,
-                                   "written": written, "hold": hold_row}, findings
+    if own_working:
+        warn("usage.working",
+             f"{agent} already holds the pen: target-only hold "
+             f"{'posted' if written else 'already active'}; current work may checkpoint "
+             "and append, but no later claim or listener launch is admitted")
+    elif state == f"AWAITING_{agent.upper()}":
+        warn("usage.solo_open_required",
+             f"{agent} is awaited and now throttled; relay routing is unchanged — "
+             "peer advancement requires the separate RFC 066 solo-open mechanism")
+    else:
+        warn("usage.hold_placed",
+             f"target-only usage hold {'placed' if written else 'already active'} for "
+             f"{agent} until {binding_window['resets_at']}; relay stayed {state or '-'}")
+    code = USAGE_GUARD_EXIT_WORKING if own_working else USAGE_GUARD_EXIT_HOLD
+    return code, {"action": action, "until": binding_window["resets_at"],
+                  "binding_window": binding_window, "written": written,
+                  "hold": hold_row}, findings
 
 
 def usage_guard_evaluate(args, agent_filter, *, apply_mode, snapshot_findings=None,
@@ -6638,7 +6819,7 @@ def usage_guard_evaluate(args, agent_filter, *, apply_mode, snapshot_findings=No
     Returns (exit_code, payload)."""
     findings = list(snapshot_findings or [])
     relay = usage_relay_snapshot()
-    hold, hold_err = read_usage_hold()
+    hold, hold_err = read_usage_hold(agent_filter)
     if hold_err:
         findings.append({"severity": "error", "check": "usage.hold", "message": hold_err})
         return USAGE_GUARD_EXIT_MALFORMED, {
@@ -6660,7 +6841,7 @@ def usage_guard_evaluate(args, agent_filter, *, apply_mode, snapshot_findings=No
                 relay, args)
             findings.extend(apply_findings)
             codes.append(apply_code)
-            hold, _refresh_err = read_usage_hold()  # refresh after a possible write
+            hold, _refresh_err = read_usage_hold(agent_filter)  # refresh after a possible write
         else:
             findings.append({"severity": "warning", "check": "usage.apply",
                              "message": f"verdict is {verdict}: nothing applied "
@@ -6756,7 +6937,7 @@ def cmd_usage_wait(args):
     ticks = 0
     while True:
         ticks += 1
-        _hold, hold_err = read_usage_hold()
+        _hold, hold_err = read_usage_hold(agent_filter)
         if hold_err:
             print(f"m8shift-runtime: {hold_err}", file=sys.stderr)
             return USAGE_GUARD_EXIT_MALFORMED
@@ -6788,7 +6969,7 @@ def cmd_usage_resume(args):
         print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
         return USAGE_GUARD_EXIT_USAGE
     findings = []
-    hold, hold_err = read_usage_hold()
+    hold, hold_err = read_usage_hold(agent_filter)
     if hold_err:
         print(f"m8shift-runtime: {hold_err}", file=sys.stderr)
         return USAGE_GUARD_EXIT_MALFORMED
@@ -6852,7 +7033,7 @@ def cmd_usage_resume(args):
                              "message": f"core resume call failed: {detail}"})
             return emit(USAGE_GUARD_EXIT_ERROR, "core_resume_failed")
         relay_after = usage_relay_snapshot()
-        cleared, clear_err = clear_usage_hold()
+        cleared, clear_err = clear_usage_hold(agent)
         if clear_err:
             findings.append({"severity": "error", "check": "usage.hold_io",
                              "message": clear_err})
@@ -6871,33 +7052,53 @@ def cmd_usage_resume(args):
                                     "usage hold cleared"})
         return emit(USAGE_GUARD_EXIT_OK, "resumed", {"relay_after": relay_after})
     if hold:
-        # Stale hold: the relay is not usage-cooldown-PAUSED (running, IDLE,
-        # operator-PAUSED, DONE). Clear the sidecar only — an operator pause is
-        # NEVER resumed by the usage monitor.
-        cleared, clear_err = clear_usage_hold()
+        # Per-agent holds never pause the relay. Clear only this target record;
+        # an operator pause is NEVER resumed by the usage monitor.
+        cleared, clear_err = clear_usage_hold(agent)
         if clear_err:
             findings.append({"severity": "error", "check": "usage.hold_io",
                              "message": clear_err})
             return emit(USAGE_GUARD_EXIT_IO, "hold_clear_failed")
         append_usage_action_event("usage.hold_cleared", agent, {
-            "action": "stale_hold_cleared",
+            "action": "target_hold_cleared",
             "relay_state_before": state, "relay_state_after": state,
             "hold": hold, "hold_cleared": cleared,
             "snapshot_ref": hold.get("snapshot_ref"), "core": None,
         })
         findings.append({"severity": "warning", "check": "usage.hold_cleared",
-                         "message": "stale usage hold cleared; relay untouched "
-                                    "(no usage cooldown is active)"})
-        return emit(USAGE_GUARD_EXIT_OK, "stale_hold_cleared")
+                         "message": f"target-only usage hold cleared for {agent}; "
+                                    "relay untouched"})
+        return emit(USAGE_GUARD_EXIT_OK, "target_hold_cleared")
     return emit(USAGE_GUARD_EXIT_OK, "nothing_to_do")
 
 
 def usage_doctor_findings():
     """Advisory usage-sidecar diagnostics for `doctor` (existence-guarded)."""
     findings = []
-    _hold, hold_err = read_usage_hold()
-    if hold_err:
-        findings.append({"severity": "warning", "check": "usage.hold", "message": hold_err})
+    if os.path.lexists(USAGE_HOLD_LEGACY):
+        _hold, hold_err = _read_usage_hold_path(USAGE_HOLD_LEGACY, legacy=True)
+        if hold_err:
+            findings.append({"severity": "warning", "check": "usage.hold",
+                             "message": hold_err})
+    if os.path.lexists(USAGE_HOLDS_DIR):
+        if os.path.islink(USAGE_HOLDS_DIR) or not os.path.isdir(USAGE_HOLDS_DIR):
+            findings.append({"severity": "warning", "check": "usage.hold",
+                             "message": ".m8shift/runtime/usage-holds must be a plain directory"})
+        else:
+            for name in sorted(os.listdir(USAGE_HOLDS_DIR)):
+                if not name.endswith(".json"):
+                    continue
+                target = name[:-5]
+                path = os.path.join(USAGE_HOLDS_DIR, name)
+                if not AGENT_RE.fullmatch(target):
+                    findings.append({"severity": "warning", "check": "usage.hold",
+                                     "message": f"{os.path.relpath(path, HERE)} has an invalid target name"})
+                    continue
+                _hold, hold_err = _read_usage_hold_path(
+                    path, expected_agent=target)
+                if hold_err:
+                    findings.append({"severity": "warning", "check": "usage.hold",
+                                     "message": hold_err})
     if os.path.exists(USAGE_ADAPTERS):
         doc, err = read_json_diagnostic(USAGE_ADAPTERS, {})
         if err:
@@ -7325,13 +7526,13 @@ def main():
     ugd = usage_sub.add_parser(
         "guard",
         help="advisory verdict from the freshest ledger snapshots; "
-             "--apply parks the relay ONLY through the core cooldown command")
+             "--apply places a target-only admission hold without pausing the relay")
     ugd.add_argument("--agent", default="",
                      help="agent whose usage verdict to evaluate (required with --apply)")
     ugd.add_argument("--apply", action="store_true",
-                     help="on limit_hit only: write usage-hold.json and call core cooldown "
-                          "via argv (cooperative: a WORKING_* relay is never mutated; "
-                          "near_limit/unknown never apply)")
+                     help="on limit_hit only: write usage-holds/<agent>.json from the "
+                          "exact decision_window reset; never changes LOCK, while "
+                          "near_limit/unknown never apply")
     usage_threshold_flags(ugd)
     ugd.add_argument("--json", action="store_true",
                      help="emit machine-readable JSON instead of human output")

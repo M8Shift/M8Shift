@@ -277,6 +277,9 @@ Parameters:
 Purpose: wait until it is the named agent's turn, the session ends, or a stale
 peer lock needs attention.
 
+An active per-agent usage hold keeps only that agent waiting; `--once` returns
+3. Peer wait/claim paths are unaffected.
+
 Parameters:
 
 - `AGENT`: roster agent waiting.
@@ -291,6 +294,8 @@ Parameters:
 
 Purpose: perform one safe resumption step: wait if necessary, claim, then print
 the incoming handoff.
+
+An active or malformed target usage hold refuses admission for that agent only.
 
 Parameters:
 
@@ -309,6 +314,11 @@ Parameters:
 ## `claim`
 
 Purpose: exclusively acquire or refresh the relay pen.
+
+A v2 usage hold under `.m8shift/runtime/usage-holds/<agent>.json` blocks a new
+work window for that target. It does not revoke an existing `WORKING_<agent>`
+window, so the holder may refresh, checkpoint, and append safely; peer claims
+remain governed only by normal relay routing.
 
 Parameters:
 
