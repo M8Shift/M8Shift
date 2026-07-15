@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Exact-identity fleet bootstrap (#85, RFC 072 slices 1–3).** The runtime
+  companion now validates declarative provider-template + explicit-model fleet
+  specs, reports a pure desired/observed plan and health view, bootstraps one
+  git-ignored exact identity artifact per lane, and delegates idempotent live
+  enrollment to holder-attributed core `roster add`. One fleet supervisor can
+  reconcile batch listener lifecycle; stop keeps relay membership intact.
 - **Per-agent usage throttles (#88, RFC 040 amendment).** A `limit_hit` now
   gates only the affected agent's claim/next/wait and managed-listener launch;
   peers keep their normal relay rights and new applies never set global

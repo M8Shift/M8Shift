@@ -79,4 +79,3 @@ passive core or weaken O1–O6.
 4. Apply is holder-attributed, uses the core command, and is idempotent.
 5. Batch stop leaves the roster, session, turn, and journal unchanged.
 6. Reconciliation never launches an unbootstrapped or ambiguous identity.
-

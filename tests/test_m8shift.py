@@ -16116,6 +16116,28 @@ class TestRFC072FleetPlan(ListenerCLIBase):
         self.assertIn("developer_instructions=", config)
         self.assertIn("codex-2", config)
 
+        # Conformance gate: execute a fake managed CLI and prove the exact
+        # identity reaches the process at the adapter's developer tier.
+        registry_path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry_path, encoding="utf-8") as fh:
+            registry = json.load(fh)
+        for row in registry["agents"]:
+            if row.get("name") == "codex-2":
+                row["argv"] = [sys.executable, "fake_cli.py", "$M8SHIFT_PROMPT"]
+                row.pop("argv_by_platform", None)
+        with open(registry_path, "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        with open(os.path.join(self.d, "fake_cli.py"), "w", encoding="utf-8") as fh:
+            fh.write("import json,sys\njson.dump(sys.argv[1:],open('seen.json','w'))\n")
+        fake = json.loads(self.rt(
+            "providers", "render", "codex-2", "--prompt", "one turn", "--json"
+        ).stdout)["argv"]
+        subprocess.check_call(fake, cwd=self.d)
+        with open(os.path.join(self.d, "seen.json"), encoding="utf-8") as fh:
+            seen = json.load(fh)
+        self.assertTrue(any("developer_instructions=" in item and "codex-2" in item
+                            for item in seen), seen)
+
         relay_after_first = self.md()
         second = self.rt("fleet", "apply", "--spec", spec,
                          "--by", "codex", "--json")
@@ -16138,6 +16160,38 @@ class TestRFC072FleetPlan(ListenerCLIBase):
             self.assertEqual(fh.read(), before)
         self.assertFalse(os.path.exists(os.path.join(
             self.d, ".m8shift", "runtime", "identities", "codex-2.md")))
+
+    def test_batch_lifecycle_is_one_supervisor_and_stop_keeps_membership(self):
+        self.init()
+        self.rt("providers", "init")
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        spec = self.fleet_spec()
+        self.assertEqual(self.rt("fleet", "apply", "--spec", spec,
+                                 "--by", "codex").returncode, 0)
+        relay_before = self.md()
+        stop = self.rt("fleet", "stop", "--spec", spec, "--dry-run", "--json")
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        self.assertEqual(json.loads(stop.stdout)["actions"], [])
+        self.assertEqual(self.md(), relay_before)
+        self.assertIn("codex-2", self.lock()["agents"].split(","))
+
+        resume = self.rt("fleet", "resume", "--spec", spec,
+                         "--dry-run", "--json")
+        self.assertEqual(resume.returncode, 0, resume.stderr)
+        self.assertEqual(json.loads(resume.stdout)["actions"], [
+            {"action": "start_listener", "agent": "codex-2"}])
+        supervisor = self.rt("fleet", "supervise", "--spec", spec,
+                             "--dry-run", "--json")
+        self.assertEqual(supervisor.returncode, 0, supervisor.stderr)
+        self.assertEqual(json.loads(supervisor.stdout)["service_count"], 1)
+
+    def test_reconcile_refuses_unbootstrapped_identity_before_process_work(self):
+        self.init()
+        self.rt("providers", "init")
+        result = self.rt("fleet", "reconcile", "--spec", self.fleet_spec(),
+                         "--dry-run", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fleet bootstrap is incomplete", result.stderr)
 
 
 class TestUpdateBackcompatCompanionHint(unittest.TestCase):

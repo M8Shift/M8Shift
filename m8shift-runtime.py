@@ -187,6 +187,7 @@ FLEET_IDENTITY_SCHEMA = "m8shift.agent-identity.v1"
 FLEET_DIR = os.path.join(RUNTIME_DIR, "fleet")
 FLEET_IDENTITIES_DIR = os.path.join(RUNTIME_DIR, "identities")
 FLEET_EVENTS = os.path.join(FLEET_DIR, "events.jsonl")
+FLEET_SUPERVISOR_PID = os.path.join(FLEET_DIR, "supervisor.pid")
 FLEET_DESIRED = {"running", "stopped"}
 
 
@@ -2519,6 +2520,144 @@ def cmd_fleet_apply(args):
     else:
         print(f"✓ fleet bootstrap applied by {event['by']} for "
               + ",".join(event["agents"]))
+    return 0
+
+
+def fleet_bootstrap_ready(plan):
+    bad = [row["name"] for row in plan["health"]
+           if not (row["member"] and row["provider_ready"] and row["identity_ready"])]
+    if bad:
+        raise ValueError("fleet bootstrap is incomplete for " + ",".join(bad) +
+                         "; run fleet apply with the live holder first")
+
+
+def fleet_listener_command(agent, action, args):
+    if action == "start_listener":
+        argv = [sys.executable, SELF_PATH, "listener", "start", "--agent", agent,
+                "--provider", "--backend", args.backend]
+        if args.runner:
+            argv += ["--runner", args.runner]
+        if getattr(args, "dry_run", False):
+            argv.append("--dry-run")
+    else:
+        argv = [sys.executable, SELF_PATH, "listener", "stop", "--agent", agent,
+                "--grace", str(args.grace)]
+    result = subprocess.run(argv, cwd=HERE, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "listener command failed").strip()
+        raise ValueError(f"{action} {agent} failed: {detail}")
+    return {"action": action, "agent": agent, "output": result.stdout.strip()}
+
+
+def fleet_reconcile_once(spec, args, desired_override=""):
+    plan = build_fleet_plan(spec)
+    fleet_bootstrap_ready(plan)
+    actions = []
+    for row in plan["health"]:
+        desired = desired_override or row["desired"]
+        running = row["listener"]["status"] == "running"
+        action = ("start_listener" if desired == "running" and not running else
+                  "stop_listener" if desired == "stopped" and running else "")
+        if not action:
+            continue
+        if getattr(args, "dry_run", False):
+            actions.append({"action": action, "agent": row["name"]})
+        else:
+            actions.append(fleet_listener_command(row["name"], action, args))
+    if not getattr(args, "dry_run", False):
+        append_jsonl(FLEET_EVENTS, {
+            "schema": "m8shift.fleet.event.v1", "event": "fleet.reconciled",
+            "at": iso(), "actions": [
+                {"action": item["action"], "agent": item["agent"]} for item in actions],
+        })
+    return actions
+
+
+def emit_fleet_lifecycle(args, event, actions):
+    payload = {"ok": True, "event": event, "actions": actions}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        if actions:
+            for item in actions:
+                print(f"{item['action']} {item['agent']}")
+        else:
+            print("✓ fleet already matches requested lifecycle")
+    return 0
+
+
+def cmd_fleet_reconcile(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        actions = fleet_reconcile_once(spec, args)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    return emit_fleet_lifecycle(args, "reconcile", actions)
+
+
+def cmd_fleet_stop(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        actions = fleet_reconcile_once(spec, args, desired_override="stopped")
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    return emit_fleet_lifecycle(args, "stop", actions)
+
+
+def cmd_fleet_resume(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        actions = fleet_reconcile_once(spec, args, desired_override="running")
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    return emit_fleet_lifecycle(args, "resume", actions)
+
+
+def cmd_fleet_supervise(args):
+    """One control-plane process reconciles every configured listener lane."""
+    try:
+        spec = load_fleet_spec(args.spec)
+        plan = build_fleet_plan(spec)
+        fleet_bootstrap_ready(plan)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    if args.dry_run:
+        payload = {"ok": True, "schema": "m8shift.fleet.supervisor.plan.v1",
+                   "agents": [row["name"] for row in spec["agents"]],
+                   "poll_interval_seconds": args.poll_interval,
+                   "service_count": 1}
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    os.makedirs(FLEET_DIR, exist_ok=True)
+    try:
+        with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
+            previous_pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        previous_pid = 0
+    if previous_pid and previous_pid != os.getpid() and listener_pid_alive(previous_pid):
+        sys.exit(f"m8shift-runtime: fleet supervisor already alive (pid {previous_pid})")
+    write_text_atomic(FLEET_SUPERVISOR_PID, f"{os.getpid()}\n")
+    ticks = 0
+    try:
+        while not args.max_ticks or ticks < args.max_ticks:
+            ticks += 1
+            try:
+                fleet_reconcile_once(spec, args)
+            except ValueError as exc:
+                append_jsonl(FLEET_EVENTS, {
+                    "schema": "m8shift.fleet.event.v1", "event": "fleet.reconcile_failed",
+                    "at": iso(), "message": str(exc),
+                })
+            if not args.max_ticks or ticks < args.max_ticks:
+                time.sleep(args.poll_interval)
+    finally:
+        try:
+            with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
+                mine = fh.read().strip() == str(os.getpid())
+            if mine:
+                os.unlink(FLEET_SUPERVISOR_PID)
+        except OSError:
+            pass
     return 0
 
 
@@ -7725,6 +7864,42 @@ def main():
     fa.add_argument("--json", action="store_true",
                     help="emit machine-readable JSON instead of human output")
     fa.set_defaults(fn=cmd_fleet_apply)
+
+    def fleet_lifecycle_flags(sp, *, dry_run=True):
+        sp.add_argument("--spec", required=True,
+                        help="path to a m8shift.fleet.spec.v1 JSON document")
+        sp.add_argument("--backend", choices=LISTENER_BACKENDS, default="local",
+                        help="backend used for newly started listener lanes (default: local)")
+        sp.add_argument("--runner", default="",
+                        help="optional headless runner path passed to listener start")
+        sp.add_argument("--grace", type=float, default=10.0,
+                        help="seconds of graceful stop before process-group kill (default: 10)")
+        if dry_run:
+            sp.add_argument("--dry-run", action="store_true",
+                            help="print lifecycle actions without process work")
+        sp.add_argument("--json", action="store_true",
+                        help="emit machine-readable JSON instead of human output")
+
+    frec = fleet_sub.add_parser(
+        "reconcile", help="converge all bootstrapped lanes to their desired lifecycle")
+    fleet_lifecycle_flags(frec)
+    frec.set_defaults(fn=cmd_fleet_reconcile)
+    fstop = fleet_sub.add_parser(
+        "stop", help="stop all fleet listeners without changing relay membership")
+    fleet_lifecycle_flags(fstop)
+    fstop.set_defaults(fn=cmd_fleet_stop)
+    fresume = fleet_sub.add_parser(
+        "resume", help="resume all bootstrapped fleet listeners as one batch")
+    fleet_lifecycle_flags(fresume)
+    fresume.set_defaults(fn=cmd_fleet_resume)
+    fsup = fleet_sub.add_parser(
+        "supervise", help="run one control-plane process that reconciles every lane")
+    fleet_lifecycle_flags(fsup)
+    fsup.add_argument("--poll-interval", type=float, default=20.0,
+                      help="seconds between reconciliation passes (default: 20)")
+    fsup.add_argument("--max-ticks", type=int, default=0,
+                      help="stop after N passes (test seam; 0 = unbounded)")
+    fsup.set_defaults(fn=cmd_fleet_supervise)
 
     route = sub.add_parser("route", help="advisory model/task routing")
     route_sub = route.add_subparsers(dest="route_verb", required=True)
