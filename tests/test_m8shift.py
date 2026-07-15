@@ -16058,6 +16058,25 @@ class TestRFC072FleetPlan(ListenerCLIBase):
             json.dump(doc, fh)
         return "fleet.json"
 
+    def job_row(self, job_id="job-one", agent="codex-2", verify_argv=None):
+        return {
+            "id": job_id, "agent": agent, "base": "main",
+            "branch": f"fleet/{job_id}", "objective": "write the marker",
+            "done_criteria": ["marker exists"],
+            "verify": {"argv": verify_argv or [
+                sys.executable, "-c", "import os,sys;sys.exit(0 if os.path.exists('marker') else 1)"
+            ], "timeout_seconds": 10},
+        }
+
+    def jobs_spec(self, verify_argv=None, jobs=None):
+        rows = jobs or [self.job_row(verify_argv=verify_argv)]
+        doc = {"schema": "m8shift.fleet.jobs.v1", "integrator": "claude",
+               "target": "main", "max_concurrency": 2, "jobs": rows}
+        path = os.path.join(self.d, "jobs.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return "jobs.json"
+
     def test_pure_plan_reports_structured_diff_without_writes(self):
         self.init("--agents", "claude,codex")
         self.assertEqual(self.rt("providers", "init").returncode, 0)
@@ -16192,6 +16211,185 @@ class TestRFC072FleetPlan(ListenerCLIBase):
                          "--dry-run", "--json")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fleet bootstrap is incomplete", result.stderr)
+
+    def test_immutable_jobs_require_designated_live_integrator(self):
+        self.init("--agents", "claude,codex,codex-2")
+        spec = self.jobs_spec()
+        before = self.md()
+        denied = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                         "--by", "claude", "--json")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertEqual(self.md(), before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "fleet", "jobs", "batch.json")))
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        submitted = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                            "--by", "claude", "--json")
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        self.assertEqual(json.loads(submitted.stdout)["created"], ["job-one"])
+        # Byte-identical retries are no-ops; changed specs conflict instead of mutating.
+        again = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                        "--by", "claude", "--json")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout)["created"], [])
+        with open(os.path.join(self.d, spec), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["jobs"][0]["objective"] = "silently changed"
+        with open(os.path.join(self.d, spec), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        conflict = self.rt("fleet", "jobs", "submit", "--spec", spec,
+                           "--by", "claude")
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertIn("immutable record conflicts", conflict.stderr)
+
+    def test_provider_exit_never_completes_without_recipe_pass(self):
+        self.init("--agents", "claude,codex,codex-2")
+        spec = self.jobs_spec()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.rt("fleet", "jobs", "submit", "--spec", spec,
+                                 "--by", "claude").returncode, 0)
+        worktree = os.path.join(self.d, ".m8shift", "worktrees", "job-one")
+        os.makedirs(worktree, exist_ok=True)
+        assignment = {
+            "schema": "m8shift.fleet.assignment.v1", "job_id": "job-one",
+            "agent": "codex-2", "integrator": "claude",
+            "worktree": os.path.join(".m8shift", "worktrees", "job-one"),
+            "branch": "fleet/job-one", "base": "main",
+        }
+        with open(os.path.join(
+                self.d, ".m8shift", "runtime", "fleet", "jobs", "job-one",
+                "assignment.json"), "w", encoding="utf-8") as fh:
+            json.dump(assignment, fh)
+        failed = self.rt("fleet", "jobs", "attempt", "--id", "job-one",
+                         "--by", "codex-2", "--provider-exit", "0", "--json")
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        self.assertFalse(json.loads(failed.stdout)["verification_passed"])
+        with open(os.path.join(
+                self.d, ".m8shift", "runtime", "fleet", "jobs", "job-one",
+                "attempts", "1.plan.json"), encoding="utf-8") as fh:
+            plan = json.load(fh)
+        self.assertEqual(plan["provider_exit"], 0)
+        with open(os.path.join(worktree, "marker"), "w", encoding="utf-8") as fh:
+            fh.write("verified\n")
+        passed = self.rt("fleet", "jobs", "attempt", "--id", "job-one",
+                         "--by", "codex-2", "--provider-exit", "0", "--json")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertTrue(json.loads(passed.stdout)["verification_passed"])
+        planned = self.rt("fleet", "jobs", "plan", "--spec", spec, "--json")
+        self.assertEqual(json.loads(planned.stdout)["jobs"][0]["state"], "verified")
+
+    def test_integrator_assigns_at_most_two_isolated_unique_producer_lanes(self):
+        if not shutil.which("git"):
+            self.skipTest("git missing")
+        git = lambda *argv: subprocess.run(
+            ["git", *argv], cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(git("init", "-q", "-b", "main").returncode, 0)
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test")
+        with open(os.path.join(self.d, "seed"), "w", encoding="utf-8") as fh:
+            fh.write("base\n")
+        git("add", "seed")
+        self.assertEqual(git("commit", "-q", "-m", "base").returncode, 0)
+        self.init("--agents", "claude,codex,codex-2,reviewer")
+        shutil.copy(os.path.join(REPO, "m8shift-worktree.py"), self.d)
+        rows = [self.job_row("job-one", "codex"),
+                self.job_row("job-two", "codex"),
+                self.job_row("job-three", "codex-2")]
+        spec = self.jobs_spec(jobs=rows)
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.rt("fleet", "jobs", "submit", "--spec", spec,
+                                 "--by", "claude").returncode, 0)
+        result = self.rt("fleet", "jobs", "assign", "--spec", spec,
+                         "--by", "claude", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["assigned"], ["job-one", "job-three"])
+        self.assertEqual(payload["active_count"], 2)
+        for job_id in payload["assigned"]:
+            self.assertTrue(os.path.isdir(os.path.join(
+                self.d, ".m8shift", "worktrees", job_id)))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "worktrees", "job-two")))
+        plan = json.loads(self.rt("fleet", "jobs", "plan", "--spec", spec,
+                                  "--json").stdout)
+        self.assertEqual([row["state"] for row in plan["jobs"]],
+                         ["assigned", "submitted", "assigned"])
+
+    def test_isolated_multi_session_acceptance_integrates_and_drops_by_integrator(self):
+        if not shutil.which("git"):
+            self.skipTest("git missing")
+        def git(*argv, cwd=None):
+            return subprocess.run(["git", *argv], cwd=cwd or self.d,
+                                  capture_output=True, text=True)
+        self.assertEqual(git("init", "-q", "-b", "main").returncode, 0)
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test")
+        with open(os.path.join(self.d, "seed"), "w", encoding="utf-8") as fh:
+            fh.write("base\n")
+        git("add", "seed")
+        self.assertEqual(git("commit", "-q", "-m", "base").returncode, 0)
+        self.init("--agents", "claude,codex,codex-2")
+        shutil.copy(os.path.join(REPO, "m8shift-worktree.py"), self.d)
+        rows = [self.job_row("lane-codex", "codex"),
+                self.job_row("lane-codex-2", "codex-2")]
+        spec = self.jobs_spec(jobs=rows)
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.rt("fleet", "jobs", "submit", "--spec", spec,
+                                 "--by", "claude").returncode, 0)
+        assigned = self.rt("fleet", "jobs", "assign", "--spec", spec,
+                           "--by", "claude", "--json")
+        self.assertEqual(json.loads(assigned.stdout)["assigned"],
+                         ["lane-codex", "lane-codex-2"])
+
+        for job_id, agent in (("lane-codex", "codex"),
+                              ("lane-codex-2", "codex-2")):
+            tree = os.path.join(self.d, ".m8shift", "worktrees", job_id)
+            with open(os.path.join(tree, "marker"), "w", encoding="utf-8") as fh:
+                fh.write("verified\n")
+            with open(os.path.join(tree, f"{job_id}.txt"), "w", encoding="utf-8") as fh:
+                fh.write(f"isolated output from {agent}\n")
+            git("add", "marker", f"{job_id}.txt", cwd=tree)
+            self.assertEqual(git("commit", "-q", "-m", job_id, cwd=tree).returncode, 0)
+            verified = self.rt("fleet", "jobs", "attempt", "--id", job_id,
+                               "--by", agent, "--provider-exit", "0", "--json")
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
+        relay_before = self.md()
+        producer_denied = self.rt("fleet", "jobs", "integrate", "--id", "lane-codex",
+                                  "--by", "codex", "--to", "codex-2")
+        self.assertNotEqual(producer_denied.returncode, 0)
+        self.assertIn("designated integrator", producer_denied.stderr)
+        self.assertEqual(self.md(), relay_before)
+
+        # Free the target branch for the companion's dedicated integration tree.
+        self.assertEqual(git("checkout", "-q", "--detach").returncode, 0)
+        first = self.rt("fleet", "jobs", "integrate", "--id", "lane-codex",
+                        "--by", "claude", "--to", "codex", "--json")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "worktrees", "lane-codex")))
+        self.assertEqual(git("cat-file", "-e", "main:lane-codex.txt").returncode, 0)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        self.assertEqual(self.cw("append", "codex", "--to", "claude",
+                                 "--ask", "integrate the second verified lane",
+                                 "--done", "confirmed first isolated lane").returncode, 0)
+        second = self.rt("fleet", "jobs", "integrate", "--id", "lane-codex-2",
+                         "--by", "claude", "--to", "codex-2", "--json")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(git("cat-file", "-e", "main:lane-codex-2.txt").returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "worktrees", "lane-codex-2")))
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX-2")
+        plan = json.loads(self.rt("fleet", "jobs", "plan", "--spec", spec,
+                                  "--json").stdout)
+        self.assertEqual([row["state"] for row in plan["jobs"]],
+                         ["integrated", "integrated"])
+        doctor = self.rt("doctor", "--json")
+        fleet_errors = [row for row in json.loads(doctor.stdout)["findings"]
+                        if row["severity"] == "error" and row["check"].startswith("fleet.")]
+        self.assertEqual(fleet_errors, [])
 
 
 class TestUpdateBackcompatCompanionHint(unittest.TestCase):

@@ -1,6 +1,6 @@
 # RFC 072 — Exact-identity fleet bootstrap and launch automation
 
-- **Status:** implementing (#85); slices 1–3 implemented
+- **Status:** implemented (#85); slices 1–6 shipped
 - **Scope:** declarative fleet planning, exact per-agent identity bootstrap,
   holder-attributed enrollment, and batch listener lifecycle.
 - **Builds on:** [RFC 067](067-rfc-detached-vendor-neutral-cli-orchestration.md),
@@ -61,15 +61,30 @@ membership. All process work remains in the existing listener implementation,
 including process-group termination, retry limits, usage holds, relay-only
 completion, and restart diagnostics.
 
-## Deferred slices 4–6
+## Slices 4–6
 
-- sequential immutable job attempts and verification;
-- owned worktree assignment and bounded concurrency;
-- integrator-only merge/handoff/drop, platform proof, doctor/docs completion,
-  and the isolated multi-session acceptance rerun from #87.
+`m8shift.fleet.jobs.v1` declares an ordered batch, its relay-designated
+integrator, target branch, concurrency cap, and explicit producer jobs. Each job
+fixes its objective, done criteria, producer, isolated branch, and shell-free
+verification argv. `fleet jobs submit` creates immutable records; conflicting
+retries fail closed. Attempts are sequential and append-only. The provider exit
+is recorded first, but a job reaches `verified` only when its recipe exits zero
+inside the assigned worktree.
 
-These later slices may extend runtime sidecars but cannot add authority to the
-passive core or weaken O1–O6.
+`fleet jobs assign` is holder- and integrator-gated. It delegates worktree
+creation to the RFC 008 companion, never places a producer on the shared target,
+allows at most two active producer worktrees, and gives one active mutating lane
+to any producer identity.
+
+`fleet jobs integrate` requires verified evidence and the exact designated
+integrator. It delegates the serialized merge and relay handoff to
+`m8shift-worktree.py`, then drops the clean producer worktree through the same
+companion. A producer cannot self-integrate. Runtime doctor checks missing or
+orphaned worktrees, incomplete attempts, owner mismatch, concurrency overflow,
+and incomplete drops without gaining any core authority.
+
+These runtime sidecars add no authority to the passive core and do not weaken
+O1–O6.
 
 ## Acceptance gates
 
@@ -79,3 +94,22 @@ passive core or weaken O1–O6.
 4. Apply is holder-attributed, uses the core command, and is idempotent.
 5. Batch stop leaves the roster, session, turn, and journal unchanged.
 6. Reconciliation never launches an unbootstrapped or ambiguous identity.
+7. Provider exit zero without recipe success is not completion.
+8. Only the live designated integrator assigns isolated worktrees; concurrency
+   never exceeds two and a producer owns at most one active mutating lane.
+9. Only the designated integrator can merge, hand off, and drop a verified job.
+
+## Acceptance proof
+
+The deterministic scratch acceptance uses a fresh repository and three exact
+roster identities. Two producer identities receive separate worktrees, commit
+distinct outputs, and pass their own recipes. A producer self-integration is
+refused byte-for-byte before relay mutation. The designated integrator then
+serializes two merges, hands the relay to distinct recipients, and removes both
+producer worktrees. The target contains both outputs, the final jobs are
+`integrated`, and runtime doctor reports no fleet errors.
+
+The orchestration uses Python argv arrays (`shell=False`) and delegates platform
+worktree semantics to the already cross-platform RFC 008 companion. The
+acceptance suite runs entirely in a temporary repository with no network or
+provider dependency; actual provider/model availability remains a host concern.

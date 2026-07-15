@@ -16,6 +16,28 @@ the roster `claude,codex,codex-2`. No existing relay was used or modified.
 | Degree-2 worktrees | Pass with a setup precondition | Two worktrees were claimed and committed concurrently; their integrations were serialized into `main`. The canonical root had to release `main` first. |
 | Add an agent to a live roster | Gap | There is no non-destructive, same-session roster-mutation command. `init --force --agents ...` resets the living journal and starts a new session. |
 
+## RFC 072 isolated rerun (slices 4–6)
+
+The launch-automation acceptance was rerun in a second fresh temporary Git
+repository after the verified-job scheduler landed. A three-identity roster
+used one relay-designated integrator and two distinct producer identities.
+
+The integrator submitted two immutable jobs and assigned both concurrently to
+separate RFC 008 worktrees (the degree-2 cap). Each producer committed a
+distinct output. A recorded provider exit of zero did not complete either job
+until its explicit verification argv also exited zero inside that producer's
+worktree. A producer's attempt to integrate was refused before the relay bytes
+changed. The designated integrator then merged the two branches serially,
+performed two normal relay handoffs, and removed both worktrees. Both target
+files were present, both jobs reported `integrated`, the final awaited identity
+was exact, and runtime doctor reported no fleet errors.
+
+This deterministic rerun uses argv subprocesses without a shell and requires no
+network/provider access, so it covers orchestration consistently across hosts.
+It does not revise the earlier finding about real nested provider startup:
+provider/model reachability and quota behavior still require a host on which
+the selected CLIs can contact their providers.
+
 ## 1. N-agent routing and identity discrimination
 
 The scratch relay was initialized with:
