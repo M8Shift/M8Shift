@@ -398,6 +398,7 @@ published site, or use the repository-local docs when working from a clone.
 | 069 | [Top-owned incremental status fold](docs/en/rfc/069-rfc-top-incremental-status-fold.md) | In-memory verified tail fold for the long-lived interactive dashboard | implemented | 2026-07-15 | one-shot status stays full; frozen snapshot v1 and RFC 064 preserved; every invalidation falls back to the full oracle |
 | 070 | [Provider-pinned model launch](docs/en/rfc/070-rfc-provider-pinned-model-launch.md) | Fail-closed per-agent model pins compiled into managed provider argv | implemented | 2026-07-15 | Codex/Claude adapters; RFC 056 provenance stays self-declared/unverified |
 | 071 | [Pen-guarded live roster addition](docs/en/rfc/071-rfc-live-roster-add.md) | Add one exact routing identity without resetting or rewriting relay state | implemented | 2026-07-15 | holder-only live pen; anchors remain manual and untouched |
+| 072 | [Exact-identity fleet bootstrap](docs/en/rfc/072-rfc-exact-identity-fleet-bootstrap.md) | Plan, bootstrap, enroll, and reconcile multiple listener identities | implementing | 2026-07-15 | O1–O6 accepted; slices 1–3 implemented |
 
 ## 🔁 How it works
 

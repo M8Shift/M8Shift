@@ -127,6 +127,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [069-rfc-top-incremental-status-fold.md](rfc/069-rfc-top-incremental-status-fold.md) | Implemented top-owned in-memory incremental status fold with a byte-equivalent full oracle, bounded O(delta) refreshes, and mandatory full fallback on invalidation. |
 | [070-rfc-provider-pinned-model-launch.md](rfc/070-rfc-provider-pinned-model-launch.md) | Implemented fail-closed per-agent model pins for managed Codex/Claude provider launches, with immutable runner-plan propagation and RFC 056's unverified provenance boundary preserved. |
 | [071-rfc-live-roster-add.md](rfc/071-rfc-live-roster-add.md) | Implemented holder-only live roster addition that changes only the LOCK `agents:` value, preserves the work window and journals byte-for-byte, and leaves anchor bootstrap explicit. |
+| [072-rfc-exact-identity-fleet-bootstrap.md](rfc/072-rfc-exact-identity-fleet-bootstrap.md) | Exact per-agent identity bootstrap plus declarative fleet plan, health, enrollment, and listener reconciliation. |
 
 ## Security docs
 

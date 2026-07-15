@@ -16047,6 +16047,153 @@ class TestRFC049PRBListenerProducer(CLIBase):
             self.d, ".m8shift", "holder-heartbeats", "claude.json")))
 
 
+class TestRFC072FleetPlan(ListenerCLIBase):
+    def fleet_spec(self, agents=None):
+        doc = {"schema": "m8shift.fleet.spec.v1", "agents": agents or [{
+            "name": "codex-2", "template": "codex",
+            "model": "gpt-test-exact", "desired": "stopped",
+        }]}
+        path = os.path.join(self.d, "fleet.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return "fleet.json"
+
+    def test_pure_plan_reports_structured_diff_without_writes(self):
+        self.init("--agents", "claude,codex")
+        self.assertEqual(self.rt("providers", "init").returncode, 0)
+        before = self.md()
+        registry = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry, "rb") as fh:
+            providers_before = fh.read()
+        result = self.rt("fleet", "plan", "--spec", self.fleet_spec(), "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual([row["action"] for row in payload["actions"]],
+                         ["write_identity", "upsert_provider", "roster_add"])
+        self.assertEqual(payload["health"][0]["listener"]["status"], "stopped")
+        self.assertEqual(self.md(), before)
+        with open(registry, "rb") as fh:
+            self.assertEqual(fh.read(), providers_before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "identities", "codex-2.md")))
+
+    def test_spec_requires_template_and_explicit_model(self):
+        self.init()
+        self.rt("providers", "init")
+        bad_model = self.fleet_spec([{
+            "name": "codex-2", "template": "codex", "model": "UNSET"}])
+        result = self.rt("fleet", "plan", "--spec", bad_model, "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("explicit valid model", result.stderr)
+        missing = self.fleet_spec([{
+            "name": "codex-2", "template": "missing", "model": "m"}])
+        result = self.rt("fleet", "plan", "--spec", missing, "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing provider template", result.stderr)
+
+    def test_apply_bootstraps_exact_identity_and_delegates_idempotent_roster_add(self):
+        self.init("--agents", "claude,codex")
+        self.rt("providers", "init")
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        spec = self.fleet_spec()
+        agents_anchor = os.path.join(self.d, "AGENTS.md")
+        with open(agents_anchor, "rb") as fh:
+            anchor_before = fh.read()
+        result = self.rt("fleet", "apply", "--spec", spec,
+                         "--by", "codex", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("codex-2", self.lock()["agents"].split(","))
+        identity = os.path.join(self.d, ".m8shift", "runtime", "identities",
+                                "codex-2.md")
+        with open(identity, encoding="utf-8") as fh:
+            self.assertIn("M8SHIFT_AGENT=codex-2", fh.read())
+        with open(agents_anchor, "rb") as fh:
+            self.assertEqual(fh.read(), anchor_before)
+        rendered = json.loads(self.rt(
+            "providers", "render", "codex-2", "--prompt", "one turn", "--json"
+        ).stdout)
+        config = rendered["argv"][rendered["argv"].index("--config") + 1]
+        self.assertIn("developer_instructions=", config)
+        self.assertIn("codex-2", config)
+
+        # Conformance gate: execute a fake managed CLI and prove the exact
+        # identity reaches the process at the adapter's developer tier.
+        registry_path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry_path, encoding="utf-8") as fh:
+            registry = json.load(fh)
+        for row in registry["agents"]:
+            if row.get("name") == "codex-2":
+                row["argv"] = [sys.executable, "fake_cli.py", "$M8SHIFT_PROMPT"]
+                row.pop("argv_by_platform", None)
+        with open(registry_path, "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        with open(os.path.join(self.d, "fake_cli.py"), "w", encoding="utf-8") as fh:
+            fh.write("import json,sys\njson.dump(sys.argv[1:],open('seen.json','w'))\n")
+        fake = json.loads(self.rt(
+            "providers", "render", "codex-2", "--prompt", "one turn", "--json"
+        ).stdout)["argv"]
+        subprocess.check_call(fake, cwd=self.d)
+        with open(os.path.join(self.d, "seen.json"), encoding="utf-8") as fh:
+            seen = json.load(fh)
+        self.assertTrue(any("developer_instructions=" in item and "codex-2" in item
+                            for item in seen), seen)
+
+        relay_after_first = self.md()
+        second = self.rt("fleet", "apply", "--spec", spec,
+                         "--by", "codex", "--json")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.md(), relay_after_first)
+        remaining = json.loads(second.stdout)["remaining_actions"]
+        self.assertEqual(remaining, [])
+
+    def test_apply_without_live_holder_refuses_before_bootstrap(self):
+        self.init()
+        self.rt("providers", "init")
+        registry = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry, "rb") as fh:
+            before = fh.read()
+        result = self.rt("fleet", "apply", "--spec", self.fleet_spec(),
+                         "--by", "codex", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("may not write", result.stderr)
+        with open(registry, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "identities", "codex-2.md")))
+
+    def test_batch_lifecycle_is_one_supervisor_and_stop_keeps_membership(self):
+        self.init()
+        self.rt("providers", "init")
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        spec = self.fleet_spec()
+        self.assertEqual(self.rt("fleet", "apply", "--spec", spec,
+                                 "--by", "codex").returncode, 0)
+        relay_before = self.md()
+        stop = self.rt("fleet", "stop", "--spec", spec, "--dry-run", "--json")
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        self.assertEqual(json.loads(stop.stdout)["actions"], [])
+        self.assertEqual(self.md(), relay_before)
+        self.assertIn("codex-2", self.lock()["agents"].split(","))
+
+        resume = self.rt("fleet", "resume", "--spec", spec,
+                         "--dry-run", "--json")
+        self.assertEqual(resume.returncode, 0, resume.stderr)
+        self.assertEqual(json.loads(resume.stdout)["actions"], [
+            {"action": "start_listener", "agent": "codex-2"}])
+        supervisor = self.rt("fleet", "supervise", "--spec", spec,
+                             "--dry-run", "--json")
+        self.assertEqual(supervisor.returncode, 0, supervisor.stderr)
+        self.assertEqual(json.loads(supervisor.stdout)["service_count"], 1)
+
+    def test_reconcile_refuses_unbootstrapped_identity_before_process_work(self):
+        self.init()
+        self.rt("providers", "init")
+        result = self.rt("fleet", "reconcile", "--spec", self.fleet_spec(),
+                         "--dry-run", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fleet bootstrap is incomplete", result.stderr)
+
+
 class TestUpdateBackcompatCompanionHint(unittest.TestCase):
     """#29 backward-compat: a pre-RFC044 adopter (no companions installed) who
     runs `update` sees the companions component skipped. The skip detail must

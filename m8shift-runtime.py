@@ -179,6 +179,17 @@ LISTENER_RESUME_PROMPT = (
     "finish the work, then append (or done) and exit."
 )
 
+# RFC 072 (slices 1-3) — declarative multi-listener fleet bootstrap.  The
+# portable spec is operator-authored; generated identities and observed state
+# stay under the already git-ignored runtime directory.
+FLEET_SPEC_SCHEMA = "m8shift.fleet.spec.v1"
+FLEET_IDENTITY_SCHEMA = "m8shift.agent-identity.v1"
+FLEET_DIR = os.path.join(RUNTIME_DIR, "fleet")
+FLEET_IDENTITIES_DIR = os.path.join(RUNTIME_DIR, "identities")
+FLEET_EVENTS = os.path.join(FLEET_DIR, "events.jsonl")
+FLEET_SUPERVISOR_PID = os.path.join(FLEET_DIR, "supervisor.pid")
+FLEET_DESIRED = {"running", "stopped"}
+
 
 def now():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
@@ -232,6 +243,24 @@ def write_json_if_missing(path, data, force=False):
         fh.write("\n")
     os.replace(tmp, path)
     return True
+
+
+def write_json_atomic(path, data):
+    """Replace one local sidecar atomically (never the portable relay)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, sort_keys=True, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def write_text_atomic(path, text):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
 
 
 def read_text(path):
@@ -1871,13 +1900,51 @@ def provider_managed_options(row):
         options += ["--model", model]
         if effort:
             options += ["--config", f'model_reasoning_effort="{effort}"']
+        identity = provider_identity_artifact(row)
+        if identity is not None:
+            _path, content = identity
+            options += ["--config", "developer_instructions=" +
+                        json.dumps(content, ensure_ascii=False)]
         return options
     if provider == "anthropic-claude":
         options = ["--model", model]
         if effort:
             options += ["--effort", effort]
+        identity = provider_identity_artifact(row)
+        if identity is not None:
+            path, _content = identity
+            options += ["--append-system-prompt-file", path]
         return options
     return []
+
+
+def provider_identity_artifact(row):
+    """Return a validated exact-identity artifact, or fail closed.
+
+    Only RFC 072 fleet rows carry these fields.  The relative path is derived
+    from the exact agent name and may neither redirect nor symlink elsewhere.
+    """
+    schema = row.get("identity_schema")
+    relpath = row.get("identity_file")
+    if schema in (None, "") and relpath in (None, ""):
+        return None
+    name = row.get("name", "")
+    if schema != FLEET_IDENTITY_SCHEMA or not AGENT_RE.fullmatch(name or ""):
+        raise ValueError("invalid exact-identity metadata")
+    expected_relpath = fleet_identity_relpath(name)
+    if relpath != expected_relpath:
+        raise ValueError(f"identity_file must be {expected_relpath}")
+    path = fleet_identity_path(name)
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise ValueError("identity artifact must be a regular non-symlink file")
+        content = read_text(path)
+    except OSError as exc:
+        raise ValueError(f"identity artifact is unavailable: {exc}")
+    if content != fleet_identity_text(name):
+        raise ValueError(f"identity artifact does not assert exact agent {name}")
+    return path, content
 
 
 def provider_launch_argv(row, prompt, run_id="", platform=None):
@@ -1910,6 +1977,11 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
     if not isinstance(agent.get("provider", ""), str) or not agent.get("provider", "").strip():
         findings.append({"severity": "error", "check": "providers.provider", "message": f"{label} provider is required"})
     provider = agent.get("provider", "")
+    try:
+        provider_identity_artifact(agent)
+    except ValueError as exc:
+        findings.append({"severity": "error", "check": "providers.identity",
+                         "message": f"{label} {exc}"})
     mode = agent.get("mode", "")
     if mode not in PROVIDER_MODES:
         findings.append({"severity": "error", "check": "providers.mode", "message": f"{label} mode must be one of {', '.join(sorted(PROVIDER_MODES))}"})
@@ -2163,6 +2235,429 @@ def cmd_providers_render(args):
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
         print(json.dumps(argv, ensure_ascii=False))
+    return 0
+
+
+def load_fleet_spec(path):
+    doc, err = read_json_diagnostic(os.path.abspath(path), {})
+    if err:
+        raise ValueError(f"cannot read fleet spec: {err}")
+    if not isinstance(doc, dict) or doc.get("schema") != FLEET_SPEC_SCHEMA:
+        raise ValueError(f"fleet spec must use schema {FLEET_SPEC_SCHEMA}")
+    rows = doc.get("agents")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("fleet spec agents must be a non-empty list")
+    seen = set()
+    normalized = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"agents[{index}] must be an object")
+        name = row.get("name", "")
+        template = row.get("template", "")
+        model = row.get("model", "")
+        desired = row.get("desired", "running")
+        if not isinstance(name, str) or not AGENT_RE.fullmatch(name):
+            raise ValueError(f"agents[{index}].name is invalid")
+        if name in seen:
+            raise ValueError(f"duplicate fleet agent {name}")
+        seen.add(name)
+        if not isinstance(template, str) or not AGENT_RE.fullmatch(template):
+            raise ValueError(f"{name} template must name a provider example")
+        if not isinstance(model, str) or model == PROVIDER_MODEL_UNSET \
+                or MODEL_ID_RE.fullmatch(model) is None:
+            raise ValueError(f"{name} requires an explicit valid model")
+        if desired not in FLEET_DESIRED:
+            raise ValueError(f"{name} desired must be running or stopped")
+        normalized.append({
+            "name": name, "template": template, "model": model,
+            "desired": desired,
+        })
+    return {"schema": FLEET_SPEC_SCHEMA, "agents": normalized}
+
+
+def fleet_templates(registry):
+    out = {}
+    for row in registry.get("examples", []):
+        if isinstance(row, dict) and isinstance(row.get("name"), str):
+            out[row["name"]] = row
+    return out
+
+
+def fleet_identity_relpath(agent):
+    return os.path.join(".m8shift", "runtime", "identities", f"{agent}.md")
+
+
+def fleet_identity_path(agent):
+    return os.path.join(FLEET_IDENTITIES_DIR, f"{agent}.md")
+
+
+def fleet_identity_text(agent):
+    return (
+        "# M8Shift exact agent identity\n\n"
+        f"You are the exact M8Shift roster identity `{agent}`.\n"
+        f"For this process, `M8SHIFT_AGENT={agent}` is authoritative.\n"
+        "Never claim, append, release, or report work as a similar identity. "
+        "Read M8SHIFT.protocol.md and use only the exact identity above.\n"
+    )
+
+
+def fleet_provider_row(item, template):
+    row = {key: value for key, value in template.items() if key != "//"}
+    row["name"] = item["name"]
+    row["model"] = item["model"]
+    row["identity_schema"] = FLEET_IDENTITY_SCHEMA
+    row["identity_file"] = fleet_identity_relpath(item["name"])
+    return row
+
+
+def fleet_relay_snapshot():
+    try:
+        core = load_core()
+        lk = core.get_lock(core.load_or_die())
+        return {
+            "state": lk.get("state", ""), "holder": lk.get("holder", ""),
+            "agents": list(core.active_agents(lk)), "turn": int(lk.get("turn", "0")),
+            "session": lk.get("session", ""),
+        }
+    except (SystemExit, ValueError, TypeError):
+        return {"state": "invalid", "holder": "", "agents": [], "turn": 0,
+                "session": ""}
+
+
+def fleet_listener_health(agent):
+    exists, pid = read_listener_pid(agent)
+    alive = bool(pid and listener_pid_alive(pid))
+    state = read_listener_state(agent)
+    if alive:
+        status = "running"
+    elif exists:
+        status = "stale"
+    elif state.get("phase") == "halted":
+        status = "halted"
+    else:
+        status = "stopped"
+    return {"status": status, "pid": pid if alive else None,
+            "phase": state.get("phase", ""),
+            "last_classification": state.get("last_classification", "")}
+
+
+def build_fleet_plan(spec):
+    registry = load_provider_registry()
+    templates = fleet_templates(registry)
+    providers = {row.get("name"): row for row in registry.get("agents", [])
+                 if isinstance(row, dict)}
+    relay = fleet_relay_snapshot()
+    actions = []
+    health = []
+    for item in spec["agents"]:
+        template = templates.get(item["template"])
+        if template is None:
+            raise ValueError(f"{item['name']} references missing provider template "
+                             f"{item['template']}")
+        candidate = fleet_provider_row(item, template)
+        identity_ok = False
+        try:
+            identity_ok = read_text(fleet_identity_path(item["name"])) == \
+                fleet_identity_text(item["name"])
+        except OSError:
+            pass
+        listener = fleet_listener_health(item["name"])
+        row = {
+            "name": item["name"], "desired": item["desired"],
+            "member": item["name"] in relay["agents"],
+            "provider_ready": providers.get(item["name"]) == candidate,
+            "identity_ready": identity_ok, "listener": listener,
+        }
+        health.append(row)
+        if not row["identity_ready"]:
+            actions.append({"action": "write_identity", "agent": item["name"]})
+        if not row["provider_ready"]:
+            actions.append({"action": "upsert_provider", "agent": item["name"]})
+        if not row["member"]:
+            actions.append({"action": "roster_add", "agent": item["name"]})
+        observed_running = listener["status"] == "running"
+        if item["desired"] == "running" and not observed_running:
+            actions.append({"action": "start_listener", "agent": item["name"]})
+        if item["desired"] == "stopped" and observed_running:
+            actions.append({"action": "stop_listener", "agent": item["name"]})
+    return {"schema": "m8shift.fleet.plan.v1", "relay": relay,
+            "health": health, "actions": actions}
+
+
+def cmd_fleet_plan(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        plan = build_fleet_plan(spec)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    if args.json:
+        print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
+    else:
+        for action in plan["actions"]:
+            print(f"{action['action']} {action['agent']}")
+        if not plan["actions"]:
+            print("✓ fleet matches desired state")
+    return 0
+
+
+def cmd_fleet_health(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        plan = build_fleet_plan(spec)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    ok = all(row["member"] and row["provider_ready"] and row["identity_ready"]
+             and ((row["desired"] == "running" and row["listener"]["status"] == "running")
+                  or (row["desired"] == "stopped" and row["listener"]["status"] != "running"))
+             for row in plan["health"])
+    payload = {"ok": ok, "health": plan["health"], "relay": plan["relay"]}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        for row in plan["health"]:
+            print(f"{row['name']} desired={row['desired']} listener={row['listener']['status']} "
+                  f"member={str(row['member']).lower()} identity={str(row['identity_ready']).lower()} "
+                  f"provider={str(row['provider_ready']).lower()}")
+    return 0 if ok else 1
+
+
+def fleet_holder_preflight(actor):
+    parsed = parse_agent_csv(actor)
+    if len(parsed) != 1:
+        raise ValueError("fleet apply requires one valid --by holder")
+    result = subprocess.run(
+        [sys.executable, CORE_PATH, "may-i-write", parsed[0]],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "holder has no live pen").strip()
+        raise ValueError(detail)
+    return parsed[0]
+
+
+def fleet_bootstrap(spec, actor):
+    """Materialize exact identities/providers, then delegate membership to core."""
+    actor = fleet_holder_preflight(actor)
+    registry = load_provider_registry()
+    templates = fleet_templates(registry)
+    rows = [row for row in registry.get("agents", []) if isinstance(row, dict)]
+    by_name = {row.get("name"): row for row in rows}
+    candidates = []
+    for item in spec["agents"]:
+        template = templates.get(item["template"])
+        if template is None:
+            raise ValueError(f"{item['name']} references missing provider template "
+                             f"{item['template']}")
+        candidates.append((item, fleet_provider_row(item, template)))
+
+    ensure_runtime_gitignore()
+    changed_identities = []
+    for item, _row in candidates:
+        path = fleet_identity_path(item["name"])
+        content = fleet_identity_text(item["name"])
+        try:
+            unchanged = read_text(path) == content
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            write_text_atomic(path, content)
+            changed_identities.append(item["name"])
+
+    for item, row in candidates:
+        by_name[item["name"]] = row
+    new_rows = []
+    emitted = set()
+    for row in rows:
+        name = row.get("name")
+        if name in by_name and name not in emitted:
+            new_rows.append(by_name[name])
+            emitted.add(name)
+    for item, _row in candidates:
+        if item["name"] not in emitted:
+            new_rows.append(by_name[item["name"]])
+            emitted.add(item["name"])
+    updated = dict(registry)
+    updated["agents"] = new_rows
+    errors = []
+    for item, row in candidates:
+        errors.extend(f for f in provider_entry_findings(
+            row, item["name"], set(), active=True) if f["severity"] == "error")
+    if errors:
+        raise ValueError("bootstrapped provider registry is invalid: " +
+                         "; ".join(f["message"] for f in errors))
+    providers_changed = updated != registry
+    if providers_changed:
+        write_json_atomic(PROVIDERS, updated)
+
+    added = []
+    for item, _row in candidates:
+        result = subprocess.run(
+            [sys.executable, CORE_PATH, "roster", "add", item["name"], "--by", actor],
+            cwd=HERE, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "roster add failed").strip()
+            raise ValueError(f"core roster add {item['name']} failed: {detail}")
+        added.append(item["name"])
+    event = {"schema": "m8shift.fleet.event.v1", "event": "fleet.applied",
+             "at": iso(), "by": actor, "agents": added,
+             "identity_changes": changed_identities,
+             "providers_changed": providers_changed}
+    append_jsonl(FLEET_EVENTS, event)
+    return event
+
+
+def cmd_fleet_apply(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        event = fleet_bootstrap(spec, args.by)
+        plan = build_fleet_plan(spec)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    payload = {"ok": True, "event": event, "remaining_actions": plan["actions"]}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"✓ fleet bootstrap applied by {event['by']} for "
+              + ",".join(event["agents"]))
+    return 0
+
+
+def fleet_bootstrap_ready(plan):
+    bad = [row["name"] for row in plan["health"]
+           if not (row["member"] and row["provider_ready"] and row["identity_ready"])]
+    if bad:
+        raise ValueError("fleet bootstrap is incomplete for " + ",".join(bad) +
+                         "; run fleet apply with the live holder first")
+
+
+def fleet_listener_command(agent, action, args):
+    if action == "start_listener":
+        argv = [sys.executable, SELF_PATH, "listener", "start", "--agent", agent,
+                "--provider", "--backend", args.backend]
+        if args.runner:
+            argv += ["--runner", args.runner]
+        if getattr(args, "dry_run", False):
+            argv.append("--dry-run")
+    else:
+        argv = [sys.executable, SELF_PATH, "listener", "stop", "--agent", agent,
+                "--grace", str(args.grace)]
+    result = subprocess.run(argv, cwd=HERE, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "listener command failed").strip()
+        raise ValueError(f"{action} {agent} failed: {detail}")
+    return {"action": action, "agent": agent, "output": result.stdout.strip()}
+
+
+def fleet_reconcile_once(spec, args, desired_override=""):
+    plan = build_fleet_plan(spec)
+    fleet_bootstrap_ready(plan)
+    actions = []
+    for row in plan["health"]:
+        desired = desired_override or row["desired"]
+        running = row["listener"]["status"] == "running"
+        action = ("start_listener" if desired == "running" and not running else
+                  "stop_listener" if desired == "stopped" and running else "")
+        if not action:
+            continue
+        if getattr(args, "dry_run", False):
+            actions.append({"action": action, "agent": row["name"]})
+        else:
+            actions.append(fleet_listener_command(row["name"], action, args))
+    if not getattr(args, "dry_run", False):
+        append_jsonl(FLEET_EVENTS, {
+            "schema": "m8shift.fleet.event.v1", "event": "fleet.reconciled",
+            "at": iso(), "actions": [
+                {"action": item["action"], "agent": item["agent"]} for item in actions],
+        })
+    return actions
+
+
+def emit_fleet_lifecycle(args, event, actions):
+    payload = {"ok": True, "event": event, "actions": actions}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        if actions:
+            for item in actions:
+                print(f"{item['action']} {item['agent']}")
+        else:
+            print("✓ fleet already matches requested lifecycle")
+    return 0
+
+
+def cmd_fleet_reconcile(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        actions = fleet_reconcile_once(spec, args)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    return emit_fleet_lifecycle(args, "reconcile", actions)
+
+
+def cmd_fleet_stop(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        actions = fleet_reconcile_once(spec, args, desired_override="stopped")
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    return emit_fleet_lifecycle(args, "stop", actions)
+
+
+def cmd_fleet_resume(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        actions = fleet_reconcile_once(spec, args, desired_override="running")
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    return emit_fleet_lifecycle(args, "resume", actions)
+
+
+def cmd_fleet_supervise(args):
+    """One control-plane process reconciles every configured listener lane."""
+    try:
+        spec = load_fleet_spec(args.spec)
+        plan = build_fleet_plan(spec)
+        fleet_bootstrap_ready(plan)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    if args.dry_run:
+        payload = {"ok": True, "schema": "m8shift.fleet.supervisor.plan.v1",
+                   "agents": [row["name"] for row in spec["agents"]],
+                   "poll_interval_seconds": args.poll_interval,
+                   "service_count": 1}
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    os.makedirs(FLEET_DIR, exist_ok=True)
+    try:
+        with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
+            previous_pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        previous_pid = 0
+    if previous_pid and previous_pid != os.getpid() and listener_pid_alive(previous_pid):
+        sys.exit(f"m8shift-runtime: fleet supervisor already alive (pid {previous_pid})")
+    write_text_atomic(FLEET_SUPERVISOR_PID, f"{os.getpid()}\n")
+    ticks = 0
+    try:
+        while not args.max_ticks or ticks < args.max_ticks:
+            ticks += 1
+            try:
+                fleet_reconcile_once(spec, args)
+            except ValueError as exc:
+                append_jsonl(FLEET_EVENTS, {
+                    "schema": "m8shift.fleet.event.v1", "event": "fleet.reconcile_failed",
+                    "at": iso(), "message": str(exc),
+                })
+            if not args.max_ticks or ticks < args.max_ticks:
+                time.sleep(args.poll_interval)
+    finally:
+        try:
+            with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
+                mine = fh.read().strip() == str(os.getpid())
+            if mine:
+                os.unlink(FLEET_SUPERVISOR_PID)
+        except OSError:
+            pass
     return 0
 
 
@@ -7342,6 +7837,69 @@ def main():
                      help="optional run id substituted for the $M8SHIFT_RUN_ID placeholder")
     pvr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     pvr.set_defaults(fn=cmd_providers_render)
+
+    fleet = sub.add_parser(
+        "fleet", help="plan and reconcile a declarative batch of exact agent identities")
+    fleet_sub = fleet.add_subparsers(dest="fleet_verb", required=True)
+    fp = fleet_sub.add_parser(
+        "plan", help="validate a fleet spec and print its pure desired/observed diff")
+    fp.add_argument("--spec", required=True,
+                    help="path to a m8shift.fleet.spec.v1 JSON document")
+    fp.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of human output")
+    fp.set_defaults(fn=cmd_fleet_plan)
+    fh = fleet_sub.add_parser(
+        "health", help="report exact identity, provider, roster, and listener health")
+    fh.add_argument("--spec", required=True,
+                    help="path to a m8shift.fleet.spec.v1 JSON document")
+    fh.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of human output")
+    fh.set_defaults(fn=cmd_fleet_health)
+    fa = fleet_sub.add_parser(
+        "apply", help="bootstrap identities/providers and delegate roster additions to core")
+    fa.add_argument("--spec", required=True,
+                    help="path to a m8shift.fleet.spec.v1 JSON document")
+    fa.add_argument("--by", required=True,
+                    help="current live pen holder attributed by core roster add")
+    fa.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of human output")
+    fa.set_defaults(fn=cmd_fleet_apply)
+
+    def fleet_lifecycle_flags(sp, *, dry_run=True):
+        sp.add_argument("--spec", required=True,
+                        help="path to a m8shift.fleet.spec.v1 JSON document")
+        sp.add_argument("--backend", choices=LISTENER_BACKENDS, default="local",
+                        help="backend used for newly started listener lanes (default: local)")
+        sp.add_argument("--runner", default="",
+                        help="optional headless runner path passed to listener start")
+        sp.add_argument("--grace", type=float, default=10.0,
+                        help="seconds of graceful stop before process-group kill (default: 10)")
+        if dry_run:
+            sp.add_argument("--dry-run", action="store_true",
+                            help="print lifecycle actions without process work")
+        sp.add_argument("--json", action="store_true",
+                        help="emit machine-readable JSON instead of human output")
+
+    frec = fleet_sub.add_parser(
+        "reconcile", help="converge all bootstrapped lanes to their desired lifecycle")
+    fleet_lifecycle_flags(frec)
+    frec.set_defaults(fn=cmd_fleet_reconcile)
+    fstop = fleet_sub.add_parser(
+        "stop", help="stop all fleet listeners without changing relay membership")
+    fleet_lifecycle_flags(fstop)
+    fstop.set_defaults(fn=cmd_fleet_stop)
+    fresume = fleet_sub.add_parser(
+        "resume", help="resume all bootstrapped fleet listeners as one batch")
+    fleet_lifecycle_flags(fresume)
+    fresume.set_defaults(fn=cmd_fleet_resume)
+    fsup = fleet_sub.add_parser(
+        "supervise", help="run one control-plane process that reconciles every lane")
+    fleet_lifecycle_flags(fsup)
+    fsup.add_argument("--poll-interval", type=float, default=20.0,
+                      help="seconds between reconciliation passes (default: 20)")
+    fsup.add_argument("--max-ticks", type=int, default=0,
+                      help="stop after N passes (test seam; 0 = unbounded)")
+    fsup.set_defaults(fn=cmd_fleet_supervise)
 
     route = sub.add_parser("route", help="advisory model/task routing")
     route_sub = route.add_subparsers(dest="route_verb", required=True)
