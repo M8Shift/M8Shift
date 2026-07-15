@@ -23,6 +23,26 @@ import subprocess
 import sys
 import tempfile
 
+
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Print command help plus a valid required-argument shape on errors."""
+
+    def error(self, message):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                parts.append(str(action.metavar or action.dest.upper()))
+        old = self.epilog
+        self.epilog = ((old + "\n\n") if old else "") + \
+            "required invocation example:\n  " + " ".join(parts)
+        self.print_help(sys.stderr)
+        self.epilog = old
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
 VERSION = "3.60.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -191,10 +211,16 @@ def run_case(case_path, m8shift_py, keep=False, live=False):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Run M8Shift e2e cases (Tier A hermetic; Tier B opt-in live).")
+    ap = HelpfulArgumentParser(
+        usage="%(prog)s CASE [options]",
+        description="Run one M8Shift end-to-end case (hermetic by default; live is opt-in).",
+        epilog="""examples:
+  m8shift-e2e.py tests/e2e/arithmetic.md
+  m8shift-e2e.py tests/e2e/arithmetic.md --keep""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"m8shift-e2e.py {VERSION}",
                     help="show the runner version and exit")
-    ap.add_argument("case", help="Markdown case file under tests/e2e/")
+    ap.add_argument("case", metavar="CASE", help="Markdown case file under tests/e2e/")
     ap.add_argument("--m8shift-py", default=os.path.join(HERE, "m8shift.py"),
                     help="path to the m8shift.py script under test, copied into the temporary "
                          "run directory (default: m8shift.py next to this runner)")

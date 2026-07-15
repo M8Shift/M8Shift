@@ -23,6 +23,7 @@ M8Shift is **free and open source**, released under the
 | [protocol.md](protocol.md) | Shared relay protocol — operational core (first read; states, rules, work loop). |
 | [protocol-reference.md](protocol-reference.md) | On-demand reference: mental model, full command reference, project adoption. |
 | [m8shift-command-reference.md](m8shift-command-reference.md) | Site-ready, plain-language reference for every `m8shift.py` command, parameter, and invocation shape. |
+| [script-usage-reference.md](script-usage-reference.md) | Site-ready invocation, parameters, examples, and required-argument behavior for every shipped command-line script. |
 | [specification.md](specification.md) | Full functional and non-functional specification. |
 | [agents-guide.md](agents-guide.md) | What is expected of AI agents: collaboration, branch/MR workflow, and the code-quality bar. |
 | [issue-lifecycle.md](issue-lifecycle.md) | The mandatory open → decide → close ticket convention: the visual create template, the decision template, and the close template — for Forgejo, GitHub, and GitLab. |

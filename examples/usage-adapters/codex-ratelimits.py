@@ -269,4 +269,13 @@ def main(out=None, now=None, read_limits=None):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        if sys.argv[1:] in (["-h"], ["--help"]):
+            print("usage: codex-ratelimits.py\n\n"
+                  "Read Codex rate limits and emit a normalized JSON snapshot.\n\n"
+                  "example:\n  codex-ratelimits.py")
+            raise SystemExit(0)
+        print("codex-ratelimits.py: error: no arguments are accepted\n"
+              "try: codex-ratelimits.py --help", file=sys.stderr)
+        raise SystemExit(2)
     sys.exit(main())

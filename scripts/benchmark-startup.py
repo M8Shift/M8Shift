@@ -47,7 +47,12 @@ def measure(argv: list[str], cwd: Path, runs: int, env: dict[str, str]) -> dict[
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        usage="%(prog)s [--runs N] [--candidate NAME=EXECUTABLE] [--json]",
+        description="Benchmark m8shift.py interpreter startup and read-only command latency.",
+        epilog="""example:
+  benchmark-startup.py --runs 50 --json""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", type=int, default=50)
     parser.add_argument(
         "--candidate", action="append", default=[], metavar="NAME=EXECUTABLE",

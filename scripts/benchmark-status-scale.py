@@ -231,7 +231,12 @@ class TurnTailCache:
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        usage="%(prog)s [options]",
+        description="Measure status parsing and rendering across synthetic relay sizes.",
+        epilog="""example:
+  benchmark-status-scale.py --sizes 1000,5000,10000 --runs 15""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--real-root", type=Path)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--runs", type=int, default=15)

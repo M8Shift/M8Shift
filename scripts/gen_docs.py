@@ -34,7 +34,13 @@ def render_doc(rel, body):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="gen_docs.py", description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(
+        prog="gen_docs.py",
+        usage="%(prog)s [--version]",
+        description="Regenerate checked-in protocol documentation from m8shift.py constants.",
+        epilog="""example:
+  python3 scripts/gen_docs.py""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"gen_docs.py {VERSION}")
     p.parse_args(argv)
 

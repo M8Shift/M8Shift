@@ -190,8 +190,13 @@ def run_history(rule, history_runs, args, run):
 def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     ap = argparse.ArgumentParser(
         prog="scrub-check.py",
-        description="RFC 052 E1: denylist scrub over git tip + history "
-                    "(read-only, redacted by default).")
+        usage="%(prog)s [options]",
+        description="Scan Git tip and history for confidential denylist terms (read-only, redacted by default).",
+        epilog="""examples:
+  scrub-check.py --repo .
+  scrub-check.py --repo . --denylist ~/.config/m8shift/denylist.txt
+  scrub-check.py --repo . --range abc123..def456""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=".", help="repository to scan (default: .)")
     ap.add_argument("--denylist", default=None,
                     help="explicit denylist path (beats M8SHIFT_DENYLIST)")

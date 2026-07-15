@@ -8,9 +8,33 @@
 # Env:
 #   M8SHIFT_ROOT    relay root passed to the engine (default: current dir)
 #   M8SHIFT_ENGINE  explicit path to m8shift.py (overrides discovery)
+#
+# Examples:
+#   scripts/watch-status.sh --for agent-a
+#   scripts/watch-status.sh --interval 5 --changes-only
 set -uo pipefail
 M8SHIFT_RUNNER_VERSION="3.60.0"
 export M8SHIFT_RUNNER_VERSION
+
+usage() {
+  cat <<'EOF'
+Usage: watch-status.sh [--for AGENT] [--interval SECONDS] [--clear] [--changes-only] [--once]
+
+Open the read-only M8Shift status monitor through the installed relay engine.
+
+All monitor parameters are forwarded to `m8shift.py watch`. Set M8SHIFT_ROOT to
+select a relay root or M8SHIFT_ENGINE to select an explicit engine script.
+
+Examples:
+  scripts/watch-status.sh --for agent-a
+  scripts/watch-status.sh --interval 5 --changes-only
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --version) printf 'watch-status.sh %s\n' "$M8SHIFT_RUNNER_VERSION"; exit 0 ;;
+esac
 
 root="${M8SHIFT_ROOT:-$PWD}"
 

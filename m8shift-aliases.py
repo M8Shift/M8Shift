@@ -50,11 +50,19 @@ def replace_block(existing: str, block: str) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Print M8Shift aliases (default), or idempotently add them to a shell rc file."
+        usage="%(prog)s [--write] [--shell SHELL] [--rc FILE]",
+        description="Print portable M8Shift aliases, or idempotently install them in a shell rc file.",
+        epilog="""examples:
+  m8shift-aliases.py
+  m8shift-aliases.py --write --shell zsh
+  m8shift-aliases.py --write --shell git-bash --rc ~/.bashrc""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--write", action="store_true", help="write the marked alias block")
-    parser.add_argument("--shell", choices=("auto", "bash", "zsh", "git-bash"), default="auto")
-    parser.add_argument("--rc", type=Path, help="override the destination rc file used with --write")
+    parser.add_argument("--shell", metavar="SHELL", choices=("auto", "bash", "zsh", "git-bash"),
+                        default="auto", help="shell syntax to print or install (default: auto)")
+    parser.add_argument("--rc", metavar="FILE", type=Path,
+                        help="override the destination rc file used with --write")
     args = parser.parse_args(argv)
 
     shell = detect_shell() if args.shell == "auto" else args.shell

@@ -58,6 +58,11 @@ Usage:
   curl -fsSL https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.sh | bash -s -- --agents claude,codex
   bash install.sh [options]
 
+Examples:
+  bash install.sh --agents agent-a,agent-b
+  bash install.sh --dir ./my-project --name my-project --dry-run
+  bash install.sh --source-dir ./release --no-init
+
 Options:
   --dir DIR            Install into DIR instead of the current directory.
   --agents A,B         Active roster passed to `m8shift.py init` (default: claude,codex).
@@ -131,7 +136,11 @@ helper_failed() {
 }
 
 need_value() {
-  [ "${2:-}" ] || die "$1 requires a value"
+  if [ -z "${2:-}" ]; then
+    printf 'm8shift install: %s requires a value\n' "$1" >&2
+    printf 'try: bash install.sh %s VALUE --dry-run\n' "$1" >&2
+    exit 1
+  fi
 }
 
 download_to() {

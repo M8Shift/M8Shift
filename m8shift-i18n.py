@@ -206,7 +206,14 @@ def _append_messages(src, msg_blocks):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="m8shift-i18n.py", description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(
+        prog="m8shift-i18n.py",
+        usage="%(prog)s [--langs CODE,... | --check CODE] [options]",
+        description="Validate language packs or build localized standalone m8shift.py files.",
+        epilog="""examples:
+  m8shift-i18n.py --check fr
+  m8shift-i18n.py --langs fr,es --into ./dist""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"m8shift-i18n.py {VERSION}",
                     help="print the tool version and exit")
     ap.add_argument("--langs", default="", help="comma-separated language codes (e.g. fr,es)")

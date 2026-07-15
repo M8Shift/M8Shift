@@ -40,6 +40,27 @@ import subprocess
 import sys
 import time
 
+
+class HelpfulArgumentParser(argparse.ArgumentParser):
+    """Print command help plus a valid required-argument shape on errors."""
+
+    def error(self, message):
+        parts = [self.prog]
+        for action in self._actions:
+            if action.dest == "help" or not action.required:
+                continue
+            if action.option_strings:
+                parts.append(action.option_strings[-1])
+            if action.nargs != 0:
+                value = action.metavar or action.dest.upper()
+                parts.append(str(value[0] if isinstance(value, tuple) else value))
+        old = self.epilog
+        self.epilog = ((old + "\n\n") if old else "") + \
+            "required invocation example:\n  " + " ".join(parts)
+        self.print_help(sys.stderr)
+        self.epilog = old
+        self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = None        # canonical repo root (set in main, before any core read/write)
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")   # mirrors the core sentinel id class
@@ -1046,7 +1067,15 @@ def cmd_integrate(args):
 # ──────────────────────────────── entry point ──────────────────────────────────
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="m8shift-worktree.py", description=__doc__.splitlines()[0])
+    p = HelpfulArgumentParser(
+        prog="m8shift-worktree.py",
+        usage="%(prog)s [--version] <command> [args]",
+        description="Create isolated feature worktrees and serialize their integration.",
+        epilog="""examples:
+  m8shift-worktree.py status
+  m8shift-worktree.py claim feature-a agent-a --base main
+  m8shift-worktree.py integrate feature-a agent-a --into main --to agent-b""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"m8shift-worktree.py {VERSION}",
                    help="show the companion version and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1083,7 +1112,7 @@ def build_parser():
     s.add_argument("id", nargs="?", help="restrict the worktree listing to this id (default: list all)")
     s.set_defaults(fn=cmd_status)
 
-    doc = sub.add_parser("doctor", help="read-only ownership findings (RFC 049 PR C, advisory)")
+    doc = sub.add_parser("doctor", help="read-only worktree ownership diagnostics")
     doc.add_argument("--json", action="store_true", help="machine-readable findings")
     doc.set_defaults(fn=cmd_doctor)
     return p
