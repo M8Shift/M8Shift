@@ -6115,6 +6115,14 @@ class TestRuntimeCompanion(CLIBase):
             cwd=self.d, env=env, capture_output=True, text=True,
         )
 
+    def load_runtime(self):
+        path = os.path.join(self.d, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_adapter_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def test_listener_status_json_capabilities_do_not_conflate_residency_with_detachment(self):
         self.init()
         listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
@@ -7226,6 +7234,108 @@ class TestRuntimeCompanion(CLIBase):
         write_registry()
         custom = json.loads(self.rt("providers", "render", "custom", "--prompt", "print(1)", "--json").stdout)
         self.assertEqual(custom["argv"], [sys.executable, "-c", "print(1)"])
+
+    def test_agent_cli_adapter_registry_dispatch_and_gemini_stub(self):
+        runtime = self.load_runtime()
+        expected = {"openai-codex", "anthropic-claude", "google-gemini"}
+        self.assertEqual(set(runtime.ADAPTER_REGISTRY), expected)
+        for provider in sorted(expected):
+            adapter = runtime.provider_adapter(provider)
+            self.assertIs(adapter, runtime.ADAPTER_REGISTRY[provider])
+            self.assertIsInstance(adapter, runtime.AdapterInterface)
+            self.assertEqual(adapter.schema, "m8shift.agent-cli-adapter.v1")
+            for operation in ("launch_argv", "stop", "resume", "health"):
+                self.assertTrue(callable(getattr(adapter, operation)))
+
+        gemini = runtime.provider_adapter("google-gemini")
+        self.assertTrue(gemini.validated_stub)
+        row = {
+            "name": "gemini", "provider": "google-gemini",
+            "argv": ["gemini", "--prompt", "$M8SHIFT_PROMPT"],
+        }
+        self.assertEqual(
+            gemini.launch_argv(row, "one turn"),
+            ["gemini", "--prompt", "one turn"],
+        )
+        self.assertEqual(gemini.stop("process-1")["strategy"], "process-group")
+        health = gemini.health("process-1", "opaque-session")
+        self.assertEqual(health["state"], "unknown")
+        self.assertFalse(health["relay_completion"])
+        self.assertNotIn("opaque-session", json.dumps(health))
+        with self.assertRaisesRegex(ValueError, "does not declare resume support"):
+            gemini.resume(row, "one turn", "opaque-session")
+
+        # A new provider is a registry addition; generic callers do not change.
+        extra = runtime.DeclarativeAdapter("example-provider")
+        runtime.register_adapter(extra)
+        self.assertIs(runtime.provider_adapter("example-provider"), extra)
+        self.assertEqual(
+            runtime.provider_launch_argv({
+                "name": "extra", "provider": "example-provider",
+                "argv": ["example", "$M8SHIFT_AGENT", "$M8SHIFT_PROMPT"],
+            }, "work"),
+            ["example", "extra", "work"],
+        )
+
+    def test_managed_adapter_launch_is_byte_identical_to_pre_registry_compiler(self):
+        runtime = self.load_runtime()
+
+        def legacy_launch(row, prompt, run_id="", platform=None):
+            argv, _platform = runtime.select_provider_argv(row, platform)
+            argv = list(argv or [])
+            provider = row.get("provider", "")
+            model = row.get("model", "")
+            effort = row.get("effort", "")
+            if provider in {"openai-codex", "anthropic-claude"}:
+                marker_indexes = [
+                    i for i, arg in enumerate(argv)
+                    if arg == runtime.PROMPT_MARKER
+                ]
+                if len(marker_indexes) != 1:
+                    raise ValueError("invalid legacy marker")
+                if provider == "openai-codex":
+                    options = []
+                    if row.get("profile", ""):
+                        options += ["--profile", row["profile"]]
+                    options += ["--model", model]
+                    if effort:
+                        options += [
+                            "--config", f'model_reasoning_effort="{effort}"',
+                        ]
+                else:
+                    options = ["--model", model]
+                    if effort:
+                        options += ["--effort", effort]
+                marker = marker_indexes[0]
+                argv[marker:marker] = options
+            return runtime.render_argv_template(
+                argv, agent=row.get("name", ""), prompt=prompt, run_id=run_id,
+            )
+
+        rows = [
+            {
+                "name": "codex", "provider": "openai-codex", "model": "m",
+                "profile": "p", "effort": "high",
+                "argv": ["codex", "exec", "$M8SHIFT_PROMPT"],
+            },
+            {
+                "name": "claude", "provider": "anthropic-claude", "model": "c",
+                "effort": "high", "argv": ["claude", "-p", "$M8SHIFT_PROMPT"],
+                "argv_by_platform": {
+                    "test-os": ["claude-test", "-p", "$M8SHIFT_PROMPT"],
+                },
+            },
+        ]
+        for row, platform in ((rows[0], None), (rows[1], "test-os")):
+            with self.subTest(provider=row["provider"], platform=platform):
+                expected = legacy_launch(row, "x;y", "run-1", platform)
+                actual = runtime.provider_launch_argv(
+                    row, "x;y", "run-1", platform)
+                self.assertEqual(actual, expected)
+                self.assertEqual(
+                    json.dumps(actual, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(expected, ensure_ascii=False, separators=(",", ":")),
+                )
 
     def test_provider_model_pin_fail_closed_and_legacy_readability(self):
         self.init()

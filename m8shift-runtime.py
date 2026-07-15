@@ -9,6 +9,7 @@ child turn is alive — `claim <agent> --refresh` near TTL/2 (TTL extension + au
 beat) and the protective `heartbeat` verb — and still never plain-claims, force-claims,
 appends, releases or completes.
 """
+import abc
 import argparse
 import datetime as dt
 import fnmatch
@@ -96,7 +97,7 @@ MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 PROVIDER_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 PROVIDER_MODEL_UNSET = "UNSET"
 PROMPT_MARKER = "$M8SHIFT_PROMPT"
-MANAGED_PROVIDER_ADAPTERS = {"openai-codex", "anthropic-claude"}
+AGENT_CLI_ADAPTER_SCHEMA = "m8shift.agent-cli-adapter.v1"
 PROVIDER_MODES = {"interactive", "headless", "hybrid", "local"}
 DEFAULT_TIER_ORDER = ["economy", "balanced", "flagship"]
 DEFAULT_COST_ORDER = ["$", "$$", "$$$", "$$$$"]
@@ -1918,53 +1919,6 @@ def provider_argv_templates(agent):
     return templates
 
 
-def managed_selector_in_argv(provider, argv):
-    """Name the first provider-managed selector embedded in a base argv."""
-    selectors = {"--model", "--model=", "--profile", "--profile=", "--effort", "--effort="}
-    if provider == "openai-codex":
-        selectors.update({"-m", "-p"})
-    for index, arg in enumerate(argv):
-        if arg in selectors or any(arg.startswith(prefix) for prefix in selectors if prefix.endswith("=")):
-            return arg
-        if provider == "openai-codex" and arg in {"--config", "-c"}:
-            if index + 1 < len(argv) and str(argv[index + 1]).split("=", 1)[0] == "model_reasoning_effort":
-                return f"{arg} model_reasoning_effort"
-        if provider == "openai-codex" and arg.startswith("model_reasoning_effort="):
-            return arg
-    return ""
-
-
-def provider_managed_options(row):
-    """Compile validated vendor options. The provider row is the sole authority."""
-    provider = row.get("provider", "")
-    model = row.get("model", "")
-    profile = row.get("profile", "")
-    effort = row.get("effort", "")
-    if provider == "openai-codex":
-        options = []
-        if profile:
-            options += ["--profile", profile]
-        options += ["--model", model]
-        if effort:
-            options += ["--config", f'model_reasoning_effort="{effort}"']
-        identity = provider_identity_artifact(row)
-        if identity is not None:
-            _path, content = identity
-            options += ["--config", "developer_instructions=" +
-                        json.dumps(content, ensure_ascii=False)]
-        return options
-    if provider == "anthropic-claude":
-        options = ["--model", model]
-        if effort:
-            options += ["--effort", effort]
-        identity = provider_identity_artifact(row)
-        if identity is not None:
-            path, _content = identity
-            options += ["--append-system-prompt-file", path]
-        return options
-    return []
-
-
 def provider_identity_artifact(row):
     """Return a validated exact-identity artifact, or fail closed.
 
@@ -1994,18 +1948,216 @@ def provider_identity_artifact(row):
     return path, content
 
 
+class AdapterInterface(abc.ABC):
+    """Versioned provider-CLI boundary owned by the optional runtime companion.
+
+    Lifecycle methods return normalized intent/observation data only.  Process
+    creation, signalling, retry, persistence, and relay verification remain in
+    the generic runner/supervisor; an adapter never gains relay authority.
+    """
+
+    schema = AGENT_CLI_ADAPTER_SCHEMA
+    provider = ""
+    managed = False
+    supports_profile = False
+    validated_stub = False
+
+    @abc.abstractmethod
+    def launch_argv(self, row, prompt, run_id="", platform=None):
+        """Compile one shell-free argv array from a validated provider row."""
+
+    @abc.abstractmethod
+    def stop(self, process_ref, mode="graceful"):
+        """Describe provider stop intent; the supervisor performs termination."""
+
+    @abc.abstractmethod
+    def resume(self, row, prompt, session_ref, run_id="", platform=None):
+        """Compile a resume attempt or fail closed when it is unsupported."""
+
+    @abc.abstractmethod
+    def health(self, process_ref=None, session_ref=""):
+        """Return a normalized lifecycle observation, never relay completion."""
+
+
+class DeclarativeAdapter(AdapterInterface):
+    """Safe argv adapter and fail-closed lifecycle baseline for any provider."""
+
+    def __init__(self, provider):
+        self.provider = provider
+
+    def managed_options(self, row):
+        return []
+
+    def managed_selector(self, argv):
+        selectors = {
+            "--model", "--model=", "--profile", "--profile=", "--effort",
+            "--effort=",
+        }
+        for arg in argv:
+            if arg in selectors or any(
+                    arg.startswith(prefix) for prefix in selectors
+                    if prefix.endswith("=")):
+                return arg
+        return ""
+
+    def launch_argv(self, row, prompt, run_id="", platform=None):
+        argv, _platform = select_provider_argv(row, platform)
+        argv = list(argv or [])
+        if self.managed:
+            marker_indexes = [i for i, arg in enumerate(argv)
+                              if arg == PROMPT_MARKER]
+            if len(marker_indexes) != 1:
+                raise ValueError(
+                    "managed provider argv must contain exactly one literal "
+                    "$M8SHIFT_PROMPT item")
+            argv[marker_indexes[0]:marker_indexes[0]] = self.managed_options(row)
+        return render_argv_template(
+            argv, agent=row.get("name", ""), prompt=prompt, run_id=run_id,
+        )
+
+    def stop(self, process_ref, mode="graceful"):
+        if mode not in {"graceful", "force"}:
+            raise ValueError("stop mode must be graceful or force")
+        return {
+            "schema": self.schema,
+            "provider": self.provider,
+            "operation": "stop",
+            "mode": mode,
+            "process_ref": process_ref,
+            "strategy": "process-group",
+        }
+
+    def resume(self, row, prompt, session_ref, run_id="", platform=None):
+        del row, prompt, session_ref, run_id, platform
+        raise ValueError(f"{self.provider} adapter does not declare resume support")
+
+    def health(self, process_ref=None, session_ref=""):
+        return {
+            "schema": self.schema,
+            "provider": self.provider,
+            "state": "unknown",
+            "process_ref": process_ref,
+            "session_ref_present": bool(session_ref),
+            "relay_completion": False,
+        }
+
+
+class OpenAICodexAdapter(DeclarativeAdapter):
+    provider = "openai-codex"
+    managed = True
+    supports_profile = True
+
+    def __init__(self):
+        super().__init__(self.provider)
+
+    def managed_options(self, row):
+        options = []
+        profile = row.get("profile", "")
+        effort = row.get("effort", "")
+        if profile:
+            options += ["--profile", profile]
+        options += ["--model", row.get("model", "")]
+        if effort:
+            options += ["--config", f'model_reasoning_effort="{effort}"']
+        identity = provider_identity_artifact(row)
+        if identity is not None:
+            _path, content = identity
+            options += ["--config", "developer_instructions=" +
+                        json.dumps(content, ensure_ascii=False)]
+        return options
+
+    def managed_selector(self, argv):
+        selectors = {
+            "--model", "--model=", "--profile", "--profile=", "--effort",
+            "--effort=", "-m", "-p",
+        }
+        for index, arg in enumerate(argv):
+            if arg in selectors or any(
+                    arg.startswith(prefix) for prefix in selectors
+                    if prefix.endswith("=")):
+                return arg
+            if arg in {"--config", "-c"} and index + 1 < len(argv):
+                if str(argv[index + 1]).split("=", 1)[0] == \
+                        "model_reasoning_effort":
+                    return f"{arg} model_reasoning_effort"
+            if arg.startswith("model_reasoning_effort="):
+                return arg
+        return ""
+
+
+class AnthropicClaudeAdapter(DeclarativeAdapter):
+    provider = "anthropic-claude"
+    managed = True
+
+    def __init__(self):
+        super().__init__(self.provider)
+
+    def managed_options(self, row):
+        options = ["--model", row.get("model", "")]
+        effort = row.get("effort", "")
+        if effort:
+            options += ["--effort", effort]
+        identity = provider_identity_artifact(row)
+        if identity is not None:
+            path, _content = identity
+            options += ["--append-system-prompt-file", path]
+        return options
+
+
+class GeminiAdapter(DeclarativeAdapter):
+    """Validated registry stub; live flags/resume await a probed CLI version."""
+
+    provider = "google-gemini"
+    validated_stub = True
+
+    def __init__(self):
+        super().__init__(self.provider)
+
+
+ADAPTER_REGISTRY = {}
+
+
+def register_adapter(adapter):
+    """Register one complete v1 adapter without changing generic callers."""
+    if not isinstance(adapter, AdapterInterface):
+        raise TypeError("adapter must implement AdapterInterface")
+    if (not isinstance(adapter.provider, str)
+            or not PROVIDER_TOKEN_RE.fullmatch(adapter.provider)):
+        raise ValueError("adapter provider key is invalid")
+    if adapter.provider in ADAPTER_REGISTRY:
+        raise ValueError(f"duplicate adapter for provider {adapter.provider}")
+    ADAPTER_REGISTRY[adapter.provider] = adapter
+    return adapter
+
+
+register_adapter(OpenAICodexAdapter())
+register_adapter(AnthropicClaudeAdapter())
+register_adapter(GeminiAdapter())
+MANAGED_PROVIDER_ADAPTERS = frozenset(
+    provider for provider, adapter in ADAPTER_REGISTRY.items()
+    if adapter.managed
+)
+
+
+def provider_adapter(provider):
+    """Dispatch by provider; unknown rows retain declarative argv behavior."""
+    return ADAPTER_REGISTRY.get(provider) or DeclarativeAdapter(provider)
+
+
+def managed_selector_in_argv(provider, argv):
+    """Compatibility wrapper around the provider adapter validation hook."""
+    return provider_adapter(provider).managed_selector(argv)
+
+
+def provider_managed_options(row):
+    """Compatibility wrapper; managed option compilation lives on adapters."""
+    return provider_adapter(row.get("provider", "")).managed_options(row)
+
+
 def provider_launch_argv(row, prompt, run_id="", platform=None):
-    """Build one shell-free provider argv from the row's single source of truth."""
-    argv, _platform = select_provider_argv(row, platform)
-    argv = list(argv or [])
-    if row.get("provider") in MANAGED_PROVIDER_ADAPTERS:
-        marker_indexes = [i for i, arg in enumerate(argv) if arg == PROMPT_MARKER]
-        if len(marker_indexes) != 1:
-            raise ValueError("managed provider argv must contain exactly one literal $M8SHIFT_PROMPT item")
-        marker = marker_indexes[0]
-        argv[marker:marker] = provider_managed_options(row)
-    return render_argv_template(
-        argv, agent=row.get("name", ""), prompt=prompt, run_id=run_id,
+    """Compatibility wrapper; launch compilation dispatches through the registry."""
+    return provider_adapter(row.get("provider", "")).launch_argv(
+        row, prompt, run_id, platform,
     )
 
 
@@ -2057,7 +2209,8 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
     model = agent.get("model", "")
     model_valid = (isinstance(model, str) and model != PROVIDER_MODEL_UNSET
                    and MODEL_ID_RE.fullmatch(model) is not None)
-    if provider in MANAGED_PROVIDER_ADAPTERS:
+    adapter = provider_adapter(provider)
+    if adapter.managed:
         if not model_valid:
             severity = "error" if active and launchable else "warning"
             findings.append({
@@ -2074,10 +2227,10 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
                     "severity": "error", "check": f"providers.{field}",
                     "message": f"{label} {field} must be a bounded safe token",
                 })
-        if provider == "anthropic-claude" and agent.get("profile") not in (None, ""):
+        if not adapter.supports_profile and agent.get("profile") not in (None, ""):
             findings.append({
                 "severity": "error", "check": "providers.profile_unsupported",
-                "message": f"{label} profile is not supported by the anthropic-claude adapter",
+                "message": f"{label} profile is not supported by the {provider} adapter",
             })
         for argv_label, template in provider_argv_templates(agent):
             embedded = managed_selector_in_argv(provider, template)

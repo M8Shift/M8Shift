@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Vendor-neutral agent CLI adapter spine (#65/#66, RFC 073 slice 1).** The
+  runtime companion now dispatches a formal `launch_argv`/`stop`/`resume`/`health`
+  contract through a provider-keyed registry. Existing Codex and Claude managed
+  launch compilation moved behind adapters with byte-identical conformance
+  fixtures; a registered Gemini validated stub proves that a third provider can
+  join without a core or generic-launcher change while live flags and resume
+  remain fail-closed pending probe evidence. RFC 073 phases detached durability
+  by extending the RFC 072 supervisor rather than creating a second daemon.
 - **Exact-identity fleet orchestration (#85, RFC 072 slices 1–6).** The runtime
   companion now validates declarative provider-template + explicit-model fleet
   specs, reports a pure desired/observed plan and health view, bootstraps one
