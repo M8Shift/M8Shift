@@ -41,6 +41,7 @@ M8Shift is **free and open source**, released under the
 | [stage2-rationale.md](stage2-rationale.md) | Design rationale behind the N-agent relay model. |
 | [context-pack-measurements.md](context-pack-measurements.md) | DoD evidence log: measured token reduction + output equivalence of the context companion (RFC 034), for Claude and Codex. |
 | [status-performance-investigation.md](status-performance-investigation.md) | Measured `status --json` scaling, interpreter/build comparison, and incremental turn-fold prototype evidence. |
+| [multi-agent-scratch-validation.md](multi-agent-scratch-validation.md) | Scratch evidence for N-agent routing, pinned listeners, concurrent Codex limits, degree-2 worktrees, and safe roster expansion. |
 | [rtk-shell-output-policy.md](rtk-shell-output-policy.md) | Usage policy for the optional RTK shell-output adapter: recommended modes, forbidden diff mode, self-declared RTK visibility, and `rtk discover` audit guidance. |
 
 ## Design decisions
