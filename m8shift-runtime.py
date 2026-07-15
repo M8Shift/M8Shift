@@ -91,6 +91,11 @@ AGENT_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 PLATFORM_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 ROUTING_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
+MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
+PROVIDER_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
+PROVIDER_MODEL_UNSET = "UNSET"
+PROMPT_MARKER = "$M8SHIFT_PROMPT"
+MANAGED_PROVIDER_ADAPTERS = {"openai-codex", "anthropic-claude"}
 PROVIDER_MODES = {"interactive", "headless", "hybrid", "local"}
 DEFAULT_TIER_ORDER = ["economy", "balanced", "flagship"]
 DEFAULT_COST_ORDER = ["$", "$$", "$$$", "$$$$"]
@@ -275,6 +280,7 @@ def provider_template(agent):
         }.get(agent, agent),
         "mode": "interactive" if agent in {"claude", "gemini", "vibe"} else "headless",
         "anchor": DEFAULT_ANCHORS.get(agent, "AGENTS.md"),
+        "model": PROVIDER_MODEL_UNSET,
         "argv": argv,
         "capabilities": DEFAULT_CAPABILITIES.get(agent, ["read_repo", "review"]),
         "requires_env": [],
@@ -295,6 +301,7 @@ def curated_provider_examples():
             "provider": "openai-codex",
             "mode": "headless",
             "anchor": "AGENTS.md",
+            "model": PROVIDER_MODEL_UNSET,
             "argv": ["codex", "exec", "$M8SHIFT_PROMPT"],
             "argv_by_platform": {
                 "default": ["codex", "exec", "$M8SHIFT_PROMPT"],
@@ -311,6 +318,7 @@ def curated_provider_examples():
             "provider": "anthropic-claude",
             "mode": "headless",
             "anchor": "CLAUDE.md",
+            "model": PROVIDER_MODEL_UNSET,
             "argv": ["claude", "-p", "$M8SHIFT_PROMPT"],
             "argv_by_platform": {
                 "default": ["claude", "-p", "$M8SHIFT_PROMPT"],
@@ -1821,7 +1829,73 @@ def render_argv_template(argv, *, agent, prompt, run_id=""):
     return out
 
 
-def provider_entry_findings(agent, prefix, seen=None):
+def provider_argv_templates(agent):
+    """Return every configured argv template with a stable diagnostic label."""
+    templates = []
+    if isinstance(agent.get("argv"), list) and agent.get("argv"):
+        templates.append(("argv", agent["argv"]))
+    by_platform = agent.get("argv_by_platform")
+    if isinstance(by_platform, dict):
+        for platform, argv in by_platform.items():
+            if isinstance(argv, list) and argv:
+                templates.append((f"argv_by_platform[{platform!r}]", argv))
+    return templates
+
+
+def managed_selector_in_argv(provider, argv):
+    """Name the first provider-managed selector embedded in a base argv."""
+    selectors = {"--model", "--model=", "--profile", "--profile=", "--effort", "--effort="}
+    if provider == "openai-codex":
+        selectors.update({"-m", "-p"})
+    for index, arg in enumerate(argv):
+        if arg in selectors or any(arg.startswith(prefix) for prefix in selectors if prefix.endswith("=")):
+            return arg
+        if provider == "openai-codex" and arg in {"--config", "-c"}:
+            if index + 1 < len(argv) and str(argv[index + 1]).split("=", 1)[0] == "model_reasoning_effort":
+                return f"{arg} model_reasoning_effort"
+        if provider == "openai-codex" and arg.startswith("model_reasoning_effort="):
+            return arg
+    return ""
+
+
+def provider_managed_options(row):
+    """Compile validated vendor options. The provider row is the sole authority."""
+    provider = row.get("provider", "")
+    model = row.get("model", "")
+    profile = row.get("profile", "")
+    effort = row.get("effort", "")
+    if provider == "openai-codex":
+        options = []
+        if profile:
+            options += ["--profile", profile]
+        options += ["--model", model]
+        if effort:
+            options += ["--config", f'model_reasoning_effort="{effort}"']
+        return options
+    if provider == "anthropic-claude":
+        options = ["--model", model]
+        if effort:
+            options += ["--effort", effort]
+        return options
+    return []
+
+
+def provider_launch_argv(row, prompt, run_id="", platform=None):
+    """Build one shell-free provider argv from the row's single source of truth."""
+    argv, _platform = select_provider_argv(row, platform)
+    argv = list(argv or [])
+    if row.get("provider") in MANAGED_PROVIDER_ADAPTERS:
+        marker_indexes = [i for i, arg in enumerate(argv) if arg == PROMPT_MARKER]
+        if len(marker_indexes) != 1:
+            raise ValueError("managed provider argv must contain exactly one literal $M8SHIFT_PROMPT item")
+        marker = marker_indexes[0]
+        argv[marker:marker] = provider_managed_options(row)
+    return render_argv_template(
+        argv, agent=row.get("name", ""), prompt=prompt, run_id=run_id,
+    )
+
+
+def provider_entry_findings(agent, prefix, seen=None, active=True):
     findings = []
     if not isinstance(agent, dict):
         return [{"severity": "error", "check": "providers.agent", "message": f"{prefix} is not an object"}]
@@ -1835,6 +1909,7 @@ def provider_entry_findings(agent, prefix, seen=None):
     label = name or prefix
     if not isinstance(agent.get("provider", ""), str) or not agent.get("provider", "").strip():
         findings.append({"severity": "error", "check": "providers.provider", "message": f"{label} provider is required"})
+    provider = agent.get("provider", "")
     mode = agent.get("mode", "")
     if mode not in PROVIDER_MODES:
         findings.append({"severity": "error", "check": "providers.mode", "message": f"{label} mode must be one of {', '.join(sorted(PROVIDER_MODES))}"})
@@ -1859,6 +1934,48 @@ def provider_entry_findings(agent, prefix, seen=None):
             elif not isinstance(platform_argv, list) or not all(isinstance(v, str) and v for v in platform_argv):
                 findings.append({"severity": "error", "check": "providers.argv_by_platform", "message": f"{label} argv_by_platform[{platform!r}] must be a list of non-empty strings"})
     selected_argv, selected_key = select_provider_argv(agent)
+    launchable = bool(provider_argv_templates(agent))
+    model = agent.get("model", "")
+    model_valid = (isinstance(model, str) and model != PROVIDER_MODEL_UNSET
+                   and MODEL_ID_RE.fullmatch(model) is not None)
+    if provider in MANAGED_PROVIDER_ADAPTERS:
+        if not model_valid:
+            severity = "error" if active and launchable else "warning"
+            findings.append({
+                "severity": severity,
+                "check": "providers.model",
+                "message": (f"{label} model pin is unset or invalid; set model to a real "
+                            "accessible model id before provider-backed launch"),
+            })
+        for field in ("profile", "effort"):
+            value = agent.get(field, "")
+            if value not in (None, "") and (not isinstance(value, str)
+                                              or not PROVIDER_TOKEN_RE.fullmatch(value)):
+                findings.append({
+                    "severity": "error", "check": f"providers.{field}",
+                    "message": f"{label} {field} must be a bounded safe token",
+                })
+        if provider == "anthropic-claude" and agent.get("profile") not in (None, ""):
+            findings.append({
+                "severity": "error", "check": "providers.profile_unsupported",
+                "message": f"{label} profile is not supported by the anthropic-claude adapter",
+            })
+        for argv_label, template in provider_argv_templates(agent):
+            embedded = managed_selector_in_argv(provider, template)
+            if embedded:
+                findings.append({
+                    "severity": "error", "check": "providers.managed_selector",
+                    "message": (f"{label} {argv_label} embeds managed selector {embedded!r}; "
+                                "move this value to the provider model/profile/effort field"),
+                })
+            exact = sum(arg == PROMPT_MARKER for arg in template)
+            embedded_prompt = any(PROMPT_MARKER in arg and arg != PROMPT_MARKER for arg in template)
+            if exact != 1 or embedded_prompt:
+                findings.append({
+                    "severity": "error", "check": "providers.prompt_marker",
+                    "message": (f"{label} {argv_label} must contain exactly one literal "
+                                "$M8SHIFT_PROMPT item"),
+                })
     if mode in {"headless", "hybrid"} and not selected_argv:
         findings.append({"severity": "warning", "check": "providers.argv_missing", "message": f"{label} has mode={mode} but no argv"})
     elif isinstance(selected_argv, list) and selected_argv:
@@ -1907,7 +2024,7 @@ def provider_findings(registry):
         findings.append({"severity": "error", "check": "providers.examples", "message": "examples must be a list"})
     else:
         for idx, example in enumerate(examples):
-            findings.extend(provider_entry_findings(example, f"examples[{idx}]", None))
+            findings.extend(provider_entry_findings(example, f"examples[{idx}]", None, active=False))
     return findings
 
 
@@ -1981,7 +2098,7 @@ def cmd_providers_list(args):
         return 0
     for row in rows:
         caps = ",".join(row.get("capabilities", [])) or "-"
-        print(f"{row.get('name')}  provider={row.get('provider')} mode={row.get('mode')} anchor={row.get('anchor')} caps={caps}")
+        print(f"{row.get('name')}  provider={row.get('provider')} model={row.get('model', PROVIDER_MODEL_UNSET)} mode={row.get('mode')} anchor={row.get('anchor')} caps={caps}")
     return 0
 
 
@@ -2014,8 +2131,7 @@ def cmd_providers_check(args):
 
 
 def render_provider_argv(row, prompt, run_id=""):
-    argv, _platform = select_provider_argv(row)
-    return render_argv_template(argv, agent=row.get("name", ""), prompt=prompt, run_id=run_id)
+    return provider_launch_argv(row, prompt, run_id)
 
 
 def cmd_providers_render(args):
@@ -2023,12 +2139,19 @@ def cmd_providers_render(args):
     row = provider_by_name(names[0]) if names else None
     if not row:
         sys.exit(f"m8shift-runtime: no provider entry for {args.agent}")
-    if any(f["severity"] == "error" for f in provider_findings({"schema": "m8shift.providers.v1", "agents": [row]})):
-        sys.exit(f"m8shift-runtime: provider entry for {args.agent} is invalid")
+    errors = [f for f in provider_findings(
+        {"schema": "m8shift.providers.v1", "agents": [row]}
+    ) if f["severity"] == "error"]
+    if errors:
+        sys.exit(f"m8shift-runtime: provider entry for {args.agent} is invalid: "
+                 + "; ".join(f["message"] for f in errors))
     argv_template, platform_key = select_provider_argv(row)
     if not argv_template:
         sys.exit(f"m8shift-runtime: provider entry for {args.agent} has no argv")
-    argv = render_provider_argv(row, args.prompt, args.run)
+    try:
+        argv = provider_launch_argv(row, args.prompt, args.run)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: provider entry for {args.agent} is invalid: {exc}")
     payload = {
         "agent": row.get("name"),
         "argv": argv,
@@ -4135,6 +4258,9 @@ def listener_profile_findings(doc, agent):
         problems.append("env_allowlist must be a list of environment variable names")
     if not isinstance(doc.get("start_on_idle", False), bool):
         problems.append("start_on_idle must be a boolean (default false)")
+    agent_model = doc.get("agent_model", "")
+    if not isinstance(agent_model, str) or (agent_model and not MODEL_ID_RE.fullmatch(agent_model)):
+        problems.append("agent_model must be a valid 1-128 character model id")
     return problems
 
 
@@ -4148,6 +4274,7 @@ def normalize_listener_profile(doc, source):
         "cwd": cwd_abs,
         "env_allowlist": list(doc.get("env_allowlist") or []),
         "start_on_idle": bool(doc.get("start_on_idle", False)),
+        "agent_model": doc.get("agent_model", "") or "",
         "source": source,
     }
 
@@ -4172,9 +4299,13 @@ def load_listener_profile(args, agent):
         if errors:
             sys.exit(f"m8shift-runtime: provider entry for {agent} is invalid: "
                      + "; ".join(f["message"] for f in errors))
-        argv, _platform = select_provider_argv(row)
-        if not argv:
+        argv_template, _platform = select_provider_argv(row)
+        if not argv_template:
             sys.exit(f"m8shift-runtime: provider entry for {agent} has no argv (nothing to launch headlessly)")
+        try:
+            argv = provider_launch_argv(row, PROMPT_MARKER)
+        except ValueError as exc:
+            sys.exit(f"m8shift-runtime: provider entry for {agent} is invalid: {exc}")
         doc = {
             "schema": LISTENER_PROFILE_SCHEMA,
             "agent": agent,
@@ -4182,6 +4313,7 @@ def load_listener_profile(args, agent):
             "cwd": ".",
             "env_allowlist": row.get("env_allowlist") or [],
             "start_on_idle": False,
+            "agent_model": row.get("model", ""),
         }
         source = os.path.relpath(PROVIDERS, HERE)
     problems = listener_profile_findings(doc, agent)
@@ -4225,6 +4357,8 @@ def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=Fal
         argv += ["--env-allowlist", ",".join(profile["env_allowlist"])]
     if profile["start_on_idle"]:
         argv.append("--start-on-idle")
+    if profile.get("agent_model"):
+        argv += ["--agent-model", profile["agent_model"]]
     if resume_working:
         argv.append("--resume-working")
     argv += ["--cmd", *provider_argv]
@@ -4422,7 +4556,8 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
         "backend_fallback_reason": fallback_reason,
         "mode": "foreground" if args.foreground else "detached",
         "profile": {key: profile[key] for key in
-                    ("schema", "agent", "argv", "cwd", "env_allowlist", "start_on_idle")},
+                    ("schema", "agent", "argv", "cwd", "env_allowlist", "start_on_idle",
+                     "agent_model")},
         "profile_source": profile["source"],
         "runner": os.path.relpath(runner_path, HERE),
         "runner_exists": os.path.isfile(runner_path),

@@ -4003,6 +4003,8 @@ import sys
 run_id = os.environ["M8SHIFT_RUN_ID"]
 with open("runner-run-id.txt", "w", encoding="utf-8") as f:
     f.write(run_id)
+with open("runner-model.txt", "w", encoding="utf-8") as f:
+    f.write(os.environ["M8SHIFT_AGENT_MODEL"])
 subprocess.check_call([sys.executable, "m8shift.py", "claim", "claude"])
 subprocess.check_call([
     sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
@@ -4012,12 +4014,17 @@ subprocess.check_call([
         r = subprocess.run(
             [sys.executable, runner, "claude", "--m8shift", "M8SHIFT.md",
              "--m8shift-py", "m8shift.py", "--start-on-idle", "--once",
-             "--interval", "1", "--max-retries", "1", "--cmd", sys.executable, "-c", code],
+             "--interval", "1", "--max-retries", "1",
+             "--env-allowlist", "HOME,PATH,M8SHIFT_AGENT_MODEL",
+             "--agent-model", "pinned-model", "--cmd", sys.executable, "-c", code],
             cwd=self.d, capture_output=True, text=True,
+            env=dict(os.environ, M8SHIFT_AGENT_MODEL="ambient-model"),
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         with open(os.path.join(self.d, "runner-run-id.txt"), encoding="utf-8") as f:
             run_id = f.read()
+        with open(os.path.join(self.d, "runner-model.txt"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "pinned-model")
         self.assertRegex(run_id, r"^\d{8}T\d{6}Z-claude-[0-9a-f]{8}$")
         self.assertIn(f"- x_run_id: {run_id}", self.md())
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"), encoding="utf-8") as f:
@@ -4037,6 +4044,7 @@ subprocess.check_call([
             plan = json.load(f)
         self.assertEqual(plan["schema"], "m8shift.headless.run_plan.v1")
         self.assertEqual(plan["agent"], "claude")
+        self.assertEqual(plan["agent_model"], "pinned-model")
         for field in ("argv", "cwd", "run_id", "prompt_hash", "env_allowlist",
                       "timeout", "kill_grace", "expected_transition"):
             self.assertIn(field, plan)
@@ -4243,6 +4251,13 @@ sys.exit(7)
         )
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("invalid agent name", bad.stderr + bad.stdout)
+        invalid_model = subprocess.run(
+            [sys.executable, runner, "claude", "--agent-model", "bad model", "--dry-run",
+             "--cmd", sys.executable, "-c", "print('x')"],
+            cwd=self.d, capture_output=True, text=True,
+        )
+        self.assertNotEqual(invalid_model.returncode, 0)
+        self.assertIn("invalid agent model", invalid_model.stderr + invalid_model.stdout)
 
     def test_headless_runner_turn_timeout_is_bounded_and_logged(self):
         self.init()
@@ -4744,6 +4759,39 @@ class TestRFC047ListenerPR1(ListenerCLIBase):
         self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "listeners")))
         self.assertFalse(os.path.exists(
             os.path.join(self.d, ".m8shift", "runtime", "logs", "claude-listener.log")))
+
+    def test_provider_dry_run_requires_and_propagates_pinned_model(self):
+        self.init()
+        providers = os.path.join(self.d, ".m8shift", "providers.json")
+        os.makedirs(os.path.dirname(providers), exist_ok=True)
+        row = {
+            "name": "claude", "provider": "anthropic-claude", "mode": "headless",
+            "anchor": "CLAUDE.md", "argv": ["claude", "-p", "$M8SHIFT_PROMPT"],
+            "capabilities": [], "requires_env": [], "env_allowlist": ["PATH"],
+            "permissions": "workspace-write",
+        }
+        with open(providers, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.providers.v1", "agents": [row]}, fh)
+        refused = self.rt("listener", "start", "--agent", "claude", "--provider", "--dry-run")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("model pin", refused.stderr)
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
+        row.update(model="claude-opus-4-8", effort="high")
+        with open(providers, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.providers.v1", "agents": [row]}, fh)
+        result = self.rt("listener", "start", "--agent", "claude", "--provider", "--dry-run",
+                         "--backend", "local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(result.stdout)["plan"]
+        self.assertEqual(plan["profile"]["agent_model"], "claude-opus-4-8")
+        self.assertEqual(plan["profile"]["argv"][:6], [
+            "claude", "-p", "--model", "claude-opus-4-8", "--effort", "high",
+        ])
+        preview = plan["runner_argv_preview"]
+        self.assertEqual(preview[preview.index("--agent-model") + 1], "claude-opus-4-8")
+        self.assertLess(preview.index("--agent-model"), preview.index("--cmd"))
+        self.assertFalse(os.path.exists(self.listeners_dir()))
 
     def test_t3_start_refuses_live_pid_without_restart(self):
         # RFC 047 PR1 test 3 (RFC Phase-2 test 2): one listener per agent lane.
@@ -6841,11 +6889,23 @@ class TestRuntimeCompanion(CLIBase):
         self.assertIn("//", examples["codex"])
         self.assertIn("argv_by_platform", examples["codex"])
         self.assertIn("env_allowlist", examples["codex"])
+        self.assertEqual(examples["codex"]["model"], "UNSET")
+        self.assertTrue(all("model" in row for row in registry["agents"]))
+        self.assertIn("model=UNSET", self.rt("providers", "list").stdout)
+        check = json.loads(self.rt("providers", "check", "--json").stdout)
+        self.assertFalse(check["ok"], check)
+        self.assertIn("providers.model", {f["check"] for f in check["findings"]})
+        for row in registry["agents"]:
+            if row["name"] == "codex":
+                row["model"] = "gpt-5.2-codex"
+        with open(os.path.join(self.d, ".m8shift", "providers.json"), "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
         check = json.loads(self.rt("providers", "check", "--json").stdout)
         self.assertTrue(check["ok"], check)
         rendered = json.loads(self.rt("providers", "render", "codex",
                                       "--prompt", "do one turn", "--run", "run1", "--json").stdout)
-        self.assertEqual(rendered["argv"], ["codex", "exec", "do one turn"])
+        self.assertEqual(rendered["argv"],
+                         ["codex", "exec", "--model", "gpt-5.2-codex", "do one turn"])
 
         roles = json.loads(self.rt("roles", "list", "--json").stdout)
         self.assertIn("reviewer", roles["roles"])
@@ -6911,7 +6971,12 @@ class TestRuntimeCompanion(CLIBase):
         path = os.path.join(self.d, ".m8shift", "providers.json")
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
+        for provider_row in data["agents"]:
+            if provider_row.get("provider") in {"openai-codex", "anthropic-claude"} \
+                    and provider_row.get("argv"):
+                provider_row["model"] = "test-model"
         data["agents"][0]["mode"] = "headless"
+        data["agents"][0]["model"] = "claude-opus-4-8"
         data["agents"][0]["argv"] = ["missing-default-provider-binary", "$M8SHIFT_PROMPT"]
         data["agents"][0]["argv_by_platform"] = {
             sys.platform: [sys.executable, "-c", "$M8SHIFT_PROMPT"],
@@ -6921,7 +6986,8 @@ class TestRuntimeCompanion(CLIBase):
             json.dump(data, fh)
         rendered = json.loads(self.rt("providers", "render", data["agents"][0]["name"],
                                       "--prompt", "print('ok')", "--json").stdout)
-        self.assertEqual(rendered["argv"], [sys.executable, "-c", "print('ok')"])
+        self.assertEqual(rendered["argv"],
+                         [sys.executable, "-c", "--model", "claude-opus-4-8", "print('ok')"])
         self.assertEqual(rendered["platform"], sys.platform)
         check = json.loads(self.rt("providers", "check", "--json").stdout)
         self.assertTrue(check["ok"], check)
@@ -6935,6 +7001,130 @@ class TestRuntimeCompanion(CLIBase):
         self.assertNotEqual(bad.returncode, 0)
         findings = json.loads(bad.stdout)["findings"]
         self.assertIn("providers.argv_by_platform_string", {f["check"] for f in findings})
+
+    def test_provider_model_pin_validation_and_exact_vendor_argv(self):
+        self.init()
+        self.rt("providers", "init", "--force")
+        path = os.path.join(self.d, ".m8shift", "providers.json")
+
+        def row(name, provider, model, argv, **extra):
+            value = {
+                "name": name, "provider": provider, "mode": "headless",
+                "anchor": "AGENTS.md", "model": model, "argv": argv,
+                "capabilities": [], "requires_env": [], "env_allowlist": [],
+                "permissions": "workspace-write",
+            }
+            value.update(extra)
+            return value
+
+        registry = {
+            "schema": "m8shift.providers.v1", "examples": [],
+            "agents": [row("codex", "openai-codex", "m",
+                           ["codex", "exec", "$M8SHIFT_PROMPT"])],
+        }
+
+        def write_registry():
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(registry, fh)
+
+        write_registry()
+        plain = json.loads(self.rt("providers", "render", "codex", "--prompt", "turn", "--json").stdout)
+        self.assertEqual(plain["argv"], ["codex", "exec", "--model", "m", "turn"])
+
+        registry["agents"][0].update(profile="m8shift-codex", effort="high")
+        write_registry()
+        configured = json.loads(self.rt("providers", "render", "codex", "--prompt", "turn", "--json").stdout)
+        self.assertEqual(configured["argv"], [
+            "codex", "exec", "--profile", "m8shift-codex", "--model", "m",
+            "--config", 'model_reasoning_effort="high"', "turn",
+        ])
+
+        registry["agents"] = [row(
+            "claude", "anthropic-claude", "claude-opus-4-8",
+            ["claude", "-p", "$M8SHIFT_PROMPT"], effort="high",
+        )]
+        write_registry()
+        claude = json.loads(self.rt("providers", "render", "claude", "--prompt", "turn", "--json").stdout)
+        self.assertEqual(claude["argv"], [
+            "claude", "-p", "--model", "claude-opus-4-8", "--effort", "high", "turn",
+        ])
+
+        # The same compiler handles platform argv, preserving the prompt as one item.
+        registry["agents"][0]["argv_by_platform"] = {
+            sys.platform: ["claude", "-p", "$M8SHIFT_PROMPT"],
+        }
+        write_registry()
+        platform = json.loads(self.rt("providers", "render", "claude", "--prompt", "x;y", "--json").stdout)
+        self.assertEqual(platform["argv"][-1], "x;y")
+        self.assertEqual(platform["argv"].count("x;y"), 1)
+
+        # Custom providers keep explicit argv authority and require no invented adapter flags.
+        registry["agents"] = [row(
+            "custom", "local-wrapper", "UNSET",
+            [sys.executable, "-c", "$M8SHIFT_PROMPT"],
+        )]
+        write_registry()
+        custom = json.loads(self.rt("providers", "render", "custom", "--prompt", "print(1)", "--json").stdout)
+        self.assertEqual(custom["argv"], [sys.executable, "-c", "print(1)"])
+
+    def test_provider_model_pin_fail_closed_and_legacy_readability(self):
+        self.init()
+        self.rt("providers", "init", "--force")
+        path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(path, encoding="utf-8") as fh:
+            registry = json.load(fh)
+        codex = next(row for row in registry["agents"] if row["name"] == "codex")
+        registry["examples"] = []
+
+        def findings_for(value):
+            if value is ...:
+                codex.pop("model", None)
+            else:
+                codex["model"] = value
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(registry, fh)
+            result = self.rt("providers", "check", "--json")
+            return result, json.loads(result.stdout)["findings"]
+
+        for invalid in (..., None, "UNSET", "bad model", "bad\nmodel", "x" * 129):
+            result, findings = findings_for(invalid)
+            self.assertNotEqual(result.returncode, 0, invalid)
+            self.assertIn("providers.model", {f["check"] for f in findings})
+
+        for valid in ("m", "A" + "x" * 127, "vendor:model/name+rev~1"):
+            result, findings = findings_for(valid)
+            self.assertEqual(result.returncode, 0, findings)
+
+        codex["model"] = "gpt-5.2-codex"
+        for field, invalid in (("profile", "bad profile"), ("effort", "x" * 129)):
+            codex[field] = invalid
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(registry, fh)
+            payload = json.loads(self.rt("providers", "check", "--json").stdout)
+            self.assertIn(f"providers.{field}", {f["check"] for f in payload["findings"]})
+            codex.pop(field)
+
+        codex["argv"] = ["codex", "exec", "--model", "other", "$M8SHIFT_PROMPT"]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        payload = json.loads(self.rt("providers", "check", "--json").stdout)
+        self.assertIn("providers.managed_selector", {f["check"] for f in payload["findings"]})
+
+        codex["argv"] = ["codex", "exec", "prefix-$M8SHIFT_PROMPT"]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        payload = json.loads(self.rt("providers", "check", "--json").stdout)
+        self.assertIn("providers.prompt_marker", {f["check"] for f in payload["findings"]})
+
+        # A legacy non-launchable managed row remains inspectable; unset is advisory only.
+        codex.update(mode="interactive", argv=[], model="UNSET")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        result = self.rt("providers", "check", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, payload)
+        self.assertTrue(any(f["check"] == "providers.model" and f["severity"] == "warning"
+                            for f in payload["findings"]))
 
     def write_routing_manifests(self, models, task_types, defaults=None):
         routing_dir = os.path.join(self.d, ".m8shift", "routing")
