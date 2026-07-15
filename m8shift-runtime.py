@@ -254,6 +254,14 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
+def write_text_atomic(path, text):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def read_text(path):
     with open(path, encoding="utf-8") as fh:
         return fh.read()
@@ -1891,13 +1899,51 @@ def provider_managed_options(row):
         options += ["--model", model]
         if effort:
             options += ["--config", f'model_reasoning_effort="{effort}"']
+        identity = provider_identity_artifact(row)
+        if identity is not None:
+            _path, content = identity
+            options += ["--config", "developer_instructions=" +
+                        json.dumps(content, ensure_ascii=False)]
         return options
     if provider == "anthropic-claude":
         options = ["--model", model]
         if effort:
             options += ["--effort", effort]
+        identity = provider_identity_artifact(row)
+        if identity is not None:
+            path, _content = identity
+            options += ["--append-system-prompt-file", path]
         return options
     return []
+
+
+def provider_identity_artifact(row):
+    """Return a validated exact-identity artifact, or fail closed.
+
+    Only RFC 072 fleet rows carry these fields.  The relative path is derived
+    from the exact agent name and may neither redirect nor symlink elsewhere.
+    """
+    schema = row.get("identity_schema")
+    relpath = row.get("identity_file")
+    if schema in (None, "") and relpath in (None, ""):
+        return None
+    name = row.get("name", "")
+    if schema != FLEET_IDENTITY_SCHEMA or not AGENT_RE.fullmatch(name or ""):
+        raise ValueError("invalid exact-identity metadata")
+    expected_relpath = fleet_identity_relpath(name)
+    if relpath != expected_relpath:
+        raise ValueError(f"identity_file must be {expected_relpath}")
+    path = fleet_identity_path(name)
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise ValueError("identity artifact must be a regular non-symlink file")
+        content = read_text(path)
+    except OSError as exc:
+        raise ValueError(f"identity artifact is unavailable: {exc}")
+    if content != fleet_identity_text(name):
+        raise ValueError(f"identity artifact does not assert exact agent {name}")
+    return path, content
 
 
 def provider_launch_argv(row, prompt, run_id="", platform=None):
@@ -1930,6 +1976,11 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
     if not isinstance(agent.get("provider", ""), str) or not agent.get("provider", "").strip():
         findings.append({"severity": "error", "check": "providers.provider", "message": f"{label} provider is required"})
     provider = agent.get("provider", "")
+    try:
+        provider_identity_artifact(agent)
+    except ValueError as exc:
+        findings.append({"severity": "error", "check": "providers.identity",
+                         "message": f"{label} {exc}"})
     mode = agent.get("mode", "")
     if mode not in PROVIDER_MODES:
         findings.append({"severity": "error", "check": "providers.mode", "message": f"{label} mode must be one of {', '.join(sorted(PROVIDER_MODES))}"})
@@ -2367,6 +2418,108 @@ def cmd_fleet_health(args):
                   f"member={str(row['member']).lower()} identity={str(row['identity_ready']).lower()} "
                   f"provider={str(row['provider_ready']).lower()}")
     return 0 if ok else 1
+
+
+def fleet_holder_preflight(actor):
+    parsed = parse_agent_csv(actor)
+    if len(parsed) != 1:
+        raise ValueError("fleet apply requires one valid --by holder")
+    result = subprocess.run(
+        [sys.executable, CORE_PATH, "may-i-write", parsed[0]],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "holder has no live pen").strip()
+        raise ValueError(detail)
+    return parsed[0]
+
+
+def fleet_bootstrap(spec, actor):
+    """Materialize exact identities/providers, then delegate membership to core."""
+    actor = fleet_holder_preflight(actor)
+    registry = load_provider_registry()
+    templates = fleet_templates(registry)
+    rows = [row for row in registry.get("agents", []) if isinstance(row, dict)]
+    by_name = {row.get("name"): row for row in rows}
+    candidates = []
+    for item in spec["agents"]:
+        template = templates.get(item["template"])
+        if template is None:
+            raise ValueError(f"{item['name']} references missing provider template "
+                             f"{item['template']}")
+        candidates.append((item, fleet_provider_row(item, template)))
+
+    ensure_runtime_gitignore()
+    changed_identities = []
+    for item, _row in candidates:
+        path = fleet_identity_path(item["name"])
+        content = fleet_identity_text(item["name"])
+        try:
+            unchanged = read_text(path) == content
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            write_text_atomic(path, content)
+            changed_identities.append(item["name"])
+
+    for item, row in candidates:
+        by_name[item["name"]] = row
+    new_rows = []
+    emitted = set()
+    for row in rows:
+        name = row.get("name")
+        if name in by_name and name not in emitted:
+            new_rows.append(by_name[name])
+            emitted.add(name)
+    for item, _row in candidates:
+        if item["name"] not in emitted:
+            new_rows.append(by_name[item["name"]])
+            emitted.add(item["name"])
+    updated = dict(registry)
+    updated["agents"] = new_rows
+    errors = []
+    for item, row in candidates:
+        errors.extend(f for f in provider_entry_findings(
+            row, item["name"], set(), active=True) if f["severity"] == "error")
+    if errors:
+        raise ValueError("bootstrapped provider registry is invalid: " +
+                         "; ".join(f["message"] for f in errors))
+    providers_changed = updated != registry
+    if providers_changed:
+        write_json_atomic(PROVIDERS, updated)
+
+    added = []
+    for item, _row in candidates:
+        result = subprocess.run(
+            [sys.executable, CORE_PATH, "roster", "add", item["name"], "--by", actor],
+            cwd=HERE, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "roster add failed").strip()
+            raise ValueError(f"core roster add {item['name']} failed: {detail}")
+        added.append(item["name"])
+    event = {"schema": "m8shift.fleet.event.v1", "event": "fleet.applied",
+             "at": iso(), "by": actor, "agents": added,
+             "identity_changes": changed_identities,
+             "providers_changed": providers_changed}
+    append_jsonl(FLEET_EVENTS, event)
+    return event
+
+
+def cmd_fleet_apply(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        event = fleet_bootstrap(spec, args.by)
+        plan = build_fleet_plan(spec)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    payload = {"ok": True, "event": event, "remaining_actions": plan["actions"]}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"✓ fleet bootstrap applied by {event['by']} for "
+              + ",".join(event["agents"]))
+    return 0
 
 
 def routing_order(manifest, key, default):
@@ -7563,6 +7716,15 @@ def main():
     fh.add_argument("--json", action="store_true",
                     help="emit machine-readable JSON instead of human output")
     fh.set_defaults(fn=cmd_fleet_health)
+    fa = fleet_sub.add_parser(
+        "apply", help="bootstrap identities/providers and delegate roster additions to core")
+    fa.add_argument("--spec", required=True,
+                    help="path to a m8shift.fleet.spec.v1 JSON document")
+    fa.add_argument("--by", required=True,
+                    help="current live pen holder attributed by core roster add")
+    fa.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of human output")
+    fa.set_defaults(fn=cmd_fleet_apply)
 
     route = sub.add_parser("route", help="advisory model/task routing")
     route_sub = route.add_subparsers(dest="route_verb", required=True)

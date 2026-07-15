@@ -16091,6 +16091,54 @@ class TestRFC072FleetPlan(ListenerCLIBase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing provider template", result.stderr)
 
+    def test_apply_bootstraps_exact_identity_and_delegates_idempotent_roster_add(self):
+        self.init("--agents", "claude,codex")
+        self.rt("providers", "init")
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        spec = self.fleet_spec()
+        agents_anchor = os.path.join(self.d, "AGENTS.md")
+        with open(agents_anchor, "rb") as fh:
+            anchor_before = fh.read()
+        result = self.rt("fleet", "apply", "--spec", spec,
+                         "--by", "codex", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("codex-2", self.lock()["agents"].split(","))
+        identity = os.path.join(self.d, ".m8shift", "runtime", "identities",
+                                "codex-2.md")
+        with open(identity, encoding="utf-8") as fh:
+            self.assertIn("M8SHIFT_AGENT=codex-2", fh.read())
+        with open(agents_anchor, "rb") as fh:
+            self.assertEqual(fh.read(), anchor_before)
+        rendered = json.loads(self.rt(
+            "providers", "render", "codex-2", "--prompt", "one turn", "--json"
+        ).stdout)
+        config = rendered["argv"][rendered["argv"].index("--config") + 1]
+        self.assertIn("developer_instructions=", config)
+        self.assertIn("codex-2", config)
+
+        relay_after_first = self.md()
+        second = self.rt("fleet", "apply", "--spec", spec,
+                         "--by", "codex", "--json")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.md(), relay_after_first)
+        remaining = json.loads(second.stdout)["remaining_actions"]
+        self.assertEqual(remaining, [])
+
+    def test_apply_without_live_holder_refuses_before_bootstrap(self):
+        self.init()
+        self.rt("providers", "init")
+        registry = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry, "rb") as fh:
+            before = fh.read()
+        result = self.rt("fleet", "apply", "--spec", self.fleet_spec(),
+                         "--by", "codex", "--json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("may not write", result.stderr)
+        with open(registry, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "identities", "codex-2.md")))
+
 
 class TestUpdateBackcompatCompanionHint(unittest.TestCase):
     """#29 backward-compat: a pre-RFC044 adopter (no companions installed) who
