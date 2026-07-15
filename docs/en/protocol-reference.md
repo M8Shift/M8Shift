@@ -129,6 +129,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
+./m8shift.py roster add <agent> --by <holder>  # holder-only live enrollment; changes only LOCK agents and never edits anchors
 ./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
 ./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
@@ -170,6 +171,10 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 
 - **`claim` first**: you must hold the pen (`WORKING_<you>`) to `append`.
   `claim` is **exclusive** (a single winner if several agents try together).
+- **Live roster add**: `roster add <agent> --by <holder>` requires the actor's
+  live `WORKING` pen and changes only the LOCK `agents:` value. It emits no turn
+  or ledger event and never edits an anchor; bootstrap the new exact identity
+  manually before routing work to it.
 - **Hard pre-write guard**: `may-i-write <you>` (alias: `guard <you>`) is read-only
   and exits 0 only when `holder=<you>`, `state=WORKING_<YOU>`, and the lock has not
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.

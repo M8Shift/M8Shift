@@ -600,6 +600,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
+./m8shift.py roster add <agent> --by <holder>  # holder-only live enrollment; changes only LOCK agents and never edits anchors
 ./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
 ./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
@@ -641,6 +642,10 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 
 - **`claim` first**: you must hold the pen (`WORKING_<you>`) to `append`.
   `claim` is **exclusive** (a single winner if several agents try together).
+- **Live roster add**: `roster add <agent> --by <holder>` requires the actor's
+  live `WORKING` pen and changes only the LOCK `agents:` value. It emits no turn
+  or ledger event and never edits an anchor; bootstrap the new exact identity
+  manually before routing work to it.
 - **Hard pre-write guard**: `may-i-write <you>` (alias: `guard <you>`) is read-only
   and exits 0 only when `holder=<you>`, `state=WORKING_<YOU>`, and the lock has not
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
@@ -1870,6 +1875,79 @@ def need_agent(a):
     if a not in ROSTER:
         sys.exit(tr("bad_agent", a=repr(a), agents=" | ".join(ROSTER)))
     return a
+
+
+def _replace_lock_agents_value(text, agents):
+    """Replace only the LOCK ``agents:`` value, preserving every other byte.
+
+    ``roster add`` deliberately does not use :func:`set_lock`: re-rendering the
+    LOCK would turn a membership change into an unrelated formatting rewrite.
+    The live v3 schema always has exactly one agents field; duplicate/missing
+    fields are refused here so this narrow mutator cannot guess at a corrupt or
+    legacy layout.
+    """
+    if text.count(LOCK_BEGIN) != 1 or text.count(LOCK_END) != 1:
+        sys.exit("refused: roster add requires exactly one LOCK block; nothing changed.")
+    i = text.index(LOCK_BEGIN) + len(LOCK_BEGIN)
+    j = text.index(LOCK_END, i)
+    block = text[i:j]
+    matches = list(re.finditer(r"(?m)^([ \t]*agents:[ \t]*)([^\r\n]*)$", block))
+    if len(matches) != 1:
+        sys.exit("refused: roster add requires exactly one LOCK agents field; "
+                 "nothing changed.")
+    match = matches[0]
+    replacement = match.group(1) + agents
+    return (text[:i + match.start()] + replacement
+            + text[i + match.end():])
+
+
+def cmd_roster_add(args):
+    """Add one active identity while preserving the current work window bytewise."""
+    raw_agent = (args.agent or "").strip()
+    valid, invalid = roster_tokens(raw_agent)
+    if invalid or len(valid) != 1 or "," in raw_agent:
+        sys.exit("refused: <agent> must be one normalized agent name (%s)." % AGENT_RE)
+    new_agent = valid[0]
+    by = (args.by_agent or "").strip().lower()
+
+    with file_lock() as guard:
+        text = load_or_die()
+        actor = need_agent(by)
+        lk = get_lock(text)
+        expected = "WORKING_%s" % actor.upper()
+        expiry = parse_iso(lk.get("expires"))
+        if (lk.get("holder") != actor or lk.get("state") != expected
+                or expiry is None or now() > expiry):
+            sys.exit("refused: roster add is holder-only and requires %s's live "
+                     "WORKING pen; state=%s, holder=%s, expires=%s. Nothing changed."
+                     % (actor, lk.get("state"), lk.get("holder"),
+                        lk.get("expires", "-")))
+
+        current = list(active_agents(lk))
+        if new_agent in current:
+            print("✓ roster unchanged: %s is already active." % new_agent)
+            return 0
+
+        updated = _replace_lock_agents_value(text, ",".join(current + [new_agent]))
+        # Validate the prospective complete relay before the single atomic write.
+        # Also prove locally that no parsed LOCK field other than agents moved.
+        validate_relay_text(updated)
+        after = get_lock(updated)
+        before_other = dict((k, v) for k, v in lk.items() if k != "agents")
+        after_other = dict((k, v) for k, v in after.items() if k != "agents")
+        if before_other != after_other:
+            sys.exit("refused: roster add would change non-roster LOCK state; "
+                     "nothing changed.")
+        guard.require_owned()
+        write(updated)
+
+    print("✓ roster: added %s by %s (current work window preserved)." %
+          (new_agent, actor))
+    print("WARNING: no anchor files were changed. Bootstrap %s manually with "
+          "M8SHIFT.protocol.md and a distinct launch-time identity; identities "
+          "sharing one generated anchor must never be treated as interchangeable."
+          % new_agent)
+    return 0
 
 # ---------------------------------------------------------------- init / anchors
 
@@ -7261,6 +7339,10 @@ def _dispatch_binding_gate(args):
         if getattr(args, "verb", "") in ("add", "done", "drop"):
             session_binding_gate(getattr(args, "agent", None))
         return
+    if cmd == "roster":
+        if getattr(args, "verb", "") == "add":
+            session_binding_gate(getattr(args, "by_agent", None))
+        return
     if cmd == "decisions":
         verb = getattr(args, "verb", "")
         if verb == "scaffold" or (verb == "target" and getattr(args, "set", "")):
@@ -10570,6 +10652,16 @@ def main():
     ci.add_argument("--force-companions", action="store_true",
                     help="replace an older/edited local companion (never downgrades a newer one)")
     i.set_defaults(fn=cmd_init)
+
+    ro = sub.add_parser(
+        "roster", help="manage the active relay roster without resetting session state")
+    ro_sub = ro.add_subparsers(dest="verb", required=True)
+    ro_add = ro_sub.add_parser(
+        "add", help="add one active identity using the current holder's live pen")
+    ro_add.add_argument("agent", help="new normalized agent name (for example: gemini or codex-2)")
+    ro_add.add_argument("--by", dest="by_agent", required=True,
+                        help="current live WORKING pen holder authorizing the membership write")
+    ro_add.set_defaults(fn=cmd_roster_add)
 
     up = sub.add_parser("update",
                         help="update a target project kit from a newer source copy; every write "

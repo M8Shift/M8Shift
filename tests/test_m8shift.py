@@ -1972,6 +1972,132 @@ class TestRoster(CLIBase):
         self.assertNotIn("claim claude", md)
 
 
+class TestRosterAdd(CLIBase):
+    @staticmethod
+    def _sha(data):
+        return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def _normalized_agents(text):
+        return re.sub(r"(?m)^([ \t]*agents:[ \t]*).*$", r"\1<roster>", text,
+                      count=1)
+
+    @staticmethod
+    def _journal_suffix(text):
+        marker = "<!-- M8SHIFT:TURN "
+        return text[text.index(marker):]
+
+    def _file_sha(self, name):
+        path = os.path.join(self.d, name)
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as fh:
+            return self._sha(fh.read())
+
+    def test_add_gemini_is_one_line_state_preserving_and_immediately_routable(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        before = self.md()
+        before_lock = self.lock()
+        evidence = dict((name, self._file_sha(name)) for name in (
+            "M8SHIFT.sessions.jsonl", "M8SHIFT.archive.md", "M8SHIFT.tasks.md"))
+
+        result = self.cw("roster", "add", "gemini", "--by", "claude")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Bootstrap gemini manually", result.stdout)
+        after = self.md()
+        self.assertEqual(sum(a != b for a, b in zip(
+            before.splitlines(keepends=True), after.splitlines(keepends=True))), 1)
+        self.assertEqual(self._normalized_agents(before), self._normalized_agents(after))
+        self.assertEqual(self._sha(self._journal_suffix(before).encode("utf-8")),
+                         self._sha(self._journal_suffix(after).encode("utf-8")))
+        after_lock = self.lock()
+        self.assertEqual(dict((k, v) for k, v in before_lock.items() if k != "agents"),
+                         dict((k, v) for k, v in after_lock.items() if k != "agents"))
+        self.assertEqual(after_lock["agents"], "claude,codex,gemini")
+        self.assertFalse(os.path.exists(os.path.join(self.d, "GEMINI.md")))
+        for name, digest in evidence.items():
+            self.assertEqual(self._file_sha(name), digest, name)
+
+        routed = self.cw("append", "claude", "--to", "gemini",
+                         "--done", "membership ready")
+        self.assertEqual(routed.returncode, 0, routed.stdout + routed.stderr)
+        self.assertEqual(self.cw("claim", "gemini").returncode, 0)
+
+    def test_codex_2_is_distinct_and_never_overwrites_shared_anchor(self):
+        self.init()
+        agents_path = os.path.join(self.d, "AGENTS.md")
+        with open(agents_path, "rb") as fh:
+            anchor_before = fh.read()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        result = self.cw("roster", "add", "codex-2", "--by", "claude")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("distinct launch-time identity", result.stdout)
+        with open(agents_path, "rb") as fh:
+            self.assertEqual(fh.read(), anchor_before)
+        self.assertNotEqual(self.cw("claim", "codex2").returncode, 0)
+        self.assertEqual(self.cw("append", "claude", "--to", "codex-2").returncode, 0)
+        self.assertEqual(self.cw("claim", "codex-2").returncode, 0)
+
+    def test_duplicate_add_is_idempotent(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        self.assertEqual(self.cw("roster", "add", "gemini", "--by", "claude").returncode, 0)
+        before = self.md()
+        result = self.cw("roster", "add", "gemini", "--by", "claude")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("already active", result.stdout)
+        self.assertEqual(self.md(), before)
+
+    def test_non_holder_idle_expired_and_corrupt_refuse_without_mutation(self):
+        self.init()
+        original = self.md()
+        self.assertNotEqual(
+            self.cw("roster", "add", "gemini", "--by", "claude").returncode, 0)
+        self.assertEqual(self.md(), original)
+
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        working = self.md()
+        self.assertNotEqual(
+            self.cw("roster", "add", "gemini", "--by", "codex").returncode, 0)
+        self.assertEqual(self.md(), working)
+
+        self.set_expires_past()
+        expired = self.md()
+        self.assertNotEqual(
+            self.cw("roster", "add", "gemini", "--by", "claude").returncode, 0)
+        self.assertEqual(self.md(), expired)
+
+        path = os.path.join(self.d, "M8SHIFT.md")
+        corrupt = expired.replace("agents:   claude,codex",
+                                  "agents:   claude,codex,@@", 1)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(corrupt)
+        self.assertNotEqual(
+            self.cw("roster", "add", "gemini", "--by", "claude").returncode, 0)
+        self.assertEqual(self.md(), corrupt)
+
+    def test_concurrent_adds_serialize_without_lost_membership(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        before = self.md()
+        procs = [subprocess.Popen(
+            [sys.executable, "m8shift.py", "roster", "add", agent,
+             "--by", "claude"], cwd=self.d, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+                 for agent in ("gemini", "codex-2")]
+        results = [proc.communicate(timeout=15) + (proc.returncode,) for proc in procs]
+        for stdout, stderr, returncode in results:
+            self.assertEqual(returncode, 0, stdout + stderr)
+        self.assertEqual(set(self.lock()["agents"].split(",")),
+                         {"claude", "codex", "gemini", "codex-2"})
+        self.assertEqual(self._journal_suffix(self.md()), self._journal_suffix(before))
+        before_lock = cowork.get_lock(before)
+        after_lock = self.lock()
+        self.assertEqual(dict((k, v) for k, v in before_lock.items() if k != "agents"),
+                         dict((k, v) for k, v in after_lock.items() if k != "agents"))
+
+
 # ───────────────────────── Stage 2 increment 1 : read commands ──────────────
 
 class TestReadCommands(CLIBase):
@@ -14796,6 +14922,7 @@ class TestRFC052SessionBinding(CLIBase):
         # ambiguity — table-driven, plus a meta assertion that every parser
         # command is explicitly classified (mutator / special / read-only).
         mutators = {
+            "roster add": ["roster", "add", "gemini", "--by", "claude"],
             "claim": ["claim", "claude"],
             "append": ["append", "claude", "--to", "codex", "--ask", "a", "--done", "d"],
             "next": ["next", "claude"],
@@ -14829,7 +14956,7 @@ class TestRFC052SessionBinding(CLIBase):
         # meta: every top-level CLI command is classified somewhere.
         helpout = self._run("--help").stdout
         cmds = set(re.search(r"\{([a-z0-9,_-]+)\}", helpout).group(1).split(","))
-        classified = ({"claim", "append", "next", "request-turn", "yield-turn",
+        classified = ({"roster", "claim", "append", "next", "request-turn", "yield-turn",
                        "decline-turn", "steer-turn", "pause", "resume", "release",
                        "done", "remember", "work-tag", "cooldown", "archive", "task",
                        "decisions", "session", "heartbeat"}         # gated mutators
