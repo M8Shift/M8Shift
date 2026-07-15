@@ -10486,7 +10486,15 @@ def main():
     # prog follows the invoked name (m8shift.py).
     p = argparse.ArgumentParser(
         prog=os.path.basename(sys.argv[0]),
-        description="Single-file multi-agent relay (M8Shift), portable.")
+        usage="%(prog)s [--version] <command> [args]",
+        description=("Single-file multi-agent relay (M8Shift), portable. "
+                     "Commands are positional, like git: use `m8shift.py init`, not "
+                     "`m8shift.py --init` or `m8shift.py -init`."),
+        epilog='''examples:
+  m8shift.py init
+  m8shift.py claim agent-a
+  m8shift.py append agent-a --to agent-b --ask "review the change" --done "implemented it"''',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"m8shift.py {VERSION}",
                    help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -10515,7 +10523,7 @@ def main():
                     help="add/refresh the generated M8Shift block in .gitignore (default in headless mode)")
     gi.add_argument("--no-gitignore", dest="gitignore", action="store_false",
                     help="do not modify .gitignore during init")
-    ci = i.add_argument_group("companion install (RFC 044)")
+    ci = i.add_argument_group("companion install")
     ci.add_argument("--companions", default="",
                     help="comma-separated companions to copy into the kit dir: "
                          "runtime,context,worktree,headroom,i18n,e2e")
@@ -10537,8 +10545,8 @@ def main():
     i.set_defaults(fn=cmd_init)
 
     up = sub.add_parser("update",
-                        help="RFC 048: source-driven local update of a TARGET project — run the "
-                             "NEW source copy; every write is rebased onto --target")
+                        help="update a target project kit from a newer source copy; every write "
+                             "is rebased onto --target")
     up.add_argument("--target", required=True,
                     help="target project directory to update (required; pass `--target .` to "
                          "explicitly confirm the current directory)")
@@ -10625,25 +10633,25 @@ def main():
     dr.add_argument("--contracts", action="store_true",
                     help="include Stage-4 contract validation findings")
     dr.add_argument("--hygiene", action="store_true",
-                    help="RFC 052: outbound data-hygiene lint — flag real absolute home paths "
+                    help="run outbound data-hygiene lint and flag real absolute home paths "
                          "(/Users/<name>/, /home/<name>/, C:\\Users\\, WSL) in tracked publishable "
                          "files (docs/**, examples/**, top-level *.md; anchors excluded). Raw stdlib "
                          "read (never grep/rtk), read-only. High-confidence paths are warning and fail "
                          "`--lint`; advisory forms (external drives, UNC, env-var home) are info")
     dr.add_argument("--hygiene-only", action="store_true",
-                    help="RFC 052: run ONLY the data-hygiene lint (implies --hygiene) and base the "
+                    help="run only the data-hygiene lint (implies --hygiene) and base the "
                          "exit code on hygiene findings alone — no relay/adoption findings. Intended "
                          "for a pre-push/pre-commit hook (with --lint --json) so relay.missing never "
                          "dominates the gate")
     dr.add_argument("--hygiene-verbose", action="store_true",
-                    help="RFC 052 C3: local forensic mode — show the matched confidential denylist "
+                    help="local forensic mode: show the matched confidential denylist "
                          "term in hygiene.denylist findings instead of only its hashed label. "
                          "Default output is redacted so a pasted doctor report never re-leaks the "
                          "identifier. The denylist itself is out-of-repo: M8SHIFT_DENYLIST if set, "
                          "else ~/.config/m8shift/denylist.txt; missing = no-op. A hygiene.denylist "
                          "warning never fails --lint unless M8SHIFT_SCRUB_ENFORCE=1")
     dr.add_argument("--hygiene-anchors", action="store_true",
-                    help="RFC 052 PR3: opt-in anchor hygiene — re-scan the generated anchors "
+                    help="opt-in anchor hygiene: re-scan the generated anchors "
                          "(CLAUDE.md, AGENTS.md), which C1 excludes by default because they "
                          "legitimately hold YOUR OWN path. Pin your own home root(s) in "
                          "M8SHIFT_HYGIENE_ALLOWED_ROOTS (comma-separated); only FOREIGN home "
@@ -10658,7 +10666,7 @@ def main():
     dr.add_argument("--severity-min", choices=tuple(SEVERITY_RANK), default="warning",
                     help="threshold for ok/lint (default: warning)")
     dr.add_argument("--source", default="",
-                    help="RFC 048: compare this project's core against a source dir's m8shift.py "
+                    help="compare this project's core against a source directory's m8shift.py "
                          "and report adoption.update_recommended plus runner.stale / "
                          "runner.manual_review_required preflight findings, and an advisory "
                          "workspace.dirty_worktree finding when the project checkout has "
@@ -10779,13 +10787,12 @@ def main():
     c.add_argument("--force", action="store_true",
                    help="reclaim a stale WORKING lock only (refused while the holder's lock is valid)")
     c.add_argument("--refresh", action="store_true",
-                   help="RFC 047: refresh-only TTL extension — refused unless you already hold "
+                   help="extend only your current pen TTL; refused unless you already hold "
                         "your own WORKING lock (runners must use this, never a plain claim)")
     c.add_argument("--reason", default="",
-                    help="RFC 049: recorded in the force session event on a stale recovery "
-                         "(recommended: why the recovery is safe and what happens next)")
+                    help="record why a stale recovery is safe and what happens next")
     c.add_argument("--live-override", action="store_true",
-                    help="RFC 049: with --force and --reason, override an ALIVE-EXPIRED "
+                    help="with --force and --reason, override an ALIVE-EXPIRED "
                          "refusal (fresh protective heartbeat) — exceptional, human-authorized "
                          "recovery; the override is audited in session events")
     c.add_argument("--check", action="store_true",
@@ -10965,8 +10972,8 @@ def main():
     ar.set_defaults(fn=cmd_archive)
 
     bd = sub.add_parser("bind",
-                        help="RFC 038 \u00a79: bind an agent to THIS project's relay — the durable "
-                             "shift-to-project pin (RFC 052). Penless; run it at session start. "
+                        help="bind an agent to this project's relay with a durable project pin; "
+                             "no pen is needed, and it should run at session start. "
                              "With two candidate relays (M8SHIFT_ROOT vs script-local) writes "
                              "refuse until disambiguated; a matching binding resolves them for "
                              "that agent")
@@ -10985,7 +10992,7 @@ def main():
     bd.set_defaults(fn=cmd_bind)
 
     hb = sub.add_parser("heartbeat",
-                        help="RFC 049: record a PROTECTIVE holder-liveness beat for a WORKING "
+                        help="record a protective holder-liveness beat for a WORKING "
                              "agent — the only surface that protects an expired pen from "
                              "force-claim. For managed producers (listener/wrapper loops), not "
                              "a manual burden; claim --refresh records audit-only beats")

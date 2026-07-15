@@ -313,7 +313,7 @@ published site, or use the repository-local docs when working from a clone.
 | **Live site** | [m8shift.ai](https://m8shift.ai/) |
 | **Documentation index** | [docs/en/README.md](docs/en/README.md) |
 | **Getting started** | [tutorial](docs/en/tutorial.md) · [VS Code guide](docs/en/vscode-guide.md) · [Windows](docs/en/windows.md) |
-| **Reference** | [protocol](docs/en/protocol.md) · [protocol reference](docs/en/protocol-reference.md) · [specification](docs/en/specification.md) · [agents guide](docs/en/agents-guide.md) |
+| **Reference** | [command reference](docs/en/m8shift-command-reference.md) · [protocol](docs/en/protocol.md) · [protocol reference](docs/en/protocol-reference.md) · [specification](docs/en/specification.md) · [agents guide](docs/en/agents-guide.md) |
 | **Explanation** | [architecture](docs/en/architecture.md) · [philosophy](docs/en/philosophy.md) · [security audit](docs/en/security-audit.md) · [stage-2 rationale](docs/en/stage2-rationale.md) |
 | **RFCs** | [RFC index](docs/en/README.md#rfcs) · [RFC directory](docs/en/rfc/) |
 
