@@ -16481,6 +16481,139 @@ class TestRFC072FleetPlan(ListenerCLIBase):
         stop.assert_called_once_with(
             {"pid": 123, "process_start_ref": "start-123"}, "graceful")
 
+    def test_transient_start_probe_failure_does_not_wedge_adopted_lane(self):
+        # A momentary start-identity probe failure (e.g. a transient POSIX `ps`
+        # error) must never strand a healthy, alive lane in a terminal state.
+        runtime, spec, args = self._durable_fleet_fixture()
+        survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                    cwd=self.d)
+        try:
+            item = spec["agents"][0]
+            row = runtime.fleet_provider_rows()["codex-2"]
+            runtime.write_listener_pid("codex-2", survivor.pid)
+            with mock.patch.object(
+                    runtime, "fleet_process_start_ref",
+                    side_effect=lambda pid: f"test-start:{pid}" if pid else ""):
+                lane = runtime.persist_fleet_lane(
+                    item, row, runtime.fleet_listener_health("codex-2"), "local")
+            self.assertTrue(lane["process_start_ref"])
+            # Probe now transiently returns "" while the pid is still alive.
+            with mock.patch.object(runtime, "fleet_process_start_ref",
+                                   side_effect=lambda pid: ""), \
+                    mock.patch.object(runtime, "fleet_listener_command") as launch:
+                actions = runtime.fleet_reconcile_once(spec, args)
+            self.assertEqual(actions, [])          # deferred: no lifecycle action
+            launch.assert_not_called()             # never a duplicate launch
+            after = runtime.load_fleet_lane("codex-2")
+            self.assertEqual(after["status"], "running")   # not needs_reconciliation
+            self.assertEqual(after["process_start_ref"], lane["process_start_ref"])
+        finally:
+            survivor.terminate()
+            survivor.wait(timeout=5)
+
+    def test_reused_pid_mismatch_restarts_lane_without_wedge(self):
+        # A determinate mismatch (pid alive but a *different* start identity)
+        # proves the listener is gone: restart once, never wedge, never signal
+        # the unrelated pid.
+        runtime, spec, args = self._durable_fleet_fixture()
+        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                    cwd=self.d)
+        replacement = None
+        try:
+            item = spec["agents"][0]
+            row = runtime.fleet_provider_rows()["codex-2"]
+            runtime.write_listener_pid("codex-2", stranger.pid)
+            with mock.patch.object(runtime, "fleet_process_start_ref",
+                                   side_effect=lambda pid: f"orig:{pid}" if pid else ""):
+                runtime.persist_fleet_lane(
+                    item, row, runtime.fleet_listener_health("codex-2"), "local")
+
+            def fake_start(agent, action, _args, provider_row=None, lane=None):
+                nonlocal replacement
+                self.assertEqual((agent, action), ("codex-2", "start_listener"))
+                replacement = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"], cwd=self.d)
+                runtime.write_listener_pid(agent, replacement.pid)
+                return {"action": action, "agent": agent, "output": "fake"}
+
+            with mock.patch.object(runtime, "fleet_process_start_ref",
+                                   side_effect=lambda pid: f"different:{pid}" if pid else ""), \
+                    mock.patch.object(runtime, "fleet_listener_command",
+                                      side_effect=fake_start):
+                actions = runtime.fleet_reconcile_once(spec, args)
+            self.assertEqual(len(actions), 1)      # restarted, not wedged
+            self.assertEqual(runtime.load_fleet_lane("codex-2")["pid"], replacement.pid)
+        finally:
+            stranger.terminate()
+            stranger.wait(timeout=5)
+            if replacement is not None and replacement.poll() is None:
+                replacement.terminate()
+                replacement.wait(timeout=5)
+
+    def test_supervisor_takes_over_stale_running_control_after_pid_reuse(self):
+        # After a reboot/service-stop that left control.json at `running`, if the
+        # persisted supervisor pid is now a different, unrelated live process the
+        # new supervisor must take over -- not exit into a terminal state that a
+        # native KeepAlive unit would crash-loop.
+        runtime, spec, _args = self._durable_fleet_fixture()
+        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                    cwd=self.d)
+        try:
+            control = {
+                "schema": runtime.FLEET_CONTROL_SCHEMA,
+                "project_ref": runtime.fleet_project_ref(),
+                "pid": stranger.pid,
+                "process_start_ref": "stale-does-not-match-the-live-probe",
+                "backend": "local",
+                "spec_digest": runtime.fleet_spec_digest(spec),
+                "state": "running", "ticks": 0, "updated_at": runtime.iso(),
+            }
+            os.makedirs(os.path.dirname(runtime.FLEET_CONTROL), exist_ok=True)
+            runtime.write_fleet_json_atomic(runtime.FLEET_CONTROL, control)
+            result = self.rt("fleet", "supervise", "--spec", "fleet.json",
+                             "--max-ticks", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("taking over stale pid", result.stderr)
+            self.assertNotIn("unverifiable", result.stderr)
+            self.assertNotIn("already alive", result.stderr)
+        finally:
+            stranger.terminate()
+            stranger.wait(timeout=5)
+
+    def test_empty_persisted_control_ref_is_unverifiable_not_reused_pid(self):
+        # An empty persisted supervisor start ref means "identity never
+        # recorded" (e.g. a transient probe at write time), NOT "a different
+        # process owns this pid".  It must never be read as a reused-pid
+        # mismatch: `stop` must refuse rather than orphan a live supervisor, and
+        # `supervise` must refuse rather than launch a second one.
+        runtime, spec, _args = self._durable_fleet_fixture()
+        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                    cwd=self.d)
+        try:
+            control = {
+                "schema": runtime.FLEET_CONTROL_SCHEMA,
+                "project_ref": runtime.fleet_project_ref(),
+                "pid": stranger.pid, "process_start_ref": "",
+                "backend": "local", "spec_digest": runtime.fleet_spec_digest(spec),
+                "state": "running", "ticks": 0, "updated_at": runtime.iso(),
+            }
+            os.makedirs(os.path.dirname(runtime.FLEET_CONTROL), exist_ok=True)
+            runtime.write_fleet_json_atomic(runtime.FLEET_CONTROL, control)
+
+            stop = self.rt("fleet", "stop", "--spec", "fleet.json")
+            self.assertNotEqual(stop.returncode, 0)
+            self.assertIn("unverifiable", stop.stderr)
+            # Control was NOT cleared -> the live supervisor is not orphaned.
+            self.assertEqual(runtime.load_fleet_control()["state"], "running")
+
+            sup = self.rt("fleet", "supervise", "--spec", "fleet.json",
+                          "--max-ticks", "1")
+            self.assertNotEqual(sup.returncode, 0)
+            self.assertIn("unverifiable", sup.stderr)
+            self.assertNotIn("taking over", sup.stderr)   # no second supervisor
+        finally:
+            stranger.terminate()
+            stranger.wait(timeout=5)
 
     def test_immutable_jobs_require_designated_live_integrator(self):
         self.init("--agents", "claude,codex,codex-2")

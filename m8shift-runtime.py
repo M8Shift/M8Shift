@@ -2722,8 +2722,19 @@ def fleet_spec_digest(spec):
 
 def write_fleet_control(spec, args, state, ticks=0):
     pid = os.getpid() if state == "running" else None
+    start_ref = fleet_process_start_ref(pid) if pid else ""
+    if state == "running" and not start_ref:
+        # Our own start identity is stable; an empty probe here is transient
+        # (e.g. a `ps` hiccup).  Never bake it into durable state: a persisted
+        # empty ref would later be misread as a reused-pid mismatch and orphan
+        # or double-launch this supervisor.  Preserve the last good ref.
+        previous, _prev_err = read_json_diagnostic(FLEET_CONTROL, {})
+        if isinstance(previous, dict) and previous.get("pid") == pid \
+                and isinstance(previous.get("process_start_ref"), str) \
+                and previous.get("process_start_ref"):
+            start_ref = previous["process_start_ref"]
     doc = {"schema": FLEET_CONTROL_SCHEMA, "project_ref": fleet_project_ref(),
-           "pid": pid, "process_start_ref": fleet_process_start_ref(pid) if pid else "",
+           "pid": pid, "process_start_ref": start_ref,
            "backend": getattr(args, "_selected_backend", args.backend),
            "spec_digest": fleet_spec_digest(spec),
            "state": state, "ticks": ticks, "updated_at": iso()}
@@ -2880,8 +2891,27 @@ def stop_fleet_supervisor(grace):
             pass
         return False
     current = fleet_process_start_ref(control["pid"])
-    if not current or current != control["process_start_ref"]:
-        raise ValueError("fleet supervisor pid/start identity is ambiguous; "
+    if current and control["process_start_ref"] \
+            and current != control["process_start_ref"]:
+        # A NON-EMPTY persisted ref that differs from a non-empty live probe is a
+        # determinate mismatch: the persisted pid now belongs to a different,
+        # unrelated process, so the supervisor is already gone.  Never signal the
+        # stranger -- just clear the stale control so nothing stays wedged.
+        stopped = dict(control)
+        stopped.update(pid=None, process_start_ref="", state="stopped",
+                       updated_at=iso())
+        write_fleet_json_atomic(FLEET_CONTROL, stopped)
+        try:
+            os.unlink(FLEET_SUPERVISOR_PID)
+        except OSError:
+            pass
+        return False
+    if not current or not control["process_start_ref"]:
+        # Indeterminate: the live probe failed, or the persisted ref was never
+        # recorded (empty).  Either way we cannot prove whose process the pid is,
+        # so refuse to signal a possibly-live supervisor.  Retry once identity is
+        # readable on both sides.
+        raise ValueError("fleet supervisor pid/start identity is unverifiable; "
                          "refusing to signal it")
     if not listener_terminate_group(control["pid"], grace):
         raise ValueError(f"fleet supervisor pid {control['pid']} did not stop")
@@ -3209,17 +3239,24 @@ def fleet_durable_preflight(spec, plan, record_failures=False):
         pid = lane["pid"]
         if pid and listener_pid_alive(pid):
             current = fleet_process_start_ref(pid)
-            if not current or not lane["process_start_ref"] \
-                    or current != lane["process_start_ref"]:
-                if record_failures:
-                    blocked = dict(lane)
-                    blocked["status"] = "needs_reconciliation"
-                    blocked["updated_at"] = iso()
-                    write_fleet_json_atomic(fleet_lane_path(agent), blocked)
-                raise ValueError(
-                    f"durable lane {agent} pid/start identity is ambiguous; "
-                    "needs_reconciliation")
-            state = "adopted"
+            if current and lane["process_start_ref"] \
+                    and current == lane["process_start_ref"]:
+                # Confirmed: the same process instance is still alive -> adopt.
+                state = "adopted"
+            elif not current and lane["process_start_ref"]:
+                # Indeterminate: the pid is alive but its start identity could
+                # not be read this tick (e.g. a transient POSIX `ps` failure).
+                # Never wedge a healthy lane on transient probe noise and never
+                # launch a second instance: keep it adopted-but-unverified,
+                # take no lifecycle action, and re-verify on a later tick.
+                state = "adopted_unverified"
+            else:
+                # Determinate mismatch: a *different* process now owns this pid
+                # (persisted start identity differs), which proves our listener
+                # is gone.  Treat the lane as missing so a desired `running`
+                # lane is restarted exactly once -- never wedged, and we never
+                # signal the unrelated pid.
+                state = "missing"
         elif live["status"] == "running":
             if record_failures:
                 blocked = dict(lane)
@@ -3293,6 +3330,12 @@ def fleet_reconcile_once(spec, args, desired_override=""):
     for row in plan["health"]:
         desired = desired_override or row["desired"]
         observation = observations[row["name"]]
+        if observation["state"] == "adopted_unverified":
+            # Start identity could not be verified this tick: defer every
+            # lifecycle action (no launch, no signal) and leave the durable
+            # lane untouched.  A later tick with a readable probe adopts,
+            # restarts, or flags it.
+            continue
         running = observation["state"] == "adopted"
         action = ("start_listener" if desired == "running" and not running else
                   "stop_listener" if desired == "stopped" and running else "")
@@ -3442,15 +3485,39 @@ def cmd_fleet_supervise(args):
         control = load_fleet_control()
     except ValueError as exc:
         sys.exit(f"m8shift-runtime: {exc}")
+    take_over_stale = False
     if control and control["state"] == "running" and control["pid"] != os.getpid() \
             and listener_pid_alive(control["pid"]):
         current = fleet_process_start_ref(control["pid"])
-        if current and current == control["process_start_ref"]:
+        if current and control["process_start_ref"] \
+                and current == control["process_start_ref"]:
             sys.exit(f"m8shift-runtime: fleet supervisor already alive "
                      f"(pid {control['pid']})")
-        sys.exit("m8shift-runtime: durable supervisor pid identity is ambiguous; "
-                 "needs_reconciliation")
-    if control and control["spec_digest"] != fleet_spec_digest(spec):
+        if current and control["process_start_ref"] \
+                and current != control["process_start_ref"]:
+            # A NON-EMPTY persisted ref that differs from a non-empty live probe
+            # proves a *different* process now owns the persisted supervisor pid,
+            # i.e. the previous supervisor is gone -- e.g. a reboot/service stop
+            # left control.json at `running` with no clean shutdown.  A
+            # supervisor is a singleton: take over rather than wedging into a
+            # terminal state that crash-loops under a native KeepAlive unit.  We
+            # never signal the unrelated pid.
+            print("m8shift-runtime: prior supervisor gone (pid reused by an "
+                  f"unrelated process); taking over stale pid {control['pid']}",
+                  file=sys.stderr)
+            take_over_stale = True
+        elif args.reconcile_control:
+            take_over_stale = True
+        else:
+            # Indeterminate: the live probe failed, or the persisted ref was
+            # never recorded (empty).  We cannot prove the old supervisor is
+            # gone, so refuse a possible second supervisor.  Recoverable with
+            # --reconcile-control once the operator confirms it stopped.
+            sys.exit("m8shift-runtime: durable supervisor pid identity is "
+                     "unverifiable; rerun with --reconcile-control after "
+                     "confirming the previous supervisor is stopped")
+    if control and control["spec_digest"] != fleet_spec_digest(spec) \
+            and not take_over_stale:
         if not args.reconcile_control:
             sys.exit("m8shift-runtime: durable supervisor spec differs; rerun with "
                      "--reconcile-control after confirming the previous supervisor "
@@ -3464,11 +3531,25 @@ def cmd_fleet_supervise(args):
             previous_pid = int(fh.read().strip())
     except (OSError, ValueError):
         previous_pid = 0
-    if previous_pid and previous_pid != os.getpid() and listener_pid_alive(previous_pid):
+    if previous_pid and previous_pid != os.getpid() \
+            and listener_pid_alive(previous_pid) and not take_over_stale:
         sys.exit(f"m8shift-runtime: fleet supervisor already alive (pid {previous_pid})")
     write_text_atomic(FLEET_SUPERVISOR_PID, f"{os.getpid()}\n")
     ticks = 0
     write_fleet_control(spec, args, "running", ticks)
+    # A clean shutdown must persist state="stopped" so the next start does not
+    # find a stale `running` control after a service stop or reboot.  Convert
+    # SIGTERM (and SIGINT) into SystemExit so the `finally` below runs instead
+    # of the process being killed outright with the control left at `running`.
+    def _fleet_supervisor_signal(_signum, _frame):
+        sys.exit(0)
+    for _signame in ("SIGTERM", "SIGINT"):
+        _sig = getattr(signal, _signame, None)
+        if _sig is not None:
+            try:
+                signal.signal(_sig, _fleet_supervisor_signal)
+            except (ValueError, OSError):  # not the main thread / unsupported
+                pass
     try:
         while not args.max_ticks or ticks < args.max_ticks:
             ticks += 1
