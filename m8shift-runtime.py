@@ -3256,15 +3256,27 @@ def fleet_durable_preflight(spec, plan, record_failures=False):
                 # is gone.  Restart a desired-running lane exactly once; we never
                 # signal the unrelated pid.
                 state = "missing"
-            else:
-                # Either side's ref is empty while the pid is still alive (a
-                # transient probe, or a lane persisted with an empty ref under a
-                # non-running status).  A mismatch is only *determinate* when
-                # both refs are non-empty, so this is indeterminate: never treat
-                # it as `missing` -- that would restart and DOUBLE-LAUNCH the
-                # still-live pid.  Defer all lifecycle action (no launch, no
-                # signal) and re-verify once both refs are readable.
+            elif lane["process_start_ref"] and not current:
+                # Transient: the persisted identity IS known; only this tick's
+                # probe failed (e.g. a POSIX `ps` hiccup).  Never wedge and never
+                # double-launch: defer all lifecycle action and re-verify on a
+                # later readable tick.
                 state = "adopted_unverified"
+            else:
+                # The persisted ref is empty while the pid is alive: this lane's
+                # identity was never recorded, so it can NEVER self-verify.  A
+                # silent defer would report false success on stop/resume while an
+                # unmanageable live pid persists, so fail closed VISIBLY (never
+                # launch, never signal) -- analogous to the supervisor-control
+                # path.  (codex, independent review of the first fix.)
+                if record_failures:
+                    blocked = dict(lane)
+                    blocked["status"] = "needs_reconciliation"
+                    blocked["updated_at"] = iso()
+                    write_fleet_json_atomic(fleet_lane_path(agent), blocked)
+                raise ValueError(
+                    f"durable lane {agent} has a live pid but no persisted start "
+                    "identity; needs_reconciliation")
         elif live["status"] == "running":
             if record_failures:
                 blocked = dict(lane)

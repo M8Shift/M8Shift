@@ -16550,13 +16550,15 @@ class TestRFC072FleetPlan(ListenerCLIBase):
                 replacement.terminate()
                 replacement.wait(timeout=5)
 
-    def test_live_pid_with_empty_lane_ref_does_not_double_launch(self):
+    def test_durable_empty_lane_ref_fails_closed_not_double_launch(self):
         # A schema-valid lane {status=stopped, pid=<alive>, process_start_ref=""}
-        # (persistable while a transient probe returns empty) must NEVER be read
-        # as a determinate reused-pid mismatch -- a mismatch is determinate only
-        # when BOTH refs are non-empty.  Otherwise a desired=running tick would
-        # restart and DOUBLE-LAUNCH the still-live pid.  (Found by codex's
-        # independent review of the first fix.)
+        # can never self-verify (its identity was never recorded).  It must
+        # NEVER be read as a determinate reused-pid mismatch (that would restart
+        # and DOUBLE-LAUNCH the live pid), and it must NOT be silently deferred
+        # (that would report false success on stop/resume while an unmanageable
+        # live pid persists).  It fails closed VISIBLY as needs_reconciliation,
+        # performing no launch and no signal.  (Found + refined by codex's
+        # independent reviews of the first fix.)
         runtime, spec, args = self._durable_fleet_fixture()
         survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                                     cwd=self.d)
@@ -16575,15 +16577,21 @@ class TestRFC072FleetPlan(ListenerCLIBase):
             lane["process_start_ref"] = ""
             lane["status"] = "stopped"
             runtime.write_fleet_json_atomic(runtime.fleet_lane_path("codex-2"), lane)
-            # Probe now readable, desired=running: must defer, not restart.
+            # Probe readable, desired=running: fail closed, never restart.
             with mock.patch.object(
                     runtime, "fleet_process_start_ref",
                     side_effect=lambda pid: f"readable:{pid}" if pid else ""), \
                     mock.patch.object(runtime, "fleet_listener_command") as launch:
-                actions = runtime.fleet_reconcile_once(spec, args)
-            launch.assert_not_called()          # deferred, never double-launched
-            self.assertEqual(actions, [])
+                with self.assertRaisesRegex(ValueError, "no persisted start identity"):
+                    runtime.fleet_reconcile_once(spec, args)
+            launch.assert_not_called()          # fail closed BEFORE any launch
             self.assertIsNone(survivor.poll())  # the live pid was left untouched
+            self.assertEqual(                   # visibly flagged, not deferred
+                runtime.load_fleet_lane("codex-2")["status"], "needs_reconciliation")
+            # stop is now visibly blocked too (no false success).
+            stop = self.rt("fleet", "stop", "--spec", "fleet.json")
+            self.assertNotEqual(stop.returncode, 0)
+            self.assertIn("reconciliation", stop.stderr)
         finally:
             survivor.terminate()
             survivor.wait(timeout=5)
