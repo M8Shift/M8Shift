@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Detached fleet liveness hardening (#65, RFC 073 slice 2 review).** A
+  transient start-identity probe failure on an alive lane no longer wedges it
+  into a terminal `needs_reconciliation`: reconciliation now defers (adopts
+  unverified — no launch, no signal — and re-verifies on a later tick), while a
+  determinate reused-pid mismatch restarts the lane once. The supervisor
+  installs a SIGTERM/SIGINT handler so a clean shutdown persists `state=stopped`,
+  and after a reboot that left stale `running` control it takes over a
+  provably-reused pid instead of crash-looping under a native KeepAlive unit;
+  `fleet stop` clears a provably-dead supervisor's control. An empty persisted
+  start ref is treated as unverifiable (never a reused-pid mismatch), so a live
+  supervisor is neither orphaned by `stop` nor double-launched by `supervise`.
+- **Detached durable fleet control plane (#65, RFC 073 slice 2).** The RFC 072
+  supervisor now persists schema-versioned, project/identity/provider/model-
+  bound control, lane, and opaque-session records with fsync + atomic replace.
+  Startup distinguishes live survivors by PID start identity, adopts exact
+  matches, restarts missing desired-running lanes once, and fails closed on
+  corrupt, stale, reused, or ambiguous evidence. Adapter `health`, `resume`, and
+  `stop` lifecycle hooks now mediate generic reconciliation without gaining
+  relay authority. `fleet supervise --detach` installs the same single control
+  plane through launchd/systemd/Windows service definitions when available, or
+  reports the weaker local process-group-detached tier explicitly.
 - **Vendor-neutral agent CLI adapter spine (#65/#66, RFC 073 slice 1).** The
   runtime companion now dispatches a formal `launch_argv`/`stop`/`resume`/`health`
   contract through a provider-keyed registry. Existing Codex and Claude managed

@@ -190,7 +190,15 @@ FLEET_DIR = os.path.join(RUNTIME_DIR, "fleet")
 FLEET_IDENTITIES_DIR = os.path.join(RUNTIME_DIR, "identities")
 FLEET_EVENTS = os.path.join(FLEET_DIR, "events.jsonl")
 FLEET_SUPERVISOR_PID = os.path.join(FLEET_DIR, "supervisor.pid")
+FLEET_CONTROL = os.path.join(FLEET_DIR, "control.json")
+FLEET_LANES_DIR = os.path.join(FLEET_DIR, "lanes")
+FLEET_SESSIONS_DIR = os.path.join(FLEET_DIR, "sessions")
+FLEET_SUPERVISOR_LOG = os.path.join(FLEET_DIR, "supervisor.log")
+FLEET_SUPERVISOR_BACKEND = os.path.join(FLEET_DIR, "supervisor.backend.json")
 FLEET_DESIRED = {"running", "stopped"}
+FLEET_CONTROL_SCHEMA = "m8shift.fleet.control.v1"
+FLEET_LANE_SCHEMA = "m8shift.fleet.lane.v1"
+FLEET_SESSION_SCHEMA = "m8shift.fleet.session.v1"
 FLEET_JOBS_SCHEMA = "m8shift.fleet.jobs.v1"
 FLEET_JOB_SCHEMA = "m8shift.fleet.job.v1"
 FLEET_ATTEMPT_SCHEMA = "m8shift.fleet.attempt.v1"
@@ -2501,6 +2509,470 @@ def fleet_identity_text(agent):
     )
 
 
+def fleet_project_ref():
+    """Opaque binding for durable records; never persists the checkout path."""
+    return hashlib.sha256(os.path.realpath(HERE).encode("utf-8")).hexdigest()
+
+
+def fleet_lane_path(agent):
+    return os.path.join(FLEET_LANES_DIR, f"{agent}.json")
+
+
+def fleet_session_path(session_ref):
+    return os.path.join(FLEET_SESSIONS_DIR, f"{session_ref}.json")
+
+
+def write_fleet_json_atomic(path, doc):
+    """Crash-consistent, restricted, non-symlink-following fleet record write."""
+    reject_symlinked_runtime_path(path)
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    reject_symlinked_runtime_path(path)
+    raw = canonical_json_bytes(doc)
+    tmp = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(parent, os.O_RDONLY)
+        except OSError:
+            dir_fd = -1
+        if dir_fd >= 0:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def fleet_process_start_ref(pid):
+    """Return a stable start identity for a live pid, or an empty string.
+
+    Linux exposes an unambiguous boot-id + /proc start tick.  Other POSIX hosts
+    use ps lstart; Windows keeps the conservative pid-only probe unavailable so
+    startup reconciliation fails closed instead of adopting a reused pid.
+    """
+    if not listener_pid_alive(pid):
+        return ""
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                fields = fh.read().rsplit(")", 1)[1].split()
+            with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as fh:
+                boot_id = fh.read().strip()
+            start_ticks = fields[19]
+            if boot_id and start_ticks.isdigit():
+                return f"linux:{boot_id}:{start_ticks}"
+        except (OSError, IndexError):
+            return ""
+    if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
+        try:
+            import ctypes
+            from ctypes import wintypes
+            process = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+            if not process:
+                return ""
+            created = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            ok = ctypes.windll.kernel32.GetProcessTimes(
+                process, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user))
+            ctypes.windll.kernel32.CloseHandle(process)
+            if not ok:
+                return ""
+            value = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            return f"windows:{value}" if value else ""
+        except (AttributeError, OSError, ValueError):
+            return ""
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        value = " ".join((result.stdout or "").split())
+        return f"posix:{value}" if result.returncode == 0 and value else ""
+
+
+def fleet_provider_rows():
+    registry = load_provider_registry()
+    return {row.get("name"): row for row in registry.get("agents", [])
+            if isinstance(row, dict) and isinstance(row.get("name"), str)}
+
+
+def load_fleet_lane(agent):
+    """Strictly validate one durable lane. Absence is distinct from corruption."""
+    path = fleet_lane_path(agent)
+    doc, err = read_json_diagnostic(path, {})
+    if err:
+        raise ValueError(f"durable lane {agent} is corrupt: {err}")
+    if not doc:
+        return None
+    required = {"schema", "project_ref", "identity", "provider", "model",
+                "pid", "process_start_ref", "session_ref", "desired",
+                "backend", "status", "updated_at"}
+    if set(doc) != required or doc.get("schema") != FLEET_LANE_SCHEMA:
+        raise ValueError(f"durable lane {agent} has an invalid schema or fields")
+    if doc.get("project_ref") != fleet_project_ref() or doc.get("identity") != agent:
+        raise ValueError(f"durable lane {agent} has a mismatched project/identity binding")
+    if doc.get("desired") not in FLEET_DESIRED:
+        raise ValueError(f"durable lane {agent} has an invalid desired state")
+    if doc.get("status") not in {"running", "stopped", "missing",
+                                 "needs_reconciliation"}:
+        raise ValueError(f"durable lane {agent} has an invalid status")
+    for field in ("provider", "model", "process_start_ref", "session_ref",
+                  "backend", "updated_at"):
+        if not isinstance(doc.get(field), str):
+            raise ValueError(f"durable lane {agent} has invalid {field}")
+    pid = doc.get("pid")
+    if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
+        raise ValueError(f"durable lane {agent} has an invalid pid")
+    if doc["status"] == "running" and (pid is None or not doc["process_start_ref"]):
+        raise ValueError(f"durable lane {agent} lacks running process identity")
+    return doc
+
+
+def write_fleet_session(agent, provider, model, session_ref):
+    doc = {"schema": FLEET_SESSION_SCHEMA, "project_ref": fleet_project_ref(),
+           "identity": agent, "provider": provider, "model": model,
+           "session_ref": session_ref, "created_at": iso()}
+    write_fleet_json_atomic(fleet_session_path(session_ref), doc)
+
+
+def load_fleet_control():
+    doc, err = read_json_diagnostic(FLEET_CONTROL, {})
+    if err:
+        raise ValueError(f"durable fleet control is corrupt: {err}")
+    if not doc:
+        return None
+    required = {"schema", "project_ref", "pid", "process_start_ref", "backend",
+                "spec_digest", "state", "ticks", "updated_at"}
+    if set(doc) != required or doc.get("schema") != FLEET_CONTROL_SCHEMA \
+            or doc.get("project_ref") != fleet_project_ref():
+        raise ValueError("durable fleet control has an invalid schema/project binding")
+    if doc.get("state") not in {"running", "stopped"} \
+            or not isinstance(doc.get("ticks"), int):
+        raise ValueError("durable fleet control has invalid lifecycle fields")
+    if doc.get("pid") is not None and (not isinstance(doc.get("pid"), int)
+                                       or isinstance(doc.get("pid"), bool)
+                                       or doc.get("pid") <= 0):
+        raise ValueError("durable fleet control has an invalid pid")
+    for field in ("process_start_ref", "backend", "spec_digest", "updated_at"):
+        if not isinstance(doc.get(field), str):
+            raise ValueError(f"durable fleet control has invalid {field}")
+    return doc
+
+
+def fleet_supervisor_health():
+    try:
+        control = load_fleet_control()
+    except ValueError as exc:
+        return {"status": "needs_reconciliation", "reason": str(exc),
+                "backend": "", "durability_tier": "unknown", "pid": None}
+    backend_doc, backend_err = read_json_diagnostic(FLEET_SUPERVISOR_BACKEND, {})
+    if backend_err:
+        return {"status": "needs_reconciliation",
+                "reason": f"fleet service record is corrupt: {backend_err}",
+                "backend": "", "durability_tier": "unknown", "pid": None}
+    if not control:
+        return {"status": "stopped", "reason": "", "backend": "",
+                "durability_tier": "none", "pid": None}
+    pid = control["pid"]
+    alive = bool(pid and listener_pid_alive(pid))
+    exact = bool(alive and control["process_start_ref"] and
+                 fleet_process_start_ref(pid) == control["process_start_ref"])
+    if alive and not exact:
+        status = "needs_reconciliation"
+        reason = "supervisor pid/start identity is ambiguous"
+    elif exact:
+        status = "running"
+        reason = ""
+    elif control["state"] == "running":
+        status = "missing"
+        reason = "durable desired-running supervisor is not resident"
+    else:
+        status = "stopped"
+        reason = ""
+    backend = control.get("backend", "")
+    native = backend in LISTENER_SERVICE_BACKENDS and bool(backend_doc)
+    return {"status": status, "reason": reason, "backend": backend,
+            "durability_tier": "native-service" if native else "local-detached",
+            "pid": pid if exact else None, "ticks": control["ticks"],
+            "updated_at": control["updated_at"]}
+
+
+def fleet_spec_digest(spec):
+    return hashlib.sha256(canonical_json_bytes(spec)).hexdigest()
+
+
+def write_fleet_control(spec, args, state, ticks=0):
+    pid = os.getpid() if state == "running" else None
+    start_ref = fleet_process_start_ref(pid) if pid else ""
+    if state == "running" and not start_ref:
+        # Our own start identity is stable; an empty probe here is transient
+        # (e.g. a `ps` hiccup).  Never bake it into durable state: a persisted
+        # empty ref would later be misread as a reused-pid mismatch and orphan
+        # or double-launch this supervisor.  Preserve the last good ref.
+        previous, _prev_err = read_json_diagnostic(FLEET_CONTROL, {})
+        if isinstance(previous, dict) and previous.get("pid") == pid \
+                and isinstance(previous.get("process_start_ref"), str) \
+                and previous.get("process_start_ref"):
+            start_ref = previous["process_start_ref"]
+    doc = {"schema": FLEET_CONTROL_SCHEMA, "project_ref": fleet_project_ref(),
+           "pid": pid, "process_start_ref": start_ref,
+           "backend": getattr(args, "_selected_backend", args.backend),
+           "spec_digest": fleet_spec_digest(spec),
+           "state": state, "ticks": ticks, "updated_at": iso()}
+    write_fleet_json_atomic(FLEET_CONTROL, doc)
+    return doc
+
+
+def fleet_supervisor_child_argv(args, backend):
+    argv = [sys.executable, SELF_PATH, "fleet", "supervise",
+            "--spec", os.path.abspath(args.spec), "--backend", backend,
+            "--poll-interval", str(args.poll_interval),
+            "--grace", str(args.grace), "--service-payload"]
+    if args.runner:
+        argv += ["--runner", os.path.abspath(args.runner)]
+    if args.max_ticks:
+        argv += ["--max-ticks", str(args.max_ticks)]
+    if getattr(args, "reconcile_control", False):
+        argv.append("--reconcile-control")
+    return argv
+
+
+def fleet_supervisor_service_plan(backend, args):
+    """Render the existing OS-service seam around the one fleet control plane."""
+    label = listener_service_label("fleet-supervisor")
+    child = fleet_supervisor_child_argv(args, backend)
+    if backend == "launchd":
+        service_file = os.path.join(FLEET_DIR, f"{label}.plist")
+        launchd_doc = launchd_plist_doc(
+            label, child, HERE, FLEET_SUPERVISOR_LOG)
+        launchd_doc["KeepAlive"] = True
+        launchd_doc["ThrottleInterval"] = 5
+        content = plistlib.dumps(launchd_doc, fmt=plistlib.FMT_XML).decode("utf-8")
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        domain = f"gui/{uid}"
+        install = [
+            {"argv": ["launchctl", "bootout", f"{domain}/{label}"],
+             "required": False},
+            {"argv": ["launchctl", "bootstrap", domain, service_file],
+             "required": True},
+        ]
+        uninstall = [{"argv": ["launchctl", "bootout", f"{domain}/{label}"],
+                      "required": False}]
+    elif backend == "systemd":
+        unit = f"{label}.service"
+        service_file = os.path.join(FLEET_DIR, unit)
+        content = systemd_unit_text(
+            label, child, HERE, FLEET_SUPERVISOR_LOG).replace(
+                "Restart=no\n", "Restart=on-failure\nRestartSec=5\n")
+        install = [
+            {"argv": ["systemctl", "--user", "link", service_file], "required": True},
+            {"argv": ["systemctl", "--user", "start", unit], "required": True},
+        ]
+        uninstall = [
+            {"argv": ["systemctl", "--user", "stop", unit], "required": False},
+            {"argv": ["systemctl", "--user", "disable", unit], "required": False},
+        ]
+    elif backend == "windows":
+        service_file = os.path.join(FLEET_DIR, f"{label}.task.json")
+        command = windows_task_command(child)
+        content = json.dumps({"schema": LISTENER_BACKEND_SCHEMA,
+                              "task_name": label, "schedule": "ONCE",
+                              "command": command},
+                             ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        install = [
+            {"argv": ["schtasks", "/Create", "/F", "/SC", "ONCE", "/ST", "00:00",
+                      "/TN", label, "/TR", command], "required": True},
+            {"argv": ["schtasks", "/Run", "/TN", label], "required": True},
+        ]
+        uninstall = [
+            {"argv": ["schtasks", "/End", "/TN", label], "required": False},
+            {"argv": ["schtasks", "/Delete", "/TN", label, "/F"], "required": False},
+        ]
+    else:
+        raise ValueError(f"no fleet service plan for backend {backend}")
+    return {"backend": backend, "label": label, "service_file": service_file,
+            "content": content, "child_argv": child,
+            "install": install, "uninstall": uninstall}
+
+
+def detach_fleet_supervisor(args, backend):
+    child = fleet_supervisor_child_argv(args, backend)
+    os.makedirs(FLEET_DIR, exist_ok=True)
+    env = os.environ.copy()
+    popen_kwargs = {"stdin": subprocess.DEVNULL, "cwd": HERE, "env": env}
+    if os.name == "nt":  # pragma: no cover - Windows hosts
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    else:
+        popen_kwargs["start_new_session"] = True
+    with open(FLEET_SUPERVISOR_LOG, "ab") as log_fh:
+        popen_kwargs["stdout"] = log_fh
+        popen_kwargs["stderr"] = log_fh
+        proc = subprocess.Popen(child, **popen_kwargs)
+    write_text_atomic(FLEET_SUPERVISOR_PID, f"{proc.pid}\n")
+    return proc.pid
+
+
+def install_fleet_service_backend(plan):
+    os.makedirs(FLEET_DIR, exist_ok=True)
+    write_text_atomic(plan["service_file"], plan["content"])
+    record = {"schema": LISTENER_BACKEND_SCHEMA, "backend": plan["backend"],
+              "label": plan["label"],
+              "service_file": os.path.relpath(plan["service_file"], HERE),
+              "installed_at": iso(), "uninstall": plan["uninstall"],
+              "last_error": ""}
+    write_fleet_json_atomic(FLEET_SUPERVISOR_BACKEND, record)
+    for step in plan["install"]:
+        detail = run_service_argv(step["argv"])
+        if detail and step.get("required", True):
+            record["last_error"] = detail[:300]
+            write_fleet_json_atomic(FLEET_SUPERVISOR_BACKEND, record)
+            print(f"m8shift-runtime: {plan['backend']} fleet service install failed: "
+                  f"{detail}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def stop_fleet_supervisor(grace):
+    """Stop service resurrection first, then the exact supervisor process group."""
+    control = load_fleet_control()
+    backend, backend_err = read_json_diagnostic(FLEET_SUPERVISOR_BACKEND, {})
+    if backend_err:
+        raise ValueError(f"fleet service record is corrupt: {backend_err}")
+    if backend:
+        for step in backend.get("uninstall") or []:
+            argv = step.get("argv") if isinstance(step, dict) else None
+            if isinstance(argv, list) and argv and all(
+                    isinstance(item, str) and item for item in argv):
+                run_service_argv(argv)
+        service_file = backend.get("service_file", "")
+        path = (service_file if os.path.isabs(service_file) else
+                os.path.join(HERE, service_file))
+        if service_file and os.path.realpath(path).startswith(
+                os.path.realpath(FLEET_DIR) + os.sep):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        try:
+            os.unlink(FLEET_SUPERVISOR_BACKEND)
+        except OSError:
+            pass
+    if not control:
+        return False
+    if not control["pid"] or not listener_pid_alive(control["pid"]):
+        stopped = dict(control)
+        stopped.update(pid=None, process_start_ref="", state="stopped", updated_at=iso())
+        write_fleet_json_atomic(FLEET_CONTROL, stopped)
+        try:
+            os.unlink(FLEET_SUPERVISOR_PID)
+        except OSError:
+            pass
+        return False
+    current = fleet_process_start_ref(control["pid"])
+    if current and control["process_start_ref"] \
+            and current != control["process_start_ref"]:
+        # A NON-EMPTY persisted ref that differs from a non-empty live probe is a
+        # determinate mismatch: the persisted pid now belongs to a different,
+        # unrelated process, so the supervisor is already gone.  Never signal the
+        # stranger -- just clear the stale control so nothing stays wedged.
+        stopped = dict(control)
+        stopped.update(pid=None, process_start_ref="", state="stopped",
+                       updated_at=iso())
+        write_fleet_json_atomic(FLEET_CONTROL, stopped)
+        try:
+            os.unlink(FLEET_SUPERVISOR_PID)
+        except OSError:
+            pass
+        return False
+    if not current or not control["process_start_ref"]:
+        # Indeterminate: the live probe failed, or the persisted ref was never
+        # recorded (empty).  Either way we cannot prove whose process the pid is,
+        # so refuse to signal a possibly-live supervisor.  Retry once identity is
+        # readable on both sides.
+        raise ValueError("fleet supervisor pid/start identity is unverifiable; "
+                         "refusing to signal it")
+    if not listener_terminate_group(control["pid"], grace):
+        raise ValueError(f"fleet supervisor pid {control['pid']} did not stop")
+    stopped = dict(control)
+    stopped.update(pid=None, process_start_ref="", state="stopped", updated_at=iso())
+    write_fleet_json_atomic(FLEET_CONTROL, stopped)
+    try:
+        os.unlink(FLEET_SUPERVISOR_PID)
+    except OSError:
+        pass
+    return True
+
+
+def validate_fleet_session(lane):
+    session_ref = lane.get("session_ref", "")
+    if not session_ref or not re.fullmatch(r"[0-9a-f]{32}", session_ref):
+        raise ValueError(f"durable lane {lane['identity']} has an invalid session ref")
+    doc, err = read_json_diagnostic(fleet_session_path(session_ref), {})
+    if err or not isinstance(doc, dict):
+        raise ValueError(f"durable lane {lane['identity']} session record is corrupt")
+    fields = {"schema", "project_ref", "identity", "provider", "model",
+              "session_ref", "created_at"}
+    if set(doc) != fields or not isinstance(doc.get("created_at"), str):
+        raise ValueError(f"durable lane {lane['identity']} session record is invalid")
+    expected = {"schema": FLEET_SESSION_SCHEMA,
+                "project_ref": lane["project_ref"], "identity": lane["identity"],
+                "provider": lane["provider"], "model": lane["model"],
+                "session_ref": session_ref}
+    if any(doc.get(key) != value for key, value in expected.items()):
+        raise ValueError(f"durable lane {lane['identity']} session binding is stale")
+
+
+def persist_fleet_lane(item, provider_row, listener, backend, status=None,
+                       session_ref=""):
+    pid = listener.get("pid")
+    start_ref = fleet_process_start_ref(pid) if pid else ""
+    previous = load_fleet_lane(item["name"])
+    if pid and not start_ref and previous and previous.get("pid") == pid \
+            and previous.get("process_start_ref"):
+        # Never durably bake a live PID with an empty start ref (a transient
+        # probe): a later readable tick would misread the empty ref as a
+        # reused-pid mismatch.  Preserve the prior good ref for the same PID.
+        start_ref = previous["process_start_ref"]
+    effective_status = status or ("running" if pid and start_ref else "stopped")
+    if effective_status == "running" and (not pid or not start_ref):
+        raise ValueError(
+            f"cannot durably adopt {item['name']}: process start identity unavailable")
+    ref = session_ref or (previous or {}).get("session_ref", "") or uuid.uuid4().hex
+    if not os.path.exists(fleet_session_path(ref)):
+        write_fleet_session(item["name"], provider_row.get("provider", ""),
+                            item["model"], ref)
+    doc = {"schema": FLEET_LANE_SCHEMA, "project_ref": fleet_project_ref(),
+           "identity": item["name"], "provider": provider_row.get("provider", ""),
+           "model": item["model"], "pid": pid, "process_start_ref": start_ref,
+           "session_ref": ref, "desired": item["desired"], "backend": backend,
+           "status": effective_status,
+           "updated_at": iso()}
+    write_fleet_json_atomic(fleet_lane_path(item["name"]), doc)
+    return doc
+
+
 def fleet_provider_row(item, template):
     row = {key: value for key, value in template.items() if key != "//"}
     row["name"] = item["name"]
@@ -2610,10 +3082,15 @@ def cmd_fleet_health(args):
              and ((row["desired"] == "running" and row["listener"]["status"] == "running")
                   or (row["desired"] == "stopped" and row["listener"]["status"] != "running"))
              for row in plan["health"])
-    payload = {"ok": ok, "health": plan["health"], "relay": plan["relay"]}
+    payload = {"ok": ok, "health": plan["health"], "relay": plan["relay"],
+               "supervisor": fleet_supervisor_health()}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
+        supervisor = payload["supervisor"]
+        print(f"supervisor status={supervisor['status']} "
+              f"backend={supervisor['backend'] or '-'} "
+              f"tier={supervisor['durability_tier']}")
         for row in plan["health"]:
             print(f"{row['name']} desired={row['desired']} listener={row['listener']['status']} "
                   f"member={str(row['member']).lower()} identity={str(row['identity_ready']).lower()} "
@@ -2731,8 +3208,118 @@ def fleet_bootstrap_ready(plan):
                          "; run fleet apply with the live holder first")
 
 
-def fleet_listener_command(agent, action, args):
+def fleet_durable_preflight(spec, plan, record_failures=False):
+    """Validate every durable lane before any process action.
+
+    A live process without matching persisted start identity is ambiguous.  It
+    is never adopted, stopped, or duplicated automatically.
+    """
+    providers = fleet_provider_rows()
+    observations = {}
+    health_by_name = {row["name"]: row for row in plan["health"]}
+    for item in spec["agents"]:
+        agent = item["name"]
+        lane = load_fleet_lane(agent)
+        live = health_by_name[agent]["listener"]
+        if lane is None:
+            if live["status"] == "running":
+                raise ValueError(
+                    f"live listener {agent} has no durable start identity; "
+                    "needs_reconciliation")
+            observations[agent] = {"state": "absent", "lane": None,
+                                   "adapter_health": {}}
+            continue
+        expected = providers.get(agent)
+        if expected is None or lane["provider"] != expected.get("provider") \
+                or lane["model"] != item["model"]:
+            raise ValueError(f"durable lane {agent} provider/model binding is stale")
+        validate_fleet_session(lane)
+        if lane["status"] == "needs_reconciliation":
+            raise ValueError(f"durable lane {agent} requires explicit reconciliation")
+        adapter = provider_adapter(lane["provider"])
+        process_ref = {"pid": lane["pid"],
+                       "process_start_ref": lane["process_start_ref"]}
+        adapter_health = adapter.health(process_ref, lane["session_ref"])
+        if adapter_health.get("relay_completion") is not False:
+            raise ValueError(f"adapter health for {agent} violated relay isolation")
+        pid = lane["pid"]
+        if pid and listener_pid_alive(pid):
+            current = fleet_process_start_ref(pid)
+            if current and lane["process_start_ref"] \
+                    and current == lane["process_start_ref"]:
+                # Confirmed: the same process instance is still alive -> adopt.
+                state = "adopted"
+            elif current and lane["process_start_ref"] \
+                    and current != lane["process_start_ref"]:
+                # Determinate mismatch -- BOTH refs non-empty and differing --
+                # proves a *different* process now owns this pid, so our listener
+                # is gone.  Restart a desired-running lane exactly once; we never
+                # signal the unrelated pid.
+                state = "missing"
+            elif lane["process_start_ref"] and not current:
+                # Transient: the persisted identity IS known; only this tick's
+                # probe failed (e.g. a POSIX `ps` hiccup).  Never wedge and never
+                # double-launch: defer all lifecycle action and re-verify on a
+                # later readable tick.
+                state = "adopted_unverified"
+            else:
+                # The persisted ref is empty while the pid is alive: this lane's
+                # identity was never recorded, so it can NEVER self-verify.  A
+                # silent defer would report false success on stop/resume while an
+                # unmanageable live pid persists, so fail closed VISIBLY (never
+                # launch, never signal) -- analogous to the supervisor-control
+                # path.  (codex, independent review of the first fix.)
+                if record_failures:
+                    blocked = dict(lane)
+                    blocked["status"] = "needs_reconciliation"
+                    blocked["updated_at"] = iso()
+                    write_fleet_json_atomic(fleet_lane_path(agent), blocked)
+                raise ValueError(
+                    f"durable lane {agent} has a live pid but no persisted start "
+                    "identity; needs_reconciliation")
+        elif live["status"] == "running":
+            if record_failures:
+                blocked = dict(lane)
+                blocked["status"] = "needs_reconciliation"
+                blocked["updated_at"] = iso()
+                write_fleet_json_atomic(fleet_lane_path(agent), blocked)
+            raise ValueError(
+                f"listener {agent} pid differs from its durable lane; "
+                "needs_reconciliation")
+        else:
+            state = "missing"
+        observations[agent] = {"state": state, "lane": lane,
+                               "adapter_health": adapter_health}
+    return observations
+
+
+def fleet_usage_preflight(agent):
+    hold, hold_error = read_usage_hold(agent)
+    if hold_error:
+        raise ValueError(f"{agent} usage hold is corrupt: {hold_error}")
+    if hold:
+        raise ValueError(f"{agent} has an active usage hold until "
+                         f"{hold.get('resets_at', '-')}")
+
+
+def fleet_listener_command(agent, action, args, provider_row=None, lane=None):
+    adapter = provider_adapter((provider_row or {}).get("provider", ""))
+    process_ref = ({"pid": lane.get("pid"),
+                    "process_start_ref": lane.get("process_start_ref", "")}
+                   if lane else None)
     if action == "start_listener":
+        # Native provider resume is optional and fail-closed.  The generic fresh
+        # listener reconstruction remains the mandatory fallback in slice 2.
+        if lane and lane.get("session_ref"):
+            try:
+                adapter.resume(provider_row, LISTENER_RESUME_PROMPT.format(
+                    agent=agent, agent_upper=agent.upper()), lane["session_ref"])
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    f"adapter {adapter.provider} returned native resume argv, but "
+                    "provider-session execution is not enabled until RFC 073 slice 3")
         argv = [sys.executable, SELF_PATH, "listener", "start", "--agent", agent,
                 "--provider", "--backend", args.backend]
         if args.runner:
@@ -2740,6 +3327,9 @@ def fleet_listener_command(agent, action, args):
         if getattr(args, "dry_run", False):
             argv.append("--dry-run")
     else:
+        intent = adapter.stop(process_ref, "graceful")
+        if intent.get("strategy") != "process-group":
+            raise ValueError(f"adapter stop for {agent} did not preserve process-group safety")
         argv = [sys.executable, SELF_PATH, "listener", "stop", "--agent", agent,
                 "--grace", str(args.grace)]
     result = subprocess.run(argv, cwd=HERE, capture_output=True, text=True)
@@ -2752,18 +3342,66 @@ def fleet_listener_command(agent, action, args):
 def fleet_reconcile_once(spec, args, desired_override=""):
     plan = build_fleet_plan(spec)
     fleet_bootstrap_ready(plan)
+    observations = fleet_durable_preflight(
+        spec, plan, record_failures=not getattr(args, "dry_run", False))
+    provider_rows = fleet_provider_rows()
+    items = {item["name"]: item for item in spec["agents"]}
     actions = []
     for row in plan["health"]:
         desired = desired_override or row["desired"]
-        running = row["listener"]["status"] == "running"
+        observation = observations[row["name"]]
+        if observation["state"] == "adopted_unverified":
+            # Start identity could not be verified this tick: defer every
+            # lifecycle action (no launch, no signal) and leave the durable
+            # lane untouched.  A later tick with a readable probe adopts,
+            # restarts, or flags it.
+            continue
+        running = observation["state"] == "adopted"
         action = ("start_listener" if desired == "running" and not running else
                   "stop_listener" if desired == "stopped" and running else "")
         if not action:
+            if not getattr(args, "dry_run", False):
+                item = dict(items[row["name"]])
+                item["desired"] = desired
+                persist_fleet_lane(
+                    item, provider_rows[row["name"]],
+                    fleet_listener_health(row["name"]),
+                    (observation["lane"] or {}).get("backend", args.backend),
+                    status="running" if running else "stopped",
+                    session_ref=(observation["lane"] or {}).get("session_ref", ""))
             continue
         if getattr(args, "dry_run", False):
             actions.append({"action": action, "agent": row["name"]})
         else:
-            actions.append(fleet_listener_command(row["name"], action, args))
+            if action == "start_listener":
+                fleet_usage_preflight(row["name"])
+            result = fleet_listener_command(
+                row["name"], action, args, provider_rows[row["name"]],
+                observation["lane"])
+            current = fleet_listener_health(row["name"])
+            if action == "start_listener" and current["status"] != "running":
+                raise ValueError(f"start_listener {row['name']} produced no live process")
+            if action == "start_listener" and not fleet_process_start_ref(current["pid"]):
+                # Never leave an unidentifiable process resident: it could not be
+                # adopted safely after the next supervisor crash.
+                intent = provider_adapter(
+                    provider_rows[row["name"]].get("provider", "")).stop(
+                        {"pid": current["pid"], "process_start_ref": ""}, "force")
+                if intent.get("strategy") == "process-group":
+                    listener_terminate_group(current["pid"], 0.0)
+                    remove_listener_pid(row["name"])
+                raise ValueError(f"start_listener {row['name']} has no stable "
+                                 "process start identity; stopped fail-closed")
+            backend_record = read_listener_backend_record(row["name"])
+            backend = backend_record.get("backend", args.backend)
+            persisted_item = dict(items[row["name"]])
+            persisted_item["desired"] = desired
+            persisted = persist_fleet_lane(
+                persisted_item, provider_rows[row["name"]], current, backend,
+                status="running" if action == "start_listener" else "stopped",
+                session_ref=(observation["lane"] or {}).get("session_ref", ""))
+            result["durable_status"] = persisted["status"]
+            actions.append(result)
     if not getattr(args, "dry_run", False):
         append_jsonl(FLEET_EVENTS, {
             "schema": "m8shift.fleet.event.v1", "event": "fleet.reconciled",
@@ -2798,6 +3436,8 @@ def cmd_fleet_reconcile(args):
 def cmd_fleet_stop(args):
     try:
         spec = load_fleet_spec(args.spec)
+        if not getattr(args, "dry_run", False):
+            stop_fleet_supervisor(args.grace)
         actions = fleet_reconcile_once(spec, args, desired_override="stopped")
     except ValueError as exc:
         sys.exit(f"m8shift-runtime: {exc}")
@@ -2821,23 +3461,115 @@ def cmd_fleet_supervise(args):
         fleet_bootstrap_ready(plan)
     except ValueError as exc:
         sys.exit(f"m8shift-runtime: {exc}")
+    selected_backend, fallback_reason = select_listener_backend(
+        args.backend, listener_backend_probe())
+    args._selected_backend = selected_backend
     if args.dry_run:
         payload = {"ok": True, "schema": "m8shift.fleet.supervisor.plan.v1",
                    "agents": [row["name"] for row in spec["agents"]],
                    "poll_interval_seconds": args.poll_interval,
-                   "service_count": 1}
+                   "service_count": 1, "backend": selected_backend,
+                   "backend_fallback_reason": fallback_reason,
+                   "durability_tier": (
+                       "foreground" if not args.detach else
+                       "native-service" if selected_backend in
+                       LISTENER_SERVICE_BACKENDS else "local-detached"),
+                   "restart_policy": (
+                       "native-on-failure" if args.detach and selected_backend in
+                       LISTENER_SERVICE_BACKENDS else "none")}
+        if args.detach and selected_backend in LISTENER_SERVICE_BACKENDS:
+            service = fleet_supervisor_service_plan(selected_backend, args)
+            payload["service"] = {
+                "label": service["label"],
+                "service_file": os.path.relpath(service["service_file"], HERE),
+                "content": service["content"],
+                "install_argv": [step["argv"] for step in service["install"]],
+            }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
+    if args.detach and not args.service_payload:
+        if fallback_reason:
+            print(f"backend {args.backend} → local: {fallback_reason}")
+        if selected_backend in LISTENER_SERVICE_BACKENDS:
+            plan = fleet_supervisor_service_plan(selected_backend, args)
+            rc = install_fleet_service_backend(plan)
+            if rc == 0:
+                print(f"✓ fleet supervisor installed (backend {selected_backend}, "
+                      f"service {plan['label']})")
+            return rc
+        pid = detach_fleet_supervisor(args, selected_backend)
+        print(f"✓ fleet supervisor started (pid {pid}, backend local, detached)")
+        print("  durability: survives frontend/terminal exit; no logout/reboot restart guarantee")
+        return 0
+    try:
+        control = load_fleet_control()
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    take_over_stale = False
+    if control and control["state"] == "running" and control["pid"] != os.getpid() \
+            and listener_pid_alive(control["pid"]):
+        current = fleet_process_start_ref(control["pid"])
+        if current and control["process_start_ref"] \
+                and current == control["process_start_ref"]:
+            sys.exit(f"m8shift-runtime: fleet supervisor already alive "
+                     f"(pid {control['pid']})")
+        if current and control["process_start_ref"] \
+                and current != control["process_start_ref"]:
+            # A NON-EMPTY persisted ref that differs from a non-empty live probe
+            # proves a *different* process now owns the persisted supervisor pid,
+            # i.e. the previous supervisor is gone -- e.g. a reboot/service stop
+            # left control.json at `running` with no clean shutdown.  A
+            # supervisor is a singleton: take over rather than wedging into a
+            # terminal state that crash-loops under a native KeepAlive unit.  We
+            # never signal the unrelated pid.
+            print("m8shift-runtime: prior supervisor gone (pid reused by an "
+                  f"unrelated process); taking over stale pid {control['pid']}",
+                  file=sys.stderr)
+            take_over_stale = True
+        elif args.reconcile_control:
+            take_over_stale = True
+        else:
+            # Indeterminate: the live probe failed, or the persisted ref was
+            # never recorded (empty).  We cannot prove the old supervisor is
+            # gone, so refuse a possible second supervisor.  Recoverable with
+            # --reconcile-control once the operator confirms it stopped.
+            sys.exit("m8shift-runtime: durable supervisor pid identity is "
+                     "unverifiable; rerun with --reconcile-control after "
+                     "confirming the previous supervisor is stopped")
+    if control and control["spec_digest"] != fleet_spec_digest(spec) \
+            and not take_over_stale:
+        if not args.reconcile_control:
+            sys.exit("m8shift-runtime: durable supervisor spec differs; rerun with "
+                     "--reconcile-control after confirming the previous supervisor "
+                     "is stopped")
+        if control["pid"] and listener_pid_alive(control["pid"]):
+            sys.exit("m8shift-runtime: cannot reconcile a changed control spec while "
+                     "the previous supervisor pid is alive")
     os.makedirs(FLEET_DIR, exist_ok=True)
     try:
         with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
             previous_pid = int(fh.read().strip())
     except (OSError, ValueError):
         previous_pid = 0
-    if previous_pid and previous_pid != os.getpid() and listener_pid_alive(previous_pid):
+    if previous_pid and previous_pid != os.getpid() \
+            and listener_pid_alive(previous_pid) and not take_over_stale:
         sys.exit(f"m8shift-runtime: fleet supervisor already alive (pid {previous_pid})")
     write_text_atomic(FLEET_SUPERVISOR_PID, f"{os.getpid()}\n")
     ticks = 0
+    write_fleet_control(spec, args, "running", ticks)
+    # A clean shutdown must persist state="stopped" so the next start does not
+    # find a stale `running` control after a service stop or reboot.  Convert
+    # SIGTERM (and SIGINT) into SystemExit so the `finally` below runs instead
+    # of the process being killed outright with the control left at `running`.
+    def _fleet_supervisor_signal(_signum, _frame):
+        sys.exit(0)
+    for _signame in ("SIGTERM", "SIGINT"):
+        _sig = getattr(signal, _signame, None)
+        if _sig is not None:
+            try:
+                signal.signal(_sig, _fleet_supervisor_signal)
+            except (ValueError, OSError):  # not the main thread / unsupported
+                pass
     try:
         while not args.max_ticks or ticks < args.max_ticks:
             ticks += 1
@@ -2848,9 +3580,11 @@ def cmd_fleet_supervise(args):
                     "schema": "m8shift.fleet.event.v1", "event": "fleet.reconcile_failed",
                     "at": iso(), "message": str(exc),
                 })
+            write_fleet_control(spec, args, "running", ticks)
             if not args.max_ticks or ticks < args.max_ticks:
                 time.sleep(args.poll_interval)
     finally:
+        write_fleet_control(spec, args, "stopped", ticks)
         try:
             with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
                 mine = fh.read().strip() == str(os.getpid())
@@ -8552,6 +9286,14 @@ def main():
                       help="seconds between reconciliation passes (default: 20)")
     fsup.add_argument("--max-ticks", type=int, default=0,
                       help="stop after N passes (test seam; 0 = unbounded)")
+    fsup.add_argument("--detach", action="store_true",
+                      help="launch the single control plane through the selected native "
+                           "service backend, or a weaker local detached fallback")
+    fsup.add_argument("--service-payload", action="store_true",
+                      help=argparse.SUPPRESS)
+    fsup.add_argument("--reconcile-control", action="store_true",
+                      help="accept a changed fleet spec only after durable evidence "
+                           "shows the previous supervisor is not alive")
     fsup.set_defaults(fn=cmd_fleet_supervise)
 
     fjobs = fleet_sub.add_parser(
