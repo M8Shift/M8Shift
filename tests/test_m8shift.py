@@ -16550,6 +16550,44 @@ class TestRFC072FleetPlan(ListenerCLIBase):
                 replacement.terminate()
                 replacement.wait(timeout=5)
 
+    def test_live_pid_with_empty_lane_ref_does_not_double_launch(self):
+        # A schema-valid lane {status=stopped, pid=<alive>, process_start_ref=""}
+        # (persistable while a transient probe returns empty) must NEVER be read
+        # as a determinate reused-pid mismatch -- a mismatch is determinate only
+        # when BOTH refs are non-empty.  Otherwise a desired=running tick would
+        # restart and DOUBLE-LAUNCH the still-live pid.  (Found by codex's
+        # independent review of the first fix.)
+        runtime, spec, args = self._durable_fleet_fixture()
+        survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                    cwd=self.d)
+        try:
+            item = spec["agents"][0]
+            row = runtime.fleet_provider_rows()["codex-2"]
+            runtime.write_listener_pid("codex-2", survivor.pid)
+            with mock.patch.object(runtime, "fleet_process_start_ref",
+                                   side_effect=lambda pid: f"orig:{pid}" if pid else ""):
+                runtime.persist_fleet_lane(
+                    item, row, runtime.fleet_listener_health("codex-2"), "local")
+            # Hand-write the dangerous durable state: alive pid, empty ref,
+            # status=stopped (schema-valid because the ref is only required for
+            # a running status).
+            lane = runtime.load_fleet_lane("codex-2")
+            lane["process_start_ref"] = ""
+            lane["status"] = "stopped"
+            runtime.write_fleet_json_atomic(runtime.fleet_lane_path("codex-2"), lane)
+            # Probe now readable, desired=running: must defer, not restart.
+            with mock.patch.object(
+                    runtime, "fleet_process_start_ref",
+                    side_effect=lambda pid: f"readable:{pid}" if pid else ""), \
+                    mock.patch.object(runtime, "fleet_listener_command") as launch:
+                actions = runtime.fleet_reconcile_once(spec, args)
+            launch.assert_not_called()          # deferred, never double-launched
+            self.assertEqual(actions, [])
+            self.assertIsNone(survivor.poll())  # the live pid was left untouched
+        finally:
+            survivor.terminate()
+            survivor.wait(timeout=5)
+
     def test_supervisor_takes_over_stale_running_control_after_pid_reuse(self):
         # After a reboot/service-stop that left control.json at `running`, if the
         # persisted supervisor pid is now a different, unrelated live process the

@@ -2948,11 +2948,17 @@ def persist_fleet_lane(item, provider_row, listener, backend, status=None,
                        session_ref=""):
     pid = listener.get("pid")
     start_ref = fleet_process_start_ref(pid) if pid else ""
+    previous = load_fleet_lane(item["name"])
+    if pid and not start_ref and previous and previous.get("pid") == pid \
+            and previous.get("process_start_ref"):
+        # Never durably bake a live PID with an empty start ref (a transient
+        # probe): a later readable tick would misread the empty ref as a
+        # reused-pid mismatch.  Preserve the prior good ref for the same PID.
+        start_ref = previous["process_start_ref"]
     effective_status = status or ("running" if pid and start_ref else "stopped")
     if effective_status == "running" and (not pid or not start_ref):
         raise ValueError(
             f"cannot durably adopt {item['name']}: process start identity unavailable")
-    previous = load_fleet_lane(item["name"])
     ref = session_ref or (previous or {}).get("session_ref", "") or uuid.uuid4().hex
     if not os.path.exists(fleet_session_path(ref)):
         write_fleet_session(item["name"], provider_row.get("provider", ""),
@@ -3243,20 +3249,22 @@ def fleet_durable_preflight(spec, plan, record_failures=False):
                     and current == lane["process_start_ref"]:
                 # Confirmed: the same process instance is still alive -> adopt.
                 state = "adopted"
-            elif not current and lane["process_start_ref"]:
-                # Indeterminate: the pid is alive but its start identity could
-                # not be read this tick (e.g. a transient POSIX `ps` failure).
-                # Never wedge a healthy lane on transient probe noise and never
-                # launch a second instance: keep it adopted-but-unverified,
-                # take no lifecycle action, and re-verify on a later tick.
-                state = "adopted_unverified"
-            else:
-                # Determinate mismatch: a *different* process now owns this pid
-                # (persisted start identity differs), which proves our listener
-                # is gone.  Treat the lane as missing so a desired `running`
-                # lane is restarted exactly once -- never wedged, and we never
+            elif current and lane["process_start_ref"] \
+                    and current != lane["process_start_ref"]:
+                # Determinate mismatch -- BOTH refs non-empty and differing --
+                # proves a *different* process now owns this pid, so our listener
+                # is gone.  Restart a desired-running lane exactly once; we never
                 # signal the unrelated pid.
                 state = "missing"
+            else:
+                # Either side's ref is empty while the pid is still alive (a
+                # transient probe, or a lane persisted with an empty ref under a
+                # non-running status).  A mismatch is only *determinate* when
+                # both refs are non-empty, so this is indeterminate: never treat
+                # it as `missing` -- that would restart and DOUBLE-LAUNCH the
+                # still-live pid.  Defer all lifecycle action (no launch, no
+                # signal) and re-verify once both refs are readable.
+                state = "adopted_unverified"
         elif live["status"] == "running":
             if record_failures:
                 blocked = dict(lane)
