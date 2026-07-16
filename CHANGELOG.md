@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.61.0 — 2026-07-16
+
 - **Detached fleet liveness hardening (#65, RFC 073 slice 2 review).** A
   transient start-identity probe failure on an alive lane no longer wedges it
   into a terminal `needs_reconciliation`: reconciliation now defers (adopts

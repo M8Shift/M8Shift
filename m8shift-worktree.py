@@ -64,7 +64,7 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = None        # canonical repo root (set in main, before any core read/write)
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")   # mirrors the core sentinel id class
-VERSION = "3.60.0"
+VERSION = "3.61.0"
 
 
 def die(msg):

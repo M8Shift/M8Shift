@@ -127,8 +127,8 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [069-rfc-top-incremental-status-fold.md](rfc/069-rfc-top-incremental-status-fold.md) | Implemented top-owned in-memory incremental status fold with a byte-equivalent full oracle, bounded O(delta) refreshes, and mandatory full fallback on invalidation. |
 | [070-rfc-provider-pinned-model-launch.md](rfc/070-rfc-provider-pinned-model-launch.md) | Implemented fail-closed per-agent model pins for managed Codex/Claude provider launches, with immutable runner-plan propagation and RFC 056's unverified provenance boundary preserved. |
 | [071-rfc-live-roster-add.md](rfc/071-rfc-live-roster-add.md) | Implemented holder-only live roster addition that changes only the LOCK `agents:` value, preserves the work window and journals byte-for-byte, and leaves anchor bootstrap explicit. |
-| [072-rfc-exact-identity-fleet-bootstrap.md](rfc/072-rfc-exact-identity-fleet-bootstrap.md) | Exact per-agent identity bootstrap plus declarative fleet plan, health, enrollment, and listener reconciliation. |
-| [073-rfc-adapter-registry-detached-durability.md](rfc/073-rfc-adapter-registry-detached-durability.md) | Phased adapter-registry and detached-durability implementation plan. |
+| [072-rfc-exact-identity-fleet-bootstrap.md](rfc/072-rfc-exact-identity-fleet-bootstrap.md) | Implemented exact-identity fleet orchestration (slices 1–6): declarative plan/health, holder-attributed identity bootstrap and enrollment, batch listener reconciliation, and immutable recipe-verified jobs with at most two producer worktrees and integrator-only merge/handoff/drop. |
+| [073-rfc-adapter-registry-detached-durability.md](rfc/073-rfc-adapter-registry-detached-durability.md) | Implemented slices 1–2: the provider-keyed `m8shift.agent-cli-adapter.v1` registry (Codex/Claude migrated byte-identical; Gemini validated stub) and the detached durable fleet control plane with `fleet supervise --detach`, a crash-consistent store, and PID start-identity reconciliation; slices 3–4 remain accepted. |
 
 ## Security docs
 
