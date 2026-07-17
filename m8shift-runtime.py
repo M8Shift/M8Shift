@@ -2582,8 +2582,9 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
     for env_name in agent.get("requires_env", []):
         if not ENV_RE.fullmatch(env_name):
             findings.append({"severity": "error", "check": "providers.env_name", "message": f"{label} has invalid env var name {env_name!r}"})
-        elif active and not os.environ.get(env_name):
-            findings.append({"severity": "error", "check": "providers.env_missing", "message": f"{label} requires missing environment variable {env_name}"})
+        elif not os.environ.get(env_name):
+            severity = "error" if active and launchable else "warning"
+            findings.append({"severity": severity, "check": "providers.env_missing", "message": f"{label} requires missing environment variable {env_name}"})
         if env_name not in agent.get("env_allowlist", []):
             findings.append({"severity": "error", "check": "providers.env_not_allowed",
                              "message": f"{label} required environment variable {env_name} is not in env_allowlist"})

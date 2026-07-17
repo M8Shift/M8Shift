@@ -7316,7 +7316,8 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(examples["codex"]["model"], "UNSET")
         self.assertTrue(all("model" in row for row in registry["agents"]))
         self.assertIn("model=UNSET", self.rt("providers", "list").stdout)
-        check = json.loads(self.rt("providers", "check", "--json").stdout)
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "placeholder"}):
+            check = json.loads(self.rt("providers", "check", "--json").stdout)
         self.assertFalse(check["ok"], check)
         self.assertIn("providers.model", {f["check"] for f in check["findings"]})
         for row in registry["agents"]:
@@ -7324,7 +7325,8 @@ class TestRuntimeCompanion(CLIBase):
                 row["model"] = "gpt-5.2-codex"
         with open(os.path.join(self.d, ".m8shift", "providers.json"), "w", encoding="utf-8") as fh:
             json.dump(registry, fh)
-        check = json.loads(self.rt("providers", "check", "--json").stdout)
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "placeholder"}):
+            check = json.loads(self.rt("providers", "check", "--json").stdout)
         self.assertTrue(check["ok"], check)
         rendered = json.loads(self.rt("providers", "render", "codex",
                                       "--prompt", "do one turn", "--run", "run1", "--json").stdout)
@@ -7388,6 +7390,30 @@ class TestRuntimeCompanion(CLIBase):
         findings = json.loads(r.stdout)["findings"]
         self.assertTrue(any(f["check"] == "providers.argv_string" for f in findings))
         self.assertTrue(any(f["check"] == "providers.env_missing" for f in findings))
+
+    def test_provider_check_missing_env_is_advisory_for_inactive_example(self):
+        self.init()
+        self.rt("providers", "init", "--force")
+        path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        codex = next(row for row in data["agents"] if row["name"] == "codex")
+        codex["model"] = "gpt-5.2-codex"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GEMINI_API_KEY", None)
+            result = self.rt("providers", "check", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(any(
+            finding["check"] == "providers.env_missing"
+            and finding["severity"] == "warning"
+            and "gemini" in finding["message"]
+            for finding in payload["findings"]
+        ), payload)
 
     def test_provider_platform_argv_selection_and_validation(self):
         self.init()
@@ -7630,10 +7656,12 @@ class TestRuntimeCompanion(CLIBase):
         )
         with mock.patch.dict(os.environ, {}, clear=True):
             findings = runtime.provider_entry_findings(row, "agents[0]")
-        self.assertIn("providers.env_missing", {f["check"] for f in findings})
+        missing = [f for f in findings if f["check"] == "providers.env_missing"]
+        self.assertEqual([f["severity"] for f in missing], ["error"])
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}, clear=True):
             findings = runtime.provider_entry_findings(row, "agents[0]")
-        self.assertIn("providers.env_missing", {f["check"] for f in findings})
+        missing = [f for f in findings if f["check"] == "providers.env_missing"]
+        self.assertEqual([f["severity"] for f in missing], ["error"])
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "placeholder"}, clear=True):
             findings = runtime.provider_entry_findings(row, "agents[0]")
         self.assertNotIn("providers.env_missing", {f["check"] for f in findings})
