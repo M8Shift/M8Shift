@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Supervisor hardening (RFC 073 slice 2C).** Fleet supervisor startup is
+  serialized by an atomic `O_EXCL` lock; detached parents confirm that the child
+  published exact running control before reporting success. `fleet resolve`
+  provides an explicit, reasoned, operator-attributed audit path for ambiguous
+  lane/control records, including a safe restart path after a persistently
+  unreadable desired-running lane is confirmed gone. No ambiguous PID is
+  signalled or duplicated automatically.
+- **Self-declared effort provenance (#198).** `M8SHIFT_AGENT_EFFORT` accepts a
+  bounded effort vocabulary and is persisted independently from model identity
+  in the LOCK and immutable turns. Status snapshot agents/activity and
+  `m8shift-top` render both declarations under the same unverified, possibly
+  stale asterisk boundary; model-equality consumers remain unchanged.
+
 ## v3.62.0 — 2026-07-17
 
 - **Liveness evidence: usage freshness, producer coverage, stranded attention

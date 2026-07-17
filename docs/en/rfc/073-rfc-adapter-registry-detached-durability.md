@@ -211,6 +211,12 @@ Implemented in this change:
 - deterministic conformance tests for survivor adoption, restart without a
   duplicate launch, corrupt-record refusal, and native-service plan rendering.
 
+Slice 2C hardens that implementation with an atomic `O_EXCL` supervisor startup
+lock, post-detach child/control confirmation, and the explicit audited
+`fleet resolve` repair command. Persistently unreadable desired-running lanes
+can be cleared for one fresh start only after an attributed operator confirms
+the prior process is gone; ambiguous PIDs are never signalled automatically.
+
 ```mermaid
 flowchart TD
     DET["fleet supervise --detach"] --> TIER["launchd / user systemd / Windows service via the existing backend seam"]

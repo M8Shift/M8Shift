@@ -44,7 +44,8 @@ def fixture():
             "paused_seconds": 26400, "idle_seconds": 660,
             "unclassified_seconds": 11220, "coverage_ratio": 0.8278,
         },
-        "last_turn": {"agent": "claude", "model": "claude-opus-4-8", "ask_excerpt": "x"},
+        "last_turn": {"agent": "claude", "model": "claude-opus-4-8",
+                      "ask_excerpt": "x"},
         "activity": [{"turn": 6, "agent": "claude", "model": "claude-opus-4-8",
                       "summary": "x" * 200}],
     }
@@ -73,6 +74,17 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             if old is not None:
                 os.environ["NO_COLOR"] = old
 
+    def test_model_and_effort_render_as_parallel_self_declarations(self):
+        top = load_top()
+        snap = fixture()
+        snap["agents"][0]["effort"] = "high"
+        snap["last_turn"]["effort"] = "xhigh"
+        snap["activity"][0]["effort"] = "xhigh"
+        output = self._plain(top.render(snap, 120, self.NOW))
+        self.assertIn("gpt-5.4/high*", output)
+        self.assertIn("model/effort self-declared (unverified; may be stale)", output)
+        self.assertIn("claude-opus-4-8/xhigh*", output)
+
     def test_wide_layout_tabulates_and_pins_right_edge(self):
         top = load_top()
         with mock.patch.dict(os.environ, {"TERM": "xterm-color"}, clear=True):
@@ -81,7 +93,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 plain = self._plain(output)
                 self.assertTrue(all(token in plain for token in (
                     "┌", "│", "├", "└", "M8SHIFT · demo", "AGENTS", "TTL", "codex",
-                    "gpt-5.4*", "self-declared (unverified)")))
+                    "gpt-5.4*", "model/effort self-declared (unverified; may be stale)")))
                 lines = plain.splitlines()
                 self.assertTrue(all(len(line) == width for line in lines))
                 # the pen holder sits in its own column, not glued to the label
@@ -679,7 +691,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "71bfe0c9ebafef769c4eee4dcc838e3478fc3f4aed803e256c8cb9b33c785e7e",
+            "b252942bffb2f03494af25c64879979c1f7746b17a0891029a65926533a56218",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):

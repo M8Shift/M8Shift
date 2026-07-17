@@ -56,3 +56,14 @@ routing authority, or billing truth.
 3. Historical turn attribution is immutable and missing values remain compatible.
 4. Narrow and wide dashboard layouts show the declaration with the unverified legend.
 5. Model provenance never feeds mutex, routing, permissions, or capability decisions.
+
+## Amendment — parallel effort declaration (#198)
+
+`M8SHIFT_AGENT_EFFORT` is a sibling self-declaration with the bounded vocabulary
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. It is persisted
+in a parallel roster-scoped `efforts` LOCK map and immutable turn `effort` field,
+then projected as `effort`/`effort_source` in agent, last-turn, and activity
+snapshot rows. It is deliberately not composed into the model id: model equality,
+fleet lane bindings, and provider selection remain unchanged. Dashboard model and
+effort values share the same `*` legend and explicitly remain unverified and
+potentially stale after an operator-side mid-session switch.

@@ -129,7 +129,7 @@ Dispatch is keyed solely by the row's `provider`; an **unknown provider retains 
   sessions/<ref>.json          # m8shift.fleet.session.v1 — opaque, project/agent/adapter/model-bound
   jobs/<job-id>/*              # immutable RFC 072 job/assignment/attempt/integration evidence
   events.jsonl                 # append-only fleet event journal
-  supervisor.pid · supervisor.log · supervisor.backend.json
+  supervisor.pid · supervisor.lock · supervisor.log · supervisor.backend.json
   (+ the generated service definition with `--detach` on a service backend)
 ```
 
@@ -145,6 +145,15 @@ Startup reconciles the store against **PID start identity** (Linux: boot-id + `/
 The same identity logic protects the supervisor itself: SIGTERM/SIGINT are converted into a clean shutdown that persists `state=stopped`; after a reboot that left `control.json` at `running`, a provably-reused pid is **taken over** instead of crash-looping under a native KeepAlive unit, while an unverifiable identity refuses a possible second supervisor until `--reconcile-control` confirms the previous one is stopped. `fleet stop` clears a provably-dead supervisor's control. Adapter `health`, optional `resume` (with fresh-listener reconstruction as the mandatory fallback), and process-group `stop` intent mediate lane lifecycle through the registry above, and active per-agent usage holds are checked before any launch.
 
 `fleet supervise --detach` installs this one control plane through the **existing listener backend seam** — a launchd LaunchAgent, a user `systemd` unit, or a Windows service definition (`native-service` durability tier, `native-on-failure` restart policy) — and otherwise starts an **honest local detached fallback** that prints exactly what it guarantees: it survives frontend/terminal exit but offers **no logout/reboot restart guarantee**. Backend selection reuses the `M8SHIFT_LISTENER_BACKEND_PROBE` seam, so deterministic tests never touch a real service manager. The relay stays portable and authoritative if the ignored store is deleted; only local orchestration history is lost.
+
+Slice 2C serializes the startup guard with `supervisor.lock` (`O_EXCL`), and a
+local detached parent reports success only after the child publishes verifiable
+running control. `fleet resolve --spec FILE (--lane AGENT | --control) --by NAME
+--reason TEXT [--resolution stopped|restart]` is the sole explicit repair path
+for ambiguous durable state. It records `fleet.operator_resolved`; it never
+signals an ambiguous PID. A desired-running lane resolved as `restart` is cleared
+to stopped and starts once on the next reconciliation after the operator confirms
+the prior process is gone.
 
 ## Inputs and outputs
 

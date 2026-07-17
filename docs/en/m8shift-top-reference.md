@@ -84,9 +84,10 @@ takeover permission from the gauge alone.
 There is one AGENTS row per relay member:
 
 - `✦` marks the current pen holder.
-- The agent identifier is followed by an optional self-declared model. A trailing
-  `*` means the model label is unverified; the note below the rows repeats that
-  boundary.
+- The agent identifier is followed by optional, parallel self-declared
+  `model/effort` values. A trailing `*` means the declarations are unverified and
+  may be stale; the note below the rows repeats that boundary. Activity rows use
+  the same notation.
 - The dot and adjacent word show the role state. Green `idle`, yellow `working`,
   and a dim unknown state remain readable as words without colour.
 - **5h** and **weekly** are provider usage windows. A percentage below 60% is

@@ -314,6 +314,13 @@ releasable at all times.
   hook stamp the executing model, export a single-line safe identifier before
   committing, for example `M8SHIFT_AGENT_MODEL=codex-gpt-5.1`. Malformed values are
   ignored fail-open and never block the commit.
+
+Relay attribution also accepts `M8SHIFT_AGENT_EFFORT` as a parallel declaration.
+Its bounded values are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and
+`ultra`. The LOCK and turn journal keep effort separate from model identity so
+model equality remains stable. Both values are self-declared, unverified, and may
+be stale until the agent next claims or appends after an operator-side switch.
+
 - **No relay artefacts committed.** `M8SHIFT.md`, `M8SHIFT.archive.md`,
   `.m8shift.lock`, and other generated relay state stay out of the repo.
 

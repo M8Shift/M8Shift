@@ -193,6 +193,7 @@ FLEET_DIR = os.path.join(RUNTIME_DIR, "fleet")
 FLEET_IDENTITIES_DIR = os.path.join(RUNTIME_DIR, "identities")
 FLEET_EVENTS = os.path.join(FLEET_DIR, "events.jsonl")
 FLEET_SUPERVISOR_PID = os.path.join(FLEET_DIR, "supervisor.pid")
+FLEET_SUPERVISOR_LOCK = os.path.join(FLEET_DIR, "supervisor.lock")
 FLEET_CONTROL = os.path.join(FLEET_DIR, "control.json")
 FLEET_LANES_DIR = os.path.join(FLEET_DIR, "lanes")
 FLEET_SESSIONS_DIR = os.path.join(FLEET_DIR, "sessions")
@@ -2728,6 +2729,49 @@ def write_fleet_json_atomic(path, doc):
             pass
 
 
+def acquire_fleet_supervisor_lock():
+    """Atomically serialize supervisor startup; recovery is operator-only."""
+    os.makedirs(FLEET_DIR, mode=0o700, exist_ok=True)
+    reject_symlinked_runtime_path(FLEET_SUPERVISOR_LOCK)
+    token = uuid.uuid4().hex
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(FLEET_SUPERVISOR_LOCK, flags, 0o600)
+    except FileExistsError:
+        raise ValueError(
+            "fleet supervisor startup lock is busy or stale; inspect fleet health "
+            "and use fleet resolve --control only after confirming no supervisor "
+            "startup is active")
+    try:
+        payload = canonical_json_bytes({
+            "schema": "m8shift.fleet.supervisor-lock.v1",
+            "pid": os.getpid(), "token": token, "created_at": iso(),
+        })
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        try:
+            os.unlink(FLEET_SUPERVISOR_LOCK)
+        except OSError:
+            pass
+        raise
+    return token
+
+
+def release_fleet_supervisor_lock(token):
+    """Remove only the startup lock carrying our unguessable token."""
+    doc, err = read_json_diagnostic(FLEET_SUPERVISOR_LOCK, {})
+    if not err and isinstance(doc, dict) and doc.get("token") == token:
+        try:
+            os.unlink(FLEET_SUPERVISOR_LOCK)
+        except OSError:
+            pass
+
+
 def fleet_process_start_ref(pid):
     """Return a stable start identity for a live pid, or an empty string.
 
@@ -2986,6 +3030,34 @@ def fleet_supervisor_service_plan(backend, args):
             "install": install, "uninstall": uninstall}
 
 
+def confirm_detached_fleet_supervisor(proc, timeout=5.0):
+    """Confirm the detached child passed startup guards and owns control."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise ValueError(
+                f"detached fleet supervisor exited during startup (rc {proc.returncode}); "
+                f"inspect {os.path.relpath(FLEET_SUPERVISOR_LOG, HERE)}")
+        try:
+            control = load_fleet_control()
+        except ValueError:
+            control = None
+        if control and control.get("state") == "running" \
+                and control.get("pid") == proc.pid \
+                and control.get("process_start_ref"):
+            current = fleet_process_start_ref(proc.pid)
+            if current and current == control["process_start_ref"]:
+                return control
+        time.sleep(0.05)
+    try:
+        listener_terminate_group(proc.pid, 0.0)
+    except OSError:
+        pass
+    raise ValueError(
+        "detached fleet supervisor did not publish verifiable running control "
+        f"within {timeout:g}s; child stopped fail-closed")
+
+
 def detach_fleet_supervisor(args, backend):
     child = fleet_supervisor_child_argv(args, backend)
     os.makedirs(FLEET_DIR, exist_ok=True)
@@ -3003,6 +3075,7 @@ def detach_fleet_supervisor(args, backend):
         popen_kwargs["stderr"] = log_fh
         proc = subprocess.Popen(child, **popen_kwargs)
     write_text_atomic(FLEET_SUPERVISOR_PID, f"{proc.pid}\n")
+    confirm_detached_fleet_supervisor(proc)
     return proc.pid
 
 
@@ -3596,6 +3669,100 @@ def emit_fleet_lifecycle(args, event, actions):
     return 0
 
 
+def fleet_resolution_actor_reason(args):
+    actor = (args.by or "").strip()
+    reason = (args.reason or "").strip()
+    if not AGENT_RE.fullmatch(actor):
+        raise ValueError("fleet resolve requires a valid --by operator identity")
+    if not reason or len(reason.encode("utf-8")) > 500 or any(
+            ch in reason for ch in "\r\n\v\f"):
+        raise ValueError("fleet resolve requires a single-line --reason (1..500 bytes)")
+    return actor, reason
+
+
+def resolve_fleet_lane(spec, agent, resolution, actor, reason):
+    items = {item["name"]: item for item in spec["agents"]}
+    item = items.get(agent)
+    if item is None:
+        raise ValueError(f"fleet spec has no lane {agent}")
+    lane = load_fleet_lane(agent)
+    if lane is None:
+        raise ValueError(f"durable lane {agent} is absent")
+    if resolution == "restart" and item["desired"] != "running":
+        raise ValueError(f"lane {agent} is not desired-running")
+    if lane["status"] != "needs_reconciliation":
+        pid = lane.get("pid")
+        unreadable = bool(pid and listener_pid_alive(pid)
+                          and lane.get("process_start_ref")
+                          and not fleet_process_start_ref(pid))
+        if not (resolution == "restart" and unreadable):
+            raise ValueError(
+                f"lane {agent} is not needs_reconciliation or persistently unverified")
+    resolved = dict(lane)
+    resolved.update(pid=None, process_start_ref="", status="stopped",
+                    desired=item["desired"], updated_at=iso())
+    write_fleet_json_atomic(fleet_lane_path(agent), resolved)
+    append_jsonl(FLEET_EVENTS, {
+        "schema": "m8shift.fleet.event.v1", "event": "fleet.operator_resolved",
+        "at": iso(), "by": actor, "target": f"lane:{agent}",
+        "resolution": resolution, "reason": reason,
+    })
+    return {"target": f"lane:{agent}", "resolution": resolution}
+
+
+def resolve_fleet_control(spec, actor, reason):
+    control, err = read_json_diagnostic(FLEET_CONTROL, {})
+    if not err and isinstance(control, dict) and control:
+        try:
+            validated = load_fleet_control()
+        except ValueError:
+            validated = None
+        if validated and validated.get("pid") \
+                and listener_pid_alive(validated["pid"]):
+            current = fleet_process_start_ref(validated["pid"])
+            if current and validated.get("process_start_ref") == current:
+                raise ValueError(
+                    f"fleet supervisor pid {validated['pid']} is exactly alive; stop it first")
+    stopped = {
+        "schema": FLEET_CONTROL_SCHEMA, "project_ref": fleet_project_ref(),
+        "pid": None, "process_start_ref": "", "backend": "local",
+        "spec_digest": fleet_spec_digest(spec), "state": "stopped",
+        "ticks": 0, "updated_at": iso(),
+    }
+    write_fleet_json_atomic(FLEET_CONTROL, stopped)
+    for path in (FLEET_SUPERVISOR_PID, FLEET_SUPERVISOR_LOCK):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    append_jsonl(FLEET_EVENTS, {
+        "schema": "m8shift.fleet.event.v1", "event": "fleet.operator_resolved",
+        "at": iso(), "by": actor, "target": "control",
+        "resolution": "stopped", "reason": reason,
+        "prior_record_error": bool(err),
+    })
+    return {"target": "control", "resolution": "stopped"}
+
+
+def cmd_fleet_resolve(args):
+    try:
+        spec = load_fleet_spec(args.spec)
+        actor, reason = fleet_resolution_actor_reason(args)
+        if args.control:
+            result = resolve_fleet_control(spec, actor, reason)
+        else:
+            result = resolve_fleet_lane(
+                spec, args.lane, args.resolution, actor, reason)
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    payload = {"ok": True, **result, "by": actor}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"✓ resolved {result['target']} as {result['resolution']} by {actor}")
+    return 0
+
+
 def cmd_fleet_reconcile(args):
     try:
         spec = load_fleet_spec(args.spec)
@@ -3674,19 +3841,24 @@ def cmd_fleet_supervise(args):
         print("  durability: survives frontend/terminal exit; no logout/reboot restart guarantee")
         return 0
     try:
-        control = load_fleet_control()
+        startup_token = acquire_fleet_supervisor_lock()
     except ValueError as exc:
         sys.exit(f"m8shift-runtime: {exc}")
-    take_over_stale = False
-    if control and control["state"] == "running" and control["pid"] != os.getpid() \
-            and listener_pid_alive(control["pid"]):
-        current = fleet_process_start_ref(control["pid"])
-        if current and control["process_start_ref"] \
-                and current == control["process_start_ref"]:
-            sys.exit(f"m8shift-runtime: fleet supervisor already alive "
-                     f"(pid {control['pid']})")
-        if current and control["process_start_ref"] \
-                and current != control["process_start_ref"]:
+    try:
+        try:
+            control = load_fleet_control()
+        except ValueError as exc:
+            sys.exit(f"m8shift-runtime: {exc}")
+        take_over_stale = False
+        if control and control["state"] == "running" and control["pid"] != os.getpid() \
+                and listener_pid_alive(control["pid"]):
+            current = fleet_process_start_ref(control["pid"])
+            if current and control["process_start_ref"] \
+                    and current == control["process_start_ref"]:
+                sys.exit(f"m8shift-runtime: fleet supervisor already alive "
+                         f"(pid {control['pid']})")
+            if current and control["process_start_ref"] \
+                    and current != control["process_start_ref"]:
             # A NON-EMPTY persisted ref that differs from a non-empty live probe
             # proves a *different* process now owns the persisted supervisor pid,
             # i.e. the previous supervisor is gone -- e.g. a reboot/service stop
@@ -3694,41 +3866,54 @@ def cmd_fleet_supervise(args):
             # supervisor is a singleton: take over rather than wedging into a
             # terminal state that crash-loops under a native KeepAlive unit.  We
             # never signal the unrelated pid.
-            print("m8shift-runtime: prior supervisor gone (pid reused by an "
-                  f"unrelated process); taking over stale pid {control['pid']}",
-                  file=sys.stderr)
-            take_over_stale = True
-        elif args.reconcile_control:
-            take_over_stale = True
-        else:
+                print("m8shift-runtime: prior supervisor gone (pid reused by an "
+                      f"unrelated process); taking over stale pid {control['pid']}",
+                      file=sys.stderr)
+                take_over_stale = True
+            elif args.reconcile_control:
+                take_over_stale = True
+            else:
             # Indeterminate: the live probe failed, or the persisted ref was
             # never recorded (empty).  We cannot prove the old supervisor is
             # gone, so refuse a possible second supervisor.  Recoverable with
             # --reconcile-control once the operator confirms it stopped.
-            sys.exit("m8shift-runtime: durable supervisor pid identity is "
-                     "unverifiable; rerun with --reconcile-control after "
-                     "confirming the previous supervisor is stopped")
-    if control and control["spec_digest"] != fleet_spec_digest(spec) \
-            and not take_over_stale:
-        if not args.reconcile_control:
-            sys.exit("m8shift-runtime: durable supervisor spec differs; rerun with "
-                     "--reconcile-control after confirming the previous supervisor "
-                     "is stopped")
-        if control["pid"] and listener_pid_alive(control["pid"]):
-            sys.exit("m8shift-runtime: cannot reconcile a changed control spec while "
-                     "the previous supervisor pid is alive")
-    os.makedirs(FLEET_DIR, exist_ok=True)
-    try:
-        with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
-            previous_pid = int(fh.read().strip())
-    except (OSError, ValueError):
-        previous_pid = 0
-    if previous_pid and previous_pid != os.getpid() \
-            and listener_pid_alive(previous_pid) and not take_over_stale:
-        sys.exit(f"m8shift-runtime: fleet supervisor already alive (pid {previous_pid})")
-    write_text_atomic(FLEET_SUPERVISOR_PID, f"{os.getpid()}\n")
-    ticks = 0
-    write_fleet_control(spec, args, "running", ticks)
+                sys.exit("m8shift-runtime: durable supervisor pid identity is "
+                         "unverifiable; run fleet resolve --control after "
+                         "confirming the previous supervisor is stopped")
+        if control and control["spec_digest"] != fleet_spec_digest(spec) \
+                and not take_over_stale:
+            if not args.reconcile_control:
+                sys.exit("m8shift-runtime: durable supervisor spec differs; rerun with "
+                         "--reconcile-control after confirming the previous supervisor "
+                         "is stopped")
+            if control["pid"] and listener_pid_alive(control["pid"]):
+                sys.exit("m8shift-runtime: cannot reconcile a changed control spec while "
+                         "the previous supervisor pid is alive")
+        os.makedirs(FLEET_DIR, exist_ok=True)
+        try:
+            with open(FLEET_SUPERVISOR_PID, encoding="utf-8") as fh:
+                previous_pid = int(fh.read().strip())
+        except (OSError, ValueError):
+            previous_pid = 0
+        if previous_pid and previous_pid != os.getpid() \
+                and listener_pid_alive(previous_pid) and not take_over_stale:
+            sys.exit(f"m8shift-runtime: fleet supervisor already alive (pid {previous_pid})")
+        write_text_atomic(FLEET_SUPERVISOR_PID, f"{os.getpid()}\n")
+        ticks = 0
+        control = write_fleet_control(spec, args, "running", ticks)
+        if not control.get("process_start_ref"):
+            failed = dict(control)
+            failed.update(pid=None, process_start_ref="", state="stopped",
+                          updated_at=iso())
+            write_fleet_json_atomic(FLEET_CONTROL, failed)
+            try:
+                os.unlink(FLEET_SUPERVISOR_PID)
+            except OSError:
+                pass
+            sys.exit("m8shift-runtime: supervisor start identity is unavailable; "
+                     "startup stopped fail-closed")
+    finally:
+        release_fleet_supervisor_lock(startup_token)
     # A clean shutdown must persist state="stopped" so the next start does not
     # find a stale `running` control after a service stop or reboot.  Convert
     # SIGTERM (and SIGINT) into SystemExit so the `finally` below runs instead
@@ -9526,6 +9711,24 @@ def main():
         "resume", help="resume all bootstrapped fleet listeners as one batch")
     fleet_lifecycle_flags(fresume)
     fresume.set_defaults(fn=cmd_fleet_resume)
+    fresolve = fleet_sub.add_parser(
+        "resolve", help="explicitly resolve an ambiguous durable lane or control record")
+    fresolve.add_argument("--spec", required=True,
+                          help="path to a m8shift.fleet.spec.v1 JSON document")
+    ftarget = fresolve.add_mutually_exclusive_group(required=True)
+    ftarget.add_argument("--lane", help="exact fleet lane identity to resolve")
+    ftarget.add_argument("--control", action="store_true",
+                         help="resolve the fleet supervisor control record as stopped")
+    fresolve.add_argument("--resolution", choices=("stopped", "restart"),
+                          default="stopped",
+                          help="lane outcome; restart clears a desired-running lane for one fresh start")
+    fresolve.add_argument("--by", required=True,
+                          help="operator identity recorded in the fleet event journal")
+    fresolve.add_argument("--reason", required=True,
+                          help="single-line operator justification recorded in the audit event")
+    fresolve.add_argument("--json", action="store_true",
+                          help="emit machine-readable JSON instead of human output")
+    fresolve.set_defaults(fn=cmd_fleet_resolve)
     fsup = fleet_sub.add_parser(
         "supervise", help="run one control-plane process that reconciles every lane")
     fleet_lifecycle_flags(fsup)
