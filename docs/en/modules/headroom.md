@@ -66,7 +66,7 @@ shown only to state explicitly that this launcher never reads or writes it.
 | Command | Mutates | Reads | Writes | Notes |
 |---------|---------|-------|--------|-------|
 | `python3 m8shift-headroom.py m8shift-transform <mode>` | read-only (no file writes) | stdin (≤ 2 MiB) | stdout only | forces offline env + blocks sockets, redacts secrets, calls Kompress `compress(..., target_ratio=0.4, allow_download=False)`; prints compact text only on a verified reduction, else empty stdout |
-| `python3 m8shift-headroom.py --version` | read-only | none | stdout | prints `m8shift-headroom.py 3.61.0` |
+| `python3 m8shift-headroom.py --version` | read-only | none | stdout | prints `m8shift-headroom.py 3.62.0` |
 | `python3 m8shift-headroom.py --help` | read-only | none | stdout | argparse usage; the subcommand is required |
 
 `<mode>` is a required positional argument. In normal operation `m8shift-context.py`

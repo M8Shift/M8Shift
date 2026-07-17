@@ -50,7 +50,7 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.epilog = old
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
-VERSION = "3.61.0"
+VERSION = "3.62.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 HERE = os.path.dirname(os.path.abspath(__file__))

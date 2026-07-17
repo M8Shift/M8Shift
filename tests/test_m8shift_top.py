@@ -28,7 +28,7 @@ def load_top():
 
 def fixture():
     return {
-        "project": "demo", "m8shift_version": "v3.61.0", "session": "session-1",
+        "project": "demo", "m8shift_version": "v3.62.0", "session": "session-1",
         "holder": "codex", "state": "WORKING_CODEX", "turn": 7,
         "since": "2026-07-13T00:00:00Z", "expires": "2026-07-13T00:30:00Z",
         "pen": {"heartbeat": "2026-07-13T00:10:00Z"},
@@ -1082,7 +1082,7 @@ class IncrementalStatusReaderTests(unittest.TestCase):
         source = self.engine.read_text(encoding="utf-8")
         replacement = self.root / "m8shift.next.py"
         replacement.write_text(
-            source.replace('VERSION = "3.61.0"', 'VERSION = "3.61.1"', 1),
+            source.replace('VERSION = "3.62.0"', 'VERSION = "3.62.1"', 1),
             encoding="utf-8")
         os.replace(str(replacement), str(self.engine))
         actual = reader.load(8)
