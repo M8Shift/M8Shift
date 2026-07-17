@@ -2136,7 +2136,7 @@ class TestReadCommands(CLIBase):
         self.assertEqual([a["role_state"] for a in d["snapshot"]["agents"]],
                          ["awaiting", "idle"])
         self.assertEqual(set(d["snapshot"]),
-                         {"schema", "agents", "listeners", "last_turn", "ledger", "pen",
+                         {"schema", "agents", "listeners", "attention", "last_turn", "ledger", "pen",
                           "activity", "activity_limit", "activity_truncated"})
         self.assertIsInstance(d["snapshot"]["activity"], list)
         self.assertLessEqual(len(d["snapshot"]["activity"]), 8)

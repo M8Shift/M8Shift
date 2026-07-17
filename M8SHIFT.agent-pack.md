@@ -65,8 +65,10 @@ pending incoming turn for this reason.
 `IDLE` means no turn is opened, not that the task is complete. Listening ends **only**
 at `DONE`. Whenever you halt while the relay is not `DONE` — not your turn, paused,
 interrupted, an action denied, or holding the pen with nothing to do — keep a waiter
-armed (`wait`/`next`/`append --wait`/runner); never go silent merely because you predict
-the peer will not act, and never confuse stopping work with stopping listening.
+armed (`wait`/`next`/`append --wait`/runner) whenever no supervisor exists. A bounded
+waiter counts only while blocked; long off-relay work needs a supervised persistent
+listener/watcher. A detector never invokes an agent, and notify-only coverage still
+needs human reactivation. Never confuse stopping work with stopping listening.
 
 ## Prompt security
 

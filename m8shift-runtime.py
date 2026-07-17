@@ -5769,7 +5769,7 @@ def listener_child_argv(args, agent, runner_path, *, service_payload=False):
         argv += ["--cmd-file", os.path.abspath(args.cmd_file)]
     if args.provider:
         argv.append("--provider")
-    if args.notify_only:
+    if getattr(args, "notify_only", False):
         argv.append("--notify-only")
     if args.max_ticks:
         argv += ["--max-ticks", str(args.max_ticks)]
@@ -6325,7 +6325,7 @@ def normalize_listener_profile(doc, source):
 
 def load_listener_profile(args, agent):
     """Load and validate the provider profile BEFORE any process work (RFC 047)."""
-    if args.notify_only and not args.cmd_file and not args.provider:
+    if getattr(args, "notify_only", False) and not args.cmd_file and not args.provider:
         return normalize_listener_profile({
             "schema": LISTENER_PROFILE_SCHEMA, "agent": agent,
             "argv": [sys.executable, "-c", "pass"], "cwd": ".",
@@ -6605,7 +6605,7 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
         "backend": backend,
         "backend_requested": args.backend,
         "backend_fallback_reason": fallback_reason,
-        "mode": ("notify_only" if args.notify_only else
+        "mode": ("notify_only" if getattr(args, "notify_only", False) else
                  "foreground" if args.foreground else "detached"),
         "profile": {key: profile[key] for key in
                     ("schema", "agent", "argv", "cwd", "env_allowlist", "start_on_idle",
@@ -6613,7 +6613,7 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
         "profile_source": profile["source"],
         "runner": os.path.relpath(runner_path, HERE),
         "runner_exists": os.path.isfile(runner_path),
-        "runner_argv_preview": ([] if args.notify_only else
+        "runner_argv_preview": ([] if getattr(args, "notify_only", False) else
                                 listener_runner_argv(agent, profile, runner_path, "RUN_ID")),
         "poll_interval_seconds": args.poll_interval,
         "max_ticks": args.max_ticks,
@@ -6903,7 +6903,7 @@ def cmd_listener_start(args):
     if fallback_reason:
         # RFC 047: the fallback must be VISIBLE — never silently downgrade.
         print(f"backend {args.backend} → local: {fallback_reason}")
-    if not args.notify_only and not os.path.isfile(runner_path):
+    if not getattr(args, "notify_only", False) and not os.path.isfile(runner_path):
         sys.exit(f"m8shift-runtime: headless runner not found at "
                  f"{os.path.relpath(runner_path, HERE)} (pass --runner PATH)")
     supervised = os.environ.get(LISTENER_DETACHED_ENV) == "1" or args.service_payload
@@ -6926,7 +6926,7 @@ def cmd_listener_start(args):
             write_listener_state(agent, phase="polling", consecutive_failures=0,
                                  last_run_id="", last_classification="", reason="",
                                  start_on_idle=profile["start_on_idle"],
-                                 notify_only=args.notify_only)
+                                 notify_only=getattr(args, "notify_only", False))
     if args.foreground:
         # The loop always records its own pid: for a local detach this is the same
         # value the parent already wrote; for an OS-service payload there IS no
@@ -6936,7 +6936,7 @@ def cmd_listener_start(args):
             agent, profile, runner_path,
             poll=args.poll_interval, max_ticks=args.max_ticks,
             max_retries=args.max_retries, max_backoff=args.max_backoff,
-            owns_log=supervised, notify_only=args.notify_only)
+            owns_log=supervised, notify_only=getattr(args, "notify_only", False))
     paths = listener_paths(agent)
     if backend in LISTENER_SERVICE_BACKENDS:
         # OS service lifecycle (RFC 047 Phase D): generate the definition under
