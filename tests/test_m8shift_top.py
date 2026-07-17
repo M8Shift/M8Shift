@@ -263,7 +263,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                                   "→ turn 8", "TTL", "alive", "✦", "● working"):
                         self.assertIn(token, plain)
 
-    def test_usage_thresholds_remain_green_below_60_yellow_to_85_red_at_85(self):
+    def test_remaining_labels_keep_used_ratio_threshold_colours(self):
         top = load_top()
         data = fixture()
         data["agents"] = []
@@ -277,9 +277,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             })
         with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
             output = top.render(data, 120, self.NOW)
-        self.assertIn("\x1b[38;2;87;171;90m5h 59%\x1b[0m", output)
-        self.assertIn("\x1b[38;2;198;144;38m5h 60%\x1b[0m", output)
-        self.assertIn("\x1b[38;2;244;112;103m5h 85%\x1b[0m", output)
+        self.assertIn("\x1b[38;2;87;171;90m5h left 41%\x1b[0m", output)
+        self.assertIn("\x1b[38;2;198;144;38m5h left 40%\x1b[0m", output)
+        self.assertIn("\x1b[38;2;244;112;103m5h left 15%\x1b[0m", output)
 
     def test_width_uses_real_geometry_above_120(self):
         top = load_top()
@@ -337,9 +337,10 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         }
         for width in (80, 120, 160):
             output = self._plain(top.render(data, width, self.NOW, utc=True))
-            self.assertIn("42% reset Mon 07-13 05:00Z", output)
-            if width >= 120:
-                self.assertIn("weekly 30% reset Fri 07-17 05:00Z", output)
+            self.assertIn("weekly left 70%", output)
+            if width >= 160:
+                self.assertIn("weekly left 70% reset Fri 07-17 05:00Z", output)
+                self.assertIn("5h left 58% reset Mon 07-13 05:00Z", output)
             self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
     def test_stale_ratio_always_carries_stale_token_across_layout_matrix(self):
@@ -363,9 +364,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 with self.subTest(width=width, env=env), \
                         mock.patch.dict(os.environ, env, clear=True):
                     plain = self._plain(top.render(data, width, self.NOW))
-                    ratio_lines = [line for line in plain.splitlines() if "73%" in line]
+                    ratio_lines = [line for line in plain.splitlines() if "left 27%" in line]
                     self.assertTrue(all("STALE" in line for line in ratio_lines))
-                    self.assertNotIn("73% S│", plain)
+                    self.assertNotIn("27% S│", plain)
                     self.assertTrue(all(len(line) == width for line in plain.splitlines()))
 
     def test_unknown_freshness_hides_ratio_but_preserves_not_provided(self):
@@ -387,7 +388,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                     self.assertIn("unknown", plain)
                     self.assertNotIn("88%", plain)
                     if width >= 120:
-                        self.assertIn("weekly n/a", plain)
+                        self.assertIn("weekly left n/a", plain)
                     self.assertTrue(all(len(line) == width for line in plain.splitlines()))
 
     @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone control")
@@ -416,22 +417,22 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 self.assertTrue(all(len(line) == width for line in local_frame.splitlines()))
                 self.assertTrue(all(len(line) == width for line in utc_frame.splitlines()))
 
-            local_frame = self._plain(top.render(data, 120, now))
+            local_frame = self._plain(top.render(data, 160, now))
             self.assertIn("01:45:00", local_frame)  # header clock
             self.assertIn("claimed 2026-07-14 01:30", local_frame)
             self.assertIn("heartbeat 5 m ago", local_frame)
             self.assertIn("expires 2026-07-14 02:30", local_frame)
-            self.assertIn("5h 42% reset Tue 07-14 01:45", local_frame)
-            self.assertIn("weekly 30% reset Tue 07-14 02:15", local_frame)
+            self.assertIn("5h left 58% reset Tue 07-14 01:45", local_frame)
+            self.assertIn("weekly left 70% reset Tue 07-14 02:15", local_frame)
             self.assertIn("2026-07-14T01:50:00", local_frame)
             self.assertNotIn("Z", local_frame)
 
-            utc_frame = self._plain(top.render(data, 120, now, utc=True))
+            utc_frame = self._plain(top.render(data, 160, now, utc=True))
             for token in (
                     "23:45:00Z", "claimed 2026-07-13 23:30Z",
                     "heartbeat 5 m ago", "expires 2026-07-14 00:30Z",
-                    "5h 42% reset Mon 07-13 23:45Z",
-                    "weekly 30% reset Tue 07-14 00:15Z",
+                    "5h left 58% reset Mon 07-13 23:45Z",
+                    "weekly left 70% reset Tue 07-14 00:15Z",
                     "2026-07-13T23:50:00Z"):
                 self.assertIn(token, utc_frame)
         finally:
@@ -441,7 +442,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 os.environ["TZ"] = old_tz
             time.tzset()
 
-    def test_usage_not_provided_is_distinct_from_unavailable_at_all_widths(self):
+    def test_unknown_usage_is_honestly_labelled_na_at_all_widths(self):
         top = load_top()
         data = fixture()
         data["agents"][0]["usage"]["windows"] = {
@@ -452,9 +453,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         }
         for width in (80, 100, 120):
             output = self._plain(top.render(data, width, self.NOW))
-            self.assertIn("5h n/a", output)
-            self.assertIn("weekly unavailable", output)
-            self.assertNotIn("5h unavailable", output)
+            self.assertIn("5h left n/a", output)
+            self.assertIn("weekly left n/a", output)
             self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
     def test_footer_shows_configured_auto_refresh_interval(self):
@@ -738,7 +738,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 time.tzset()
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "5491e8f9400fbed0a3f12247ad7e3ec4a12bf6d8539fb186ff8fc6f15d0db9cd",
+            "1b6a457d8c060080ee8b450d50f3273b201296a97a6bb09c17a9381c319617ee",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
@@ -994,8 +994,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             "session_5h": {"used_ratio": 1.0, "model": "Fable"},
         }
         output = self._plain(top.render(snap, 120, self.NOW))
-        self.assertIn("5h EXHAUSTED [Fable]", output)
-        self.assertNotIn("5h unavailable", output)
+        self.assertIn("5h left 0% [Fable exhausted]", output)
+        self.assertNotIn("5h left n/a", output)
 
     def test_wide_long_fields_keep_a_gap_between_columns(self):
         top = load_top()
@@ -1008,7 +1008,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             "weekly": {"used_ratio": 0.42},
         }
         lines = self._plain(top.render(snap, 120, self.NOW)).splitlines()
-        agent_line = next(line for line in lines if "5h EXHAUSTED" in line)
+        agent_line = next(line for line in lines if "5h left 0%" in line)
         pen_line = next(line for line in lines if "heartbeat" in line)
 
         self.assertEqual(agent_line[agent_line.index("weekly") - 1], " ")

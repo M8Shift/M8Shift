@@ -880,6 +880,23 @@ fields (compact, sorted keys in the JSONL ledger):
   provider output: secrets/token-like runs are redacted before storage, and it
   is emitted only when the operator passes `--raw-excerpt`.
 
+**Usage-semantics amendment (2026-07-17).** Ratio-native provider windows are
+vendor-cumulative quota readings, never daily subtotals or locally accumulated
+deltas. Their normalized window carries both `used_ratio` and
+`remaining_ratio = round(1 - used_ratio, 4)`. The snapshot also projects those
+two values plus `usage_window` from the primary weekly window, then the secondary
+`session_5h` fallback. Token-only/local accounting windows do not manufacture a
+quota ratio and therefore present remaining as `n/a`. The existing
+`decision_ratio` remains the maximum consumed ratio and all warn/limit thresholds
+remain unchanged on that consumed value.
+
+An official cumulative decrease is authoritative reset evidence: the newest
+provider value replaces the older value immediately. The runtime appends a
+`usage.reset_detected` event with previous/current used ratios and the new
+remaining ratio; an unchanged provider reset timestamp marks the event
+`out_of_band: true`. Thus remaining is monotone-decreasing only between resets,
+not across an operator-triggered full reset.
+
 The ledger event wraps that snapshot in the standard
 `m8shift.runtime.event.v1` envelope with `type: "usage.snapshot"` and is
 append-only: new snapshots never rewrite prior lines. Grouping events by

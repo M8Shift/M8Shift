@@ -18,6 +18,7 @@ import http.client
 import importlib.util
 import io
 import json
+import math
 import os
 import ast
 import re
@@ -2333,7 +2334,7 @@ class TestReadCommands(CLIBase):
         windows = codex["usage"]["windows"]
         self.assertEqual(windows["session_5h"], {
             "available": False, "not_provided": True, "used_ratio": None,
-            "resets_at": None, "last_known": False,
+            "remaining_ratio": None, "resets_at": None, "last_known": False,
         })
         self.assertTrue(windows["weekly"]["available"])
         self.assertFalse(windows["weekly"]["not_provided"])
@@ -9919,6 +9920,10 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertIsNone(snap["limit_tokens"])
         win = snap["windows"][0]
         self.assertEqual(win["used_ratio"], 0.58)
+        self.assertEqual(win["remaining_ratio"], 0.42)
+        self.assertEqual(snap["used_ratio"], 0.58)
+        self.assertEqual(snap["remaining_ratio"], 0.42)
+        self.assertEqual(snap["usage_window"], "session_5h")
         self.assertIsNone(win["used"])
         self.assertIsNone(win["limit"])
 
@@ -10536,6 +10541,40 @@ class TestRFC040UsageQuota(CLIBase):
         snap = json.loads(hit.stdout)["snapshots"][0]["snapshot"]
         self.assertEqual(snap["source"]["provenance"], "official")
         self.assertIsNone(snap["windows"][0]["used"])                      # tokens stay null
+
+    def test_vendor_cumulative_reset_replay_tracks_remaining_and_emits_trace(self):
+        """Real observed shape: provider used 0.96, manual full reset to 0.06,
+        then cumulative climb to 0.33.  Display follows the authoritative vendor
+        value at every point; it never preserves a local monotonic used total."""
+        reset = "2026-01-08T00:00:00Z"  # unchanged => reset was out-of-band
+        for used, left in ((0.96, 4), (0.06, 94), (0.33, 67)):
+            result = self.snapshot_for(self.ratio_doc(
+                {"kind": "weekly", "used_ratio": used, "resets_at": reset}))
+            payload = json.loads(result.stdout)
+            snap = payload["snapshots"][0]["snapshot"]
+            self.assertEqual(snap["usage_window"], "weekly")
+            self.assertEqual(snap["used_ratio"], used)
+            self.assertEqual(snap["remaining_ratio"], left / 100)
+            self.assertEqual(snap["windows"][0]["remaining_ratio"], left / 100)
+
+            human = self.rt("usage", "status")
+            self.assertIn(f"weekly left {left}%", human.stdout)
+
+        with open(os.path.join(self.d, ".m8shift", "runtime", "usage.jsonl"),
+                  encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        resets = [row for row in rows if row.get("type") == "usage.reset_detected"]
+        self.assertEqual(len(resets), 1)
+        trace = resets[0]["payload"]
+        self.assertEqual(trace["previous_used_ratio"], 0.96)
+        self.assertEqual(trace["used_ratio"], 0.06)
+        self.assertEqual(trace["remaining_ratio"], 0.94)
+        self.assertTrue(trace["out_of_band"])
+
+        status = json.loads(self.rt("usage", "status", "--json").stdout)["agents"][0]
+        self.assertEqual(status["used_ratio"], 0.33)
+        self.assertEqual(status["remaining_ratio"], 0.67)  # no 66/68 rounding drift
+        self.assertEqual(status["usage_window"], "weekly")
 
     def _example(self):
         import importlib.util
@@ -13483,6 +13522,14 @@ class TestRFC051UsageAdvisory(CLIBase):
                  captured_at=None, decision_window="auto", **extra):
         dw = ({"kind": kind, "resets_at": resets_at} if decision_window == "auto"
               else decision_window)
+        default_windows = []
+        if isinstance(decision_ratio, (int, float)) and not isinstance(decision_ratio, bool):
+            try:
+                if math.isfinite(decision_ratio) and 0 <= decision_ratio <= 1:
+                    default_windows = [{"kind": kind, "used_ratio": decision_ratio,
+                                        "resets_at": resets_at}]
+            except OverflowError:
+                pass
         snap = {
             "schema": "m8shift.usage.snapshot.v1",
             "agent": agent,
@@ -13492,7 +13539,7 @@ class TestRFC051UsageAdvisory(CLIBase):
             "limit_tokens": None,
             "decision_ratio": decision_ratio,
             "decision_window": dw,
-            "windows": [],
+            "windows": default_windows,
         }
         snap.update(extra)
         return snap
@@ -13536,7 +13583,7 @@ class TestRFC051UsageAdvisory(CLIBase):
         newest = self.snapshot(decision_ratio=None, captured_at=self.fresh_iso())
         self.write_sidecar([self.event(older), self.event(newest)])
         line = self._agent_line(self.status_out(), "claude")
-        self.assertIn("73%", line)
+        self.assertIn("5h left 27%", line)
         self.assertIn("stale", line)
 
         usage = json.loads(self.status_out("--json"))["usage"]
@@ -13570,13 +13617,13 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.write_sidecar([self.event(snap)])
         for output in (self.status_out(), self.watch_out()):
             line = self._agent_line(output, "claude")
-            self.assertIn("5h EXHAUSTED [Fable]", line)
-            self.assertNotIn("unavailable", line)
+            self.assertIn("5h left 0% [Fable exhausted]", line)
+            self.assertIn("weekly left n/a", line)
 
     def test_all_empty_snapshots_keep_em_dash(self):
         self.write_sidecar([self.event(self.snapshot(decision_ratio=None))])
         line = self._agent_line(self.status_out(), "claude")
-        self.assertIn("—", line)
+        self.assertIn("left n/a", line)
 
     def test_newest_usable_snapshot_is_not_forced_stale(self):
         self.write_sidecar([
@@ -13584,7 +13631,7 @@ class TestRFC051UsageAdvisory(CLIBase):
             self.event(self.snapshot(decision_ratio=0.8, captured_at=self.fresh_iso())),
         ])
         line = self._agent_line(self.status_out(), "claude")
-        self.assertIn("80%", line)
+        self.assertIn("5h left 20%", line)
         self.assertNotIn("stale", line)
 
     @staticmethod
@@ -13630,11 +13677,10 @@ class TestRFC051UsageAdvisory(CLIBase):
         ])
         out = self.status_out()
         self.assertIn("── usage", out)
-        self.assertIn("90%", out)
-        self.assertIn("session_5h", out)
+        self.assertIn("5h left 10%", out)
         self.assertIn("(local_estimate)", out)
-        self.assertIn("resets", out)
-        self.assertIn("40%", out)
+        self.assertIn("Reset", out)
+        self.assertIn("weekly left 60%", out)
         self.assertIn("weekly", out)
         self.assertIn("(official)", out)
 
@@ -13642,7 +13688,7 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.write_sidecar([self.event(self.snapshot(decision_ratio=0.9))])
         out = self.watch_out()
         self.assertIn("── usage", out)
-        self.assertIn("90%", out)
+        self.assertIn("5h left 10%", out)
 
     def test_status_json_includes_usage_array(self):
         self.write_sidecar([
@@ -13657,6 +13703,15 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.assertFalse(by["claude"]["stale"])
         self.assertIn("age_seconds", by["claude"])
         self.assertEqual(by["codex"]["decision_window"]["kind"], "weekly")
+        codex_window = by["codex"]["windows"][0]
+        self.assertEqual(codex_window["used_ratio"], 0.4)
+        self.assertEqual(codex_window["remaining_ratio"], 0.6)
+        projected = {a["id"]: a for a in d["snapshot"]["agents"]}
+        self.assertEqual(projected["codex"]["usage"]["windows"]["weekly"], {
+            "available": True, "not_provided": False, "used_ratio": 0.4,
+            "remaining_ratio": 0.6, "resets_at": "2026-01-01T05:00:00Z",
+            "last_known": False,
+        })
 
     # ── byte-identity when off (the load-bearing invariant) ───────────────────
     def test_no_sidecar_has_no_usage_surface(self):
@@ -13786,7 +13841,7 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.write_sidecar([self.event(snap, agent="claude")])
         out = self.status_out()
         self.assertIn("── usage", out)
-        self.assertIn("—", out)              # unknown ratio
+        self.assertIn("left n/a", out)       # unknown remaining quota
         self.assertIn("(unknown)", out)      # provenance defaulted
         self.assertIn("stale", out)          # missing captured_at → stale
 
@@ -13811,7 +13866,7 @@ class TestRFC051UsageAdvisory(CLIBase):
                 self.write_sidecar(rows)
                 out = self.status_out()
                 self.assertIn("── usage", out)
-                self.assertIn("—", out)                 # unknown percentage
+                self.assertIn("left n/a", out)          # unknown remaining quota
                 for bad in ("nan", "inf", "NaN", "Infinity", "1e999", "%", "high", "True"):
                     self.assertNotIn(bad + "%", out)    # never rendered as a percentage
 
@@ -13857,7 +13912,7 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.write_sidecar([self.event(self.snapshot(decision_ratio=10 ** 400))])
         out = self.status_out()
         self.assertIn("── usage", out)
-        self.assertIn("—", out)
+        self.assertIn("left n/a", out)
         self.watch_out()
         r = self.cw("status", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -13872,7 +13927,7 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.write_sidecar([self.event(self.snapshot(decision_ratio=10 ** 300))])
         out = self.status_out()
         self.assertIn("── usage", out)
-        self.assertIn("—", out)
+        self.assertIn("left n/a", out)
         self.assertNotIn("0000000%", out)                        # no absurd giant percentage
 
     # ── #59: token CONSUMPTION display (co-designed with Codex) ────────────────
@@ -13884,7 +13939,7 @@ class TestRFC051UsageAdvisory(CLIBase):
             windows=[{"kind": "session_5h", "used": 80046129, "resets_at": None},
                      {"kind": "weekly", "used": 1517060421, "resets_at": None}]))])
         out = self.status_out()
-        self.assertIn("— ", out)                              # no ratio
+        self.assertIn("left n/a", out)                        # no vendor quota
         self.assertIn("used 80M/5h", out)
         self.assertIn("1.5B/wk", out)
         self.watch_out()                                      # watch renders it too
@@ -13894,7 +13949,7 @@ class TestRFC051UsageAdvisory(CLIBase):
             decision_ratio=0.87, kind="session_5h", provenance="official",
             windows=[{"kind": "session_5h", "used": 80046129, "resets_at": None}]))])
         out = self.status_out()
-        self.assertIn("87%", out)
+        self.assertIn("left n/a", out)                        # token-only local value
         self.assertIn("used 80M/5h", out)
 
     def test_consumption_top_level_fallback(self):
@@ -13956,19 +14011,19 @@ class TestRFC051UsageAdvisory(CLIBase):
                             json.dumps(self.event(self.snapshot(decision_ratio=0.9)))])
         out = self.status_out()
         self.assertIn("── usage", out)
-        self.assertIn("90%", out)
+        self.assertIn("5h left 10%", out)
 
     def test_invalid_utf8_bytes_fail_open(self):
         valid = json.dumps(self.event(self.snapshot(decision_ratio=0.9))).encode("utf-8")
         self.write_sidecar(b"\xff\xfe not utf8 bytes\n" + valid + b"\n")
         out = self.status_out()                  # bad byte → replace, that line skipped
-        self.assertIn("90%", out)                # the valid line still renders
+        self.assertIn("5h left 10%", out)        # the valid line still renders
 
     def test_deeply_nested_json_fails_open(self):
         bomb = "[" * 60000 + "]" * 60000          # json.loads → RecursionError, tolerated
         self.write_sidecar([bomb, json.dumps(self.event(self.snapshot(decision_ratio=0.9)))])
         out = self.status_out()
-        self.assertIn("90%", out)
+        self.assertIn("5h left 10%", out)
 
     # ── terminal / JSON output safety (amendment C) ───────────────────────────
     def test_provenance_and_kind_sanitized_no_raw_escape(self):
@@ -14004,10 +14059,10 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.write_sidecar(lines)
         out = self.status_out()
         self.assertIn("── usage", out)
-        self.assertIn("90%", out)                # last valid snapshot wins
+        self.assertIn("5h left 10%", out)        # last valid snapshot wins
         self.assertIn("(newest_prov)", out)
         self.assertNotIn("oldest_prov", out)     # partial huge first line discarded / beyond cap
-        self.assertNotIn("10%", out)
+        self.assertNotIn("left 90%", out)
 
     # ── read-only (opens only the sidecar; no write / network / subprocess) ────
     def test_status_render_is_read_only(self):
@@ -14016,7 +14071,7 @@ class TestRFC051UsageAdvisory(CLIBase):
             before_bytes = fh.read()
         before_mtime = os.stat(path).st_mtime
         tree_before = self._runtime_tree()
-        self.assertIn("90%", self.status_out())
+        self.assertIn("5h left 10%", self.status_out())
         with open(path, "rb") as fh:
             self.assertEqual(fh.read(), before_bytes)          # sidecar untouched
         self.assertEqual(os.stat(path).st_mtime, before_mtime)
@@ -14069,18 +14124,20 @@ class TestRFC051UsageAdvisory(CLIBase):
                  "used": None, "limit": None},
             ]))])
         line = self._agent_line(self.status_out(), "codex")
-        self.assertIn(f"5h 64% (Reset {self._local_when(near)})", line)
-        self.assertIn(f"weekly 42% (Reset {self._local_when(far)})", line)
+        self.assertIn(f"weekly left 58% (Reset {self._local_when(far)})", line)
+        self.assertIn(f"5h left 36% (Reset {self._local_when(near)})", line)
         self.assertIn(" - ", line)                      # operator's window separator
         self.assertIn("(official)", line)
         self.assertIn("/", self._local_when(far))       # cross-day reset carries the DATE
         self.assertNotIn("resets ", line)               # legacy fragment replaced
-        self.assertNotIn("36%", line)                   # consumed %, never a remaining figure
+        self.assertNotIn("weekly left 57%", line)       # exact vendor value, no drift
         # --json keeps echoing the full windows[] for downstream tooling
         d = json.loads(self.status_out("--json"))
         entry = next(u for u in d["usage"] if u["agent"] == "codex")
         self.assertEqual(entry["windows"][0]["used_ratio"], 0.64)
+        self.assertEqual(entry["windows"][0]["remaining_ratio"], 0.36)
         self.assertEqual(entry["windows"][1]["used_ratio"], 0.42)
+        self.assertEqual(entry["windows"][1]["remaining_ratio"], 0.58)
 
     def test_known_standard_window_absent_now_renders_na_without_inventing_pct(self):
         reset = self.fresh_iso(7200)
@@ -14093,24 +14150,26 @@ class TestRFC051UsageAdvisory(CLIBase):
         ])
         self.write_sidecar([self.event(older), self.event(current)])
         line = self._agent_line(self.status_out(), "codex")
-        self.assertIn("weekly 43%", line)
-        self.assertIn(f"5h N/A (Reset {self._local_when(reset)})", line)
-        self.assertNotIn("5h 64%", line)
+        self.assertIn("weekly left 57%", line)
+        self.assertIn(f"5h left n/a (Reset {self._local_when(reset)})", line)
+        self.assertNotIn("5h left 36%", line)
         # Internal history is display-only; frozen JSON echoes only the current snapshot.
         entry = next(u for u in json.loads(self.status_out("--json"))["usage"]
                      if u["agent"] == "codex")
-        self.assertEqual(entry["windows"], current["windows"])
+        self.assertEqual(entry["windows"], [{
+            **current["windows"][0], "remaining_ratio": 0.57,
+        }])
         self.assertFalse(any(k.startswith("_") for k in entry))
 
-    def test_weekly_only_forever_does_not_render_5h_na(self):
+    def test_weekly_only_forever_renders_secondary_5h_na(self):
         weekly = {"kind": "weekly", "used_ratio": 0.42, "resets_at": None}
         self.write_sidecar([
             self.event(self.snapshot(agent="codex", windows=[weekly])),
             self.event(self.snapshot(agent="codex", windows=[{**weekly, "used_ratio": 0.43}])),
         ])
         line = self._agent_line(self.status_out(), "codex")
-        self.assertIn("weekly 43%", line)
-        self.assertNotIn("5h N/A", line)
+        self.assertIn("weekly left 57%", line)
+        self.assertIn("5h left n/a", line)
 
     def test_unified_line_field_level_degradation(self):
         far = self.fresh_iso(6 * 86400)
@@ -14127,11 +14186,11 @@ class TestRFC051UsageAdvisory(CLIBase):
             ]))])
         out = self.status_out()
         line = self._agent_line(out, "claude")
-        self.assertIn(f"weekly 42% (Reset {self._local_when(far)})", line)
-        self.assertNotIn("5h", line)                    # NaN window contributes nothing
+        self.assertIn(f"weekly left 58% (Reset {self._local_when(far)})", line)
+        self.assertIn("5h left n/a", line)              # invalid vendor value is explicit
         self.assertNotIn("50%", line)                   # unlabeled window contributes nothing
-        self.assertIn("31mevil0m 77%", line)            # hostile kind reduced to safe token
-        self.assertNotIn("31mevil0m 77% (Reset", line)  # unusable reset simply omitted
+        self.assertIn("31mevil0m left 23%", line)       # hostile kind reduced to safe token
+        self.assertNotIn("31mevil0m left 23% (Reset", line)  # unusable reset omitted
         self.assertNotIn("\x1b", out)                   # no raw escape reaches the terminal
 
     def test_unified_line_caps_hostile_many_windows(self):
@@ -14140,10 +14199,10 @@ class TestRFC051UsageAdvisory(CLIBase):
             windows=[{"kind": f"w{i}", "used_ratio": 0.1, "resets_at": None}
                      for i in range(9)]))])
         line = self._agent_line(self.status_out(), "claude")
-        self.assertIn("w0 10%", line)
-        self.assertIn("w3 10%", line)
-        self.assertNotIn("w4 10%", line)                # capped after USAGE_LINE_MAX_WINDOWS
-        self.assertIn("+5", line)                       # overflow disclosed, never silent
+        self.assertIn("w0 left 90%", line)
+        self.assertIn("w1 left 90%", line)
+        self.assertNotIn("w2 left 90%", line)           # two standard cells consume the cap
+        self.assertIn("+7", line)                       # overflow disclosed, never silent
         self.assertLess(len(line), 200)
 
     def test_unified_line_falls_back_when_windows_unusable(self):
@@ -14151,9 +14210,12 @@ class TestRFC051UsageAdvisory(CLIBase):
             self.write_sidecar([self.event(self.snapshot(
                 agent="claude", decision_ratio=0.9, windows=windows))])
             line = self._agent_line(self.status_out(), "claude")
-            self.assertIn("90%", line)                  # legacy single-window line intact
-            self.assertIn("session_5h (", line)
-            self.assertNotIn(" - ", line)
+            self.assertIn("left n/a", line)             # no vendor cumulative ratio
+            if isinstance(windows, list):
+                self.assertIn("weekly left n/a - 5h left n/a", line)
+            else:
+                self.assertIn("session_5h (", line)
+                self.assertNotIn(" - ", line)
 
     def test_usage_signature_reflects_window_change(self):
         cowork.configure_root(self.d)
@@ -14181,7 +14243,7 @@ class TestRFC051UsageAdvisory(CLIBase):
             ]))])
         out = self.status_out()
         line = self._agent_line(out, "codex")
-        self.assertIn("weekly 42%", line)               # valid sibling survives
+        self.assertIn("weekly left 58%", line)          # valid sibling survives
         self.assertNotIn("50%", line)
         self.assertNotIn("60%", line)
         d = json.loads(self.status_out("--json"))
@@ -14210,8 +14272,8 @@ class TestRFC051UsageAdvisory(CLIBase):
             ]))])
         for out in (self.status_out(), self.watch_out()):    # both public render surfaces
             line = self._agent_line(out, "claude")
-            self.assertIn("weekly 42%", line)           # valid siblings survive
-            self.assertIn("w-full 100%", line)
+            self.assertIn("weekly left 58%", line)      # valid siblings survive
+            self.assertIn("w-full left 0%", line)
             self.assertNotIn("-50%", line)
             self.assertNotIn("150%", line)
             for k in ("w-neg", "w-over", "w-bool", "w-nan", "w-inf", "w-huge", "w-ovf"):
@@ -14227,13 +14289,13 @@ class TestRFC051UsageAdvisory(CLIBase):
         self.write_sidecar([self.event(self.snapshot(
             agent="claude", decision_ratio=0.9, resets_at=far, windows=[]))])
         line = self._agent_line(self.status_out(), "claude")
-        self.assertIn(f"resets {self._local_when(far)}", line)   # dd/mm HH:MM
+        self.assertIn(f"5h left n/a (Reset {self._local_when(far)})", line)
         self.assertIn("/", self._local_when(far))
         near = self.fresh_iso(120)
         self.write_sidecar([self.event(self.snapshot(
             agent="claude", decision_ratio=0.9, resets_at=near, windows=[]))])
         line = self._agent_line(self.status_out(), "claude")
-        self.assertIn(f"resets {self._local_when(near)}", line)  # same-day: HH:MM as before
+        self.assertIn(f"5h left n/a (Reset {self._local_when(near)})", line)
 
     def test_reset_when_midnight_boundary_deterministic(self):
         # Codex #106 review: pin the same-local-day boundary with an INJECTED ref so the
@@ -14273,7 +14335,7 @@ class TestRFC051UsageAdvisory(CLIBase):
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("── usage", r.stdout)
-        self.assertIn("90%", r.stdout)
+        self.assertIn("5h left 10%", r.stdout)
 
 
 class TestRFC052Hygiene(CLIBase):

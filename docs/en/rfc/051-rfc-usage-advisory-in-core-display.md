@@ -69,13 +69,12 @@ So Part A of this work is a **schema-additive** change in the companion's
 `decision_window: {kind, resets_at}` (the window that produced `decision_ratio`,
 or `null` when the ratio came from the top-level `used_tokens/limit_tokens` or is
 `unknown`). Additive and optional → existing readers and the byte-identity anchor
-are unaffected. The core then **echoes** `decision_window` verbatim and computes
-nothing.
+are unaffected. The core echoes `decision_window`; the later usage-semantics
+amendment derives remaining only from a schema-valid cumulative `used_ratio`.
 
 **Tie rule (amendment E).** When two windows share the max ratio, the companion
 picks the **first max in ratio-computation order** (deterministic), and a test
-pins that behavior. A missing `decision_window` still renders **percentage-only**
-in the core, with **no** core recomputation.
+pins that behavior. A missing usable vendor-cumulative window renders `left n/a`.
 
 ## Model — what the CORE adds (it owns none of this today)
 
@@ -105,11 +104,11 @@ stdlib-only, independently unit-tested unit to `m8shift.py`:
    on any mismatch (defeats a spoofed/mislabelled snapshot). Then keep the
    **file-order last** valid `usage.snapshot` per agent (last write wins, matching
    the companion).
-4. **Validate before render (no computation).**
-   - `decision_ratio`: rendered as a percentage only when
-     `isinstance(dr, (int, float)) and not isinstance(dr, bool) and
-     math.isfinite(dr)`; otherwise `—` (unknown). NaN / Infinity / string / bool →
-     `—`, never a crash.
+4. **Validate before render.**
+   - Ratio-native windows render the recorded `remaining_ratio`; for a valid
+     pre-amendment sidecar that carries only `used_ratio`, the core derives the
+     compatibility value `1 - used_ratio`. It never accumulates local deltas.
+     Missing/invalid vendor-cumulative quota renders explicitly as `left n/a`.
    - **Terminal/output safety (amendment C):** `provenance` and
      `decision_window.kind` are **not** arbitrary verbatim terminal output — a
      corrupt/hostile sidecar could carry ANSI escapes or control characters.
@@ -126,16 +125,17 @@ stdlib-only, independently unit-tested unit to `m8shift.py`:
 
 ### Rendered line
 
-**Amendment E (#106) — unified multi-window line.** When the snapshot carries at
+**Amendment E (#106), amended 2026-07-17 — unified multi-window line.** When the snapshot carries at
 least one plausible `windows[]` entry, the line renders EVERY plausible window
-inline — consumed percentage first, reset next — instead of only the decision
-window:
+inline — weekly remaining first, 5h remaining second, reset next — instead of
+only the decision window:
 
 ```text
-  codex    5h 64% (Reset 18:05) - weekly 42% (Reset 16/07 23:45) · (official) · 2m ago
+  codex    weekly left 58% (Reset 16/07 23:45) - 5h left 36% (Reset 18:05) · (official) · 2m ago
 ```
 
-- Each fragment is `label NN% (Reset when)`: `NN%` echoes the window's CONSUMED
+- Each fragment is `label left NN% (Reset when)`: `NN%` is the actionable
+  remaining quota derived from the window's authoritative cumulative
   `used_ratio`, enforced to the schema range — finite, non-bool, `0 <= r <= 1`
   (STRICTER than the decision ratio, whose token-derived over-limit semantics
   may exceed 1: a hostile `-0.5`/`1.5` must never render `-50%`/`150%`);
@@ -187,6 +187,9 @@ present-but-empty/all-malformed sidecar is byte-identical to no sidecar. The arr
 echoes recorded values; it invents nothing. **JSON must never emit a non-finite
 number (amendment C):** an invalid/NaN/Inf `decision_ratio` is serialized as
 `null` (unknown), never `NaN`/`Infinity` (which is non-standard JSON).
+Every valid ratio-native window carries both `used_ratio` and
+`remaining_ratio`; the additive status snapshot projection carries the same
+pair. Guard consumers continue to use consumed ratios.
 
 ## Charter and safety
 
@@ -205,9 +208,10 @@ number (amendment C):** an invalid/NaN/Inf `decision_ratio` is serialized as
   skipped; non-finite/non-numeric `decision_ratio` → `—`; unparseable
   `captured_at`/`resets_at` → stale/omitted. Nothing here can crash `status` or
   `watch`.
-- **Honesty**: provenance verbatim; staleness marked; docs and the block state the
-  numbers are "as last recorded by the usage companion", never computed by the
-  core; schema-pinned so drift is skipped, not misrendered.
+- **Honesty**: provenance verbatim; staleness marked; quota is based only on the
+  newest vendor-cumulative reading, never a daily subtotal or local delta. The
+  core may derive `1 - used_ratio` only for backward-compatible display;
+  schema-pinned drift is skipped, not misrendered.
 
 ## Acceptance criteria
 
@@ -240,8 +244,8 @@ number (amendment C):** an invalid/NaN/Inf `decision_ratio` is serialized as
   discards that partial first line and the last valid snapshot still wins — named
   test.
 - **decision_window tie (E)**: two windows sharing the max → the companion records
-  the deterministic first-max-in-ratio-order; a missing `decision_window` still
-  renders percentage-only — named tests.
+  the deterministic first-max-in-ratio-order; a missing usable cumulative window
+  renders `left n/a` — named tests.
 - **Bounded**: a multi-MB sidecar is read in bounded time (tail cap) and the
   file-order last snapshot still wins.
 - **Read-only assertion**: rendering opens only the sidecar path and performs no

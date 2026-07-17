@@ -7937,6 +7937,25 @@ def _usage_ratio_or_none(value, field, warnings):
     return ratio
 
 
+def _usage_remaining_ratio(used_ratio):
+    """Quota left for a schema-valid cumulative provider ratio.
+
+    Keep the derivation in the producer so every machine consumer receives both
+    meanings and never has to guess whether a percentage is spent or remaining.
+    Four decimals matches the existing decision-ratio precision while avoiding
+    binary-float display drift (for example, 0.33 always becomes 0.67).
+    """
+    if isinstance(used_ratio, bool) or not isinstance(used_ratio, (int, float)):
+        return None
+    try:
+        ratio = float(used_ratio)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(ratio) or ratio < 0 or ratio > 1:
+        return None
+    return round(1.0 - ratio, 4)
+
+
 def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
                              include_raw_excerpt=False, budget=None):
     """Normalize one m8shift.usage.fixture.v1 document to the pinned
@@ -8059,6 +8078,32 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
         if top is not None:
             ratios = [top]           # top-level fallback → decision_window stays null
     decision_ratio = round(max(ratios), 4) if ratios else None
+
+    # Usage semantics: ratio-native machine surfaces carry BOTH the authoritative
+    # vendor-cumulative consumption and the actionable remaining quota.  Do not
+    # manufacture quota percentages from token-only/local-accumulation windows.
+    for w in windows:
+        normalized_ratio = w.get("used_ratio")
+        remaining_ratio = _usage_remaining_ratio(normalized_ratio)
+        if remaining_ratio is not None:
+            w["used_ratio"] = round(float(normalized_ratio), 4)
+            w["remaining_ratio"] = remaining_ratio
+
+    # Weekly is the full decision window and therefore the primary presentation
+    # value; 5h is secondary.  The legacy decision_ratio remains the max across
+    # windows so guard/threshold behaviour stays unchanged.
+    primary_window = next(
+        (w for preferred in ("weekly", "session_5h") for w in windows
+         if w.get("kind") == preferred and w.get("remaining_ratio") is not None),
+        None,
+    )
+    if primary_window is None:
+        primary_window = next(
+            (w for w in windows if w.get("remaining_ratio") is not None), None)
+    primary_used_ratio = primary_window.get("used_ratio") if primary_window else None
+    primary_remaining_ratio = (primary_window.get("remaining_ratio")
+                               if primary_window else None)
+    primary_window_kind = primary_window.get("kind") if primary_window else None
     known = {"schema", "agent", "provenance", "captured_at", "used_tokens", "limit_tokens", "windows"}
     for key in sorted(set(doc) - known):
         warnings.append(f"unknown input key {key!r} ignored")
@@ -8075,6 +8120,12 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
         "decision_window": decision_window,
         "windows": windows,
     }
+    if primary_window is not None:
+        snapshot.update({
+            "used_ratio": primary_used_ratio,
+            "remaining_ratio": primary_remaining_ratio,
+            "usage_window": primary_window_kind,
+        })
     if include_raw_excerpt and raw_text:
         snapshot["raw_excerpt_redacted"] = redact_usage_excerpt(raw_text)
     return snapshot, warnings
@@ -8672,6 +8723,19 @@ def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
             findings.append({"severity": "error", "check": "usage.adapter",
                              "message": f"{name}: {warnings[0]}"})
             continue
+        ledger_rows, ledger_findings = read_usage_ledger_diagnostic()
+        findings.extend(ledger_findings)
+        previous = latest_usage_snapshots(ledger_rows, []).get(agent)
+        for reset in detect_usage_resets(previous, snapshot):
+            append_jsonl(USAGE_LEDGER, runtime_event(
+                "usage.reset_detected", agent=agent, payload=reset))
+            findings.append({
+                "severity": "warning", "check": "usage.reset_detected",
+                "message": (f"{agent}: {reset['window']} cumulative vendor usage "
+                            f"resynced {reset['previous_used_ratio']:g} -> "
+                            f"{reset['used_ratio']:g}"
+                            + (" (out-of-band reset)" if reset["out_of_band"] else "")),
+            })
         append_jsonl(USAGE_LEDGER, runtime_event(
             "usage.snapshot", agent=agent, payload={"snapshot": snapshot}))
         classification = classify_usage_ratio(
@@ -8692,6 +8756,55 @@ def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
         findings.append({"severity": "warning", "check": "usage.no_adapter",
                          "message": "no enabled usage adapter matched; usage unknown (fail-open)"})
     return results, findings, had_adapter_error, skipped_disabled, False
+
+
+def detect_usage_resets(previous, current):
+    """Describe authoritative cumulative ratios that moved backwards.
+
+    Remaining quota may increase only at a reset.  A provider value is
+    authoritative, so we resync immediately rather than forcing local monotonic
+    accumulation.  An unchanged reset timestamp makes the reset out-of-band
+    (for example, an operator-triggered full account reset).
+    """
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return []
+    previous_source = previous.get("source") or {}
+    current_source = current.get("source") or {}
+    if previous_source.get("provenance") != "official" \
+            or current_source.get("provenance") != "official":
+        return []
+
+    def by_kind(snapshot):
+        windows = snapshot.get("windows")
+        if not isinstance(windows, list):
+            return {}
+        return {w.get("kind"): w for w in windows
+                if isinstance(w, dict) and isinstance(w.get("kind"), str)}
+
+    before = by_kind(previous)
+    events = []
+    for kind, after in by_kind(current).items():
+        prior = before.get(kind)
+        if not isinstance(prior, dict):
+            continue
+        old = prior.get("used_ratio")
+        new = after.get("used_ratio")
+        if _usage_remaining_ratio(old) is None or _usage_remaining_ratio(new) is None:
+            continue
+        if new >= old:
+            continue
+        events.append({
+            "schema": "m8shift.usage.reset-detected.v1",
+            "window": kind,
+            "previous_used_ratio": old,
+            "used_ratio": new,
+            "remaining_ratio": after.get("remaining_ratio"),
+            "previous_resets_at": prior.get("resets_at"),
+            "resets_at": after.get("resets_at"),
+            "out_of_band": bool(after.get("resets_at"))
+                           and prior.get("resets_at") == after.get("resets_at"),
+        })
+    return events
 
 
 def cmd_usage_snapshot(args):
@@ -8720,10 +8833,10 @@ def cmd_usage_snapshot(args):
         return code
     for r in results:
         s = r["snapshot"]
-        ratio = "-" if s["decision_ratio"] is None else f"{s['decision_ratio']:g}"
         tokens = f"{s['used_tokens']}/{s['limit_tokens']}" \
             if s["used_tokens"] is not None and s["limit_tokens"] is not None else "-"
-        print(f"{s['agent']}  {r['classification']}  ratio={ratio} tokens={tokens} "
+        print(f"{s['agent']}  {r['classification']}  {usage_remaining_display(s)} "
+              f"tokens={tokens} "
               f"adapter={r['adapter']} captured={s['captured_at']}")
     print_usage_findings(findings)
     return code
@@ -8810,6 +8923,10 @@ def usage_ledger_report(agent_filter, warn_threshold, limit_threshold, stale_aft
             "age_seconds": age_s,
             "stale": stale,
             "decision_ratio": snapshot.get("decision_ratio"),
+            "used_ratio": snapshot.get("used_ratio"),
+            "remaining_ratio": snapshot.get("remaining_ratio"),
+            "usage_window": snapshot.get("usage_window"),
+            "windows": snapshot.get("windows") if isinstance(snapshot.get("windows"), list) else [],
             "used_tokens": snapshot.get("used_tokens"),
             "limit_tokens": snapshot.get("limit_tokens"),
             "classification": effective,
@@ -8818,6 +8935,22 @@ def usage_ledger_report(agent_filter, warn_threshold, limit_threshold, stale_aft
         findings.append({"severity": "warning", "check": "usage.no_data",
                          "message": "no usage snapshots recorded; usage unknown (fail-open)"})
     return report, latest, findings
+
+
+def usage_remaining_display(snapshot):
+    """Primary weekly, secondary 5h remaining quota for human CLI surfaces."""
+    windows = snapshot.get("windows") if isinstance(snapshot, dict) else None
+    windows = windows if isinstance(windows, list) else []
+    by_kind = {w.get("kind"): w for w in windows
+               if isinstance(w, dict) and isinstance(w.get("kind"), str)}
+    parts = []
+    for kind, label in (("weekly", "weekly"), ("session_5h", "5h")):
+        row = by_kind.get(kind)
+        remaining = _usage_remaining_ratio(
+            row.get("used_ratio") if isinstance(row, dict) else None)
+        value = "n/a" if remaining is None else f"{round(remaining * 100):d}%"
+        parts.append(f"{label} left {value}")
+    return " - ".join(parts)
 
 
 def cmd_usage_status(args):
@@ -8836,11 +8969,11 @@ def cmd_usage_status(args):
     print(f"m8shift-runtime.py v{VERSION}")
     print("── usage status (advisory, read-only) ─")
     for row in report:
-        ratio = "-" if row["decision_ratio"] is None else f"{row['decision_ratio']:g}"
         tokens = f"{row['used_tokens']}/{row['limit_tokens']}" \
             if row["used_tokens"] is not None and row["limit_tokens"] is not None else "-"
         freshness = "stale" if row["stale"] else "fresh"
-        print(f"{row['agent']}  {row['classification']}  ratio={ratio} tokens={tokens} "
+        print(f"{row['agent']}  {row['classification']}  {usage_remaining_display(row)} "
+              f"tokens={tokens} "
               f"{freshness} captured={row['captured_at'] or '-'}")
     print_usage_findings(findings)
     return code
@@ -9339,9 +9472,9 @@ def print_usage_guard_result(command, code, payload, json_mode):
     print(f"{command}: verdict={payload['verdict']} relay={relay_state} exit={code}",
           flush=True)
     for row in payload["agents"]:
-        ratio = "-" if row["decision_ratio"] is None else f"{row['decision_ratio']:g}"
         freshness = "stale" if row["stale"] else "fresh"
-        print(f"  {row['agent']}  {row['classification']}  ratio={ratio} {freshness} "
+        print(f"  {row['agent']}  {row['classification']}  {usage_remaining_display(row)} "
+              f"{freshness} "
               f"captured={row['captured_at'] or '-'}")
     applied = payload.get("applied")
     if applied:
