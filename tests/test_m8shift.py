@@ -2356,16 +2356,33 @@ class TestReadCommands(CLIBase):
             flat = next(a for a in payload["usage"] if a["agent"] == "codex")
             return projected, flat
 
+        # The subprocess takes real wall-clock time, so an at-the-boundary
+        # fixture can legally drift past 1800 s on a slow runner (observed on
+        # CI). The subprocess leg asserts CONSISTENCY: the verdict must match
+        # the engine's own reported age under the strict >1800 rule.
         fresh, flat_fresh = status_at_age(1800)
-        self.assertEqual(fresh["freshness"], "fresh")
-        self.assertFalse(fresh["stale"])
+        expected = "stale" if fresh["age_seconds"] > 1800 else "fresh"
+        self.assertEqual(fresh["freshness"], expected)
+        self.assertEqual(fresh["stale"], fresh["age_seconds"] > 1800)
         self.assertEqual(flat_fresh["freshness"], fresh["freshness"])
         self.assertEqual(flat_fresh["age_seconds"], fresh["age_seconds"])
 
+        # Age only grows: the stale side is race-free and stays pinned.
         stale, flat_stale = status_at_age(1801)
         self.assertEqual(stale["freshness"], "stale")
         self.assertTrue(stale["stale"])
         self.assertEqual(flat_stale["freshness"], stale["freshness"])
+
+        # The EXACT 1800/1801 boundary is proven deterministically in-process
+        # with a fixed reference time (no wall clock, no subprocess).
+        ref = dt.datetime(2026, 7, 13, 12, 0, 0, tzinfo=dt.timezone.utc)
+        for age, want_stale in ((1800, False), (1801, True)):
+            snap = {"schema": "m8shift.usage.snapshot.v1", "agent": "codex",
+                    "captured_at": (ref - dt.timedelta(seconds=age))
+                    .strftime("%Y-%m-%dT%H:%M:%SZ")}
+            got = cowork._usage_age_seconds(snap, ref)
+            self.assertEqual(got, age)
+            self.assertEqual(got > cowork.USAGE_STALE_AFTER_SECONDS, want_stale)
 
     def test_status_survives_malformed_runtime_sidecars_on_all_read_surfaces(self):
         self.init()
