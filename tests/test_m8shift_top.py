@@ -705,7 +705,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 time.tzset()
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "e2ac072b2666cc39829ccd148490f0652ccfb106a1cca4f4705aabd232533228",
+            "5491e8f9400fbed0a3f12247ad7e3ec4a12bf6d8539fb186ff8fc6f15d0db9cd",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
@@ -870,6 +870,30 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         finally:
             if old is not None:
                 os.environ["NO_COLOR"] = old
+
+    def test_activity_model_effort_cells_mark_every_adversarial_truncation(self):
+        top = load_top()
+        for length in range(13, 257, 17):
+            with self.subTest(length=length):
+                model = "model-" + ("M" * length)
+                effort = "effort-" + ("E" * length)
+                rendered = top._model_effort(
+                    {"model": model, "effort": effort}, 12, 6)
+                self.assertEqual(len(rendered), 20)
+                self.assertEqual(rendered.count("…"), 2)
+                self.assertTrue(rendered.endswith("…*"))
+
+                snap = dict(fixture())
+                snap["activity"] = [{
+                    "turn": 99, "agent": "codex", "model": model,
+                    "effort": effort, "kind": "turn",
+                    "ts": "2026-07-13T03:47:21Z", "summary": "Verified output",
+                }]
+                output = self._plain(top.render(snap, 120, self.NOW))
+                line = next(row for row in output.splitlines()
+                            if "Verified" in row)
+                self.assertEqual(len(line), 120)
+                self.assertGreaterEqual(line.count("…"), 2)
 
     def test_no_color_keeps_frame_without_ansi(self):
         top = load_top()

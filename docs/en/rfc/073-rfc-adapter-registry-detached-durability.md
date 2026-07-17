@@ -231,7 +231,7 @@ flowchart TD
     RECON -->|"live pid, empty persisted ref"| FAILC["fail closed — needs_reconciliation"]
 ```
 
-### Slice 3 — live Gemini and resume
+### Slice 3 — live Gemini and resume (implemented: fresh launch; native resume fail-closed)
 
 Probe a supported Gemini CLI/version, replace the validated stub with a managed
 adapter, and implement native resume only for adapters/versions whose session
@@ -252,11 +252,32 @@ Acceptance gates:
 5. Secret/session references are absent from persisted plans, events, CLI output,
    diagnostics, and relay turns.
 
-### Slice 4 — #59 routing-matrix extension
+Implementation probe (2026-07-17): npm weekly-stable Gemini CLI `0.51.0`
+exposes `-m/--model`, `-p/--prompt`, `--output-format`
+`text|json|stream-json`, `--resume INDEX|latest`, and `--session-id UUID`. Its
+shipped default-model surface names `gemini-2.5-pro`. The live adapter therefore
+compiles shell-free `-m gemini-2.5-pro -p PROMPT` launches and selects API-key
+authentication through `requires_env=[GEMINI_API_KEY]`; the same key is in the
+child allowlist. Diagnostic stderr is independent of provider stdout.
+
+Native resume is intentionally not implemented. An index or `latest` is neither
+opaque nor project/identity/job-bound, while `--session-id` starts rather than
+resumes the exact owned session. Passing the runtime's opaque reference to either
+flag would make ownership ambiguous. Fresh one-shot reconstruction remains the
+mandatory fallback and ambiguity fails closed as D6/D16 require.
+
+### Slice 4 — #59 routing-matrix extension (phase 1 implemented)
 
 Extend the operator-owned RFC 039/#59 catalog after live adapter capability
 evidence exists. Routing starts as a recorded recommendation over explicit jobs;
 automatic launch remains separately preauthorized.
+
+Phase 1 ships the provider-neutral declarative baseline only: five task classes
+map to a model-tier floor/optimum and an effort recommendation, validation rejects
+unknown effort values, and `route recommend` returns the effort alongside
+`authority=advisory` and `launch=false`. No provider is selected or launched and
+RFC 066 remains separate. Evidence-driven vendor/model catalog expansion remains
+future work.
 
 Acceptance gates:
 
