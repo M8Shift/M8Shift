@@ -1,6 +1,7 @@
 # RFC 074 — Standardized inter-agent exchange
 
-- **Status:** draft / design-only; implementation requires operator arbitration
+- **Status:** arbitrated / design-only; implementation requires separately
+  authorized slices
 - **Date:** 2026-07-17
 - **Scope:** explicit shift stages, a vendor-neutral turn contract, and portable
   whole-shift exchange
@@ -45,23 +46,21 @@ the relay mutex.
    remain authoritative. Schema validity never authorizes work or a handoff.
 5. **Append-only compatibility.** Historical turns remain byte-identical and
    are labelled `legacy-unstamped` by derived views.
-6. **Bounded by default.** The common path adds only `schema` and `stage`; large
-   evidence and artifacts stay referenced rather than embedded.
+6. **Bounded by default.** The lightweight path adds only `stage`; the full
+   contract adds `schema` plus `stage`. Large evidence and artifacts stay
+   referenced rather than embedded.
 
 ## 3. Canonical shift-stage taxonomy
 
-The proposed v1 token set is closed:
+The arbitrated v1 token set contains 15 closed tokens:
 
 ```text
 scope
-claim
-ack
 implement
 diagnose
 root_cause
 review_request
-revise
-approve
+review_result
 integrate
 ship
 dogfood
@@ -79,14 +78,11 @@ labels may be localized. Their meanings are:
 | Token | Meaning |
 |---|---|
 | `scope` | establish or change the bounded objective |
-| `claim` | accept ownership and declare the intended work |
-| `ack` | acknowledge scope/evidence without claiming completion |
 | `implement` | create or modify the requested artifact |
 | `diagnose` | investigate symptoms or gather discriminating evidence |
 | `root_cause` | state and support the causal explanation |
 | `review_request` | submit a concrete result for independent review |
-| `revise` | respond to review with corrections or a revised proposal |
-| `approve` | record an affirmative review result, not integration authority |
+| `review_result` | record a review outcome through the separate `decision` field |
 | `integrate` | merge or otherwise incorporate an approved result |
 | `ship` | publish or release an integrated result |
 | `dogfood` | exercise the result in a realistic adopter workflow |
@@ -98,8 +94,9 @@ labels may be localized. Their meanings are:
 | `done` | record that the scoped objective and required delivery are complete |
 
 These tokens describe the sender's primary action in the immutable turn. They
-do not mirror LOCK states: `claim` is a narrative stage recorded after a real
-claim, while only `WORKING_<X>` proves current pen ownership. `approve` does not
+do not mirror LOCK states: a claim is exclusively a LOCK transition, and only
+`WORKING_<X>` proves current pen ownership. An acknowledgement is a relation to
+prior work rather than a primary stage. A review `decision=approve` does not
 imply `integrate`, and `ship` does not imply `verify` or `done`.
 
 Dashboard consumers render an explicit stage column. A missing field renders
@@ -108,7 +105,7 @@ with an `unknown` marker and produce an advisory lint finding.
 
 ## 4. Versioned turn/message schema
 
-The proposed identifier is:
+The arbitrated identifier is:
 
 ```text
 m8shift.exchange.turn/1
@@ -120,7 +117,7 @@ It is serialized inside the existing turn block:
 <!-- M8SHIFT:TURN 865 codex BEGIN -->
 - from:    codex
 - to:      claude
-- ask:     review the navigation cache and RFC questions
+- ask:     review the navigation cache and exchange-design boundaries
 - done:    implemented the bounded batch
 - files:   m8shift-top.py, docs/en/rfc/074-rfc-standardized-inter-agent-exchange.md
 - handoff: claude
@@ -132,8 +129,8 @@ It is serialized inside the existing turn block:
 - requires: inspect the raw diff and run the declared gates
 - expected_output: approve or revise with ranked findings
 - evidence: local-suite; linux-suite; commit:<opaque-ref>
-- next: review, then operator arbitration for RFC 074
-- blocked_on: operator:rfc-074-open-questions
+- next: review, then separately authorize any implementation slice
+- blocked_on: implementation:operator-authorization
 
 Human-readable context remains in the body.
 <!-- M8SHIFT:TURN 865 codex END -->
@@ -143,10 +140,10 @@ Human-readable context remains in the body.
 
 | Field | Type / vocabulary | Contract |
 |---|---|---|
-| `schema` | exact identifier | opts the turn into this schema |
-| `stage` | one §3 token | sender's explicit primary stage |
+| `schema` | exact identifier | opts the turn into the full turn contract |
+| `stage` | one §3 token | sender's explicit primary stage; valid alone as a lightweight stamp |
 | `from`, `to`, `ask`, `done`, `files`, `handoff` | existing core fields | unchanged relay format and authority |
-| `relation` | `handoff`, `review_request`, `review_result`, `escalation` | RFC 012 relationship |
+| `relation` | `ack`, `handoff`, `review_request`, `review_result`, `escalation` | RFC 012 relationship plus acknowledgement |
 | `role_from`, `role_to` | bounded role identifiers | declared work roles, not identities or permissions |
 | `decision` | `approve`, `revise`, `reject`, `waive` | RFC 012 review decision |
 | `waiver_reason` | bounded text | required for `decision=waive` |
@@ -158,9 +155,15 @@ Human-readable context remains in the body.
 | `permissions` | bounded advisory vocabulary/text | declared intent only; host policy remains authoritative |
 
 The schema deliberately reuses the Stage 4 names instead of creating aliases.
-Existing `stage4.v1` turns remain valid; a later implementation may accept both
-identifiers during a transition, but must not rewrite either. Project-specific
-metadata continues to use `x_*`.
+`m8shift.exchange.turn/1` is the successor to `stage4.v1`. Implementations
+accept both identifiers during the transition, preserve existing `stage4.v1`
+turns as valid, and never rewrite either identifier or its immutable turn.
+Project-specific metadata continues to use `x_*`.
+
+`stage` alone is a valid lightweight stamp and opts into only the closed stage
+vocabulary. Adding `schema=m8shift.exchange.turn/1` opts into the richer field
+contract and its cross-field lint rules. Absence of `schema` is therefore not a
+malformation when a valid `stage` is present.
 
 ### 4.2 Minimal validation profile
 
@@ -168,10 +171,11 @@ The recommended default is advisory doctor lint:
 
 - `schema` present but unknown: warning;
 - known schema with missing/unknown `stage`: warning;
+- schema absent with a known `stage`: valid lightweight stamp;
 - `stage=review_request`: recommend `relation=review_request`, `role_to`,
   `requires`, and `expected_output`;
-- `stage=approve`: require `relation=review_result` and `decision=approve`;
-- `stage=revise`: recommend `decision=revise` when it is a review result;
+- `stage=review_result`: require `relation=review_result` and one of
+  `decision=approve|revise|reject|waive`;
 - `stage=block`: require non-empty `blocked_on`;
 - `stage=unblock`: require evidence or a blocker reference;
 - `stage=done`: warn when `next` still declares required work;
@@ -183,7 +187,7 @@ future strict mode may return non-zero for newly stamped malformed turns only.
 
 ## 5. Whole-shift exchange format
 
-The proposed portable envelope is UTF-8 JSON with schema:
+The arbitrated portable envelope is UTF-8 JSON with schema:
 
 ```text
 m8shift.exchange/1
@@ -211,13 +215,15 @@ The top-level shape is:
 ### 5.1 Sections
 
 - `turns` contains ordered structured headers plus body references. Inline body
-  inclusion is opt-in and size-bounded.
+  inclusion is opt-in and size-bounded; references-only is the default.
 - `stage_history` contains only explicit stage stamps. Historical unstamped turns
   appear as `legacy-unstamped` spans, never guessed events.
 - `decisions` uses RFC 031's decision/context/options/positions/divergence/
   resolution/trace structure and cites originating turn numbers.
-- `artifacts` contains logical name, media type, digest when available, and a
-  relative or opaque reference. It does not copy arbitrary repository files.
+- `artifacts` contains logical name, media type, digest algorithm and value,
+  and a relative or opaque reference. When the referenced file exists at export
+  time, its digest is mandatory and uses `sha256`; the algorithm is recorded on
+  each artifact. It does not copy arbitrary repository files.
 - `time_accounting` carries RFC 064 categories and its exact/partial quality;
   unclassified time is retained, never silently redistributed.
 - `redactions` records categories and counts, not removed secret values.
@@ -228,13 +234,26 @@ apply RFC 052 compartmentalization: no foreign project identity, absolute path,
 credential, runtime sidecar, listener PID, or raw environment value crosses the
 exchange boundary by default.
 
+The export bytes are checked against RFC 052's operator-confidential denylist,
+using the same term set as `scrub-check.py`. Before an exchange leaves its
+source compartment, the operator must pass an explicit confirmation gate after
+that check; producing a local derived view is not permission to transmit it.
+Normal output never discloses the protected denylist terms.
+
+Version 1 exchanges are explicitly unsigned derived views. They claim neither
+origin authentication nor protection against a party that can recompute local
+history. Tamper-evidence work remains deferred to RFC 030, including its stated
+limit that a local chain is recomputable and a remote anchor supplies the
+meaningful external evidence.
+
 ### 5.2 Portability and import boundary
 
-Consumers may visualize, archive, or analyze an exchange. Importing it as live
-relay state is explicitly out of scope for v1 because that would require rules
-for identity rebinding, immutable-number collisions, decision provenance, and
-mutex authority. A future import RFC must use a new session and preserve the
-original exchange as provenance; it may never splice foreign turns into an
+Consumers may visualize, archive, or analyze an exchange. Version 1 permanently
+defines the exchange as read-only handover evidence; it cannot be imported as
+live relay state. Import would require rules for identity rebinding,
+immutable-number collisions, decision provenance, and mutex authority. A future
+import RFC may define a later version, but it must use a new session, preserve
+the original exchange as provenance, and never splice foreign turns into an
 existing append-only journal.
 
 ## 6. Feasibility and compatibility
@@ -245,7 +264,8 @@ More than 860 existing turns are intentionally untouched. Parsers already
 preserve unknown header fields, so adding `schema` and `stage` is additive.
 Derived views use these states:
 
-- `stamped`: a valid v1 schema and stage;
+- `lightweight-stamped`: a valid stage without an exchange schema;
+- `schema-stamped`: a valid accepted schema and stage;
 - `legacy-unstamped`: no exchange schema/stage;
 - `unknown-version`: a schema a consumer cannot validate;
 - `malformed`: a claimed v1 record that fails advisory lint.
@@ -268,10 +288,10 @@ relay deadlocks.
 ### 6.3 Byte and context budget
 
 RFC 048 established that mandatory agent-facing material needs a measured byte
-budget. This design adds nothing to the generated pack or anchor stanza. The
-normal stamped turn adds only two short lines (about 70–90 UTF-8 bytes depending
-on stage). Existing Stage 4 fields are reused, not duplicated. A future change
-must assert:
+budget. This design adds nothing to the generated pack or anchor stanza. A
+lightweight stamp adds one short `stage` line; the full common path adds
+`schema + stage` (about 70–90 UTF-8 bytes depending on stage). Existing Stage 4
+fields are reused, not duplicated. A future change must assert:
 
 - pack/stanza byte budgets remain unchanged unless separately approved;
 - `schema + stage` stays under 96 bytes per turn;
@@ -320,28 +340,37 @@ a verification or decision claim.
 Each slice requires its own implementation authorization, tests, RFC 058 index
 updates, and Python 3.8 plus Linux parity gates.
 
-## 9. Open questions for operator arbitration
+## 9. Arbitrated decisions
 
-1. Is the 18-token §3 set accepted as v1, or should `ack`, `root_cause`, or
-   `handoff` be represented as relations rather than primary stages?
-2. Should `approve`/`revise` be stages as proposed, despite also being decision
-   values, or should the stage stay `review_result` with only `decision` varying?
-3. Is `m8shift.exchange.turn/1` the preferred successor to `stage4.v1`, or
-   should Stage 4 remain the schema identifier and gain only `stage`?
-4. Should the recommended common path require both `schema` and `stage`, or may
-   `stage` alone be treated as a valid lightweight stamp?
-5. Which optional fields need hard byte caps beyond the existing core field
-   bounds, and is the proposed 96-byte common-path budget acceptable?
-6. Should whole-shift export include turn bodies by default, references only by
-   default (recommended), or a configurable bounded tail?
-7. Are artifact digests mandatory when a referenced file exists, and which
-   digest algorithm/version belongs in v1?
-8. Should exchanges support signatures/tamper evidence in v1, defer to RFC 030,
-   or explicitly remain unsigned derived views?
-9. What operator-confirmed redaction profile is sufficient before an exchange
-   leaves its source project compartment?
-10. Is a future import/continuation workflow desirable at all, or should v1
-    permanently define exchange as read-only handover evidence?
+The operator arbitrated all ten design questions on 2026-07-17. The RFC author
+then performed contradictory validation and accepted each position; none remains
+open.
 
-Until these questions are arbitrated, RFC 074 remains design-only and no token,
-schema, dashboard, validator, or export behavior is normative.
+1. **Taxonomy:** `ack` is a relation, not a primary stage, because it only
+   describes how a turn relates to prior work. `claim` is absent because it is a
+   LOCK transition, not turn content. `root_cause` remains a stage because a
+   supported causal conclusion is a distinct work result from investigation.
+2. **Review outcomes:** the stage is `review_result`; `decision` varies among
+   `approve`, `revise`, `reject`, and `waive`. Outcome words are not duplicated
+   as stages.
+3. **Schema identity:** `m8shift.exchange.turn/1` succeeds `stage4.v1`.
+   Implementations accept both during transition and never rewrite either.
+4. **Lightweight stamp:** `stage` alone is valid. The full schema explicitly
+   opts into the richer cross-field contract.
+5. **Budgets:** `schema + stage` remains below 96 bytes; optional scalars retain
+   the existing bounded core-field limits.
+6. **Bodies:** exchange exports are references-only by default. Inline bodies
+   require an explicit, size-bounded option.
+7. **Digests:** an artifact referencing a file that exists at export time must
+   carry a `sha256` digest, with the algorithm recorded per artifact.
+8. **Signatures:** v1 exchanges are unsigned derived views. Integrity work is
+   deferred to RFC 030 with its honest local-recomputation/remote-anchor limit.
+9. **Redaction:** the RFC 052 operator denylist term set is applied to the
+   export, followed by explicit operator confirmation before the exchange may
+   leave its source compartment. The RFC 052 boundary in §5.1 is unchanged.
+10. **Import:** v1 is permanently read-only handover evidence. A later import
+    RFC may open a new session with the original exchange as provenance, but
+    may never splice turns into an existing journal.
+
+These decisions make the design normative for future separately authorized
+implementation slices; this RFC itself still changes no runtime behavior.
