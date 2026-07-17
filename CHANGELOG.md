@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.63.0 — 2026-07-17
+
 - **Usage semantics: quota left, vendor-cumulative, reset-aware.** Every human
   usage surface now labels the actionable remaining quota explicitly, orders the
   full weekly window before the secondary 5h window, and renders unknown quota as
