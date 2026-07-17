@@ -245,7 +245,10 @@ def _usage_cell(usage, label, short, utc=False):
         value = "%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100))
         shown_ratio = ratio
     if freshness == "stale" and shown_ratio is not None:
-        value += " STALE"
+        # Keep the warning before the diagnostic value: rows and adaptive cells
+        # truncate at the right edge, so a visible ratio can never outlive its
+        # mandatory stale marker even with adversarially long identities/models.
+        value = "STALE " + value
     reset = _stamp(row.get("resets_at"))
     if reset is not None:
         value += " reset " + _display_time(reset, utc, "%a %m-%d %H:%M")

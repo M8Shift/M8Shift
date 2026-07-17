@@ -988,10 +988,21 @@ def write_notify_json(path, data):
     os.replace(tmp, path)
 
 
-def append_notify_log(row):
-    ensure_notify_dir()
-    with open(NOTIFY_LOG, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+def append_notify_log(row, findings=None):
+    """Best-effort notification ledger append; delivery must never kill a listener."""
+    try:
+        ensure_notify_dir()
+        with open(NOTIFY_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    except (OSError, TypeError, ValueError) as e:
+        if findings is not None:
+            findings.append({
+                "severity": "warning",
+                "check": "runtime.notify_log",
+                "message": f"cannot append notification ledger: {e}; delivery remains best-effort",
+            })
+        return False
+    return True
 
 
 def latest_notify_delivered(agent, event):
@@ -1108,7 +1119,7 @@ def emit_notification(agent, event, message, *, prompt="", config=None, state=""
             agent=agent,
             payload={"agent": agent, "event": event, "reason": "dedup", "state": state},
         )
-        append_notify_log(row)
+        append_notify_log(row, findings)
         return {
             "ok": True,
             "delivered": False,
@@ -1181,7 +1192,7 @@ def emit_notification(agent, event, message, *, prompt="", config=None, state=""
                 "message": "hook tier enabled but no hook argv configured",
             })
 
-    if set(tiers) - {"stdout"}:
+    if delivered:
         append_notify_log(runtime_event(
             "notify.delivered",
             agent=agent,
@@ -1196,7 +1207,7 @@ def emit_notification(agent, event, message, *, prompt="", config=None, state=""
                 "skipped": skipped,
                 "findings": findings,
             },
-        ))
+        ), findings)
     return {
         "ok": True,
         "delivered": bool(delivered),
@@ -1206,6 +1217,25 @@ def emit_notification(agent, event, message, *, prompt="", config=None, state=""
         "findings": findings,
         "event": payload,
     }
+
+
+def emit_notification_nonfatal(*args, **kwargs):
+    """Listener-loop boundary: no notification backend/config failure is fatal."""
+    try:
+        return emit_notification(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001 - notification is advisory by contract
+        return {
+            "ok": False,
+            "delivered": False,
+            "suppressed": "",
+            "tiers": [],
+            "skipped": [],
+            "findings": [{
+                "severity": "warning",
+                "check": "runtime.notify_internal",
+                "message": f"notification failed without stopping listener: {e}",
+            }],
+        }
 
 
 def validate_session_id(session_id):
@@ -1326,6 +1356,8 @@ def producer_evidence(listener, presence, usage_watch, *, now_utc=None,
         return {"coverage": "invoker", "source": "listener", "fresh": True}
     if listener.get("process_resident") and listener.get("can_notify"):
         return {"coverage": "notifier", "source": "listener", "fresh": True}
+    if malformed:
+        return {"coverage": "unknown", "source": "malformed", "fresh": False}
     if isinstance(presence, dict) and heartbeat_fresh(presence, "last_seen"):
         live = presence.get("pid")
         if not isinstance(live, int) or pid_alive(live):
@@ -1335,8 +1367,6 @@ def producer_evidence(listener, presence, usage_watch, *, now_utc=None,
             live = usage_watch.get("pid")
             if isinstance(live, int) and pid_alive(live):
                 return {"coverage": "foreground_watch", "source": "usage_watch", "fresh": True}
-    if malformed:
-        return {"coverage": "unknown", "source": "malformed", "fresh": False}
     return {"coverage": "absent", "source": "none", "fresh": False}
 
 
@@ -1389,26 +1419,31 @@ def runtime_attention(status, agent, stale_after_seconds=ATTENTION_STALE_AFTER_S
     """Read bounded sidecars and apply the shared pure producer/attention rules."""
     exists, pid = read_listener_pid(agent)
     state_doc, state_err = read_json_diagnostic(listener_paths(agent)["state"], {})
-    alive = bool(pid and listener_pid_alive(pid))
+    # Match the core attention classifier: unverifiable advisory evidence does
+    # not prove coverage.  Listener lifecycle commands retain their separate
+    # EPERM-as-resident semantics for safe stop/status handling.
+    alive = bool(pid and pid_alive(pid))
     halted = isinstance(state_doc, dict) and state_doc.get("phase") == "halted"
     notify_only = isinstance(state_doc, dict) and bool(state_doc.get("notify_only"))
+    listener_problem = state_err or (
+        "resident listener has missing/empty state" if alive and not state_doc else "")
     listener = ({"process_resident": alive,
                  "can_invoke_agent": bool(alive and state_doc and not halted and not notify_only),
                  "can_notify": bool(alive and state_doc and not halted and notify_only)}
-                if not state_err else state_doc)
+                if not listener_problem else listener_problem)
     presence_doc, presence_err = read_json_diagnostic(PRESENCE, {})
     presence = presence_doc.get(agent) if isinstance(presence_doc, dict) else presence_doc
     watch, watch_err = read_usage_watch(agent)
     evidence = producer_evidence(
-        listener if not state_err else None,
-        presence if not presence_err else None,
-        watch if not watch_err else None,
+        listener,
+        presence if not presence_err else presence_err,
+        watch if not watch_err else watch_err,
         now_utc=now_utc, stale_after_seconds=stale_after_seconds)
     attention = relay_attention(
         status.get("state", ""), status.get("since", ""), evidence,
         now_utc=now_utc, stale_after_seconds=stale_after_seconds)
     return {"producer": evidence, "attention": attention,
-            "sidecar_errors": [e for e in (state_err, presence_err, watch_err) if e]}
+            "sidecar_errors": [e for e in (listener_problem, presence_err, watch_err) if e]}
 
 
 def maybe_notify_stranded(status, stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS):
@@ -1425,7 +1460,7 @@ def maybe_notify_stranded(status, stale_after_seconds=ATTENTION_STALE_AFTER_SECO
     verdict = runtime_attention(status, agent, stale_after_seconds)
     if verdict["attention"].get("verdict") != "stranded":
         return None
-    return emit_notification(
+    return emit_notification_nonfatal(
         agent, "stranded",
         "%s has no fresh wake-up producer after %ss; human reactivation is required" % (
             state, verdict["attention"].get("age_seconds")),
@@ -6785,7 +6820,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 continue
             if notify_only:
                 # Durable human wake-up, explicitly without provider invocation.
-                emit_notification(
+                emit_notification_nonfatal(
                     agent, "turn-ready",
                     "%s is ready for %s; human reactivation is required" % (state, agent),
                     state=state, holder=lk.get("holder", ""))

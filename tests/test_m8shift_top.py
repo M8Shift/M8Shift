@@ -333,6 +333,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
     def test_stale_ratio_always_carries_stale_token_across_layout_matrix(self):
         top = load_top()
         data = fixture()
+        data["agents"][0].update({
+            "id": "agent-with-long-id", "model": "provider/model-with-a-very-long-name",
+        })
         data["agents"][0]["usage"].update({
             "captured_at": "2026-07-12T23:00:00Z", "age_seconds": 4500,
             "freshness": "stale", "stale": True,
@@ -349,8 +352,8 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                         mock.patch.dict(os.environ, env, clear=True):
                     plain = self._plain(top.render(data, width, self.NOW))
                     ratio_lines = [line for line in plain.splitlines() if "73%" in line]
-                    self.assertTrue(ratio_lines)
                     self.assertTrue(all("STALE" in line for line in ratio_lines))
+                    self.assertNotIn("73% S│", plain)
                     self.assertTrue(all(len(line) == width for line in plain.splitlines()))
 
     def test_unknown_freshness_hides_ratio_but_preserves_not_provided(self):

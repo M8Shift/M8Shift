@@ -5026,9 +5026,16 @@ def read_json_diagnostic(path, default):
         return default, ""
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh), ""
-    except (OSError, json.JSONDecodeError) as e:
+            data = json.load(fh)
+    # Runtime sidecars are written by other processes.  Invalid UTF-8 and
+    # adversarially deep JSON are diagnostics, never reasons for status/watch
+    # to fail.
+    except (OSError, json.JSONDecodeError, RecursionError, ValueError) as e:
         return default, str(e)
+    if not isinstance(data, type(default)):
+        return default, "expected %s, got %s" % (
+            type(default).__name__, type(data).__name__)
+    return data, ""
 
 
 def configured_decision_target():
@@ -9428,21 +9435,22 @@ def _status_attention(lk, ref=None, stale_after_seconds=300):
         except (OSError, ValueError):
             listener_pid = None
         resident = alive(listener_pid)
-        if resident and isinstance(listener, dict) and listener.get("phase") != "halted":
+        lane = presence.get(agent) if isinstance(presence, dict) else None
+        watch, watch_err = read_json_diagnostic(
+            os.path.join(runtime, "usage-watchers", agent + ".json"), {})
+        listener_valid = bool(listener) and isinstance(listener, dict) and not listener_err
+        if resident and listener_valid and listener.get("phase") != "halted":
             coverage = "notifier" if listener.get("notify_only") else "invoker"
             source = "listener"
+        elif listener_err or presence_err or watch_err or (resident and not listener_valid):
+            coverage, source = "unknown", "malformed"
         else:
-            lane = presence.get(agent) if isinstance(presence, dict) else None
-            watch, watch_err = read_json_diagnostic(
-                os.path.join(runtime, "usage-watchers", agent + ".json"), {})
             if isinstance(lane, dict) and fresh(lane, "last_seen") \
                     and (not isinstance(lane.get("pid"), int) or alive(lane.get("pid"))):
                 coverage, source = "foreground_watch", "presence"
             elif isinstance(watch, dict) and watch.get("phase") == "running" \
                     and fresh(watch, "last_tick") and alive(watch.get("pid")):
                 coverage, source = "foreground_watch", "usage_watch"
-            elif listener_err or presence_err or watch_err:
-                coverage, source = "unknown", "malformed"
             else:
                 coverage, source = "absent", "none"
         if state != "AWAITING_" + agent.upper():
