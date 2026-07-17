@@ -8792,7 +8792,8 @@ def cmd_may_i_write(args):
 # stdlib-only unit is a READ-ONLY reader of the companion-authored local sidecar
 # `.m8shift/runtime/usage.jsonl` (event `m8shift.runtime.event.v1`, payload.snapshot =
 # `m8shift.usage.snapshot.v1`). It NEVER computes a ratio/argmax, opens a socket, spawns a
-# process, or writes — it echoes recorded scalars and marks staleness. Any absent/hostile
+# process, or writes — it echoes recorded scalars (with a compatibility
+# `1 - used_ratio` display projection) and marks staleness. Any absent/hostile
 # input fails open to a BYTE-IDENTICAL no-usage display. See docs/en/rfc/051-*.
 
 USAGE_SIDECAR_REL = os.path.join(".m8shift", "runtime", "usage.jsonl")
@@ -9067,10 +9068,26 @@ def _usage_window_pct(r):
     return f"{int(round(r * 100))}%"
 
 
+def _usage_window_remaining_pct(window):
+    """Explicit quota left for a window, with compatibility for older sidecars.
+
+    New producers record both fields.  Deriving from a schema-valid used ratio
+    keeps an already-recorded pre-upgrade snapshot useful without trusting an
+    arbitrary remaining value or locally accumulating deltas.
+    """
+    if not isinstance(window, dict):
+        return None
+    used = window.get("used_ratio")
+    if _usage_window_pct(used) is None:
+        return None
+    remaining = round(1.0 - float(used), 4)
+    return _usage_window_pct(remaining)
+
+
 def _usage_window_frags(snap, ref):
-    """#106 unified line: one `label NN% (Reset when)` fragment per plausible entry of
-    `windows[]` — NN% is the CONSUMED `used_ratio` (echo-only, enforced to the schema
-    range [0, 1] by `_usage_window_pct`), label is the window's kind (aliased
+    """Unified line: one `label left NN% (Reset when)` fragment per plausible entry
+    of `windows[]`. Remaining is derived from cumulative `used_ratio` (enforced to
+    the schema range [0, 1]), label is the window's kind (aliased
     `session_5h`→`5h`, otherwise sanitized as-is so any agent's window kinds render —
     inter-agent generic), reset is same-day `HH:MM` / cross-day `dd/mm HH:MM` and simply
     omitted when unusable. An entry that is not a dict, has no plausible ratio, or no
@@ -9083,11 +9100,23 @@ def _usage_window_frags(snap, ref):
     windows = snap.get("windows")
     if not isinstance(windows, list):
         return []
-    frags = []
-    for w in windows:
+    # Full-window cumulative quota is primary; the 5h window is secondary.
+    order = {"weekly": 0, "session_5h": 1}
+    def window_order(pair):
+        index, row = pair
+        kind = row.get("kind") if isinstance(row, dict) else None
+        return (order.get(kind, 2) if isinstance(kind, str) else 3, index)
+
+    ordered_windows = sorted(
+        enumerate(windows),
+        key=window_order,
+    )
+    standard_frags = {}
+    custom_frags = []
+    for _, w in ordered_windows:
         if not isinstance(w, dict):
             continue
-        pct = _usage_window_pct(w.get("used_ratio"))
+        pct = _usage_window_remaining_pct(w)
         if pct is None:
             continue
         kind = w.get("kind")
@@ -9097,22 +9126,27 @@ def _usage_window_frags(snap, ref):
             continue
         when = _usage_reset_when(w.get("resets_at"), ref)
         model = _usage_sanitize(w.get("model"), cap=24, fallback="")
-        exhausted = pct == "100%" and bool(model)
-        value = f"EXHAUSTED [{model}]" if exhausted else pct
-        frags.append(f"{label} {value}" + (f" (Reset {when})" if when else ""))
-    current_kinds = {
-        w.get("kind") for w in windows
-        if isinstance(w, dict) and isinstance(w.get("kind"), str)
-        and _usage_window_pct(w.get("used_ratio")) is not None
-    }
+        exhausted = pct == "0%" and bool(model)
+        value = f"left {pct}" + (f" [{model} exhausted]" if exhausted else "")
+        fragment = f"{label} {value}" + (f" (Reset {when})" if when else "")
+        if kind in ("weekly", "session_5h"):
+            standard_frags.setdefault(kind, fragment)
+        else:
+            custom_frags.append(fragment)
     known = snap.get("_m8shift_known_windows")
-    if isinstance(known, dict):
-        for kind in ("session_5h", "weekly"):
-            if kind in current_kinds or kind not in known:
-                continue
-            label = USAGE_WINDOW_LABELS.get(kind) or kind
-            when = _usage_reset_when(known.get(kind), ref)
-            frags.append(f"{label} N/A" + (f" (Reset {when})" if when else ""))
+    decision_window = snap.get("decision_window")
+    for kind in ("weekly", "session_5h"):
+        if kind in standard_frags:
+            continue
+        label = USAGE_WINDOW_LABELS.get(kind) or kind
+        remembered_reset = known.get(kind) if isinstance(known, dict) else None
+        if remembered_reset is None and isinstance(decision_window, dict) \
+                and decision_window.get("kind") == kind:
+            remembered_reset = decision_window.get("resets_at")
+        when = _usage_reset_when(remembered_reset, ref)
+        standard_frags[kind] = (f"{label} left n/a"
+                                + (f" (Reset {when})" if when else ""))
+    frags = [standard_frags["weekly"], standard_frags["session_5h"]] + custom_frags
     if len(frags) > USAGE_LINE_MAX_WINDOWS:
         extra = len(frags) - USAGE_LINE_MAX_WINDOWS
         frags = frags[:USAGE_LINE_MAX_WINDOWS] + [f"+{extra}"]
@@ -9223,8 +9257,8 @@ def _print_usage_block(lk, rows=None):
         if row.get("consumption"):
             segs.append(row["consumption"])          # #59: actual token consumption
         if row.get("windows_display"):
-            # #106 unified line: every plausible window inline, consumed %, reset with
-            # date when not today — `agent  5h 64% (Reset 18:05) - weekly 42%
+            # Unified line: full-window remaining quota first, then 5h, with reset
+            # date when not today — `agent weekly left 58% (...) - 5h left 36%
             # (Reset 16/07 23:45) · (official) · 2m ago`.
             if row["age_display"]:
                 segs.append(row["age_display"])
@@ -9234,8 +9268,9 @@ def _print_usage_block(lk, rows=None):
             print(f"  {row['agent']:<8} {' - '.join(row['windows_display'])}"
                   f" · ({row['provenance']}){tail}")
             continue
-        # Legacy single-window line: snapshots without a usable `windows[]` (older
-        # adapters, budget-only gates) keep rendering exactly as before.
+        # Without a vendor-cumulative ratio window there is no honest quota-left
+        # percentage.  Keep attribution/reset diagnostics, but label the primary
+        # value n/a instead of converting a local/token decision ratio.
         window = f"{row['kind']} ({row['provenance']})" if row["kind"] else f"({row['provenance']})"
         if row["reset"]:
             segs.append(f"resets {row['reset']}")
@@ -9244,7 +9279,7 @@ def _print_usage_block(lk, rows=None):
         if row["stale"]:
             segs.append("stale")
         tail = " · " + " · ".join(segs) if segs else ""
-        print(f"  {row['agent']:<8} {row['pct']:<3} {window}{tail}")
+        print(f"  {row['agent']:<8} left n/a {window}{tail}")
 
 
 def _usage_json(lk, ref=None):
@@ -9262,6 +9297,14 @@ def _usage_json(lk, ref=None):
             entry = _usage_json_safe(row["snapshot"])   # echo recorded values, non-finite → null
             dr = row["snapshot"].get("decision_ratio")
             entry["decision_ratio"] = dr if _usage_ratio_valid(dr) else None
+            for window in entry.get("windows", []) if isinstance(entry.get("windows"), list) else []:
+                if not isinstance(window, dict):
+                    continue
+                used = window.get("used_ratio")
+                remaining = _usage_window_remaining_pct(window)
+                if _usage_window_pct(used) is not None and remaining is not None:
+                    window["used_ratio"] = used
+                    window["remaining_ratio"] = round(1.0 - float(used), 4)
             entry["last_known"] = bool(row["snapshot"].get("_m8shift_last_known"))
             entry["stale"] = row["stale"]
             entry["age_seconds"] = row["age_seconds"]
@@ -9338,6 +9381,7 @@ def _status_usage_windows(snapshot, last_known=False):
             "available": available,
             "not_provided": bool(has_valid_window and row is None),
             "used_ratio": ratio if available else None,
+            "remaining_ratio": (round(1.0 - float(ratio), 4) if available else None),
             "resets_at": _status_snapshot_text(row.get("resets_at")) if available else None,
             "last_known": bool(last_known),
         }

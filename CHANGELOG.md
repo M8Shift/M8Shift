@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Usage semantics: quota left, vendor-cumulative, reset-aware.** Every human
+  usage surface now labels the actionable remaining quota explicitly, orders the
+  full weekly window before the secondary 5h window, and renders unknown quota as
+  `n/a`. Ratio-native snapshots and status JSON carry both authoritative
+  `used_ratio` and derived `remaining_ratio`; guard thresholds remain on consumed
+  ratio. Provider values resync across scheduled and manual full resets, with
+  backward cumulative jumps recorded as local `usage.reset_detected` events.
 - **Cached dashboard navigation and neutral lease display.** Interactive
   `m8shift-top` now reloads the status fold only on interval expiry, explicit
   refresh, or activity-provision growth; navigation/help keys render the cached

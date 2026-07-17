@@ -90,12 +90,13 @@ There is one AGENTS row per relay member:
   the same notation.
 - The dot and adjacent word show the role state. Green `idle`, yellow `working`,
   and a dim unknown state remain readable as words without colour.
-- **5h** and **weekly** are provider usage windows. A percentage below 60% is
-  green, 60% to below 85% is yellow, and 85% or more is red. If the provider
-  supplies a reset instant, it appears beside the percentage. `n/a` means the
-  provider structurally did not supply that window; `unavailable` means the
-  reading could not be obtained. `EXHAUSTED [model]` is explicit when a window
-  reaches 100% and a model is known.
+- **weekly** and **5h** are provider usage windows, in that order: the cumulative
+  full weekly decision window is primary and 5h is secondary. Each value is
+  explicitly labelled `left` and equals `1 - used_ratio`; `n/a` means no honest
+  vendor-cumulative value is available. Colour still follows the unchanged
+  consumed-ratio guard bands (below 60% green, 60% to below 85% yellow, 85% or
+  more red). If the provider supplies a reset instant, it appears beside the
+  remaining percentage. A known model at zero remaining is labelled exhausted.
 
 Usage is advisory. It does not change claimability, relay state, or the pen.
 
@@ -116,8 +117,8 @@ confirm the invocation backend with
 setup as autonomous.
 
 Usage values carry the core snapshot's `fresh|stale|unknown` verdict. Stale
-ratios remain visible only with an explicit `STALE` token in every layout and
-colour mode; unknown age never renders as a live percentage. The ATTENTION
+remaining ratios remain visible only with an explicit `STALE` token in every
+layout and colour mode; unknown age never renders as a live percentage. The ATTENTION
 verdict separately shows `covered`, `human_resume_needed`, or `stranded` and
 does not grant claim or invocation authority.
 

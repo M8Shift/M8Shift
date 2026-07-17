@@ -243,20 +243,26 @@ def _usage_cell(usage, label, short, utc=False):
     windows = usage.get("windows") if isinstance(usage.get("windows"), dict) else {}
     row = windows.get(label) or {}
     ratio = row.get("used_ratio")
+    # Derive from the authoritative cumulative value even when a pre-upgrade
+    # snapshot lacks remaining_ratio; never use a locally accumulated delta.
+    valid_ratio = (not isinstance(ratio, bool)
+                   and isinstance(ratio, (int, float)) and 0 <= ratio <= 1)
+    remaining = round(1.0 - ratio, 4) if valid_ratio else None
     model = row.get("model") if isinstance(row.get("model"), str) else ""
     model = clean(model, 18) if model else ""
     freshness = usage.get("freshness")
     if row.get("not_provided") is True:
-        value = "%s n/a" % short
+        value = "%s left n/a" % short
         shown_ratio = None
     elif freshness not in ("fresh", "stale"):
-        value = "%s unknown" % short
+        value = "%s left n/a" % short
         shown_ratio = None
-    elif ratio == 1 and model:
-        value = "%s EXHAUSTED [%s]" % (short, model)
+    elif remaining == 0 and model:
+        value = "%s left 0%% [%s exhausted]" % (short, model)
         shown_ratio = ratio
     else:
-        value = "%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100))
+        value = "%s left %s" % (
+            short, "n/a" if remaining is None else "%d%%" % round(remaining * 100))
         shown_ratio = ratio
     if freshness == "stale" and shown_ratio is not None:
         # Keep the warning before the diagnostic value: rows and adaptive cells
@@ -745,7 +751,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         state = clean(agent.get("role_state") or "unknown", 14)
         usage = agent.get("usage") or {}
         bits, ratios, freshnesses = [], [], []
-        for label in ("session_5h", "weekly"):
+        for label in ("weekly", "session_5h"):
             bit, ratio, freshness = _usage_cell(usage, label, label, utc)
             bits.append(bit)
             ratios.append(ratio)
@@ -937,7 +943,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         astate = clean(agent.get("role_state") or "unknown", 12)
         usage = agent.get("usage") or {}
         ratios, bits, freshnesses = [], [], []
-        for short, label in (("5h", "session_5h"), ("weekly", "weekly")):
+        for short, label in (("weekly", "weekly"), ("5h", "session_5h")):
             bit, ratio, freshness = _usage_cell(usage, label, short, utc)
             ratios.append(ratio)
             bits.append(bit)
