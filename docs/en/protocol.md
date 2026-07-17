@@ -56,8 +56,8 @@ re-run `status --for <you>` before ending a turn; if not `DONE`, `append`/`done`
 keep waiting.
 
 **Listening invariant:** `idle` is **not** `DONE`; listening ends **only** at `DONE`.
-When you halt while not `DONE` — even holding the pen — keep `wait <you>` armed until
-your turn (`append --wait` / a headless runner).
+At any other halt, keep `wait <you>` armed. Waiters count only while blocked;
+notify-only needs human reactivation.
 
 **Unread-turn guardrail:** when a handoff is addressed to you, **read it before any
 empty handback** (`next <you>` or `claim <you>` + `peek <you>`). `release <you> --to

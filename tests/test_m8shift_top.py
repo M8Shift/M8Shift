@@ -33,7 +33,9 @@ def fixture():
         "since": "2026-07-13T00:00:00Z", "expires": "2026-07-13T00:30:00Z",
         "pen": {"heartbeat": "2026-07-13T00:10:00Z"},
         "agents": [{"id": "codex", "model": "gpt-5.4", "model_source": "self_declared",
-                    "role_state": "working", "usage": {"windows": {}}}],
+                    "role_state": "working", "usage": {
+                        "captured_at": "2026-07-13T00:14:00Z", "age_seconds": 60,
+                        "freshness": "fresh", "stale": False, "windows": {}}}],
         "ledger": {}, "listeners": [],
         "time_accounting": {
             "schema": "m8shift.time-accounting/1", "quality": "partial",
@@ -256,7 +258,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         for name, ratio in (("safe", .59), ("elevated", .60), ("danger", .85)):
             data["agents"].append({
                 "id": name, "model": "m", "role_state": "idle",
-                "usage": {"windows": {
+                "usage": {"freshness": "fresh", "stale": False, "windows": {
                     "session_5h": {"used_ratio": ratio},
                     "weekly": {"used_ratio": ratio},
                 }},
@@ -327,6 +329,54 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             if width >= 120:
                 self.assertIn("weekly 30% reset Fri 07-17 05:00Z", output)
             self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
+    def test_stale_ratio_always_carries_stale_token_across_layout_matrix(self):
+        top = load_top()
+        data = fixture()
+        data["agents"][0].update({
+            "id": "agent-with-long-id", "model": "provider/model-with-a-very-long-name",
+        })
+        data["agents"][0]["usage"].update({
+            "captured_at": "2026-07-12T23:00:00Z", "age_seconds": 4500,
+            "freshness": "stale", "stale": True,
+            "windows": {
+                "session_5h": {"used_ratio": .73},
+                "weekly": {"not_provided": True, "used_ratio": None},
+            },
+        })
+        colour_envs = ({"NO_COLOR": "1"}, {"TERM": "xterm-color"},
+                       {"TERM": "xterm-256color"}, {"COLORTERM": "truecolor"})
+        for width in (72, 80, 96, 99, 100, 120, 160):
+            for env in colour_envs:
+                with self.subTest(width=width, env=env), \
+                        mock.patch.dict(os.environ, env, clear=True):
+                    plain = self._plain(top.render(data, width, self.NOW))
+                    ratio_lines = [line for line in plain.splitlines() if "73%" in line]
+                    self.assertTrue(all("STALE" in line for line in ratio_lines))
+                    self.assertNotIn("73% S│", plain)
+                    self.assertTrue(all(len(line) == width for line in plain.splitlines()))
+
+    def test_unknown_freshness_hides_ratio_but_preserves_not_provided(self):
+        top = load_top()
+        data = fixture()
+        data["agents"][0]["usage"].update({
+            "captured_at": "bad", "age_seconds": None,
+            "freshness": "unknown", "stale": True,
+            "windows": {
+                "session_5h": {"used_ratio": .88},
+                "weekly": {"not_provided": True, "used_ratio": None},
+            },
+        })
+        for width in (80, 120, 160):
+            for env in ({"NO_COLOR": "1"}, {"TERM": "xterm-color"}):
+                with self.subTest(width=width, env=env), \
+                        mock.patch.dict(os.environ, env, clear=True):
+                    plain = self._plain(top.render(data, width, self.NOW))
+                    self.assertIn("unknown", plain)
+                    self.assertNotIn("88%", plain)
+                    if width >= 120:
+                        self.assertIn("weekly n/a", plain)
+                    self.assertTrue(all(len(line) == width for line in plain.splitlines()))
 
     @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone control")
     def test_every_time_uses_local_default_or_utc_flag_consistently(self):
@@ -629,7 +679,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "d398de5da289eb7c780848465d8b7e61f14144e6632fb8e8fea17c8300a68982",
+            "010fabe4de6fd6a1901dfb51df6337afa7261d9c30d0af89b638c82636ea957b",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):

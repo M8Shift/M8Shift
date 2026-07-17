@@ -42,6 +42,15 @@ budgets; the fuller enumeration (paused, interrupted, a denied action, holding
 the pen) lives in `M8SHIFT.agent-pack.md`, which the pack section already binds.
 `DONE` remains the sole state that ends the relay and ends listening.
 
+A bounded or expiring waiter counts as coverage only while that process remains
+blocked; it does not become a persistent producer after it returns. Long
+off-relay work therefore needs a supervised persistent listener/watcher, and at
+every halt an agent with no such supervisor re-arms its waiter. An invoker may
+reactivate an agent, a notifier can only alert a human, a foreground watch exists
+only while its process is alive, and absent/unknown evidence proves no wake-up
+path. A detector never invokes an agent. A notify-only listener is durable
+notification coverage but still requires human reactivation.
+
 ## Where it binds
 
 The rule is authored once in the embedded protocol templates so that every
@@ -65,8 +74,9 @@ substrings the suite already pins. The core stays within its proxy-token budget
 and the stanza within its byte ceiling (`test_protocol_core_within_budget`,
 `test_stanza_byte_count_under_hard_ceiling`).
 
-## Optional future enforcement
+## Advisory enforcement
 
-A doctor advisory MAY flag an agent that has been non-`DONE` with no armed
-listener and no pen for longer than a threshold — turning the invariant from a
-documented habit into a detectable one. Deferred; not part of this contract.
+Runtime and status companions classify `AWAITING_<agent>` attention after the
+existing 300-second strict-`>` boundary: invoker coverage is `covered`;
+notifier/fresh foreground evidence is `human_resume_needed`; absent evidence is
+`stranded`. These verdicts are advisory and never alter routing or claim authority.

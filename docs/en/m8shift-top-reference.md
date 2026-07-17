@@ -114,6 +114,12 @@ confirm the invocation backend with
 `python3 m8shift-runtime.py listener status --agent AGENT` before describing a
 setup as autonomous.
 
+Usage values carry the core snapshot's `fresh|stale|unknown` verdict. Stale
+ratios remain visible only with an explicit `STALE` token in every layout and
+colour mode; unknown age never renders as a live percentage. The ATTENTION
+verdict separately shows `covered`, `human_resume_needed`, or `stranded` and
+does not grant claim or invocation authority.
+
 ## LEDGER and TURN
 
 LEDGER projects four bounded operational counts:

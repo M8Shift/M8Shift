@@ -67,7 +67,13 @@ The companion emits a notification on a state transition it computes from
 | `turn-ready` | the relay became `AWAITING_<agent>` for a watched agent that has no live runtime |
 | `stale` | a `WORKING_<agent>` lock passed its TTL, or presence for the holder went `stale` |
 | `blocked` | the companion marked a runtime `blocked` (needs human action) |
+| `stranded` | `AWAITING_<agent>` is older than 300 seconds (strict `>`) with no fresh invoker, notifier, or foreground-watch evidence |
 | `done` | the relay reached `DONE` |
+
+`stranded` uses the same configured-tier, deduplication, argv-only, best-effort
+delivery path as every other event. It never auto-enables OS or hook tiers: only
+tiers already enabled in `notify.config.json` are attempted, failures degrade,
+and no notification makes a core transition.
 
 Each event carries the agent, the relay state, a one-line summary, and — for
 `turn-ready` — the exact resume prompt.
