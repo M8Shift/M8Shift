@@ -1885,6 +1885,14 @@ class TestRoster(CLIBase):
         self.assertIn("You are **codex**", agents)
         self.assertIn("already used", r.stdout)
 
+    def test_vibe_uses_confirmed_agents_anchor(self):
+        r = self.init("--agents", "vibe,claude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.d, "AGENTS.md"), encoding="utf-8") as f:
+            agents = f.read()
+        self.assertIn("You are **vibe**", agents)
+        self.assertNotIn("no known anchor", r.stdout)
+
     def test_collision_lechat_then_codex(self):
         """NR-collision (order): lechat owns AGENTS.md, codex (dedicated branch) is warned."""
         r = self.init("--agents", "lechat,codex")
@@ -7304,12 +7312,18 @@ class TestRuntimeCompanion(CLIBase):
         self.assertIn("codex", examples)
         self.assertIn("claude", examples)
         self.assertIn("gemini", examples)
+        self.assertIn("vibe", examples)
         self.assertEqual(examples["codex"]["argv"], ["codex", "exec", "$M8SHIFT_PROMPT"])
         self.assertEqual(examples["claude"]["argv"], ["claude", "-p", "$M8SHIFT_PROMPT"])
         self.assertEqual(examples["gemini"]["argv"], ["gemini", "$M8SHIFT_PROMPT"])
         self.assertEqual(examples["gemini"]["model"], "gemini-2.5-pro")
         self.assertEqual(examples["gemini"]["requires_env"], ["GEMINI_API_KEY"])
         self.assertIn("GEMINI_API_KEY", examples["gemini"]["env_allowlist"])
+        self.assertEqual(examples["vibe"]["provider"], "mistral-vibe")
+        self.assertEqual(examples["vibe"]["anchor"], "AGENTS.md")
+        self.assertEqual(examples["vibe"]["argv"],
+                         ["vibe", "-p", "$M8SHIFT_PROMPT"])
+        self.assertEqual(examples["vibe"]["requires_env"], ["MISTRAL_API_KEY"])
         self.assertIn("//", examples["codex"])
         self.assertIn("argv_by_platform", examples["codex"])
         self.assertIn("env_allowlist", examples["codex"])
@@ -7519,7 +7533,8 @@ class TestRuntimeCompanion(CLIBase):
 
     def test_agent_cli_adapter_registry_dispatch_and_live_gemini(self):
         runtime = self.load_runtime()
-        expected = {"openai-codex", "anthropic-claude", "google-gemini"}
+        expected = {"openai-codex", "anthropic-claude", "google-gemini",
+                    "mistral-vibe"}
         self.assertEqual(set(runtime.ADAPTER_REGISTRY), expected)
         for provider in sorted(expected):
             adapter = runtime.provider_adapter(provider)
@@ -7554,6 +7569,23 @@ class TestRuntimeCompanion(CLIBase):
         self.assertNotIn("opaque-session", json.dumps(health))
         with self.assertRaisesRegex(ValueError, "native resume is unsafe"):
             gemini.resume(row, "one turn", "opaque-session")
+
+        vibe = runtime.provider_adapter("mistral-vibe")
+        self.assertTrue(vibe.validated_stub)
+        self.assertFalse(vibe.managed)
+        vibe_row = {
+            "name": "vibe", "provider": "mistral-vibe",
+            "argv": ["vibe", "-p", "$M8SHIFT_PROMPT"],
+        }
+        self.assertEqual(
+            vibe.launch_argv(vibe_row, "one turn"),
+            ["vibe", "-p", "one turn"],
+        )
+        self.assertEqual(vibe.health("process-2", "opaque-session")["state"],
+                         "unknown")
+        self.assertFalse(vibe.health()["relay_completion"])
+        with self.assertRaisesRegex(ValueError, "does not declare resume support"):
+            vibe.resume(vibe_row, "one turn", "opaque-session")
 
         # A new provider is a registry addition; generic callers do not change.
         extra = runtime.DeclarativeAdapter("example-provider")

@@ -294,7 +294,10 @@ ANCHORS = {
     "claude": "CLAUDE.md",
     "codex": "AGENTS.md",
     "gemini": "GEMINI.md",
-    "lechat": "AGENTS.md",   # Le Chat / Mistral: best-effort (convention unconfirmed)
+    # Mistral Vibe 2.20.0 documents and loads project AGENTS.md files from the
+    # working directory up to the trust root. lechat/mistral remain aliases.
+    "vibe": "AGENTS.md",
+    "lechat": "AGENTS.md",
     "mistral": "AGENTS.md",
     # NOTE: nested-path anchors (e.g. GitHub Copilot's .github/copilot-instructions.md)
     # are out of stage 1 — ensure_canonical_anchor is not path-aware (no case handling

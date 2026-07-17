@@ -363,7 +363,7 @@ def active_roster_or_default(raw=""):
 def provider_template(agent):
     argv = []
     permissions = "human-driven"
-    mode = "interactive" if agent in {"claude", "vibe"} else "headless"
+    mode = "interactive" if agent == "claude" else "headless"
     model = PROVIDER_MODEL_UNSET
     requires_env = []
     env_allowlist = []
@@ -376,13 +376,18 @@ def provider_template(agent):
         requires_env = ["GEMINI_API_KEY"]
         env_allowlist = DEFAULT_PROVIDER_ENV_ALLOWLIST + ["GEMINI_API_KEY"]
         permissions = "workspace-write"
+    elif agent == "vibe":
+        argv = ["vibe", "-p", "$M8SHIFT_PROMPT"]
+        requires_env = ["MISTRAL_API_KEY"]
+        env_allowlist = DEFAULT_PROVIDER_ENV_ALLOWLIST + ["MISTRAL_API_KEY"]
+        permissions = "workspace-write"
     provider = {
         "name": agent,
         "provider": {
             "claude": "anthropic-claude",
             "codex": "openai-codex",
             "gemini": "google-gemini",
-            "vibe": "vibe",
+            "vibe": "mistral-vibe",
         }.get(agent, agent),
         "mode": mode,
         "anchor": DEFAULT_ANCHORS.get(agent, "AGENTS.md"),
@@ -414,6 +419,25 @@ def curated_provider_examples():
             "env_allowlist": common_env,
             "capabilities": DEFAULT_CAPABILITIES.get("codex", ["read_repo", "write_repo", "run_tests"]),
             "requires_env": [],
+            "permissions": "workspace-write",
+        },
+        {
+            "//": ("Opt-in validated stub based on Mistral Vibe 2.20.0 source; "
+                   "live lifecycle support remains disabled pending a local probe."),
+            "name": "vibe",
+            "provider": "mistral-vibe",
+            "mode": "headless",
+            "anchor": "AGENTS.md",
+            "model": PROVIDER_MODEL_UNSET,
+            "argv": ["vibe", "-p", "$M8SHIFT_PROMPT"],
+            "argv_by_platform": {
+                "default": ["vibe", "-p", "$M8SHIFT_PROMPT"],
+                "win32": ["vibe.exe", "-p", "$M8SHIFT_PROMPT"],
+            },
+            "env_allowlist": common_env + ["MISTRAL_API_KEY"],
+            "capabilities": DEFAULT_CAPABILITIES.get(
+                "vibe", ["read_repo", "write_repo", "review"]),
+            "requires_env": ["MISTRAL_API_KEY"],
             "permissions": "workspace-write",
         },
         {
@@ -2422,6 +2446,16 @@ class GeminiAdapter(DeclarativeAdapter):
         }
 
 
+class MistralVibeAdapter(DeclarativeAdapter):
+    """Source-validated stub; live lifecycle awaits a local CLI probe."""
+
+    provider = "mistral-vibe"
+    validated_stub = True
+
+    def __init__(self):
+        super().__init__(self.provider)
+
+
 ADAPTER_REGISTRY = {}
 
 
@@ -2441,6 +2475,7 @@ def register_adapter(adapter):
 register_adapter(OpenAICodexAdapter())
 register_adapter(AnthropicClaudeAdapter())
 register_adapter(GeminiAdapter())
+register_adapter(MistralVibeAdapter())
 MANAGED_PROVIDER_ADAPTERS = frozenset(
     provider for provider, adapter in ADAPTER_REGISTRY.items()
     if adapter.managed
