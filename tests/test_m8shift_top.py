@@ -691,16 +691,18 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         # runner rendered different bytes for the same fixture).  Pin TZ=UTC
         # inside the mocked env so the golden digest is host-independent.
         top = load_top()
-        with mock.patch.dict(os.environ, {"NO_COLOR": "1", "TZ": "UTC"},
-                             clear=True):
+        try:
+            with mock.patch.dict(os.environ, {"NO_COLOR": "1", "TZ": "UTC"},
+                                 clear=True):
+                if hasattr(time, "tzset"):
+                    time.tzset()
+                output = top.render(fixture(), 120, self.NOW)
+        finally:
+            # The mock context has already restored the real env by the time
+            # this runs (even when render raises), so tzset re-reads the host
+            # zone and later tests never inherit the UTC C-library state.
             if hasattr(time, "tzset"):
                 time.tzset()
-            try:
-                output = top.render(fixture(), 120, self.NOW)
-            finally:
-                pass
-        if hasattr(time, "tzset"):
-            time.tzset()  # restore the host zone once the real env is back
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
             "e2ac072b2666cc39829ccd148490f0652ccfb106a1cca4f4705aabd232533228",
