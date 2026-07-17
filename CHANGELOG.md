@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.63.0 — 2026-07-17
+
 - **Usage semantics: quota left, vendor-cumulative, reset-aware.** Every human
   usage surface now labels the actionable remaining quota explicitly, orders the
   full weekly window before the secondary 5h window, and renders unknown quota as
@@ -22,11 +24,13 @@
   until a supported local CLI version is probed. Upstream Vibe 2.20.0 docs and
   harness source confirm project `AGENTS.md` discovery up to the trust root, so
   the core's old convention-unconfirmed annotation is resolved.
-- **Standardized inter-agent exchange draft (RFC 074).** A design-only RFC
-  proposes an explicit bounded stage taxonomy, versioned vendor-neutral turn
-  fields, and a portable whole-shift exchange for stages, decisions, artifacts,
-  and time accounting. Historical turns stay immutable/unstamped and
-  implementation waits on the RFC's operator-arbitration questions.
+- **Standardized inter-agent exchange (RFC 074, arbitrated).** A design-only
+  RFC defines an explicit bounded stage taxonomy (15 primary stages), versioned
+  vendor-neutral turn fields succeeding the emergent Stage 4 set, and a
+  portable read-only whole-shift exchange for stages, decisions, artifacts,
+  and time accounting. All ten operator-arbitration questions are decided and
+  recorded in the RFC; historical turns stay immutable/unstamped and
+  implementation remains separately authorized.
 - **Live Gemini CLI adapter (RFC 073 slice 3).** The provider-keyed runtime
   registry now compiles real Gemini CLI 0.51.0 one-shot launches with an
   explicit `gemini-2.5-pro` model pin and `-p` headless prompt. Generated
