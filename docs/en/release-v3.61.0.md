@@ -74,9 +74,14 @@ recovery remains supported. No relay-format or CLI compatibility break.
 
 ### Deferred
 
-- The remaining slice-2c hardening items and RFC 073 slices 3–4 (live Gemini +
-  probed native resume; the #59 routing-matrix extension) are accepted, not
-  shipped.
+- Accepted supervisor-hardening follow-ups, not shipped: an atomic supervisor
+  singleton lock (two concurrent `fleet supervise` starts can both pass the
+  takeover guard), a restart path for a lane whose start identity stays
+  unreadable on Windows, a post-detach child-survival confirmation, and an
+  operator command that resolves a `needs_reconciliation` lane or control
+  record.
+- RFC 073 slices 3–4 (live Gemini + probed native resume; the #59
+  routing-matrix extension) are accepted, not shipped.
 
 ## Upgrade and verification
 
