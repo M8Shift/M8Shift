@@ -2309,6 +2309,35 @@ class TestReadCommands(CLIBase):
             self.assertFalse(row["available"])
             self.assertFalse(row["not_provided"])
 
+    def test_status_snapshot_usage_freshness_boundary_and_flat_json_parity(self):
+        self.init()
+        path = os.path.join(self.d, ".m8shift", "runtime", "usage.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        def status_at_age(age):
+            captured = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age)) \
+                .strftime("%Y-%m-%dT%H:%M:%SZ")
+            snap = {"schema": "m8shift.usage.snapshot.v1", "agent": "codex",
+                    "captured_at": captured, "decision_ratio": .4,
+                    "windows": [{"kind": "weekly", "used_ratio": .4}]}
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"agent": "codex", "payload": {"snapshot": snap}}) + "\n")
+            payload = json.loads(self.cw("status", "--json").stdout)
+            projected = next(a for a in payload["snapshot"]["agents"] if a["id"] == "codex")["usage"]
+            flat = next(a for a in payload["usage"] if a["agent"] == "codex")
+            return projected, flat
+
+        fresh, flat_fresh = status_at_age(1800)
+        self.assertEqual(fresh["freshness"], "fresh")
+        self.assertFalse(fresh["stale"])
+        self.assertEqual(flat_fresh["freshness"], fresh["freshness"])
+        self.assertEqual(flat_fresh["age_seconds"], fresh["age_seconds"])
+
+        stale, flat_stale = status_at_age(1801)
+        self.assertEqual(stale["freshness"], "stale")
+        self.assertTrue(stale["stale"])
+        self.assertEqual(flat_stale["freshness"], stale["freshness"])
+
     def test_status_and_recap_show_timezone_prefixed_local_time(self):
         self.init()
         status = self.cw("status").stdout
@@ -6139,6 +6168,87 @@ class TestRuntimeCompanion(CLIBase):
         self.assertTrue(payload["backend_configured"])
         self.assertFalse(payload["survives_parent_exit"])
 
+    def test_liveness_evidence_matrix_and_strict_attention_boundary(self):
+        runtime = self.load_runtime()
+        instant = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        fresh = "2026-01-01T00:00:00Z"
+        with mock.patch.object(runtime, "pid_alive", return_value=True):
+            self.assertEqual(runtime.producer_evidence(
+                {"process_resident": True, "can_invoke_agent": True}, {}, {},
+                now_utc=instant)["coverage"], "invoker")
+            self.assertEqual(runtime.producer_evidence(
+                {"process_resident": True, "can_notify": True}, {}, {},
+                now_utc=instant)["coverage"], "notifier")
+            self.assertEqual(runtime.producer_evidence(
+                {}, {"last_seen": fresh, "pid": 123}, {}, now_utc=instant
+            )["coverage"], "foreground_watch")
+            self.assertEqual(runtime.producer_evidence(
+                {}, {}, {"schema": runtime.USAGE_WATCH_SCHEMA, "phase": "running",
+                         "last_tick": fresh, "pid": 123}, now_utc=instant
+            )["coverage"], "foreground_watch")
+        self.assertEqual(runtime.producer_evidence({}, {}, {}, now_utc=instant)["coverage"],
+                         "absent")
+        self.assertEqual(runtime.producer_evidence("bad", {}, {}, now_utc=instant)["coverage"],
+                         "unknown")
+
+        absent = {"coverage": "absent"}
+        at_300 = runtime.relay_attention(
+            "AWAITING_CODEX", "2025-12-31T23:55:00Z", absent, now_utc=instant)
+        at_301 = runtime.relay_attention(
+            "AWAITING_CODEX", "2025-12-31T23:54:59Z", absent, now_utc=instant)
+        self.assertEqual(at_300["verdict"], "human_resume_needed")
+        self.assertEqual(at_301["verdict"], "stranded")
+        self.assertEqual(runtime.relay_attention(
+            "AWAITING_CODEX", "2025-01-01T00:00:00Z", {"coverage": "invoker"},
+            now_utc=instant)["verdict"], "covered")
+        self.assertEqual(runtime.relay_attention(
+            "AWAITING_CODEX", "2025-01-01T00:00:00Z", {"coverage": "notifier"},
+            now_utc=instant)["verdict"], "human_resume_needed")
+
+        with mock.patch.object(runtime, "runtime_attention", return_value={
+                "attention": {"verdict": "human_resume_needed"}}), \
+                mock.patch.object(runtime, "emit_notification") as emit:
+            self.assertIsNone(runtime.maybe_notify_stranded({"state": "AWAITING_CODEX"}))
+            emit.assert_not_called()
+        with mock.patch.object(runtime, "runtime_attention", return_value={
+                "attention": {"verdict": "stranded", "age_seconds": 301}}), \
+                mock.patch.object(runtime, "emit_notification", return_value={"ok": True}) as emit:
+            runtime.maybe_notify_stranded({"state": "AWAITING_CODEX", "holder": "codex"})
+            self.assertEqual(emit.call_args.args[1], "stranded")
+
+    def test_usage_watch_lifecycle_stops_cleanly_and_never_mutates_relay(self):
+        self.init()
+        relay = os.path.join(self.d, "M8SHIFT.md")
+        with open(relay, "rb") as fh:
+            before = fh.read()
+        result = self.rt("usage", "watch", "--agent", "claude", "--max-ticks", "1",
+                         "--interval", "0.01", "--json")
+        self.assertIn(result.returncode, (0, 30, 40, 50), result.stdout + result.stderr)
+        path = os.path.join(self.d, ".m8shift", "runtime", "usage-watchers", "claude.json")
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["schema"], "m8shift.usage-watch.lifecycle.v1")
+        self.assertEqual(doc["mode"], "advisory")
+        self.assertEqual(doc["phase"], "stopped")
+        self.assertTrue(doc["started"])
+        self.assertTrue(doc["last_tick"])
+        with open(relay, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+
+    def test_notify_only_listener_reports_notification_without_invocation(self):
+        self.init()
+        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        with open(os.path.join(listeners, "claude.pid"), "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({"phase": "polling", "notify_only": True}, fh)
+        payload = json.loads(self.rt(
+            "listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertTrue(payload["process_resident"])
+        self.assertTrue(payload["can_notify"])
+        self.assertFalse(payload["can_invoke_agent"])
+
     def test_doctor_reports_stale_awaiting_without_listener_and_stale_usage(self):
         self.init()
         relay = os.path.join(self.d, "M8SHIFT.md")
@@ -6614,6 +6724,20 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("notify turn-ready codex: codex is ready", r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "notify")))
+        self.assertEqual(self.md(), before)
+
+    def test_stranded_notification_uses_enabled_tiers_and_dedup_only(self):
+        self.init()
+        before = self.md()
+        self.assertEqual(self.rt(
+            "notify", "config", "--enable", "stdout,file", "--json").returncode, 0)
+        first = self.rt("notify", "codex", "--event", "stranded",
+                        "--message", "awaiting attention", "--json")
+        second = self.rt("notify", "codex", "--event", "stranded",
+                         "--message", "awaiting attention", "--json")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(json.loads(first.stdout)["tiers"], ["stdout", "file"])
+        self.assertEqual(json.loads(second.stdout)["suppressed"], "dedup")
         self.assertEqual(self.md(), before)
 
     def test_notify_writes_prompt_event_log_and_deduplicates(self):

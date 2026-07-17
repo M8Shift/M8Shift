@@ -85,7 +85,7 @@ NOTIFY_DIR = os.path.join(RUNTIME_DIR, "notify")
 NOTIFY_CONFIG = os.path.join(RUNTIME_DIR, "notify.config.json")
 NOTIFY_LOG = os.path.join(NOTIFY_DIR, "log.jsonl")
 NOTIFY_TIERS = {"stdout", "file", "bell", "os", "hook"}
-NOTIFY_EVENTS = {"turn-ready", "stale", "blocked", "done"}
+NOTIFY_EVENTS = {"turn-ready", "stale", "stranded", "blocked", "done"}
 NOTIFY_PLACEHOLDERS = {"{agent}", "{event}", "{state}"}
 NOTIFY_DEFAULT_DEDUP_S = 300
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
@@ -158,6 +158,9 @@ LISTENER_LOG_MAX_ENV = "M8SHIFT_LISTENER_LOG_MAX_BYTES"
 LISTENER_LOG_MAX_BYTES = 5 * 1024 * 1024
 LISTENER_LOG_KEEP = 3
 LISTENER_REPEATED_NON_COMPLETION_N = 2
+USAGE_WATCH_SCHEMA = "m8shift.usage-watch.lifecycle.v1"
+USAGE_WATCHERS_DIR = os.path.join(RUNTIME_DIR, "usage-watchers")
+ATTENTION_STALE_AFTER_SECONDS = 300
 # macOS TCC-protected user folders (heuristic, RFC 047): launchd services often
 # cannot read projects under these; paths are always derived from expanduser("~").
 MACOS_PROTECTED_FOLDERS = ("Documents", "Desktop", "Downloads",
@@ -1293,6 +1296,140 @@ def fresh_presence(row, stale_after):
         return False
     pid = row.get("pid")
     return pid_alive(pid) or not isinstance(pid, int)
+
+
+def producer_evidence(listener, presence, usage_watch, *, now_utc=None,
+                      stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS):
+    """Classify local producer evidence without granting relay authority.
+
+    The inputs are already-read sidecars so this function is deterministic and
+    testable.  Residency, notification, and invocation stay distinct: a live
+    notify-only listener is a notifier, never an invoker; a foreground UI or
+    usage watcher only proves a currently blocked local process.
+    """
+    now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
+
+    def stamp(value):
+        parsed = parse_utc(value) if isinstance(value, str) else None
+        return parsed
+
+    def heartbeat_fresh(doc, key):
+        when = stamp(doc.get(key)) if isinstance(doc, dict) else None
+        return bool(when and (now_utc - when).total_seconds() <= stale_after_seconds)
+
+    malformed = any(value is not None and not isinstance(value, dict)
+                    for value in (listener, presence, usage_watch))
+    listener = listener if isinstance(listener, dict) else {}
+    presence = presence if isinstance(presence, dict) else {}
+    usage_watch = usage_watch if isinstance(usage_watch, dict) else {}
+    if listener.get("process_resident") and listener.get("can_invoke_agent"):
+        return {"coverage": "invoker", "source": "listener", "fresh": True}
+    if listener.get("process_resident") and listener.get("can_notify"):
+        return {"coverage": "notifier", "source": "listener", "fresh": True}
+    if isinstance(presence, dict) and heartbeat_fresh(presence, "last_seen"):
+        live = presence.get("pid")
+        if not isinstance(live, int) or pid_alive(live):
+            return {"coverage": "foreground_watch", "source": "presence", "fresh": True}
+    if isinstance(usage_watch, dict) and usage_watch.get("schema") == USAGE_WATCH_SCHEMA:
+        if usage_watch.get("phase") == "running" and heartbeat_fresh(usage_watch, "last_tick"):
+            live = usage_watch.get("pid")
+            if isinstance(live, int) and pid_alive(live):
+                return {"coverage": "foreground_watch", "source": "usage_watch", "fresh": True}
+    if malformed:
+        return {"coverage": "unknown", "source": "malformed", "fresh": False}
+    return {"coverage": "absent", "source": "none", "fresh": False}
+
+
+def relay_attention(state, since, evidence, *, now_utc=None,
+                    stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS):
+    """Advisory attention verdict with strict-``>`` threshold semantics."""
+    if not isinstance(state, str) or not state.startswith("AWAITING_"):
+        return {"verdict": "not_applicable", "age_seconds": None,
+                "threshold_seconds": stale_after_seconds, "coverage": evidence.get("coverage", "unknown")}
+    now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
+    when = parse_utc(since) if isinstance(since, str) else None
+    age = max(0, int((now_utc - when).total_seconds())) if when else None
+    coverage = evidence.get("coverage", "unknown")
+    if coverage == "invoker":
+        verdict = "covered"
+    elif coverage in ("notifier", "foreground_watch"):
+        verdict = "human_resume_needed"
+    elif age is None:
+        verdict = "unknown"
+    elif age > stale_after_seconds:
+        verdict = "stranded"
+    else:
+        verdict = "human_resume_needed"
+    return {"verdict": verdict, "age_seconds": age,
+            "threshold_seconds": stale_after_seconds, "coverage": coverage}
+
+
+def usage_watch_path(agent):
+    return os.path.join(USAGE_WATCHERS_DIR, "%s.json" % agent)
+
+
+def read_usage_watch(agent):
+    doc, err = read_json_diagnostic(usage_watch_path(agent), {})
+    return (doc if isinstance(doc, dict) else {}), err
+
+
+def write_usage_watch(agent, *, mode, interval, started, phase,
+                      last_tick="", last_success=""):
+    os.makedirs(USAGE_WATCHERS_DIR, exist_ok=True)
+    doc = {"schema": USAGE_WATCH_SCHEMA, "kind": "usage_watch", "agent": agent,
+           "pid": os.getpid(), "mode": mode, "interval": interval,
+           "started": started, "last_tick": last_tick,
+           "last_success": last_success, "phase": phase}
+    atomic_write_json(usage_watch_path(agent), doc)
+    return doc
+
+
+def runtime_attention(status, agent, stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS,
+                      now_utc=None):
+    """Read bounded sidecars and apply the shared pure producer/attention rules."""
+    exists, pid = read_listener_pid(agent)
+    state_doc, state_err = read_json_diagnostic(listener_paths(agent)["state"], {})
+    alive = bool(pid and listener_pid_alive(pid))
+    halted = isinstance(state_doc, dict) and state_doc.get("phase") == "halted"
+    notify_only = isinstance(state_doc, dict) and bool(state_doc.get("notify_only"))
+    listener = ({"process_resident": alive,
+                 "can_invoke_agent": bool(alive and state_doc and not halted and not notify_only),
+                 "can_notify": bool(alive and state_doc and not halted and notify_only)}
+                if not state_err else state_doc)
+    presence_doc, presence_err = read_json_diagnostic(PRESENCE, {})
+    presence = presence_doc.get(agent) if isinstance(presence_doc, dict) else presence_doc
+    watch, watch_err = read_usage_watch(agent)
+    evidence = producer_evidence(
+        listener if not state_err else None,
+        presence if not presence_err else None,
+        watch if not watch_err else None,
+        now_utc=now_utc, stale_after_seconds=stale_after_seconds)
+    attention = relay_attention(
+        status.get("state", ""), status.get("since", ""), evidence,
+        now_utc=now_utc, stale_after_seconds=stale_after_seconds)
+    return {"producer": evidence, "attention": attention,
+            "sidecar_errors": [e for e in (state_err, presence_err, watch_err) if e]}
+
+
+def maybe_notify_stranded(status, stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS):
+    """Emit through configured local tiers when an observed awaiting lane strands.
+
+    This is called only by an already-running listener poll loop.  With no local
+    producer there is intentionally nobody to deliver a notification; status and
+    doctor still surface the structured verdict for the next observer.
+    """
+    state = status.get("state", "") if isinstance(status, dict) else ""
+    if not state.startswith("AWAITING_"):
+        return None
+    agent = state[len("AWAITING_"):].lower()
+    verdict = runtime_attention(status, agent, stale_after_seconds)
+    if verdict["attention"].get("verdict") != "stranded":
+        return None
+    return emit_notification(
+        agent, "stranded",
+        "%s has no fresh wake-up producer after %ss; human reactivation is required" % (
+            state, verdict["attention"].get("age_seconds")),
+        state=state, holder=status.get("holder", ""))
 
 
 def relay_runtime_state(lk, agent):
@@ -4941,6 +5078,9 @@ def cmd_status_runtime(args):
     findings.extend(headroom.get("runtime_findings", []))
     context_rtk = context_rtk_status()
     findings.extend(context_rtk.get("findings", []))
+    attention_agents = ([agent] if agent else
+                        [a.strip() for a in str(status.get("agents", "")).split(",") if a.strip()])
+    attention = {ag: runtime_attention(status, ag) for ag in attention_agents}
     if args.json:
         print(json.dumps({
             "m8shift_version": status.get("m8shift_version"),
@@ -4949,6 +5089,7 @@ def cmd_status_runtime(args):
             "runtime": summary,
             "headroom": headroom,
             "context_rtk": context_rtk,
+            "attention": attention,
             "runtime_findings": findings,
         }, ensure_ascii=False, sort_keys=True))
         return 0
@@ -4957,6 +5098,12 @@ def cmd_status_runtime(args):
     reasons = "; ".join(headroom.get("reasons") or ["-"])
     print(f"headroom: {headroom.get('status')} — {reasons}")
     print(context_rtk.get("label", "RTK: OFF (native)"))
+    for ag, row in attention.items():
+        verdict = row["attention"]
+        if verdict.get("verdict") != "not_applicable":
+            print("attention %s: %s coverage=%s age=%s" % (
+                ag, verdict.get("verdict"), verdict.get("coverage"),
+                verdict.get("age_seconds") if verdict.get("age_seconds") is not None else "?"))
     if context_rtk.get("last_pack"):
         last = context_rtk["last_pack"]
         print(
@@ -5241,12 +5388,25 @@ def stale_state_findings(stale_after_seconds):
                         "if working, claim now — even for read-only review — so peers "
                         f"receive a WORKING_{agent.upper()} expiry/liveness signal"),
         })
-        if since:
-            _exists, pid = read_listener_pid(agent)
-            if ((dt.datetime.now(dt.timezone.utc) - since).total_seconds() > stale_after_seconds
-                    and not (pid and listener_pid_alive(pid))):
-                findings.append({"severity": "info", "check": "runtime.stale_state",
-                                 "message": f"{state} is stale and {agent} has no live listener; a human wake-up may be required"})
+        verdict = runtime_attention(status, agent, stale_after_seconds)
+        attention = verdict["attention"]
+        producer = verdict["producer"]
+        if attention.get("verdict") == "stranded":
+            findings.append({"severity": "warning", "check": "runtime.producer_absent",
+                             "message": f"{agent} has no fresh invoker, notifier, or foreground-watch producer",
+                             "agent": agent, "producer": producer})
+            findings.append({"severity": "warning", "check": "runtime.stranded",
+                             "message": (f"{state} is stranded after {attention.get('age_seconds')}s; "
+                                         f"producer coverage={producer.get('coverage')} and human wake-up is required"),
+                             "agent": agent, "attention": attention, "producer": producer})
+            # Compatibility with the existing doctor contract while keeping the
+            # producer and data-freshness axes separately inspectable.
+            findings.append({"severity": "info", "check": "runtime.stale_state",
+                             "message": f"{state} is stale and {agent} has no live listener or other fresh wake-up producer"})
+        elif attention.get("verdict") == "human_resume_needed":
+            findings.append({"severity": "info", "check": "runtime.human_resume_needed",
+                             "message": f"{state} has {producer.get('coverage')} coverage; a human must reactivate {agent}",
+                             "agent": agent, "attention": attention, "producer": producer})
     rows, _problems = read_usage_ledger_diagnostic()
     snapshots = []
     for row in rows:
@@ -5609,6 +5769,8 @@ def listener_child_argv(args, agent, runner_path, *, service_payload=False):
         argv += ["--cmd-file", os.path.abspath(args.cmd_file)]
     if args.provider:
         argv.append("--provider")
+    if args.notify_only:
+        argv.append("--notify-only")
     if args.max_ticks:
         argv += ["--max-ticks", str(args.max_ticks)]
     if service_payload:
@@ -6163,6 +6325,12 @@ def normalize_listener_profile(doc, source):
 
 def load_listener_profile(args, agent):
     """Load and validate the provider profile BEFORE any process work (RFC 047)."""
+    if args.notify_only and not args.cmd_file and not args.provider:
+        return normalize_listener_profile({
+            "schema": LISTENER_PROFILE_SCHEMA, "agent": agent,
+            "argv": [sys.executable, "-c", "pass"], "cwd": ".",
+            "env_allowlist": [], "start_on_idle": False, "agent_model": "",
+        }, "notify-only")
     if bool(args.cmd_file) == bool(args.provider):
         sys.exit("m8shift-runtime: listener start requires exactly one of --cmd-file or --provider")
     if args.cmd_file:
@@ -6256,7 +6424,7 @@ def read_listener_state(agent):
 
 def write_listener_state(agent, *, phase, consecutive_failures,
                          last_run_id="", last_classification="", reason="",
-                         start_on_idle=False):
+                         start_on_idle=False, notify_only=False):
     os.makedirs(LISTENERS_DIR, exist_ok=True)
     previous = read_listener_state(agent)
     last_successful_run = previous.get("last_successful_run", "")
@@ -6273,6 +6441,7 @@ def write_listener_state(agent, *, phase, consecutive_failures,
         # start_on_idle is persisted so listener_starters()/doctor can enforce the
         # at-most-one-starter rule; runtime_version feeds listener.version_skew.
         "start_on_idle": bool(start_on_idle),
+        "notify_only": bool(notify_only),
         "runtime_version": VERSION,
         "updated_at": iso(),
     }
@@ -6436,14 +6605,16 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
         "backend": backend,
         "backend_requested": args.backend,
         "backend_fallback_reason": fallback_reason,
-        "mode": "foreground" if args.foreground else "detached",
+        "mode": ("notify_only" if args.notify_only else
+                 "foreground" if args.foreground else "detached"),
         "profile": {key: profile[key] for key in
                     ("schema", "agent", "argv", "cwd", "env_allowlist", "start_on_idle",
                      "agent_model")},
         "profile_source": profile["source"],
         "runner": os.path.relpath(runner_path, HERE),
         "runner_exists": os.path.isfile(runner_path),
-        "runner_argv_preview": listener_runner_argv(agent, profile, runner_path, "RUN_ID"),
+        "runner_argv_preview": ([] if args.notify_only else
+                                listener_runner_argv(agent, profile, runner_path, "RUN_ID")),
         "poll_interval_seconds": args.poll_interval,
         "max_ticks": args.max_ticks,
         "max_retries": max_retries,
@@ -6504,7 +6675,7 @@ def spawn_detached_listener(args, agent, runner_path, backend):
 
 
 def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retries,
-                      max_backoff, owns_log=False):
+                      max_backoff, owns_log=False, notify_only=False):
     """The RFC 047 listener loop — one bounded runner turn per wake, zero model spend
     while it is not this agent's turn.
 
@@ -6555,7 +6726,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
         write_listener_state(agent, phase=phase, consecutive_failures=fails,
                              last_run_id=last_run_id,
                              last_classification=last_classification, reason=reason,
-                             start_on_idle=profile["start_on_idle"])
+                             start_on_idle=profile["start_on_idle"],
+                             notify_only=notify_only)
 
     save()
     ticks = 0
@@ -6577,6 +6749,9 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 say(f"{agent}: relay session is DONE — stopping cleanly.")
                 save()
                 return 0
+            # Any resident listener may observe and locally notify a stranded
+            # peer lane. Dedup keeps the 20s poll from spamming configured tiers.
+            maybe_notify_stranded(lk)
             wake = ""
             if state == me_awaiting:
                 wake = "awaiting_turn"
@@ -6606,6 +6781,16 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 if phase != "polling":
                     phase = "polling"
                     save()
+                time.sleep(poll)
+                continue
+            if notify_only:
+                # Durable human wake-up, explicitly without provider invocation.
+                emit_notification(
+                    agent, "turn-ready",
+                    "%s is ready for %s; human reactivation is required" % (state, agent),
+                    state=state, holder=lk.get("holder", ""))
+                phase = "polling"
+                save()
                 time.sleep(poll)
                 continue
             hold, hold_error = read_usage_hold(agent)
@@ -6718,7 +6903,7 @@ def cmd_listener_start(args):
     if fallback_reason:
         # RFC 047: the fallback must be VISIBLE — never silently downgrade.
         print(f"backend {args.backend} → local: {fallback_reason}")
-    if not os.path.isfile(runner_path):
+    if not args.notify_only and not os.path.isfile(runner_path):
         sys.exit(f"m8shift-runtime: headless runner not found at "
                  f"{os.path.relpath(runner_path, HERE)} (pass --runner PATH)")
     supervised = os.environ.get(LISTENER_DETACHED_ENV) == "1" or args.service_payload
@@ -6740,7 +6925,8 @@ def cmd_listener_start(args):
             # --restart is the explicit operator act that clears a persisted halt.
             write_listener_state(agent, phase="polling", consecutive_failures=0,
                                  last_run_id="", last_classification="", reason="",
-                                 start_on_idle=profile["start_on_idle"])
+                                 start_on_idle=profile["start_on_idle"],
+                                 notify_only=args.notify_only)
     if args.foreground:
         # The loop always records its own pid: for a local detach this is the same
         # value the parent already wrote; for an OS-service payload there IS no
@@ -6750,7 +6936,7 @@ def cmd_listener_start(args):
             agent, profile, runner_path,
             poll=args.poll_interval, max_ticks=args.max_ticks,
             max_retries=args.max_retries, max_backoff=args.max_backoff,
-            owns_log=supervised)
+            owns_log=supervised, notify_only=args.notify_only)
     paths = listener_paths(agent)
     if backend in LISTENER_SERVICE_BACKENDS:
         # OS service lifecycle (RFC 047 Phase D): generate the definition under
@@ -6835,7 +7021,9 @@ def cmd_listener_status(args):
     # A resident foreground/local process says nothing about what happens when its
     # parent exits. Only an installed lifecycle backend carries that guarantee.
     survives_parent_exit = bool(record)
-    can_invoke_agent = bool(alive and doc and not halted)
+    notify_only = bool(doc.get("notify_only"))
+    can_invoke_agent = bool(alive and doc and not halted and not notify_only)
+    can_notify = bool(alive and doc and not halted and notify_only)
     last_successful_run = doc.get("last_successful_run", "")
     payload = {
         "agent": agent,
@@ -6853,6 +7041,8 @@ def cmd_listener_status(args):
         "backend_configured": backend_configured,
         "survives_parent_exit": survives_parent_exit,
         "can_invoke_agent": can_invoke_agent,
+        "can_notify": can_notify,
+        "notify_only": notify_only,
         "last_successful_run": last_successful_run,
         "consecutive_failures": fails,
         "last_run_id": doc.get("last_run_id", ""),
@@ -6871,6 +7061,7 @@ def cmd_listener_status(args):
     where = f" (pid {pid}, process {'resident' if alive else 'gone'})" if exists else ""
     print(f"listener {agent}: {status_label}{where}")
     print(f"  capability: can_invoke_agent={str(can_invoke_agent).lower()} "
+          f"can_notify={str(can_notify).lower()} "
           f"survives_parent_exit={str(survives_parent_exit).lower()} "
           f"backend_configured={str(backend_configured).lower()} "
           f"last_successful_run={last_successful_run or '-'}")
@@ -8786,22 +8977,43 @@ def cmd_usage_watch(args):
         print("m8shift-runtime: --max-ticks must be >= 0", file=sys.stderr)
         return USAGE_GUARD_EXIT_USAGE
     ticks = 0
-    while True:
-        ticks += 1
-        _results, snapshot_findings, had_error, _skipped, config_error = \
-            collect_usage_snapshots(agent_filter, args.warn_threshold,
-                                    args.limit_threshold, False)
-        code, payload = usage_guard_evaluate(
-            args, agent_filter, apply_mode=args.apply,
-            snapshot_findings=snapshot_findings,
-            snapshot_error=(had_error or config_error))
-        payload["tick"] = ticks
-        # A watch tick that sees an ok verdict NEVER resumes anything (PR B
-        # non-goal: no automatic resume; only `usage resume` may resume).
-        print_usage_guard_result(f"usage watch tick {ticks}", code, payload, args.json)
-        if args.max_ticks and ticks >= args.max_ticks:
-            return code
-        time.sleep(args.interval)
+    started = iso()
+    last_tick = ""
+    last_success = ""
+    mode = "apply" if args.apply else "advisory"
+    lifecycle_agent = agent_filter or ""
+    if lifecycle_agent:
+        write_usage_watch(lifecycle_agent, mode=mode, interval=args.interval,
+                          started=started, phase="running")
+    try:
+        while True:
+            ticks += 1
+            last_tick = iso()
+            if lifecycle_agent:
+                write_usage_watch(lifecycle_agent, mode=mode, interval=args.interval,
+                                  started=started, phase="running",
+                                  last_tick=last_tick, last_success=last_success)
+            _results, snapshot_findings, had_error, _skipped, config_error = \
+                collect_usage_snapshots(agent_filter, args.warn_threshold,
+                                        args.limit_threshold, False)
+            if not had_error and not config_error:
+                last_success = iso()
+            code, payload = usage_guard_evaluate(
+                args, agent_filter, apply_mode=args.apply,
+                snapshot_findings=snapshot_findings,
+                snapshot_error=(had_error or config_error))
+            payload["tick"] = ticks
+            # A watch tick that sees an ok verdict NEVER resumes anything (PR B
+            # non-goal: no automatic resume; only `usage resume` may resume).
+            print_usage_guard_result(f"usage watch tick {ticks}", code, payload, args.json)
+            if args.max_ticks and ticks >= args.max_ticks:
+                return code
+            time.sleep(args.interval)
+    finally:
+        if lifecycle_agent:
+            write_usage_watch(lifecycle_agent, mode=mode, interval=args.interval,
+                              started=started, phase="stopped",
+                              last_tick=last_tick, last_success=last_success)
 
 
 def cmd_usage_wait(args):
@@ -9428,6 +9640,8 @@ def main():
                           "test seam, never touches a real service manager)")
     lst.add_argument("--restart", action="store_true",
                      help="replace a live listener and clear a persisted halted phase")
+    lst.add_argument("--notify-only", action="store_true",
+                     help="use the listener lifecycle only for local human wake-up notifications; never invoke an agent")
     lst.add_argument("--service-payload", action="store_true",
                      help="internal (written into generated service definitions): mark this "
                           "foreground loop as an OS-service payload that owns its own pid file "
