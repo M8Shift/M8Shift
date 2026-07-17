@@ -44,7 +44,8 @@ def fixture():
             "paused_seconds": 26400, "idle_seconds": 660,
             "unclassified_seconds": 11220, "coverage_ratio": 0.8278,
         },
-        "last_turn": {"agent": "claude", "model": "claude-opus-4-8", "ask_excerpt": "x"},
+        "last_turn": {"agent": "claude", "model": "claude-opus-4-8",
+                      "ask_excerpt": "x"},
         "activity": [{"turn": 6, "agent": "claude", "model": "claude-opus-4-8",
                       "summary": "x" * 200}],
     }
@@ -73,6 +74,17 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             if old is not None:
                 os.environ["NO_COLOR"] = old
 
+    def test_model_and_effort_render_as_parallel_self_declarations(self):
+        top = load_top()
+        snap = fixture()
+        snap["agents"][0]["effort"] = "high"
+        snap["last_turn"]["effort"] = "xhigh"
+        snap["activity"][0]["effort"] = "xhigh"
+        output = self._plain(top.render(snap, 120, self.NOW))
+        self.assertIn("gpt-5.4/high*", output)
+        self.assertIn("model/effort self-declared (unverified; may be stale)", output)
+        self.assertIn("claude-opus-4-8/xhigh*", output)
+
     def test_wide_layout_tabulates_and_pins_right_edge(self):
         top = load_top()
         with mock.patch.dict(os.environ, {"TERM": "xterm-color"}, clear=True):
@@ -81,7 +93,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 plain = self._plain(output)
                 self.assertTrue(all(token in plain for token in (
                     "┌", "│", "├", "└", "M8SHIFT · demo", "AGENTS", "TTL", "codex",
-                    "gpt-5.4*", "self-declared (unverified)")))
+                    "gpt-5.4*", "model/effort self-declared (unverified; may be stale)")))
                 lines = plain.splitlines()
                 self.assertTrue(all(len(line) == width for line in lines))
                 # the pen holder sits in its own column, not glued to the label
@@ -674,12 +686,26 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertEqual(merged["schema"], "m8shift.status/1")
 
     def test_120_column_plain_frame_is_byte_stable(self):
+        # Hermetic on purpose: with the env cleared, wall-clock cells fall back
+        # to the HOST system timezone (a Europe-zoned dev machine and a UTC CI
+        # runner rendered different bytes for the same fixture).  Pin TZ=UTC
+        # inside the mocked env so the golden digest is host-independent.
         top = load_top()
-        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
-            output = top.render(fixture(), 120, self.NOW)
+        try:
+            with mock.patch.dict(os.environ, {"NO_COLOR": "1", "TZ": "UTC"},
+                                 clear=True):
+                if hasattr(time, "tzset"):
+                    time.tzset()
+                output = top.render(fixture(), 120, self.NOW)
+        finally:
+            # The mock context has already restored the real env by the time
+            # this runs (even when render raises), so tzset re-reads the host
+            # zone and later tests never inherit the UTC C-library state.
+            if hasattr(time, "tzset"):
+                time.tzset()
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "71bfe0c9ebafef769c4eee4dcc838e3478fc3f4aed803e256c8cb9b33c785e7e",
+            "e2ac072b2666cc39829ccd148490f0652ccfb106a1cca4f4705aabd232533228",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):

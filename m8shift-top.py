@@ -121,6 +121,16 @@ def _value(value):
     return "unavailable" if value is None else str(value)
 
 
+def _model_effort(row, model_width=18, effort_width=7):
+    """Render parallel self-declarations without changing model identity."""
+    row = row if isinstance(row, dict) else {}
+    model = clean(row.get("model") or "—", model_width)
+    effort = row.get("effort")
+    if effort:
+        return "%s/%s*" % (model, clean(effort, effort_width))
+    return model + ("*" if row.get("model") else "")
+
+
 def _pen_turn_label(snapshot):
     """Describe the holder's live/next turn without misattributing the last one."""
     try:
@@ -715,7 +725,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     lines += ["│" + ttl_row + "│", sep, row("AGENTS", dim)]
     for agent in snapshot.get("agents") or []:
         name = clean(agent.get("id"), 18)
-        model = clean(agent.get("model") or "—", 24) + ("*" if agent.get("model") else "")
+        model = _model_effort(agent, 18, 7)
         state = clean(agent.get("role_state") or "unknown", 14)
         usage = agent.get("usage") or {}
         bits, ratios, freshnesses = [], [], []
@@ -733,7 +743,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         for bit, ratio, freshness in zip(bits, ratios, freshnesses):
             agent_plain = paint(agent_plain, bit, red if freshness == "stale" else usage_style(ratio))
         lines.append("│" + agent_plain + "│")
-    lines.append(row("* model self-declared (unverified)", dim))
+    lines.append(row("* model/effort self-declared (unverified; may be stale)", dim))
     ledger = snapshot.get("ledger") or {}
     listeners = snapshot.get("listeners")
     attention = _attention_display(snapshot)
@@ -758,7 +768,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         colored)
     lines += [sep, listen_row, ledger_row]
     last = snapshot.get("last_turn") or {}
-    last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
+    last_model = _model_effort(last)
     lines.append(row("LAST TURN  #%s %s/%s → %s  %s" %
                      (_value(last.get("n")), _value(last.get("agent")), last_model,
                       _value(last.get("to")), _value(last.get("ask_excerpt")))))
@@ -777,7 +787,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         lines += [sep, row(_activity_label(
             events, visible, upper=True, buffer_edge=at_buffer_edge), dim)]
         for event in visible:
-            event_model = ((event.get("model") or "—") + ("*" if event.get("model") else ""))
+            event_model = _model_effort(event)
             lines.append(row("  #%s  %s/%s  %s" % (_value(event.get("turn")),
                                                  _value(event.get("agent")), event_model,
                                                  _value(event.get("summary")))))
@@ -912,7 +922,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
 
     for i, agent in enumerate(snapshot.get("agents") or []):
         name = clean(agent.get("id"), 16)
-        model = clean(agent.get("model") or "—", 17) + ("*" if agent.get("model") else "")
+        model = _model_effort(agent, 11, 6)
         astate = clean(agent.get("role_state") or "unknown", 12)
         usage = agent.get("usage") or {}
         ratios, bits, freshnesses = [], [], []
@@ -934,7 +944,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         arow = paint(arow, bits[0], red if freshnesses[0] == "stale" else usage_style(ratios[0]))
         arow = paint(arow, bits[1], red if freshnesses[1] == "stale" else usage_style(ratios[1]))
         lines.append("│" + arow + "│")
-    lines.append(content([("        * model self-declared (unverified)", 0)]))
+    lines.append(content([("        * model/effort self-declared (unverified; may be stale)", 0)]))
 
     ledger = snapshot.get("ledger") or {}
     last = snapshot.get("last_turn") or {}
@@ -963,7 +973,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         ledger_line, ledger_segments[3], lg[3],
         green if lg[3] == "armed" else amber if lg[3] == "disarmed" else dim,
         colored)
-    last_model = ((last.get("model") or "—") + ("*" if last.get("model") else ""))
+    last_model = _model_effort(last)
     turn_payload = "#%s %s/%s → %s  %s" % (
         _value(last.get("n")), _value(last.get("agent")), last_model,
         _value(last.get("to")), _value(last.get("ask_excerpt")))
@@ -1001,7 +1011,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
             parts = (_value(e.get("summary")) or "").split(None, 1)
             action = (parts[0][:1].upper() + parts[0][1:])[:13] if parts and parts[0] != "unavailable" else "—"
             note = parts[1] if len(parts) > 1 else ""
-            model = clean(e.get("model") or "—", 19) + ("*" if e.get("model") else "")
+            model = _model_effort(e, 12, 6)
             activity_row = adaptive_cells(
                 ("  %s" % _value(e.get("turn")), ts_s, dur,
                  clean(e.get("agent"), 8), model, action, note),

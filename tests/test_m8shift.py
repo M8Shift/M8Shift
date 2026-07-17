@@ -1025,6 +1025,35 @@ class TestClaimModel(CLIBase):
         self.assertIsNone(claude["model"])
         self.assertNotIn("- model:", self.md())
 
+    def test_effort_declaration_is_parallel_stamped_and_snapshotted(self):
+        self.init()
+        with mock.patch.dict(os.environ, {
+                "M8SHIFT_AGENT_MODEL": "claude-opus-4-8",
+                "M8SHIFT_AGENT_EFFORT": "xhigh"}):
+            self.assertEqual(self.cw("claim", "claude").returncode, 0)
+            self.assertEqual(self.cw("append", "claude", "--to", "codex",
+                                     "--done", "declared").returncode, 0)
+        lock = self.lock()
+        self.assertEqual(lock["models"], "claude=claude-opus-4-8")
+        self.assertEqual(lock["efforts"], "claude=xhigh")
+        self.assertIn("- effort:  xhigh", self.md())
+        snap = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        claude = next(a for a in snap["agents"] if a["id"] == "claude")
+        self.assertEqual((claude["model"], claude["effort"]),
+                         ("claude-opus-4-8", "xhigh"))
+        self.assertEqual(snap["last_turn"]["effort"], "xhigh")
+        self.assertEqual(snap["activity"][-1]["effort"], "xhigh")
+
+    def test_invalid_effort_declaration_is_not_recorded(self):
+        self.init()
+        with mock.patch.dict(os.environ, {"M8SHIFT_AGENT_EFFORT": "extreme\nforged"}):
+            self.assertEqual(self.cw("claim", "claude").returncode, 0)
+            self.assertEqual(self.cw("append", "claude", "--to", "codex").returncode, 0)
+        snap = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        claude = next(a for a in snap["agents"] if a["id"] == "claude")
+        self.assertIsNone(claude["effort"])
+        self.assertNotIn("- effort:", self.md())
+
     def test_state_events_cover_core_transitions_and_work_tags_are_window_stable(self):
         self.init()
         claim = self.cw("claim", "claude", "--work-item", "task:68")
@@ -16810,6 +16839,8 @@ class TestRFC072FleetPlan(ListenerCLIBase):
         stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                                     cwd=self.d)
         try:
+            if not runtime.fleet_process_start_ref(stranger.pid):
+                self.skipTest("host denies a stable process-start probe")
             control = {
                 "schema": runtime.FLEET_CONTROL_SCHEMA,
                 "project_ref": runtime.fleet_project_ref(),
@@ -16865,6 +16896,76 @@ class TestRFC072FleetPlan(ListenerCLIBase):
         finally:
             stranger.terminate()
             stranger.wait(timeout=5)
+
+    def test_supervisor_startup_lock_is_atomic_and_token_owned(self):
+        runtime, _spec, _args = self._durable_fleet_fixture()
+        token = runtime.acquire_fleet_supervisor_lock()
+        try:
+            with self.assertRaisesRegex(ValueError, "startup lock"):
+                runtime.acquire_fleet_supervisor_lock()
+            runtime.release_fleet_supervisor_lock("not-the-owner")
+            self.assertTrue(os.path.exists(runtime.FLEET_SUPERVISOR_LOCK))
+        finally:
+            runtime.release_fleet_supervisor_lock(token)
+        again = runtime.acquire_fleet_supervisor_lock()
+        runtime.release_fleet_supervisor_lock(again)
+
+    def test_detached_parent_confirms_child_owned_running_control(self):
+        runtime, _spec, _args = self._durable_fleet_fixture()
+        proc = mock.Mock(pid=4321, returncode=None)
+        proc.poll.return_value = None
+        control = {"state": "running", "pid": 4321,
+                   "process_start_ref": "start:4321"}
+        with mock.patch.object(runtime, "load_fleet_control", return_value=control), \
+                mock.patch.object(runtime, "fleet_process_start_ref",
+                                  return_value="start:4321"):
+            self.assertIs(runtime.confirm_detached_fleet_supervisor(proc), control)
+
+    def test_operator_restart_resolves_persistently_unverified_lane_and_audits(self):
+        runtime, spec, _args = self._durable_fleet_fixture()
+        survivor = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], cwd=self.d)
+        try:
+            item = spec["agents"][0]
+            row = runtime.fleet_provider_rows()["codex-2"]
+            runtime.write_listener_pid("codex-2", survivor.pid)
+            with mock.patch.object(runtime, "fleet_process_start_ref",
+                                   return_value=f"known:{survivor.pid}"):
+                runtime.persist_fleet_lane(
+                    item, row, runtime.fleet_listener_health("codex-2"), "local")
+            with mock.patch.object(runtime, "fleet_process_start_ref", return_value=""):
+                result = runtime.resolve_fleet_lane(
+                    spec, "codex-2", "restart", "operator", "confirmed old process gone")
+            self.assertEqual(result["resolution"], "restart")
+            lane = runtime.load_fleet_lane("codex-2")
+            self.assertEqual((lane["pid"], lane["status"], lane["desired"]),
+                             (None, "stopped", "running"))
+            with open(runtime.FLEET_EVENTS, encoding="utf-8") as fh:
+                event = json.loads(fh.readlines()[-1])
+            self.assertEqual((event["event"], event["by"], event["target"]),
+                             ("fleet.operator_resolved", "operator", "lane:codex-2"))
+        finally:
+            survivor.terminate()
+            survivor.wait(timeout=5)
+
+    def test_operator_control_resolver_repairs_ambiguous_record_and_stale_lock(self):
+        runtime, spec, _args = self._durable_fleet_fixture()
+        control = {
+            "schema": runtime.FLEET_CONTROL_SCHEMA,
+            "project_ref": runtime.fleet_project_ref(), "pid": os.getpid(),
+            "process_start_ref": "", "backend": "local",
+            "spec_digest": runtime.fleet_spec_digest(spec), "state": "running",
+            "ticks": 3, "updated_at": runtime.iso(),
+        }
+        runtime.write_fleet_json_atomic(runtime.FLEET_CONTROL, control)
+        token = runtime.acquire_fleet_supervisor_lock()
+        self.assertTrue(token)
+        result = runtime.resolve_fleet_control(
+            spec, "operator", "confirmed prior supervisor stopped")
+        self.assertEqual(result["target"], "control")
+        repaired = runtime.load_fleet_control()
+        self.assertEqual((repaired["state"], repaired["pid"]), ("stopped", None))
+        self.assertFalse(os.path.exists(runtime.FLEET_SUPERVISOR_LOCK))
 
     def test_immutable_jobs_require_designated_live_integrator(self):
         self.init("--agents", "claude,codex,codex-2")
