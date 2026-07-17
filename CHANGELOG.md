@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Cached dashboard navigation and neutral lease display.** Interactive
+  `m8shift-top` now reloads the status fold only on interval expiry, explicit
+  refresh, or activity-provision growth; navigation/help keys render the cached
+  snapshot with zero engine subprocesses. Pending key bursts coalesce into one
+  frame, expanded turn records are cached by immutable turn number, and
+  `AWAITING`/other no-lease states render neutral `no TTL` cells instead of a
+  false `00:00 left (stale)` claim.
+- **Mistral Vibe validated stub.** The provider registry now includes a
+  declarative `mistral-vibe` adapter using source-confirmed `vibe -p PROMPT`,
+  `MISTRAL_API_KEY`, and `AGENTS.md`. Resume and health stay fail-closed/unknown
+  until a supported local CLI version is probed. Upstream Vibe 2.20.0 docs and
+  harness source confirm project `AGENTS.md` discovery up to the trust root, so
+  the core's old convention-unconfirmed annotation is resolved.
+- **Standardized inter-agent exchange draft (RFC 074).** A design-only RFC
+  proposes an explicit bounded stage taxonomy, versioned vendor-neutral turn
+  fields, and a portable whole-shift exchange for stages, decisions, artifacts,
+  and time accounting. Historical turns stay immutable/unstamped and
+  implementation waits on the RFC's operator-arbitration questions.
 - **Live Gemini CLI adapter (RFC 073 slice 3).** The provider-keyed runtime
   registry now compiles real Gemini CLI 0.51.0 one-shot launches with an
   explicit `gemini-2.5-pro` model pin and `-p` headless prompt. Generated
