@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## v3.62.0 — 2026-07-17
+
+- **Liveness evidence: usage freshness, producer coverage, stranded attention
+  (#192, #193, PR #195).** The status snapshot now carries additive per-agent
+  usage-freshness fields (`captured_at`, `age_seconds`, `freshness`, `stale`)
+  and `m8shift-top` renders a mandatory, truncation-immune `STALE` marker
+  before any stale ratio — a stale percentage can never look current again.
+  `usage watch` records a per-agent lifecycle sidecar (pid, mode, heartbeat)
+  so a dead producer is detectable separately from stale data. For every
+  `AWAITING_<X>` the core derives an advisory attention verdict
+  (`covered` / `human_resume_needed` / `stranded`) from listener, presence,
+  and usage-watch evidence — damaged or undecodable evidence classifies as
+  `unknown`, never as covered — and the runtime emits a deduplicated,
+  local-tier-only RFC 027 `stranded` notification past the strict 300 s
+  boundary. `listener start --notify-only` provides durable human wake-up
+  for interactive agents without provider invocation (never counted as
+  covered). The core sidecar reader is hardened against invalid UTF-8 and
+  adversarially deep JSON (diagnostics, never a status/watch crash), and
+  notification I/O failures degrade without ending a listener. RFC 062, the
+  protocol mirror, the agent pack, and the floor stanza are sharpened: an
+  expiring bounded wait counts as listening only while the agent stays
+  blocked on it.
+
 ## v3.61.0 — 2026-07-16
 
 - **Detached fleet liveness hardening (#65, RFC 073 slice 2 review).** A

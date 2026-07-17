@@ -28,7 +28,7 @@ def load_top():
 
 def fixture():
     return {
-        "project": "demo", "m8shift_version": "v3.61.0", "session": "session-1",
+        "project": "demo", "m8shift_version": "v0.0.0-fixture", "session": "session-1",
         "holder": "codex", "state": "WORKING_CODEX", "turn": 7,
         "since": "2026-07-13T00:00:00Z", "expires": "2026-07-13T00:30:00Z",
         "pen": {"heartbeat": "2026-07-13T00:10:00Z"},
@@ -679,7 +679,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             output = top.render(fixture(), 120, self.NOW)
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "010fabe4de6fd6a1901dfb51df6337afa7261d9c30d0af89b638c82636ea957b",
+            "71bfe0c9ebafef769c4eee4dcc838e3478fc3f4aed803e256c8cb9b33c785e7e",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
@@ -1082,7 +1082,7 @@ class IncrementalStatusReaderTests(unittest.TestCase):
         source = self.engine.read_text(encoding="utf-8")
         replacement = self.root / "m8shift.next.py"
         replacement.write_text(
-            source.replace('VERSION = "3.61.0"', 'VERSION = "3.61.1"', 1),
+            source.replace('VERSION = "3.62.0"', 'VERSION = "3.62.1"', 1),
             encoding="utf-8")
         os.replace(str(replacement), str(self.engine))
         actual = reader.load(8)
