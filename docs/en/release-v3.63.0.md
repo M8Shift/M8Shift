@@ -61,8 +61,9 @@ effort declarations rendered with the may-be-stale footnote.
 
 ## Deferred
 
-- Live Vibe launches, probed Gemini resume, and the #59 routing-matrix
-  extension (RFC 073 slice 4) — accepted, not shipped.
+- Live Vibe launches, probed Gemini resume, and the post-phase-1 routing
+  expansion (per-vendor model catalogs beyond the shipped advisory matrix,
+  RFC 073 slice 4) — accepted, not shipped.
 - The bootstrap-experience batch (quickstart, runner provisioning + version
   handshake, sandbox fast-fail, usage bootstrap, top-at-init) — scoped from
   real adopter evidence, next.
