@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,11 +88,15 @@ def test_status_role_state_matrix_and_snapshot_shape():
     snap = engine.status_snapshot_v1(
         {"state": "IDLE", "agents": "claude,codex"}, None,
         {"started_at": "-", "duration_seconds": 0}, [])
-    assert set(snap) == {"schema", "agents", "listeners", "last_turn", "ledger", "pen",
+    assert set(snap) == {"schema", "agents", "listeners", "attention", "last_turn", "ledger", "pen",
                          "activity", "activity_limit", "activity_truncated"}
     assert snap["schema"] == "m8shift.status/1"
     assert all(set(row) == {"id", "model", "model_source", "role_state", "usage"}
                for row in snap["agents"])
+    assert all(set(row["usage"]) == {
+        "available", "last_known", "captured_at", "age_seconds",
+        "freshness", "stale", "windows",
+    } for row in snap["agents"])
 
 
 def test_top_rejects_absent_malformed_and_future_snapshot(tmp_path):
@@ -105,6 +110,21 @@ def test_top_rejects_absent_malformed_and_future_snapshot(tmp_path):
             pass
         else:
             raise AssertionError("invalid/future snapshot accepted")
+
+
+def test_extended_snapshot_remains_additive_for_top_consumer():
+    engine = load_module("m8shift_additive_engine", ROOT / "m8shift.py")
+    top = load_module("m8shift_additive_top", ROOT / "m8shift-top.py")
+    with mock.patch.object(engine, "_usage_rows", return_value=[]):
+        snap = engine.status_snapshot_v1(
+            {"state": "IDLE", "agents": "claude,codex"}, None,
+            {"started_at": "-", "duration_seconds": 0}, [])
+    merged = top._merge_status_payload({"snapshot": snap, "state": "IDLE"})
+    assert merged["schema"] == "m8shift.status/1"
+    for row in merged["agents"]:
+        assert row["usage"]["freshness"] == "unknown"
+        assert row["usage"]["captured_at"] is None
+        assert row["usage"]["age_seconds"] is None
 
 
 def test_skill_release_surface_and_safety_boundaries():

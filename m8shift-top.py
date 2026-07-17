@@ -217,21 +217,50 @@ def _paint_wordmark(plain, enabled):
     return left + wordmark + right
 
 
-def _usage_cell(windows, label, short, utc=False):
-    """Render exhaustion or usage, plus the provider-supplied reset time."""
+def _usage_cell(usage, label, short, utc=False):
+    """Render one usage window without ever presenting uncertain data as live.
+
+    Freshness is computed by the core from the shared 1800-second boundary.  Top
+    only renders that verdict: stale values remain diagnostic but carry a
+    mandatory ``STALE`` token; missing/unparseable age is ``unknown``.  An
+    explicitly absent provider window remains ``n/a`` in every freshness state.
+    """
+    usage = usage if isinstance(usage, dict) else {}
+    windows = usage.get("windows") if isinstance(usage.get("windows"), dict) else {}
     row = windows.get(label) or {}
     ratio = row.get("used_ratio")
     model = row.get("model") if isinstance(row.get("model"), str) else ""
     model = clean(model, 18) if model else ""
-    if ratio == 1 and model:
+    freshness = usage.get("freshness")
+    if row.get("not_provided") is True:
+        value = "%s n/a" % short
+        shown_ratio = None
+    elif freshness not in ("fresh", "stale"):
+        value = "%s unknown" % short
+        shown_ratio = None
+    elif ratio == 1 and model:
         value = "%s EXHAUSTED [%s]" % (short, model)
+        shown_ratio = ratio
     else:
-        missing = "n/a" if row.get("not_provided") is True else "unavailable"
-        value = "%s %s" % (short, missing if ratio is None else "%d%%" % round(ratio * 100))
+        value = "%s %s" % (short, "unavailable" if ratio is None else "%d%%" % round(ratio * 100))
+        shown_ratio = ratio
+    if freshness == "stale" and shown_ratio is not None:
+        value += " STALE"
     reset = _stamp(row.get("resets_at"))
     if reset is not None:
         value += " reset " + _display_time(reset, utc, "%a %m-%d %H:%M")
-    return value, ratio
+    return value, shown_ratio, freshness
+
+
+def _attention_display(snapshot):
+    rows = snapshot.get("attention") if isinstance(snapshot.get("attention"), dict) else {}
+    for agent, row in rows.items():
+        if not isinstance(row, dict) or row.get("relay_attention") == "not_applicable":
+            continue
+        return "ATTENTION %s %s (%s)" % (
+            clean(agent, 18), clean(row.get("relay_attention") or "unknown", 24),
+            clean(row.get("producer_coverage") or "unknown", 20))
+    return ""
 
 
 def _stamp(value):
@@ -686,26 +715,30 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         model = clean(agent.get("model") or "—", 24) + ("*" if agent.get("model") else "")
         state = clean(agent.get("role_state") or "unknown", 14)
         usage = agent.get("usage") or {}
-        windows = usage.get("windows") or {}
-        bits, ratios = [], []
+        bits, ratios, freshnesses = [], [], []
         for label in ("session_5h", "weekly"):
-            bit, ratio = _usage_cell(windows, label, label, utc)
+            bit, ratio, freshness = _usage_cell(usage, label, label, utc)
             bits.append(bit)
             ratios.append(ratio)
+            freshnesses.append(freshness)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
         agent_plain = clean("%s %s | %s | ● %s | %s" %
                             (marker, name, model, state, "  ".join(bits)),
                             inner).ljust(inner)
         agent_plain = paint(agent_plain, marker.strip(), amber)
         agent_plain = paint(agent_plain, "●", dot_style(state))
-        for bit, ratio in zip(bits, ratios):
-            agent_plain = paint(agent_plain, bit, usage_style(ratio))
+        for bit, ratio, freshness in zip(bits, ratios, freshnesses):
+            agent_plain = paint(agent_plain, bit, red if freshness == "stale" else usage_style(ratio))
         lines.append("│" + agent_plain + "│")
     lines.append(row("* model self-declared (unverified)", dim))
     ledger = snapshot.get("ledger") or {}
     listeners = snapshot.get("listeners")
-    listen_row = row("LISTENERS  %s" % _value(listeners))
+    attention = _attention_display(snapshot)
+    listen_row = row("LISTENERS  %s%s" % (
+        _value(listeners), ("  " + attention) if attention else ""))
     listen_row = paint(listen_row, "ALIVE", green)
+    listen_row = paint(listen_row, "stranded", red)
+    listen_row = paint(listen_row, "human_resume_needed", amber)
     ledger_payload, ledger_segments, lg = _ledger_display(ledger, slim=True)
     ledger_row = row("LEDGER  " + ledger_payload)
     ledger_row = _paint_segment_value(
@@ -878,12 +911,13 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         name = clean(agent.get("id"), 16)
         model = clean(agent.get("model") or "—", 17) + ("*" if agent.get("model") else "")
         astate = clean(agent.get("role_state") or "unknown", 12)
-        windows = (agent.get("usage") or {}).get("windows") or {}
-        ratios, bits = [], []
+        usage = agent.get("usage") or {}
+        ratios, bits, freshnesses = [], [], []
         for short, label in (("5h", "session_5h"), ("weekly", "weekly")):
-            bit, ratio = _usage_cell(windows, label, short, utc)
+            bit, ratio, freshness = _usage_cell(usage, label, short, utc)
             ratios.append(ratio)
             bits.append(bit)
+            freshnesses.append(freshness)
         marker = "✦" if agent.get("id") == snapshot.get("holder") else " "
         arow = adaptive_cells(
             ("  AGENTS" if i == 0 else "        ",
@@ -894,17 +928,21 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
             (0, 1, 1, 0, 2, 2),
         )
         arow = paint(arow, "●", dot_style(astate))
-        arow = paint(arow, bits[0], usage_style(ratios[0]))
-        arow = paint(arow, bits[1], usage_style(ratios[1]))
+        arow = paint(arow, bits[0], red if freshnesses[0] == "stale" else usage_style(ratios[0]))
+        arow = paint(arow, bits[1], red if freshnesses[1] == "stale" else usage_style(ratios[1]))
         lines.append("│" + arow + "│")
     lines.append(content([("        * model self-declared (unverified)", 0)]))
 
     ledger = snapshot.get("ledger") or {}
     last = snapshot.get("last_turn") or {}
     listen_val = _value(snapshot.get("listeners"))
+    attention = _attention_display(snapshot)
+    listen_payload = listen_val + (("   " + attention) if attention else "")
     listen_line = "│" + adaptive_cells(
-        ("  LISTEN", listen_val), (0, 10), (10, 108), (0, 1)) + "│"
+        ("  LISTEN", listen_payload), (0, 10), (10, 108), (0, 1)) + "│"
     listen_line = paint(listen_line, "ALIVE", green)
+    listen_line = paint(listen_line, "stranded", red)
+    listen_line = paint(listen_line, "human_resume_needed", amber)
     if listen_val == "unavailable":
         listen_line = paint(listen_line, listen_val, dim)
     ledger_payload, ledger_segments, lg = _ledger_display(ledger)
