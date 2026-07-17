@@ -68,7 +68,7 @@ ANCHORS = {
     "claude":  "CLAUDE.md",
     "codex":   "AGENTS.md",        # + AGENTS.override.md
     "gemini":  "GEMINI.md",        # Gemini CLI auto-loads GEMINI.md
-    "vibe":    "AGENTS.md",        # Vibe / AGENTS-compatible tools (best-effort) — see below
+    "vibe":    "AGENTS.md",        # Mistral Vibe loads AGENTS.md — see below
     # nested-path anchors (e.g. Copilot's .github/copilot-instructions.md) are out of
     # stage 1: ensure_canonical_anchor is not path-aware → manual-bootstrap fallback.
 }
@@ -86,7 +86,7 @@ Two hard cases, handled explicitly (not silently):
    sharing this file; identify yourself by your host tool") and list the valid
    `--to` targets. Honest limit: a tool sharing `AGENTS.md` does not intrinsically
    *know* which roster name it is — agent identity remains a human/launch convention.
-2. **No auto-load convention** (e.g. a custom Vibe setup, or any cron/CI launched outside
+2. **No auto-load convention** (e.g. any cron/CI launched outside
    the project, or a tool with no project-doc mechanism). M8Shift is **passive**: it
    can provide the stanza but cannot force a read. `init` writes a best-effort
    fallback anchor and **prints a warning**: *"agent `<X>`: no known auto-loaded
@@ -171,10 +171,12 @@ Two hard cases, handled explicitly (not silently):
    snapshot **did change** (it is *not* unchanged) and `test_protocol_docs_in_sync` was
    re-baselined against `m8shift.PROTOCOL["en"]`. The `agents:` field itself stays a
    backward-compatible **optional** addition within protocol v1 (old readers ignore it).
-5. **`lechat` anchor.** ✅ *Resolved (best-effort).* The convention is unconfirmed, so
-   `lechat`/`mistral` map to `AGENTS.md` as a **best-effort** guess; an agent with no
-   known anchor (or one whose anchor is already taken) triggers a printed
-   manual-bootstrap warning rather than blocking `init`.
+5. **Mistral Vibe anchor.** ✅ *Resolved.* Upstream Mistral Vibe 2.20.0
+   documentation and `HarnessFilesManager` source confirm that trusted projects
+   load `AGENTS.md` from the working directory up to the trust root, with
+   `~/.vibe/AGENTS.md` as the user-level file. `vibe`, plus the historical
+   `lechat`/`mistral` aliases, therefore map to `AGENTS.md`; collisions still use
+   the generic shared-anchor behavior above.
 
 ## 10. Stage-2 horizon — N *simultaneous* agents
 

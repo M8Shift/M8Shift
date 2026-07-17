@@ -121,6 +121,12 @@ Registered adapters in this release:
   Health reports installed/probed version evidence but never relay completion.
   Native resume remains fail-closed: the probed `--resume` accepts only a
   project-local index or `latest`, not M8Shift's opaque bound session ref.
+- **`mistral-vibe`** — a source-validated declarative stub based on upstream
+  Mistral Vibe 2.20.0. Generated/example rows use `vibe -p PROMPT`, require and
+  allowlist `MISTRAL_API_KEY`, and point to the confirmed `AGENTS.md` project
+  anchor. It is deliberately not managed/live: health stays `unknown`, resume
+  fails closed, and a local version/capability probe is required before
+  promotion.
 
 Dispatch is keyed solely by the row's `provider`; an **unknown provider retains the existing explicit declarative-argv behavior** (the safe baseline adapter). Registering a new provider requires no generic call-site or core change — `register_adapter` validates the provider key and refuses duplicates. The interface never executes a shell string, never persists or prints a raw session reference, never signals a process itself, and never infers relay completion.
 
