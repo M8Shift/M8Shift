@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Live Gemini CLI adapter (RFC 073 slice 3).** The provider-keyed runtime
+  registry now compiles real Gemini CLI 0.51.0 one-shot launches with an
+  explicit `gemini-2.5-pro` model pin and `-p` headless prompt. Generated
+  provider rows are API-key-only (`GEMINI_API_KEY` via `requires_env` and the
+  child allowlist); absent credentials fail before launch. Health exposes the
+  installed/probed CLI version without treating provider success as relay
+  completion. Native resume stays fail-closed because 0.51.0 exposes only a
+  project-local index/`latest`, not an opaque project/identity/job-bound ref.
+- **Advisory routing baseline (#59).** Generated `routing/skills.json` now
+  carries a deliberately small five-class task matrix mapping each class to a
+  model-tier floor/optimum and validated effort. Recommendations remain
+  declarative (`authority=advisory`, `launch=false`) and never reroute or launch
+  an agent automatically.
+- **Visible model/effort truncation (#201).** Dashboard model and effort cells
+  now end every truncated identifier with `…`; generative long-identifier
+  coverage keeps activity rows frame-exact.
 - **Supervisor hardening (RFC 073 slice 2C).** Fleet supervisor startup is
   serialized by an atomic `O_EXCL` lock; detached parents confirm that the child
   published exact running control before reporting success. `fleet resolve`

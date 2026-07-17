@@ -111,10 +111,13 @@ def enter(stream=None):
     _enable_keyboard()
 
 
-def clean(value, width):
+def clean(value, width, ellipsis=False):
     text = value if isinstance(value, str) and value else "unavailable"
     text = "".join(c for c in text if ord(c) >= 32 and not 127 <= ord(c) <= 159)
-    return text[:max(0, width)]
+    width = max(0, width)
+    if ellipsis and len(text) > width:
+        return (text[:width - 1] + "…") if width else ""
+    return text[:width]
 
 
 def _value(value):
@@ -124,10 +127,11 @@ def _value(value):
 def _model_effort(row, model_width=18, effort_width=7):
     """Render parallel self-declarations without changing model identity."""
     row = row if isinstance(row, dict) else {}
-    model = clean(row.get("model") or "—", model_width)
+    model = clean(row.get("model") or "—", model_width, ellipsis=True)
     effort = row.get("effort")
     if effort:
-        return "%s/%s*" % (model, clean(effort, effort_width))
+        return "%s/%s*" % (
+            model, clean(effort, effort_width, ellipsis=True))
     return model + ("*" if row.get("model") else "")
 
 

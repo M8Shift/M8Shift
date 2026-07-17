@@ -98,11 +98,14 @@ PROVIDER_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 PROVIDER_MODEL_UNSET = "UNSET"
 PROMPT_MARKER = "$M8SHIFT_PROMPT"
 AGENT_CLI_ADAPTER_SCHEMA = "m8shift.agent-cli-adapter.v1"
+GEMINI_PROBED_CLI_VERSION = "0.51.0"
+GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 PROVIDER_MODES = {"interactive", "headless", "hybrid", "local"}
 DEFAULT_TIER_ORDER = ["economy", "balanced", "flagship"]
 DEFAULT_COST_ORDER = ["$", "$$", "$$$", "$$$$"]
 DEFAULT_LATENCY_ORDER = ["fast", "medium", "slow"]
 DEFAULT_CONTEXT_ORDER = ["small", "large", "xlarge"]
+ROUTING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 HIGH_STAKES_TASK_TYPES = {"adversarial-verify", "security-review", "legal-compliance-review", "legal-review"}
 DEFAULT_CAPABILITIES = {
     "claude": ["read_repo", "write_repo", "review", "long_context"],
@@ -116,6 +119,10 @@ DEFAULT_ANCHORS = {
     "gemini": "GEMINI.md",
     "vibe": "AGENTS.md",
 }
+DEFAULT_PROVIDER_ENV_ALLOWLIST = [
+    "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER",
+    "M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TURN",
+]
 HEADROOM_DEFAULTS = {
     "warn_after_turns_since_checkpoint": 8,
     "warn_after_handoff_body_bytes": 12000,
@@ -356,8 +363,18 @@ def active_roster_or_default(raw=""):
 def provider_template(agent):
     argv = []
     permissions = "human-driven"
+    mode = "interactive" if agent in {"claude", "vibe"} else "headless"
+    model = PROVIDER_MODEL_UNSET
+    requires_env = []
+    env_allowlist = []
     if agent == "codex":
         argv = ["codex", "exec", "$M8SHIFT_PROMPT"]
+        permissions = "workspace-write"
+    elif agent == "gemini":
+        argv = ["gemini", "$M8SHIFT_PROMPT"]
+        model = GEMINI_DEFAULT_MODEL
+        requires_env = ["GEMINI_API_KEY"]
+        env_allowlist = DEFAULT_PROVIDER_ENV_ALLOWLIST + ["GEMINI_API_KEY"]
         permissions = "workspace-write"
     provider = {
         "name": agent,
@@ -367,22 +384,20 @@ def provider_template(agent):
             "gemini": "google-gemini",
             "vibe": "vibe",
         }.get(agent, agent),
-        "mode": "interactive" if agent in {"claude", "gemini", "vibe"} else "headless",
+        "mode": mode,
         "anchor": DEFAULT_ANCHORS.get(agent, "AGENTS.md"),
-        "model": PROVIDER_MODEL_UNSET,
+        "model": model,
         "argv": argv,
         "capabilities": DEFAULT_CAPABILITIES.get(agent, ["read_repo", "review"]),
-        "requires_env": [],
+        "requires_env": requires_env,
+        "env_allowlist": env_allowlist,
         "permissions": permissions,
     }
     return provider
 
 
 def curated_provider_examples():
-    common_env = [
-        "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER",
-        "M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TURN",
-    ]
+    common_env = DEFAULT_PROVIDER_ENV_ALLOWLIST
     return [
         {
             "//": "Opt-in sample; copy into agents and adapt locally before running.",
@@ -418,6 +433,25 @@ def curated_provider_examples():
             "requires_env": [],
             "permissions": "workspace-write",
         },
+        {
+            "//": ("Opt-in API-key-only sample probed with Gemini CLI 0.51.0; "
+                   "copy into agents and adapt locally before running."),
+            "name": "gemini",
+            "provider": "google-gemini",
+            "mode": "headless",
+            "anchor": "GEMINI.md",
+            "model": GEMINI_DEFAULT_MODEL,
+            "argv": ["gemini", "$M8SHIFT_PROMPT"],
+            "argv_by_platform": {
+                "default": ["gemini", "$M8SHIFT_PROMPT"],
+                "win32": ["gemini.cmd", "$M8SHIFT_PROMPT"],
+            },
+            "env_allowlist": common_env + ["GEMINI_API_KEY"],
+            "capabilities": DEFAULT_CAPABILITIES.get(
+                "gemini", ["read_repo", "review", "image_reasoning"]),
+            "requires_env": ["GEMINI_API_KEY"],
+            "permissions": "workspace-write",
+        },
     ]
 
 
@@ -448,17 +482,44 @@ def default_routing_skills_manifest():
     return {
         "schema": ROUTING_SKILLS_SCHEMA,
         "authority": "advisory",
-        "enabled": False,
+        "enabled": True,
         "default_on_missing": "escalate_to_pen_holder",
         "defaults": {
             "min_model": "balanced",
             "optimum_model": "flagship",
+            "effort": "high",
             "downgradable": True,
             "required_capabilities": [],
             "required_context_class": "small",
             "verify": ["pen-holder verifies against source before integrate"],
         },
-        "task_types": {},
+        "task_types": {
+            "mechanical-edit": {
+                "min_model": "economy", "optimum_model": "balanced",
+                "effort": "low", "verify": ["deterministic diff and check"],
+            },
+            "documentation-edit": {
+                "min_model": "balanced", "optimum_model": "balanced",
+                "effort": "medium", "verify": ["facts and cross-file terms checked"],
+            },
+            "implementation": {
+                "min_model": "balanced", "optimum_model": "flagship",
+                "effort": "high", "required_capabilities": ["write_repo"],
+                "verify": ["project tests and scoped invariants pass"],
+            },
+            "review-critique": {
+                "min_model": "balanced", "optimum_model": "flagship",
+                "effort": "high", "required_capabilities": ["review"],
+                "verify": ["pen-holder checks every material finding"],
+            },
+            "adversarial-verify": {
+                "min_model": "flagship", "optimum_model": "flagship",
+                "effort": "xhigh", "downgradable": False,
+                "required_capabilities": ["review"],
+                "required_context_class": "large",
+                "verify": ["independent evidence; disagreements go to operator"],
+            },
+        },
     }
 
 
@@ -470,8 +531,9 @@ core relay.
 - `providers.json`: host-side agent/provider registry. Keep secrets out of it.
   Generated registries include opt-in `examples` for cooperative headless CLIs;
   copy/adapt them into active agents before use.
-- `routing/`: optional advisory model/task routing manifests. Defaults are empty,
-  provider-neutral, and contain no vendor prices.
+- `routing/`: optional advisory model/task routing manifests. The default model
+  catalog is empty and provider-neutral; the small task table recommends only
+  model tiers plus effort and contains no vendor prices.
 - `roles/`: stable behavioral role contracts.
 - `workflows/`: simple local workflow definitions.
 - `policies/`: human approval and runtime policy notes.
@@ -2141,6 +2203,7 @@ class AdapterInterface(abc.ABC):
     provider = ""
     managed = False
     supports_profile = False
+    supports_effort = True
     validated_stub = False
 
     @abc.abstractmethod
@@ -2286,13 +2349,77 @@ class AnthropicClaudeAdapter(DeclarativeAdapter):
 
 
 class GeminiAdapter(DeclarativeAdapter):
-    """Validated registry stub; live flags/resume await a probed CLI version."""
+    """Live Gemini CLI 0.51.0 adapter with fail-closed native resume.
+
+    The probed CLI accepts ``-m MODEL -p PROMPT`` and can emit text or JSON.
+    Its resume surface accepts only a project-local index or ``latest``; that
+    cannot represent M8Shift's project/identity/job-bound opaque session ref.
+    Fresh one-shot reconstruction therefore remains the only safe path.
+    """
 
     provider = "google-gemini"
-    validated_stub = True
+    managed = True
+    supports_effort = False
+    probed_cli_version = GEMINI_PROBED_CLI_VERSION
 
     def __init__(self):
         super().__init__(self.provider)
+
+    def managed_options(self, row):
+        return ["-m", row.get("model", ""), "-p"]
+
+    def managed_selector(self, argv):
+        selectors = {"-m", "--model", "--model=", "-p", "--prompt", "--prompt="}
+        for arg in argv:
+            if arg in selectors or any(
+                    arg.startswith(prefix) for prefix in selectors
+                    if prefix.endswith("=")):
+                return arg
+        return ""
+
+    def launch_argv(self, row, prompt, run_id="", platform=None):
+        identity = provider_identity_artifact(row)
+        if identity is not None:
+            _path, content = identity
+            prompt = content + "\n" + prompt
+        return super().launch_argv(row, prompt, run_id, platform)
+
+    def resume(self, row, prompt, session_ref, run_id="", platform=None):
+        del row, prompt, session_ref, run_id, platform
+        raise ValueError(
+            "google-gemini 0.51.0 native resume is unsafe: --resume accepts "
+            "only a project-local index or latest, not a bound opaque reference")
+
+    def health(self, process_ref=None, session_ref=""):
+        executable = shutil.which("gemini")
+        version = ""
+        if executable:
+            try:
+                probe = subprocess.run(
+                    [executable, "--version"], capture_output=True, text=True,
+                    timeout=5,
+                )
+                if probe.returncode == 0:
+                    version = (probe.stdout or "").strip().splitlines()[0]
+            except (OSError, subprocess.TimeoutExpired, IndexError):
+                version = ""
+        if not executable:
+            state = "missing"
+        elif version == self.probed_cli_version:
+            state = "ready"
+        else:
+            state = "unsupported"
+        return {
+            "schema": self.schema,
+            "provider": self.provider,
+            "state": state,
+            "process_ref": process_ref,
+            "cli_version": version,
+            "probed_cli_version": self.probed_cli_version,
+            "session_ref_present": bool(session_ref),
+            "native_resume": False,
+            "relay_completion": False,
+        }
 
 
 ADAPTER_REGISTRY = {}
@@ -2413,6 +2540,11 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
                 "severity": "error", "check": "providers.profile_unsupported",
                 "message": f"{label} profile is not supported by the {provider} adapter",
             })
+        if not adapter.supports_effort and agent.get("effort") not in (None, ""):
+            findings.append({
+                "severity": "error", "check": "providers.effort_unsupported",
+                "message": f"{label} effort is not supported by the {provider} adapter",
+            })
         for argv_label, template in provider_argv_templates(agent):
             embedded = managed_selector_in_argv(provider, template)
             if embedded:
@@ -2450,8 +2582,12 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
     for env_name in agent.get("requires_env", []):
         if not ENV_RE.fullmatch(env_name):
             findings.append({"severity": "error", "check": "providers.env_name", "message": f"{label} has invalid env var name {env_name!r}"})
-        elif env_name not in os.environ:
-            findings.append({"severity": "error", "check": "providers.env_missing", "message": f"{label} requires missing environment variable {env_name}"})
+        elif not os.environ.get(env_name):
+            severity = "error" if active and launchable else "warning"
+            findings.append({"severity": severity, "check": "providers.env_missing", "message": f"{label} requires missing environment variable {env_name}"})
+        if env_name not in agent.get("env_allowlist", []):
+            findings.append({"severity": "error", "check": "providers.env_not_allowed",
+                             "message": f"{label} required environment variable {env_name} is not in env_allowlist"})
     for env_name in agent.get("env_allowlist", []):
         if not ENV_RE.fullmatch(env_name):
             findings.append({"severity": "error", "check": "providers.env_allowlist_name", "message": f"{label} has invalid env allowlist name {env_name!r}"})
@@ -4541,6 +4677,10 @@ def routing_skill_findings(skills_manifest, models_manifest):
             findings.append({"severity": "error", "check": "routing.skill.capabilities", "message": f"{task_type}: required_capabilities must be a list of strings"})
         if not list_strings(rule.get("verify", [])):
             findings.append({"severity": "error", "check": "routing.skill.verify", "message": f"{task_type}: verify must be a list of strings"})
+        effort = rule.get("effort", "")
+        if effort not in ROUTING_EFFORTS:
+            findings.append({"severity": "error", "check": "routing.skill.effort",
+                             "message": f"{task_type}: effort must be one of {', '.join(sorted(ROUTING_EFFORTS))}"})
         required_context = rule.get("required_context_class", "small")
         if required_context not in contexts:
             findings.append({"severity": "error", "check": "routing.skill.context", "message": f"{task_type}: unknown required_context_class {required_context!r}"})
@@ -4608,7 +4748,8 @@ def resolve_self_model(args, holder):
     return provider_self_model(holder)
 
 
-def fail_safe_recommendation(args, reason, findings, *, floor="", optimum="", verify=None):
+def fail_safe_recommendation(args, reason, findings, *, floor="", optimum="",
+                             effort="", verify=None):
     holder = current_holder()
     self_model, self_source = resolve_self_model(args, holder)
     if not self_model:
@@ -4623,6 +4764,7 @@ def fail_safe_recommendation(args, reason, findings, *, floor="", optimum="", ve
         "holder": holder,
         "floor": floor,
         "optimum": optimum,
+        "effort": effort,
         "required_capabilities": [],
         "required_context_class": "",
         "feasible": [],
@@ -4669,6 +4811,7 @@ def route_recommendation(args):
     required_context = rule.get("required_context_class", contexts[0] if contexts else "small")
     required_context = order_max(contexts, required_context, context_class_for_tokens(args.input_tokens, contexts))
     verify = rule.get("verify", [])
+    effort = rule.get("effort", "")
     eligible = []
     for row in [r for r in models_manifest.get("models", []) if isinstance(r, dict)]:
         if order_index(tiers, row.get("tier")) < order_index(tiers, floor):
@@ -4694,6 +4837,7 @@ def route_recommendation(args):
             findings,
             floor=floor,
             optimum=optimum,
+            effort=effort,
             verify=verify,
         )
     picked = feasible_rows[0]
@@ -4711,6 +4855,7 @@ def route_recommendation(args):
         "holder": current_holder(),
         "floor": floor,
         "optimum": optimum,
+        "effort": effort,
         "downgradable": bool(rule.get("downgradable", True)),
         "required_capabilities": required_caps,
         "required_context_class": required_context,
@@ -4738,6 +4883,7 @@ def cmd_route_recommend(args):
         print(f"task_type: {result.get('task_type')}")
         print(f"floor: {result.get('floor', '-') or '-'}")
         print(f"optimum: {result.get('optimum', '-') or '-'}")
+        print(f"effort: {result.get('effort', '-') or '-'}")
         print(f"picked: {result.get('picked', '-') or '-'}")
         print(f"reason: {result.get('reason', '-')}")
         verify = ", ".join(result.get("verify") or []) or "-"

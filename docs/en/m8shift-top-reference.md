@@ -162,6 +162,10 @@ it. Automatic refreshes reuse the fetched record. Up/down selects the
 newer/older turn block; left/right pages through text that is taller than the
 activity zone. Press `e` again to return to compact mode.
 
+Model and effort identifiers that exceed their fixed compact-activity cells end
+in a visible `…`. The ellipsis occupies the final cell, so truncation cannot
+resemble a complete model pin or effort declaration and frame width stays exact.
+
 ## TIME
 
 The permanent TIME strip accounts for the whole current session rather than one

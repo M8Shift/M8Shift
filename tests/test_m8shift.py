@@ -7303,15 +7303,21 @@ class TestRuntimeCompanion(CLIBase):
         examples = {row["name"]: row for row in registry["examples"]}
         self.assertIn("codex", examples)
         self.assertIn("claude", examples)
+        self.assertIn("gemini", examples)
         self.assertEqual(examples["codex"]["argv"], ["codex", "exec", "$M8SHIFT_PROMPT"])
         self.assertEqual(examples["claude"]["argv"], ["claude", "-p", "$M8SHIFT_PROMPT"])
+        self.assertEqual(examples["gemini"]["argv"], ["gemini", "$M8SHIFT_PROMPT"])
+        self.assertEqual(examples["gemini"]["model"], "gemini-2.5-pro")
+        self.assertEqual(examples["gemini"]["requires_env"], ["GEMINI_API_KEY"])
+        self.assertIn("GEMINI_API_KEY", examples["gemini"]["env_allowlist"])
         self.assertIn("//", examples["codex"])
         self.assertIn("argv_by_platform", examples["codex"])
         self.assertIn("env_allowlist", examples["codex"])
         self.assertEqual(examples["codex"]["model"], "UNSET")
         self.assertTrue(all("model" in row for row in registry["agents"]))
         self.assertIn("model=UNSET", self.rt("providers", "list").stdout)
-        check = json.loads(self.rt("providers", "check", "--json").stdout)
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "placeholder"}):
+            check = json.loads(self.rt("providers", "check", "--json").stdout)
         self.assertFalse(check["ok"], check)
         self.assertIn("providers.model", {f["check"] for f in check["findings"]})
         for row in registry["agents"]:
@@ -7319,7 +7325,8 @@ class TestRuntimeCompanion(CLIBase):
                 row["model"] = "gpt-5.2-codex"
         with open(os.path.join(self.d, ".m8shift", "providers.json"), "w", encoding="utf-8") as fh:
             json.dump(registry, fh)
-        check = json.loads(self.rt("providers", "check", "--json").stdout)
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "placeholder"}):
+            check = json.loads(self.rt("providers", "check", "--json").stdout)
         self.assertTrue(check["ok"], check)
         rendered = json.loads(self.rt("providers", "render", "codex",
                                       "--prompt", "do one turn", "--run", "run1", "--json").stdout)
@@ -7383,6 +7390,30 @@ class TestRuntimeCompanion(CLIBase):
         findings = json.loads(r.stdout)["findings"]
         self.assertTrue(any(f["check"] == "providers.argv_string" for f in findings))
         self.assertTrue(any(f["check"] == "providers.env_missing" for f in findings))
+
+    def test_provider_check_missing_env_is_advisory_for_inactive_example(self):
+        self.init()
+        self.rt("providers", "init", "--force")
+        path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        codex = next(row for row in data["agents"] if row["name"] == "codex")
+        codex["model"] = "gpt-5.2-codex"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GEMINI_API_KEY", None)
+            result = self.rt("providers", "check", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(any(
+            finding["check"] == "providers.env_missing"
+            and finding["severity"] == "warning"
+            and "gemini" in finding["message"]
+            for finding in payload["findings"]
+        ), payload)
 
     def test_provider_platform_argv_selection_and_validation(self):
         self.init()
@@ -7486,7 +7517,7 @@ class TestRuntimeCompanion(CLIBase):
         custom = json.loads(self.rt("providers", "render", "custom", "--prompt", "print(1)", "--json").stdout)
         self.assertEqual(custom["argv"], [sys.executable, "-c", "print(1)"])
 
-    def test_agent_cli_adapter_registry_dispatch_and_gemini_stub(self):
+    def test_agent_cli_adapter_registry_dispatch_and_live_gemini(self):
         runtime = self.load_runtime()
         expected = {"openai-codex", "anthropic-claude", "google-gemini"}
         self.assertEqual(set(runtime.ADAPTER_REGISTRY), expected)
@@ -7499,21 +7530,29 @@ class TestRuntimeCompanion(CLIBase):
                 self.assertTrue(callable(getattr(adapter, operation)))
 
         gemini = runtime.provider_adapter("google-gemini")
-        self.assertTrue(gemini.validated_stub)
+        self.assertFalse(gemini.validated_stub)
+        self.assertTrue(gemini.managed)
         row = {
             "name": "gemini", "provider": "google-gemini",
-            "argv": ["gemini", "--prompt", "$M8SHIFT_PROMPT"],
+            "model": "gemini-2.5-pro",
+            "argv": ["gemini", "$M8SHIFT_PROMPT"],
         }
         self.assertEqual(
             gemini.launch_argv(row, "one turn"),
-            ["gemini", "--prompt", "one turn"],
+            ["gemini", "-m", "gemini-2.5-pro", "-p", "one turn"],
         )
         self.assertEqual(gemini.stop("process-1")["strategy"], "process-group")
-        health = gemini.health("process-1", "opaque-session")
-        self.assertEqual(health["state"], "unknown")
+        probe = subprocess.CompletedProcess(
+            ["gemini", "--version"], 0, stdout="0.51.0\n", stderr="warning\n")
+        with mock.patch.object(runtime.shutil, "which", return_value="/bin/gemini"), \
+                mock.patch.object(runtime.subprocess, "run", return_value=probe):
+            health = gemini.health("process-1", "opaque-session")
+        self.assertEqual(health["state"], "ready")
+        self.assertEqual(health["cli_version"], "0.51.0")
+        self.assertFalse(health["native_resume"])
         self.assertFalse(health["relay_completion"])
         self.assertNotIn("opaque-session", json.dumps(health))
-        with self.assertRaisesRegex(ValueError, "does not declare resume support"):
+        with self.assertRaisesRegex(ValueError, "native resume is unsafe"):
             gemini.resume(row, "one turn", "opaque-session")
 
         # A new provider is a registry addition; generic callers do not change.
@@ -7587,6 +7626,49 @@ class TestRuntimeCompanion(CLIBase):
                     json.dumps(actual, ensure_ascii=False, separators=(",", ":")),
                     json.dumps(expected, ensure_ascii=False, separators=(",", ":")),
                 )
+
+    def test_gemini_adapter_launch_bytes_and_fail_closed_key_requirement(self):
+        runtime = self.load_runtime()
+        row = {
+            "name": "gemini", "provider": "google-gemini", "mode": "headless",
+            "anchor": "GEMINI.md", "model": "gemini-2.5-pro",
+            "argv": ["gemini", "--approval-mode", "plan", "$M8SHIFT_PROMPT"],
+            "argv_by_platform": {
+                "test-os": ["gemini-test", "$M8SHIFT_PROMPT"],
+            },
+            "capabilities": ["read_repo"], "requires_env": ["GEMINI_API_KEY"],
+            "env_allowlist": ["PATH", "GEMINI_API_KEY"],
+            "permissions": "workspace-write",
+        }
+        expected_default = [
+            "gemini", "--approval-mode", "plan", "-m", "gemini-2.5-pro",
+            "-p", "x;y",
+        ]
+        actual_default = runtime.provider_launch_argv(row, "x;y", "run-1")
+        self.assertEqual(actual_default, expected_default)
+        self.assertEqual(
+            json.dumps(actual_default, ensure_ascii=False, separators=(",", ":")),
+            '["gemini","--approval-mode","plan","-m","gemini-2.5-pro","-p","x;y"]',
+        )
+        self.assertEqual(
+            runtime.provider_launch_argv(row, "work", "run-1", "test-os"),
+            ["gemini-test", "-m", "gemini-2.5-pro", "-p", "work"],
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            findings = runtime.provider_entry_findings(row, "agents[0]")
+        missing = [f for f in findings if f["check"] == "providers.env_missing"]
+        self.assertEqual([f["severity"] for f in missing], ["error"])
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}, clear=True):
+            findings = runtime.provider_entry_findings(row, "agents[0]")
+        missing = [f for f in findings if f["check"] == "providers.env_missing"]
+        self.assertEqual([f["severity"] for f in missing], ["error"])
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "placeholder"}, clear=True):
+            findings = runtime.provider_entry_findings(row, "agents[0]")
+        self.assertNotIn("providers.env_missing", {f["check"] for f in findings})
+
+        bad = dict(row, effort="high")
+        findings = runtime.provider_entry_findings(bad, "agents[0]", active=False)
+        self.assertIn("providers.effort_unsupported", {f["check"] for f in findings})
 
     def test_provider_model_pin_fail_closed_and_legacy_readability(self):
         self.init()
@@ -7668,6 +7750,7 @@ class TestRuntimeCompanion(CLIBase):
                 "defaults": defaults or {
                     "min_model": "balanced",
                     "optimum_model": "flagship",
+                    "effort": "high",
                     "downgradable": True,
                     "required_capabilities": [],
                     "required_context_class": "small",
@@ -7717,6 +7800,7 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(payload["floor"], "economy")
         self.assertEqual(payload["optimum"], "balanced")
         self.assertEqual(payload["saved_vs"], "MODEL_BAL")
+        self.assertEqual(payload["effort"], "high")
         self.assertEqual(payload["verify"], ["byte-diff", "build"])
         self.assertEqual(payload["authority"], "advisory")
         self.assertFalse(payload["launch"])
@@ -7783,6 +7867,28 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(r.returncode, 1)
         findings = json.loads(r.stdout)["findings"]
         self.assertIn("routing.model_ref", {f["check"] for f in findings})
+
+    def test_default_routing_matrix_is_small_advisory_and_effort_validated(self):
+        runtime = self.load_runtime()
+        manifest = runtime.default_routing_skills_manifest()
+        self.assertEqual(manifest["authority"], "advisory")
+        self.assertTrue(manifest["enabled"])
+        self.assertEqual(set(manifest["task_types"]), {
+            "mechanical-edit", "documentation-edit", "implementation",
+            "review-critique", "adversarial-verify",
+        })
+        self.assertEqual(manifest["task_types"]["mechanical-edit"]["effort"], "low")
+        self.assertEqual(manifest["task_types"]["adversarial-verify"]["effort"], "xhigh")
+        self.assertFalse(manifest["task_types"]["adversarial-verify"]["downgradable"])
+        self.assertEqual(
+            runtime.routing_skill_findings(
+                manifest, runtime.default_routing_models_manifest()), [])
+
+        invalid = json.loads(json.dumps(manifest))
+        invalid["task_types"]["implementation"]["effort"] = "extreme\nforged"
+        findings = runtime.routing_skill_findings(
+            invalid, runtime.default_routing_models_manifest())
+        self.assertIn("routing.skill.effort", {f["check"] for f in findings})
 
     def test_report_write_rejects_path_traversal_run_ids(self):
         self.init()
