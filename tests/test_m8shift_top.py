@@ -686,12 +686,24 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertEqual(merged["schema"], "m8shift.status/1")
 
     def test_120_column_plain_frame_is_byte_stable(self):
+        # Hermetic on purpose: with the env cleared, wall-clock cells fall back
+        # to the HOST system timezone (a Europe-zoned dev machine and a UTC CI
+        # runner rendered different bytes for the same fixture).  Pin TZ=UTC
+        # inside the mocked env so the golden digest is host-independent.
         top = load_top()
-        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
-            output = top.render(fixture(), 120, self.NOW)
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1", "TZ": "UTC"},
+                             clear=True):
+            if hasattr(time, "tzset"):
+                time.tzset()
+            try:
+                output = top.render(fixture(), 120, self.NOW)
+            finally:
+                pass
+        if hasattr(time, "tzset"):
+            time.tzset()  # restore the host zone once the real env is back
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "b252942bffb2f03494af25c64879979c1f7746b17a0891029a65926533a56218",
+            "e2ac072b2666cc39829ccd148490f0652ccfb106a1cca4f4705aabd232533228",
         )
 
     def test_weighted_largest_remainder_track_plans_are_exact(self):
