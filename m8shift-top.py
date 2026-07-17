@@ -632,6 +632,24 @@ def _pen_ttl_track_widths(width):
     return result
 
 
+def _ttl_display(snapshot, current, gauge_width, utc=False):
+    """Return neutral lease cells unless a real expiry can be evaluated."""
+    expires = _stamp(snapshot.get("expires"))
+    if expires is None:
+        state = _value(snapshot.get("state"))
+        return ("─" * gauge_width, "no TTL", "not applicable",
+                "not applicable [%s]" % state, "neutral")
+    remaining = max(0, int((expires - current).total_seconds()))
+    alive = remaining > 0
+    filled = min(gauge_width, max(0, round(gauge_width * remaining / 1800)))
+    gauge = "█" * filled + "░" * (gauge_width - filled)
+    left = "%02d:%02d left" % (remaining // 60, remaining % 60)
+    status = "alive" if alive else "stale"
+    expiry = "expires %s (%s)" % (
+        _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—", status)
+    return gauge, left, status, expiry, "alive" if alive else "stale"
+
+
 def render(snapshot, width, now=None, interval=2, utc=False, height=None,
            activity_offset=0, expanded_activity=None, text_offset=0):
     # Use the real terminal width. The 100-column breakpoint is stable; the wide
@@ -710,22 +728,16 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     pen_plain = paint(pen_plain, heartbeat, heartbeat_style)
     lines.append("│" + pen_plain + "│")
 
-    expires = _stamp(snapshot.get("expires"))
-    remaining = max(0, int((expires - current).total_seconds())) if expires else 0
-    alive = bool(expires and remaining > 0)
-    # The pen lease is 30 minutes; cap protects the gauge after clock skew.
-    filled = min(10, max(0, round(10 * remaining / 1800)))
-    gauge = "█" * filled + "░" * (10 - filled)
-    left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
-    status_seg = "alive" if alive else "stale"
+    gauge, left_seg, status_seg, ttl_expiry, ttl_role = _ttl_display(
+        snapshot, current, 10, utc)
     gauge_seg = "<%s>" % gauge
-    ttl_expiry = "expires %s (%s)" % (
-        _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—", status_seg)
     ttl_row = _track_cells(
         ("TTL", gauge_seg, left_seg, ttl_expiry),
         pen_tracks[:3] + [sum(pen_tracks[3:])])
-    ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
-    ttl_row = paint(ttl_row, status_seg, green if alive else red)
+    ttl_style = amber if ttl_role != "neutral" else dim
+    ttl_row = paint(paint(ttl_row, gauge, ttl_style), left_seg, ttl_style)
+    ttl_row = paint(ttl_row, status_seg,
+                    green if ttl_role == "alive" else red if ttl_role == "stale" else dim)
     lines += ["│" + ttl_row + "│", sep, row("AGENTS", dim)]
     for agent in snapshot.get("agents") or []:
         name = clean(agent.get("id"), 18)
@@ -907,21 +919,16 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     pen_row = paint(pen_row, hb_seg, heartbeat_style)
     lines.append("│" + pen_row + "│")
 
-    expires = _stamp(snapshot.get("expires"))
-    remaining = max(0, int((expires - current).total_seconds())) if expires else 0
-    alive = bool(expires and remaining > 0)
     gw = max(12, min(28, inner - 70)) if width < 120 else 28
-    filled = min(gw, max(0, round(gw * remaining / 1800)))
-    gauge = "█" * filled + "░" * (gw - filled)
-    left_seg = "%02d:%02d left" % (remaining // 60, remaining % 60)
-    status_seg = "alive" if alive else "stale"
-    ttl_expiry = "expires %s (%s)" % (
-        _display_time(expires, utc, "%Y-%m-%d %H:%M") or "—", status_seg)
+    gauge, left_seg, status_seg, ttl_expiry, ttl_role = _ttl_display(
+        snapshot, current, gw, utc)
     ttl_row = _track_cells(
         ("  TTL", gauge, left_seg, ttl_expiry),
         pen_tracks[:3] + [sum(pen_tracks[3:])])
-    ttl_row = paint(paint(ttl_row, gauge, amber), left_seg, amber)
-    ttl_row = paint(ttl_row, status_seg, green if alive else red)
+    ttl_style = amber if ttl_role != "neutral" else dim
+    ttl_row = paint(paint(ttl_row, gauge, ttl_style), left_seg, ttl_style)
+    ttl_row = paint(ttl_row, status_seg,
+                    green if ttl_role == "alive" else red if ttl_role == "stale" else dim)
     lines += ["│" + ttl_row + "│", blank]
 
     for i, agent in enumerate(snapshot.get("agents") or []):
@@ -1341,18 +1348,34 @@ def read_key(stream=None, timeout=.03, selector=select.select):
         stream.read(1), "escape")
 
 
+def read_key_burst(first, stream=None, selector=select.select, reader=read_key):
+    """Drain currently queued key events so one burst produces one frame."""
+    stream = stream or sys.stdin
+    keys = [] if first is None else [first]
+    while first is not None:
+        ready, _, _ = selector([stream], [], [], 0)
+        if stream not in ready:
+            break
+        first = reader(stream=stream, selector=selector)
+        if first is not None:
+            keys.append(first)
+    return keys
+
+
 def key_effect(key, scroll_offset, max_scroll, help_visible):
     """Return (quit, refresh, offset, help) for one decoded key event."""
     if key == "q":
         return True, False, scroll_offset, help_visible
     if key == "?":
-        return False, True, scroll_offset, not help_visible
-    if key in ("r", "escape"):
+        return False, False, scroll_offset, not help_visible
+    if key == "r":
         return False, True, scroll_offset, False
+    if key == "escape":
+        return False, False, scroll_offset, False
     if not help_visible and key == "up":
-        return False, True, max(0, scroll_offset - 1), help_visible
+        return False, False, max(0, scroll_offset - 1), help_visible
     if not help_visible and key == "down":
-        return False, True, min(max_scroll, scroll_offset + 1), help_visible
+        return False, False, min(max_scroll, scroll_offset + 1), help_visible
     return False, False, scroll_offset, help_visible
 
 
@@ -1457,21 +1480,45 @@ def main(argv=None):
     text_offset = 0
     help_visible = False
     agent_count = 2
+    snap = None
+    loaded_provision = 0
+    next_refresh = 0.0
+    explicit_refresh = True
+    reader_cache = {}
     try:
         while True:
             size = shutil.get_terminal_size((80, 24))
             provision = _activity_request_limit(
                 size.columns, size.lines, agent_count)
-            snap = status_reader.load(provision)
-            agent_count = len(snap.get("agents") or [])
+            tick = time.monotonic()
+            reload_due = (snap is None or explicit_refresh
+                          or tick >= next_refresh
+                          or provision > loaded_provision)
+            if reload_due:
+                # Turn records are immutable, but a status refresh defines the
+                # cache generation: discard every fetched reader record before
+                # rebuilding the selected entry from the refreshed snapshot.
+                reader_cache.clear()
+                snap = status_reader.load(provision)
+                agent_count = len(snap.get("agents") or [])
+                # The first payload may reveal a different agent count than
+                # the conservative startup estimate. Treat that calibration
+                # as satisfied; only later geometry growth triggers reload.
+                loaded_provision = max(provision, _activity_request_limit(
+                    size.columns, size.lines, agent_count))
+                next_refresh = tick + max(.1, args.interval)
+                if expanded and selected_turn is not None:
+                    reader_cache[selected_turn] = load_activity_turn(
+                        engine, args.root, selected_turn)
+                explicit_refresh = False
             max_scroll = activity_max_scroll(snap, size.columns, size.lines)
             scroll_offset = min(scroll_offset, max_scroll)
             if expanded and selected_turn is None:
                 selected_turn = activity_adjacent_turn(snap, None, 0)
-            if expanded and selected_turn is not None and selected_activity is None:
-                selected_activity = load_activity_turn(engine, args.root, selected_turn)
+            selected_activity = reader_cache.get(selected_turn)
             reader_record = (selected_activity or {
-                "turn": None, "agent": None, "to": None, "done": "",
+                "turn": selected_turn, "agent": None, "to": None,
+                "done": "Complete turn text will load on the next refresh.",
             }) if expanded else None
             frame = (render_help(size.columns, args.interval, size.lines) if help_visible else
                      render(snap, size.columns, interval=args.interval, utc=args.utc,
@@ -1483,43 +1530,44 @@ def main(argv=None):
                 sys.stdout.flush()
                 previous = frame
             readers = [sys.stdin] + ([resize_read] if resize_read is not None else [])
-            ready, _, _ = select.select(readers, [], [], max(.1, args.interval))
+            timeout = max(.01, min(max(.1, args.interval), next_refresh - time.monotonic()))
+            ready, _, _ = select.select(readers, [], [], timeout)
             if resize_pending or (resize_read is not None and resize_read in ready):
                 resize_pending = False
                 _drain_self_pipe(resize_read)
                 previous = None
             if sys.stdin in ready:
-                key = read_key()
-                if not help_visible and key == "e":
-                    expanded = not expanded
-                    text_offset = 0
-                    if expanded:
-                        events = _activity_navigation(snap)
-                        selected_turn = (events[min(scroll_offset, len(events) - 1)].get("turn")
-                                         if events else None)
-                        selected_activity = None
-                    previous = None
-                    continue
-                if not help_visible and expanded and key in ("up", "down"):
-                    adjacent = activity_adjacent_turn(
-                        snap, selected_turn, -1 if key == "up" else 1)
-                    if adjacent != selected_turn:
-                        selected_turn, selected_activity = adjacent, None
-                    text_offset = 0
-                    previous = None
-                    continue
-                if not help_visible and expanded and key in ("left", "right"):
-                    text_offset = activity_text_page(
-                        snap, selected_activity, size.columns, size.lines,
-                        text_offset, -1 if key == "left" else 1)
-                    previous = None
-                    continue
-                quit_requested, refresh, scroll_offset, help_visible = key_effect(
-                    key, scroll_offset, max_scroll, help_visible)
+                keys = read_key_burst(
+                    read_key(), selector=select.select, reader=read_key)
+                quit_requested = False
+                for key in keys:
+                    if not help_visible and key == "e":
+                        expanded = not expanded
+                        text_offset = 0
+                        if expanded:
+                            events = _activity_navigation(snap)
+                            selected_turn = (events[min(scroll_offset, len(events) - 1)].get("turn")
+                                             if events else None)
+                        continue
+                    if not help_visible and expanded and key in ("up", "down"):
+                        selected_turn = activity_adjacent_turn(
+                            snap, selected_turn, -1 if key == "up" else 1)
+                        text_offset = 0
+                        continue
+                    if not help_visible and expanded and key in ("left", "right"):
+                        text_offset = activity_text_page(
+                            snap, reader_cache.get(selected_turn),
+                            size.columns, size.lines, text_offset,
+                            -1 if key == "left" else 1)
+                        continue
+                    quit_requested, refresh, scroll_offset, help_visible = key_effect(
+                        key, scroll_offset, max_scroll, help_visible)
+                    explicit_refresh = explicit_refresh or refresh
+                    if quit_requested:
+                        break
                 if quit_requested:
                     break
-                if refresh:
-                    previous = None
+                previous = None
     finally:
         if resize_write is not None:
             signal.set_wakeup_fd(previous_wakeup)
