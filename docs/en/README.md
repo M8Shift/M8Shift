@@ -129,6 +129,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [071-rfc-live-roster-add.md](rfc/071-rfc-live-roster-add.md) | Implemented holder-only live roster addition that changes only the LOCK `agents:` value, preserves the work window and journals byte-for-byte, and leaves anchor bootstrap explicit. |
 | [072-rfc-exact-identity-fleet-bootstrap.md](rfc/072-rfc-exact-identity-fleet-bootstrap.md) | Implemented exact-identity fleet orchestration (slices 1–6): declarative plan/health, holder-attributed identity bootstrap and enrollment, batch listener reconciliation, and immutable recipe-verified jobs with at most two producer worktrees and integrator-only merge/handoff/drop. |
 | [073-rfc-adapter-registry-detached-durability.md](rfc/073-rfc-adapter-registry-detached-durability.md) | Implemented slices 1–3 plus routing phase 1: provider-keyed adapters, detached durable fleet control, live API-key/model-pinned Gemini CLI 0.51.0 fresh launches (native resume fails closed on its unbound index/`latest` surface), and a five-class advisory tier/effort matrix with no automatic routing. |
+| [074-rfc-standardized-inter-agent-exchange.md](rfc/074-rfc-standardized-inter-agent-exchange.md) | Draft design for explicit bounded shift stages, a vendor-neutral structured turn schema, and a portable whole-shift exchange; implementation waits on operator arbitration. |
 
 ## Security docs
 

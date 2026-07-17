@@ -511,14 +511,47 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
     def test_every_advertised_key_has_a_real_state_effect(self):
         top = load_top()
         self.assertEqual(top.key_effect("q", 2, 4, False), (True, False, 2, False))
-        self.assertEqual(top.key_effect("?", 2, 4, False), (False, True, 2, True))
-        self.assertEqual(top.key_effect("?", 2, 4, True), (False, True, 2, False))
+        self.assertEqual(top.key_effect("?", 2, 4, False), (False, False, 2, True))
+        self.assertEqual(top.key_effect("?", 2, 4, True), (False, False, 2, False))
         self.assertEqual(top.key_effect("r", 2, 4, True), (False, True, 2, False))
         self.assertEqual(top.key_effect("escape", 2, 4, True),
-                         (False, True, 2, False))
-        self.assertEqual(top.key_effect("up", 2, 4, False), (False, True, 1, False))
-        self.assertEqual(top.key_effect("down", 2, 4, False), (False, True, 3, False))
-        self.assertEqual(top.key_effect("down", 4, 4, False), (False, True, 4, False))
+                         (False, False, 2, False))
+        self.assertEqual(top.key_effect("up", 2, 4, False), (False, False, 1, False))
+        self.assertEqual(top.key_effect("down", 2, 4, False), (False, False, 3, False))
+        self.assertEqual(top.key_effect("down", 4, 4, False), (False, False, 4, False))
+
+    def test_pending_key_burst_is_drained_before_one_render_cycle(self):
+        top = load_top()
+        stream = object()
+        pending = iter(["down", "down", None])
+
+        def selector(readers, _writers, _errors, _timeout):
+            return (readers if next_ready[0] else []), [], []
+
+        next_ready = [True]
+
+        def reader(**_kwargs):
+            key = next(pending)
+            next_ready[0] = key is not None
+            return key
+
+        self.assertEqual(
+            top.read_key_burst("down", stream=stream, selector=selector,
+                               reader=reader),
+            ["down", "down", "down"],
+        )
+
+    def test_awaiting_state_renders_neutral_no_ttl_strip(self):
+        top = load_top()
+        snap = fixture()
+        snap.update(state="AWAITING_CODEX", holder="codex", expires="-")
+        for width in (80, 120):
+            output = self._plain(top.render(snap, width, self.NOW))
+            ttl = next(line for line in output.splitlines() if "TTL" in line)
+            self.assertIn("no TTL", ttl)
+            self.assertIn("not applicable", ttl)
+            self.assertNotIn("00:00", ttl)
+            self.assertNotIn("stale", ttl)
 
     def test_activity_arrows_address_a_clamped_height_aware_window(self):
         top = load_top()
@@ -825,6 +858,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                                   side_effect=terminal_size), \
                 mock.patch.object(top.select, "select", side_effect=ready), \
                 mock.patch.object(top, "read_key", return_value="?"), \
+                mock.patch.object(top, "read_key_burst", return_value=["?"]), \
                 mock.patch.object(top, "render_help", wraps=real_help) as help_render:
             with self.assertRaises(LoopDone):
                 top.main(["--root", str(ROOT), "--interval", "2"])
@@ -832,6 +866,47 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             [(call.args[0], call.args[2]) for call in help_render.call_args_list],
             [(120, 18), (160, 24)],
         )
+
+    def test_navigation_burst_renders_once_without_engine_subprocess(self):
+        top = load_top()
+
+        class TTY(io.StringIO):
+            @staticmethod
+            def isatty():
+                return True
+
+        class LoopDone(Exception):
+            pass
+
+        stdin, stdout = TTY(), TTY()
+        selects = [0]
+
+        def ready(_readers, _writers, _errors, _timeout):
+            selects[0] += 1
+            if selects[0] == 1:
+                return [stdin], [], []
+            raise LoopDone
+
+        with mock.patch.dict(os.environ, {"TERM": "xterm"}, clear=True), \
+                mock.patch.object(top.sys, "stdin", stdin), \
+                mock.patch.object(top.sys, "stdout", stdout), \
+                mock.patch.object(top, "enter"), mock.patch.object(top, "restore"), \
+                mock.patch.object(top.atexit, "register"), \
+                mock.patch.object(top.IncrementalStatusReader, "load",
+                                  return_value=fixture()) as load, \
+                mock.patch.object(top.shutil, "get_terminal_size",
+                                  return_value=os.terminal_size((120, 30))), \
+                mock.patch.object(top.select, "select", side_effect=ready), \
+                mock.patch.object(top, "read_key", return_value="down"), \
+                mock.patch.object(top, "read_key_burst",
+                                  return_value=["down", "down", "down"]), \
+                mock.patch.object(top, "render", wraps=top.render) as render, \
+                mock.patch.object(top.subprocess, "run") as engine_invoker:
+            with self.assertRaises(LoopDone):
+                top.main(["--root", str(ROOT), "--interval", "60"])
+        load.assert_called_once()
+        engine_invoker.assert_not_called()
+        self.assertEqual(render.call_count, 2)  # initial frame + one burst frame
 
     def test_help_documents_refresh_interval(self):
         proc = subprocess.run(

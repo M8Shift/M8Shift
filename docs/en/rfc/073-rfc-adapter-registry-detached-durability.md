@@ -236,8 +236,10 @@ flowchart TD
 Probe a supported Gemini CLI/version, replace the validated stub with a managed
 adapter, and implement native resume only for adapters/versions whose session
 ownership and flags are proven. Fresh one-shot reconstruction remains mandatory
-fallback. Mistral Vibe remains a documented TBD adapter until its product and
-CLI contract are confirmed; it is neither hard-coded nor an onboarding blocker.
+fallback. Mistral Vibe 2.20.0 source now confirms the `vibe -p PROMPT` surface,
+`MISTRAL_API_KEY`, and project `AGENTS.md` loading; it joins the registry as a
+declarative validated stub. Live lifecycle support remains gated on a local
+version/capability probe and is not an onboarding blocker.
 
 Acceptance gates:
 
@@ -265,6 +267,13 @@ opaque nor project/identity/job-bound, while `--session-id` starts rather than
 resumes the exact owned session. Passing the runtime's opaque reference to either
 flag would make ownership ambiguous. Fresh one-shot reconstruction remains the
 mandatory fallback and ambiguity fails closed as D6/D16 require.
+
+Mistral Vibe stub evidence (upstream 2.20.0): `pyproject.toml` declares the
+`vibe` entry point, `vibe/cli/entrypoint.py` declares `-p/--prompt`, the README
+declares `MISTRAL_API_KEY`, and `HarnessFilesManager` loads project `AGENTS.md`
+from the working directory up to the trust root. This is sufficient for a
+shell-free declarative argv/conformance fixture, but not for managed model,
+resume, health, or completion claims.
 
 ### Slice 4 — #59 routing-matrix extension (phase 1 implemented)
 
