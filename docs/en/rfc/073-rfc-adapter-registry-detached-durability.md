@@ -1,7 +1,7 @@
 # RFC 073 — Adapter registry and detached orchestration delivery slices
 
-- **Status:** slices 1–2 implemented; slices 3–4 accepted for implementation in
-  separately reviewed batches
+- **Status:** slices 1–2 implemented in v3.61.0 (2026-07-16); slices 3–4
+  accepted for implementation in separately reviewed batches
 - **Date:** 2026-07-15
 - **Scope:** concrete delivery plan for backlog #65/#66 and RFC 067 D1–D16
 - **Builds on:** [RFC 067](067-rfc-detached-vendor-neutral-cli-orchestration.md),
@@ -91,6 +91,19 @@ Implemented in this change:
 
 Slice 1 activates no detached process, durable scheduler, live Gemini launch, or
 provider-native resume.
+
+```mermaid
+flowchart TD
+    ROW["validated provider row — provider key + explicit model"] --> REG["provider-keyed adapter registry"]
+    REG --> CODEX["OpenAICodexAdapter — managed, byte-identical migration"]
+    REG --> CLAUDE["AnthropicClaudeAdapter — managed, byte-identical migration"]
+    REG --> GEM["GeminiAdapter — validated stub, declarative argv only"]
+    REG -->|"unknown provider"| DECL["existing explicit declarative argv behavior"]
+    CODEX --> IFACE["m8shift.agent-cli-adapter.v1 — launch_argv / stop / resume / health"]
+    CLAUDE --> IFACE
+    GEM --> IFACE
+    IFACE --> SUP["generic supervisor — shell-free argv, process-group termination, relay completion always false"]
+```
 
 ## 4. Detachment backend choice
 
@@ -197,6 +210,20 @@ Implemented in this change:
   local detached fallback;
 - deterministic conformance tests for survivor adoption, restart without a
   duplicate launch, corrupt-record refusal, and native-service plan rendering.
+
+```mermaid
+flowchart TD
+    DET["fleet supervise --detach"] --> TIER["launchd / user systemd / Windows service via the existing backend seam"]
+    DET -->|"no native service manager"| LOCAL["honest local detached fallback — no logout/reboot/restart guarantee"]
+    TIER --> CP["single fleet control plane — SIGTERM-clean shutdown, stale-pid takeover"]
+    LOCAL --> CP
+    CP --> STORE["crash-consistent .m8shift/runtime/fleet/ store — control.json, lanes/, jobs/, attempts/, sessions/, events.jsonl"]
+    CP --> RECON["startup PID start-identity reconciliation"]
+    RECON -->|"persisted ref matches live ref"| ADOPT["adopt the exact live survivor"]
+    RECON -->|"both refs known and differing"| RESTART["restart a missing desired-running lane once"]
+    RECON -->|"persisted ref known, probe failed this tick"| DEFER["adopt unverified — defer, re-verify on a later tick"]
+    RECON -->|"live pid, empty persisted ref"| FAILC["fail closed — needs_reconciliation"]
+```
 
 ### Slice 3 — live Gemini and resume
 

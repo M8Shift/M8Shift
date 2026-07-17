@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.61.0 — 2026-07-16
+
 - **Detached fleet liveness hardening (#65, RFC 073 slice 2 review).** A
   transient start-identity probe failure on an alive lane no longer wedges it
   into a terminal `needs_reconciliation`: reconciliation now defers (adopts
@@ -16,9 +18,11 @@
 - **Detached durable fleet control plane (#65, RFC 073 slice 2).** The RFC 072
   supervisor now persists schema-versioned, project/identity/provider/model-
   bound control, lane, and opaque-session records with fsync + atomic replace.
-  Startup distinguishes live survivors by PID start identity, adopts exact
-  matches, restarts missing desired-running lanes once, and fails closed on
-  corrupt, stale, reused, or ambiguous evidence. Adapter `health`, `resume`, and
+  Startup distinguishes live survivors by PID start identity: exact matches are
+  adopted, missing or determinately-reused desired-running lanes are restarted
+  once (a provably reused supervisor pid is taken over without signalling the
+  unrelated process), and corrupt, unverifiable, or ambiguous evidence fails
+  closed. Adapter `health`, `resume`, and
   `stop` lifecycle hooks now mediate generic reconciliation without gaining
   relay authority. `fleet supervise --detach` installs the same single control
   plane through launchd/systemd/Windows service definitions when available, or

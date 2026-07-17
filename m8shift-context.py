@@ -41,7 +41,7 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.epilog = old
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
-VERSION = "3.60.0"
+VERSION = "3.61.0"
 SCHEMA_PACK = "m8shift.context.pack.v1"
 SCHEMA_RECEIPT = "m8shift.context.receipt.v1"
 SCHEMA_METRICS = "m8shift.context.metrics.v1"

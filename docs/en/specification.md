@@ -1,7 +1,7 @@
 # Specification — M8Shift
 
 > [!NOTE]
-> **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-07-03 (v3.43.0)
+> **Status**: `Current` · **Version**: protocol v1 · **Last reviewed**: 2026-07-16 (v3.61.0)
 
 ---
 
@@ -207,6 +207,10 @@ sequenceDiagram
 | EF-35 | **Go-forward RFC discipline (RFC 058)**: substantive source/workflow changes ship a new RFC or governing amendment in the same PR. Repository-aware doctor compares canonical RFC files with the root and English-doc indices and emits advisory `rfc.index_drift`; pre-commit prints a non-blocking same-PR reminder and staged-index drift advisory. These checks never mutate relay state and never gate `doctor --lint`. | `test_rfc_index_doctor_is_clean_for_repository`, `test_rfc_index_doctor_reports_drift_advisory`, `test_precommit_warns_for_substantive_change_without_rfc` |
 | EF-36 | **Terminal colour capability and semantic rendering (RFC 059)**: `m8shift-top.py` selects truecolour, deterministic xterm-256, semantic ANSI-16, or plain output from standard terminal signals. Semantic cells use redundant text/symbols, ordinary content keeps the terminal foreground, `NO_COLOR` and `TERM=dumb` are escape-free, and ANSI-stripped frame width is invariant. | `test_semantic_roles_are_exact_in_every_colour_tier`, `test_all_capabilities_preserve_frame_and_non_colour_meaning`, `test_usage_thresholds_remain_green_below_60_yellow_to_85_red_at_85` |
 | EF-37 | **Adaptive terminal geometry (RFC 060)**: interactive `m8shift-top.py` automatically consumes the real terminal width and height with no mode flag or maximum-width option. The 24-column floor and stacked `<100` / wide `>=100` breakpoint remain stable; the 120-column wide frame is byte-compatible, wider frames allocate declared tracks by deterministic weighted largest remainder, and available activity rows or framed blanks fill the viewport exactly when fixed chrome fits. POSIX `SIGWINCH` uses a nonblocking self-pipe with a mark-only handler, burst drain/coalescing, immediate geometry recomputation, scroll clamping, and help-state preservation; fallback modes remain unchanged. | `test_120_column_plain_frame_is_byte_stable`, `test_weighted_largest_remainder_track_plans_are_exact`, `test_geometry_acceptance_matrix_plain_and_ansi`, `test_self_pipe_coalesces_resize_bursts`, `test_resize_recomputes_geometry_immediately_and_preserves_help` |
+| EF-38 | **Exact-identity fleet bootstrap (RFC 072 slices 1–3)**: `m8shift-runtime.py fleet plan/health --spec FILE` are pure — they validate `m8shift.fleet.spec.v1` (a curated provider template plus an explicit model only; missing templates, `UNSET`/implicit models, duplicate identities, or invalid desired states fail before a plan is emitted) and report the desired/observed diff or health view without writing. `fleet apply --spec FILE --by HOLDER` bootstraps one git-ignored exact identity artifact per lane under `.m8shift/runtime/identities/<agent>.md`, materializes only curated provider rows, and delegates idempotent live enrollment to holder-attributed core `roster add` — the runtime has no standing pen and refuses to apply without the live holder. `fleet reconcile/stop/resume` converge batch listener lifecycle only after complete identity/provider/roster bootstrap; one `fleet supervise` control-plane process reconciles every lane, and `stop` deliberately keeps relay membership intact. | `test_pure_plan_reports_structured_diff_without_writes`, `test_spec_requires_template_and_explicit_model`, `test_apply_bootstraps_exact_identity_and_delegates_idempotent_roster_add`, `test_apply_without_live_holder_refuses_before_bootstrap`, `test_batch_lifecycle_is_one_supervisor_and_stop_keeps_membership`, `test_reconcile_refuses_unbootstrapped_identity_before_process_work` |
+| EF-39 | **Immutable fleet jobs (RFC 072 slices 4–6)**: `fleet jobs submit --spec FILE --by INTEGRATOR` persists immutable `m8shift.fleet.jobs.v1` batch and per-job records under the relay-designated integrator (the live holder must match; conflicting retries fail closed). `fleet jobs assign` delegates worktree creation to the RFC 008 companion, never places a producer on the shared target branch, allows at most two active isolated producer worktrees with one active mutating lane per producer identity. `fleet jobs attempt --id ID --by PRODUCER --provider-exit N` records sequential append-only attempts where provider exit alone is never completion: a job reaches `verified` only when its explicit shell-free verification recipe exits zero inside the assigned worktree. `fleet jobs integrate --id ID --by INTEGRATOR --to AGENT` requires verified evidence and the exact designated integrator, then delegates the serialized merge, relay handoff, and worktree drop to `m8shift-worktree.py`; producers cannot self-integrate. | `test_immutable_jobs_require_designated_live_integrator`, `test_provider_exit_never_completes_without_recipe_pass`, `test_integrator_assigns_at_most_two_isolated_unique_producer_lanes`, `test_isolated_multi_session_acceptance_integrates_and_drops_by_integrator` |
+| EF-40 | **Vendor-neutral agent CLI adapter registry (RFC 073 slice 1)**: the runtime companion dispatches launch/lifecycle work through a formal `m8shift.agent-cli-adapter.v1` contract (`launch_argv`/`stop`/`resume`/`health`) behind a provider-keyed registry. Managed `openai-codex` and `anthropic-claude` launch compilation moved behind adapters with byte-identical argv relative to the pre-registry compiler; a registered `google-gemini` validated stub launches declarative argv while resume fails closed and health can never imply relay completion; unknown providers keep the existing explicit declarative argv behavior. A third provider can join without a core or generic-launcher change. | `test_agent_cli_adapter_registry_dispatch_and_gemini_stub`, `test_managed_adapter_launch_is_byte_identical_to_pre_registry_compiler`, `test_fleet_lifecycle_dispatches_resume_health_and_stop_through_adapter` |
+| EF-41 | **Detached durable fleet recovery (RFC 073 slice 2)**: the RFC 072 supervisor persists schema-versioned, project/identity/provider/model-bound control, lane, and opaque-session records crash-consistently (fsync + atomic replace, non-symlink-following, project-bound) under `.m8shift/runtime/fleet/`. Startup PID start-identity reconciliation is a complete four-way partition: an exact persisted-ref/live-ref match is **adopted**; a determinate reused-pid mismatch **restarts the missing desired-running lane once**; a transient probe failure on a known persisted ref **defers unverified** (no launch, no signal, re-verified on a later tick); a live pid with an empty persisted ref — and any corrupt, half-written, stale, or ambiguous evidence — **fails closed** to `needs_reconciliation`, never to a duplicate launch or success. The supervisor installs a SIGTERM/SIGINT handler so clean shutdown persists `state=stopped`; after a reboot that left stale `running` control it takes over a provably-reused pid instead of crash-looping, and `fleet stop` clears a provably-dead supervisor's control. `fleet supervise --detach` installs the same single control plane through native launchd/user-systemd/Windows-service definitions via the existing backend seam, or reports the weaker local process-group-detached tier explicitly. | `test_crash_restart_adopts_surviving_listener_without_duplicate_launch`, `test_resume_restarts_missing_listener_once_then_adopts_it`, `test_corrupt_durable_lane_fails_closed_before_launch`, `test_half_written_control_fails_before_supervisor_or_listener_launch`, `test_transient_start_probe_failure_does_not_wedge_adopted_lane`, `test_reused_pid_mismatch_restarts_lane_without_wedge`, `test_durable_empty_lane_ref_fails_closed_not_double_launch`, `test_supervisor_takes_over_stale_running_control_after_pid_reuse`, `test_empty_persisted_control_ref_is_unverifiable_not_reused_pid` |
 
 ## 5. Non-functional requirements
 
@@ -342,6 +346,75 @@ stateDiagram-v2
     DONE --> [*]
 ```
 
+### 6.3 Fleet durable store — `.m8shift/runtime/fleet/`
+
+The RFC 072/073 fleet control plane persists its evidence in a crash-consistent,
+git-ignored store under `.m8shift/runtime/fleet/` (fsync + atomic replace,
+project-bound, non-symlink-following). Like every runtime sidecar it is advisory:
+deleting it loses only local orchestration history — the relay stays portable and
+authoritative, and no fleet record ever advances the `LOCK`.
+
+```text
+.m8shift/runtime/
+├── identities/<agent>.md            ← exact per-agent identity artifact
+│                                       (bound to the provider row via
+│                                        identity_schema = m8shift.agent-identity.v1)
+└── fleet/
+    ├── control.json                 ← m8shift.fleet.control.v1 (supervisor control)
+    ├── supervisor.pid · supervisor.log · supervisor.backend.json
+    ├── lanes/<agent>.json           ← m8shift.fleet.lane.v1 (per-identity lane record)
+    ├── sessions/<session-ref>.json  ← m8shift.fleet.session.v1 (opaque session refs)
+    ├── jobs/
+    │   ├── batch.json               ← m8shift.fleet.jobs.v1 (immutable batch record)
+    │   └── <job-id>/
+    │       ├── spec.json            ← m8shift.fleet.job.v1 (immutable job)
+    │       ├── assignment.json      ← m8shift.fleet.assignment.v1
+    │       ├── attempts/<n>.plan.json / <n>.result.json
+    │       │                        ← m8shift.fleet.attempt.v1 (sequential, append-only)
+    │       ├── integration.plan.json ← m8shift.fleet.integration-plan.v1
+    │       └── completion.json      ← m8shift.fleet.integration.v1
+    └── events.jsonl                 ← m8shift.fleet.event.v1 append-only transitions
+```
+
+The operator-authored input, `m8shift.fleet.spec.v1`, is passed via `--spec` and is
+never copied into the store. Desired lane/job records and resolved attempt plans are
+schema-versioned; an attempt plan is immutable and a retry gets a new attempt number;
+transitions append to `events.jsonl` and derived health is rebuildable. Session
+references are opaque, redacted from events/output, and bound to the same project,
+agent, adapter, and job; the project binding itself is an opaque hash
+(`project_ref`), never the checkout path. Startup reconciles the store, process
+start identity, service state, relay, worktree, last event, usage hold, and adapter
+health before any launch; ambiguous ownership, missing evidence, or a half-written
+record fails closed to `needs_reconciliation`, never to a duplicate launch.
+
+```mermaid
+flowchart TD
+    Spec["m8shift.fleet.spec.v1<br/>operator-authored --spec"]
+    Plan["fleet plan / health<br/>pure desired/observed diff"]
+    Apply["fleet apply --by HOLDER<br/>identity artifact + core roster add"]
+    Sup["fleet supervise [--detach]<br/>single control plane"]
+    Reg["adapter registry<br/>m8shift.agent-cli-adapter.v1"]
+    Codex["openai-codex<br/>managed adapter"]
+    Claude["anthropic-claude<br/>managed adapter"]
+    Gem["google-gemini<br/>validated stub"]
+    Store[".m8shift/runtime/fleet/<br/>control.json · lanes/ · jobs/<br/>attempts/ · sessions/ · events.jsonl"]
+    Listener["listener lanes<br/>one bounded runner turn per wake"]
+    Core["m8shift.py core<br/>roster add · relay LOCK"]
+
+    Spec --> Plan
+    Plan --> Apply
+    Apply -->|"holder-attributed argv"| Core
+    Apply --> Sup
+    Sup -->|"launch_argv / stop / resume / health"| Reg
+    Reg --> Codex
+    Reg --> Claude
+    Reg --> Gem
+    Sup -->|"crash-consistent records"| Store
+    Store -->|"PID start-identity reconciliation<br/>adopt / restart-once / defer-unverified / fail-closed"| Sup
+    Reg --> Listener
+    Listener -.->|"read-only LOCK polls; child claims via core"| Core
+```
+
 ## 7. Command-line interface
 
 `init [--agents a,b,c…] [--lang …]` · `status [--for agent] [--json] [--brief]` · `watch [--for agent] [--interval N] [--clear] [--changes-only]` · `doctor [--lint] [--json] [--security] [--contracts] [--severity-min …]` ·
@@ -356,6 +429,17 @@ stateDiagram-v2
 turn unless forced with an audited reason) · `done <agent> [--force --reason TEXT]` · `archive [--keep N]` ·
 `pause <holder> --reason TEXT` · `cooldown --until ISO --reason TEXT [--for agent] [--source SOURCE] [--wait-interval N] [--replace]` · `resume <agent> --reason TEXT` ·
 `remember <agent> "<note>"` · `task add|done|drop <agent> … | task list|show …`
+
+Fleet verbs (RFC 072/073) live in the runtime companion, `m8shift-runtime.py`, not in
+the core:
+`fleet plan --spec FILE [--json]` · `fleet health --spec FILE [--json]` ·
+`fleet apply --spec FILE --by HOLDER [--json]` ·
+`fleet reconcile|stop|resume --spec FILE [--backend auto|local|launchd|systemd|windows] [--runner PATH] [--grace N] [--dry-run] [--json]` ·
+`fleet supervise --spec FILE [lifecycle flags] [--poll-interval N] [--max-ticks N] [--detach] [--reconcile-control]` ·
+`fleet jobs plan --spec FILE [--json]` · `fleet jobs submit --spec FILE --by HOLDER [--json]` ·
+`fleet jobs assign --spec FILE --by HOLDER [--json]` ·
+`fleet jobs attempt --id ID --by PRODUCER --provider-exit N [--json]` ·
+`fleet jobs integrate --id ID --by INTEGRATOR --to AGENT [--json]`
 
 > The single shipped file is **English-only**; `--lang` selects among languages bundled into
 > a localized variant built with `m8shift-i18n.py` (see the i18n note).
@@ -561,6 +645,11 @@ read-only over data M8Shift already stores, and **never feed the mutex / routing
 | [040-rfc-ai-session-usage-monitoring.md](rfc/040-rfc-ai-session-usage-monitoring.md) | **Usage monitoring: cooldown core + companion phases + reference adapters** | Core: `cooldown --until ISO --reason TEXT [--for agent] [--source SOURCE] [--wait-interval N] [--replace]`, `PAUSED`, and `M8SHIFT.sessions.jsonl` `pause` events with `kind=usage_cooldown`. Companion: `m8shift-runtime.py usage init/adapters/snapshot/status/guard/watch/wait/resume` over `.m8shift/usage/adapters.json` (disabled-by-default registry) and the append-only `m8shift.usage.snapshot.v1` ledger; `usage guard --apply` parks the relay only through the core `cooldown` command and `usage resume` is the only road back (never automatic). Reference adapters (Phase 4, live-verified 2026-07-10 #105): `examples/usage-adapters/claude-oauth-usage.py` (Keychain OAuth, live `five_hour`/`seven_day` shape, strict-`Z` normalization, naive resets → `null`, exact `windows[]`-first fallback precedence) and `examples/usage-adapters/codex-ratelimits.py` (Codex app-server JSON-RPC over held-open stdin with a daemon reader thread and a monotonic deadline, so a silent-but-live server is bounded). | The core never runs an adapter, opens a socket, or spawns the companion; adapters are fail-open (empty official fixture on any provider/auth/schema error) and never emit account identity, credits, plan type, raw responses, or stderr; no automatic resume anywhere. |
 | [051-rfc-usage-advisory-in-core-display.md](rfc/051-rfc-usage-advisory-in-core-display.md) | **Usage advisory in the core display** — implemented v3.54.0 line; #59 consumption fragment; amendment E #106 unified multi-window line | `status` / `watch` (and `scripts/watch-status.sh`) render a read-only advisory usage line per roster agent from the most recent recorded `usage.snapshot` event in `.m8shift/runtime/usage.jsonl`: recorded percent + window + verbatim `provenance` + staleness marker, with the #59 bounded consumption fragment. Amendment E (#106): when a snapshot carries at least one additional usable window, the line unifies all recorded windows (consumed percentage and reset per window, deterministic max-ratio tie rule, field-level degradation, a hard cap against hostile many-window payloads, and fallback to the single-window form when `windows[]` is unusable). #107: when the most recent snapshot has no usable window/ratio (a transient empty official fixture at a watch tick), the line falls back to the most recent snapshot that DOES have a usable window, rendered explicitly marked stale, and `status --json` exposes a clean public `last_known` boolean (no underscore-prefixed internal keys leak); the em-dash is byte-identical only when NO usable snapshot exists at all. |
 | [052-rfc-project-compartmentalization-data-hygiene.md](rfc/052-rfc-project-compartmentalization-data-hygiene.md) | **Project compartmentalization & data hygiene** — complete (PR1–PR4), v3.56.0 + v3.57.0 | `doctor --hygiene`/`--hygiene-only`/`--hygiene-anchors` raw-read outbound path lint (placeholder-aware, high-confidence hits gate under `--lint`), an out-of-repo confidential denylist (`$M8SHIFT_DENYLIST`), `scripts/scrub-check.py` + `hooks/pre-push`, the agent-pack compartmentalization floor, and mechanical one-project session binding. | Deny-by-default project isolation: no project's identity/real paths/session output crosses into another; cross-reference needs explicit operator opt-in; advisory-by-default (gates only under `M8SHIFT_SCRUB_ENFORCE=1`). | Bounded path-safe tail read (`lstat` first, tail never trusts a partial first line); echo-recorded-bytes plus a stale-marked last-known-good fallback (#107) — the core never computes ratios or an argmax over ratios and never runs an adapter; roster-only rendering; terminal/output-safe fields; byte-identical human and `--json` output when no usable snapshot exists. |
+| [067-rfc-detached-vendor-neutral-cli-orchestration.md](rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | **Detached, vendor-neutral CLI agent orchestration** — accepted, DESIGN-ONLY; phased implementation deferred (#157) | Design charter (D1–D16) for pluggable agent-CLI adapters, detached process supervision, durable recovery, relay coordination, scheduling, and model/task routing; delivered incrementally by RFC 070/072/073. | The document itself grants no runtime authority; every slice ships through its own implementation RFC and adversarial review. |
+| [070-rfc-provider-pinned-model-launch.md](rfc/070-rfc-provider-pinned-model-launch.md) | **Provider-pinned model launch** — implemented (#86, 2026-07-15), shipped v3.61.0 | Managed Codex/Claude provider rows require an explicit valid model before headless launch, compile model/profile/effort from one source into shell-free argv, and reject competing embedded selectors; listener plans pass the pin through the immutable reference-runner plan into `M8SHIFT_AGENT_MODEL`. | Launchable managed rows fail closed on an absent/invalid/`UNSET` model; the pin overrides ambient inheritance but remains RFC 056 self-declared/unverified provenance; no core routing authority. |
+| [071-rfc-live-roster-add.md](rfc/071-rfc-live-roster-add.md) | **Pen-guarded live roster addition** — implemented (#89, 2026-07-15), shipped v3.61.0 | Holder-only core `roster add <agent> --by <holder>` for byte-preserving live enrollment without `init --force`. | Changes only LOCK `agents` membership; requires the actor's live pen; deliberately leaves per-instance anchor bootstrap manual and never edits anchors. |
+| [072-rfc-exact-identity-fleet-bootstrap.md](rfc/072-rfc-exact-identity-fleet-bootstrap.md) | **Exact-identity fleet bootstrap and launch automation** — implemented (#85); slices 1–6 shipped v3.61.0 | `m8shift-runtime.py fleet plan/health/apply/reconcile/stop/resume/supervise` and `fleet jobs plan/submit/assign/attempt/integrate` over `m8shift.fleet.spec.v1` / `m8shift.fleet.jobs.v1`; exact per-agent identity artifacts under `.m8shift/runtime/identities/`; durable evidence under `.m8shift/runtime/fleet/` (§6.3). | Plan/health are pure; fleet specs select a curated template + explicit model only (never arbitrary argv); membership is holder-attributed and delegated to core `roster add` (the runtime has no standing pen); `stop` never removes membership; provider exit alone is never job completion — verification recipes are explicit and shell-free; at most two isolated producer worktrees; only the relay-designated integrator merges, hands off, and drops. |
+| [073-rfc-adapter-registry-detached-durability.md](rfc/073-rfc-adapter-registry-detached-durability.md) | **Adapter registry + detached durable fleet recovery** — slices 1–2 shipped v3.61.0; slices 3–4 (live Gemini/resume, #59 routing-matrix extension) accepted, not shipped | Slice 1: provider-keyed registry dispatching the `m8shift.agent-cli-adapter.v1` contract (`launch_argv`/`stop`/`resume`/`health`) with managed `openai-codex`/`anthropic-claude` adapters (byte-identical argv migration) and a `google-gemini` validated stub. Slice 2: `fleet supervise --detach` over the crash-consistent `.m8shift/runtime/fleet/` store (§6.3) with PID start-identity reconciliation, SIGTERM-clean shutdown, stale-pid takeover, and launchd/user-systemd/Windows-service backends with an honest local detached fallback. | Adapters never gain relay authority and `health` can never imply relay completion; Gemini live flags/resume remain fail-closed pending probe evidence; startup ambiguity fails closed to `needs_reconciliation`, never a duplicate launch; the durable store extends the RFC 072 supervisor rather than adding a second daemon. |
 
 ### 12.2 Stage 4 contract surface
 

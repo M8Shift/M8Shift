@@ -190,8 +190,9 @@ sequenceDiagram
 ### 1.6.1 Module map — the full system (core + companions)
 
 The product grew past a single file into a **passive core plus advisory companions**. Nothing below
-the core holds the pen, writes `M8SHIFT.md`, requires the network, or runs a daemon; each companion is
-opt-in and fully removable. Colour: 🔒 core · 🧩 companions · ⚡ optional external · 📋 traceability.
+the core holds the pen, writes `M8SHIFT.md`, or requires the network; resident processes (the RFC 047
+listener, the RFC 073 detached fleet supervisor) exist only as explicit opt-in companions, and each
+companion is fully removable. Colour: 🔒 core · 🧩 companions · ⚡ optional external · 📋 traceability.
 
 ```mermaid
 flowchart TB
@@ -212,7 +213,7 @@ flowchart TB
     class LOCK,LEDG,INIT,DEC,HOOK core
 
     subgraph COMP["🧩 Advisory companions — no pen · never write M8SHIFT.md / LOCK"]
-        RT["m8shift-runtime.py<br/>presence · runs · progress · inbox · reports<br/>status-runtime · doctor · retention prune/apply<br/>notify (tiers 0–4) · listener (RFC 047; RFC 049 liveness producer)<br/>usage adapters/snapshot/guard (RFC 040) · usage-cooldown guard"]
+        RT["m8shift-runtime.py<br/>presence · runs · progress · inbox · reports<br/>status-runtime · doctor · retention prune/apply<br/>notify (tiers 0–4) · listener (RFC 047; RFC 049 liveness producer)<br/>usage adapters/snapshot/guard (RFC 040) · usage-cooldown guard<br/>fleet bootstrap · immutable jobs (RFC 072) · agent-CLI adapter registry (RFC 073)<br/>detached durable control plane (fleet supervise --detach)"]
         CX["m8shift-context.py<br/>context packs · identity-pinned adapters"]
         WT["m8shift-worktree.py<br/>degree-2 worktrees · serialized integration pen<br/>ownership sidecar + advisory takeover guard (RFC 049 PR C)"]
         I18["m8shift-i18n.py<br/>language packs"]
@@ -267,8 +268,9 @@ flowchart LR
         RELAY["📘 M8SHIFT.md + LOCK<br/>single pen + turn journal"]
         LOCKFILE["🔐 .m8shift.lock<br/>O_EXCL inter-process lock"]
         BOARDS["📋 M8SHIFT.memory.md<br/>M8SHIFT.tasks.md<br/>M8SHIFT.sessions.jsonl"]
-        RUNTIME["🧩 m8shift-runtime.py<br/>presence · progress · notify · route"]
+        RUNTIME["🧩 m8shift-runtime.py<br/>presence · progress · notify · route<br/>fleet · adapter registry · detached supervisor"]
         RUNTIME_STORE["🗂 .m8shift/runtime/*<br/>JSONL / JSON sidecars"]
+        FLEET_STORE["🗂 .m8shift/runtime/fleet/*<br/>control.json · lanes/ · sessions/<br/>jobs/ · events.jsonl"]
         CONTEXT["🧩 m8shift-context.py<br/>pack · compress · retrieve"]
         CONTEXT_STORE["🗂 .m8shift/context/*<br/>packs · adapters · compression records"]
         WORKTREE["🧩 m8shift-worktree.py<br/>degree-2 isolated worktrees"]
@@ -281,7 +283,7 @@ flowchart LR
     end
     style LOCAL fill:#F7F5FF,stroke:#7B8196,color:#2B3045,stroke-dasharray: 6 4
     class CORE core
-    class RELAY,LOCKFILE,BOARDS,RUNTIME_STORE,CONTEXT_STORE record
+    class RELAY,LOCKFILE,BOARDS,RUNTIME_STORE,FLEET_STORE,CONTEXT_STORE record
     class RUNTIME,CONTEXT,WORKTREE,E2E,I18N,GEN companion
     class GIT,HOOKS,ADAPTERS external
 
@@ -292,6 +294,7 @@ flowchart LR
     CORE -->|"MD/JSONL append: memory/tasks/sessions"| BOARDS
     RUNTIME -->|"subprocess argv: m8shift.py status --json / pause"| CORE
     RUNTIME -->|"JSON/JSONL file R/W: presence/progress/inbox/runs"| RUNTIME_STORE
+    RUNTIME -->|"fsync + atomic replace: durable control/lane/session/job records"| FLEET_STORE
     RUNTIME -->|"one-shot argv + exit code: notify hook / OS preset"| HOOKS
     CONTEXT -->|"bounded file read: relay/context inputs"| RELAY
     CONTEXT -->|"JSON/text file R/W: packs, records, raw/compact refs"| CONTEXT_STORE
@@ -402,6 +405,7 @@ afterwards. Decisions and their contradictions are recorded through the **forge 
 | local pre-commit hook | Git index + `checksums.sha256`; RFC files + both README indices | local Git | W only for checksum refresh; RFC governance read-only/advisory (RFC 057/058) |
 | `m8shift-worktree.py` | `.m8shift/worktrees/*`, `.m8shift/worktree-owners/*` (ownership sidecars + takeover ledger), canonical `M8SHIFT.md` | local file system + Git | W, serialized integration |
 | `m8shift-runtime.py` | `.m8shift/runtime/*`, `.m8shift/usage/*` (adapter registry + snapshot ledger) | local file system | W (advisory sidecars only) |
+| `m8shift-runtime.py fleet` / `fleet supervise [--detach]` | `.m8shift/runtime/fleet/*` (`control.json`, `lanes/`, `sessions/`, `jobs/`, `events.jsonl`); managed provider launches compiled through the `m8shift.agent-cli-adapter.v1` registry | local file system (+ bounded argv to the user's service manager under `--detach`: launchd / user systemd / Windows, honest local fallback) | W (crash-consistent durable control plane; PID start-identity reconciliation, fail-closed `needs_reconciliation`; RFC 072/073) |
 
 ### 1.8 Concurrency model — a mutex, not a semaphore
 

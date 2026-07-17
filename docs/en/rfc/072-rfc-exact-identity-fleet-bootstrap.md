@@ -1,6 +1,6 @@
 # RFC 072 — Exact-identity fleet bootstrap and launch automation
 
-- **Status:** implemented (#85); slices 1–6 shipped
+- **Status:** implemented (#85); slices 1–6 shipped in v3.61.0 (2026-07-16)
 - **Scope:** declarative fleet planning, exact per-agent identity bootstrap,
   holder-attributed enrollment, and batch listener lifecycle.
 - **Builds on:** [RFC 067](067-rfc-detached-vendor-neutral-cli-orchestration.md),
@@ -85,6 +85,25 @@ and incomplete drops without gaining any core authority.
 
 These runtime sidecars add no authority to the passive core and do not weaken
 O1–O6.
+
+## Fleet lifecycle
+
+```mermaid
+flowchart TD
+    SPEC["m8shift.fleet.spec.v1"] --> PLAN["fleet plan / fleet health — pure, read-only"]
+    PLAN --> APPLY["fleet apply --by HOLDER — identity artifact + core roster add"]
+    APPLY --> REC["fleet reconcile — converge listener lifecycle"]
+    REC --> SUBMIT["fleet jobs submit — immutable m8shift.fleet.jobs.v1 records"]
+    SUBMIT --> ASSIGN["fleet jobs assign — holder- and integrator-gated"]
+    ASSIGN -->|"at most two active producer worktrees, never the shared target"| WT["isolated worktree via the RFC 008 companion"]
+    WT --> ATT["sequential append-only attempt — provider exit recorded first"]
+    ATT --> VER{"verification recipe exits zero inside the worktree?"}
+    VER -->|no| UNVER["job stays unverified — provider exit alone is never completion"]
+    VER -->|"yes — verified"| INT["fleet jobs integrate — designated integrator only, no producer self-integration"]
+    INT --> MERGE["serialized merge + relay handoff via m8shift-worktree.py"]
+    MERGE --> DROP["drop the clean producer worktree"]
+    STOP["fleet stop / fleet resume — batch lifecycle intents"] -.->|"never removes membership"| REC
+```
 
 ## Acceptance gates
 
