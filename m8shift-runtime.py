@@ -1423,6 +1423,8 @@ def pid_alive(pid):
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        return True
     except OSError:
         return False
 
@@ -1474,6 +1476,9 @@ def producer_evidence(listener, presence, usage_watch, *, now_utc=None,
     if isinstance(usage_watch, dict) and isinstance(usage_watch.get("pid"), int):
         usage_watch = dict(usage_watch,
                            process_resident=pid_alive(usage_watch.get("pid")))
+    if (isinstance(usage_watch, dict)
+            and usage_watch.get("schema") != USAGE_WATCH_SCHEMA):
+        usage_watch = {}
     row = load_core().listener_snapshot(
         "", "", observation, presence, usage_watch,
         now_utc=now_utc, stale_after_seconds=stale_after_seconds)
@@ -1520,13 +1525,11 @@ def runtime_attention(status, agent, stale_after_seconds=ATTENTION_STALE_AFTER_S
     exists, pid, pid_generation = read_listener_identity(agent)
     state_doc, state_err = read_json_diagnostic(listener_paths(agent)["state"], {})
     # Match the core attention classifier: unverifiable advisory evidence does
-    # not prove coverage.  Listener lifecycle commands retain their separate
-    # EPERM-as-resident semantics for safe stop/status handling.
+    # not prove coverage. Both passive and lifecycle probes treat EPERM as
+    # resident because signal-0 permission denial still proves process presence.
     alive = bool(pid and pid_alive(pid))
-    generation_matches = bool(
-        alive and isinstance(state_doc, dict) and pid_generation
-        and state_doc.get("generation") == pid_generation
-        and state_doc.get("process_pid") == pid)
+    generation_matches = load_core().listener_generation_matches(
+        alive, pid_generation, state_doc, pid)
     listener_problem = state_err or (
         "resident listener has missing/empty state" if alive and not state_doc else "")
     listener = {
@@ -1545,6 +1548,8 @@ def runtime_attention(status, agent, stale_after_seconds=ATTENTION_STALE_AFTER_S
         presence = dict(presence, process_resident=pid_alive(presence.get("pid")))
     if isinstance(watch, dict) and isinstance(watch.get("pid"), int):
         watch = dict(watch, process_resident=pid_alive(watch.get("pid")))
+    if isinstance(watch, dict) and watch.get("schema") != USAGE_WATCH_SCHEMA:
+        watch = {}
     row = load_core().listener_snapshot(
         status.get("state", ""), status.get("since", ""), listener,
         presence if not presence_err else presence_err,
@@ -7018,7 +7023,11 @@ def write_listener_state(agent, *, phase, consecutive_failures,
 
 
 def read_listener_identity(agent):
-    """Return ``(exists, pid, generation)``; legacy integer files have no cookie."""
+    """Return ``(exists, pid, generation)``; legacy integer files have no cookie.
+
+    The cookie binds the pid file to the state file. It is not a portable OS
+    process-start identity and cannot detect PID reuse by itself.
+    """
     path = listener_paths(agent)["pid"]
     try:
         with open(path, encoding="utf-8") as fh:
@@ -7314,6 +7323,16 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                              notify_only=notify_only, generation=generation,
                              process_pid=os.getpid())
 
+    def notify_halt(state, holder, message="", prompt=""):
+        """Notify once at the transition; durable event dedup covers observers."""
+        message = message or (
+            "%s has a resident halted listener; operator action is required (%s)" % (
+                state, reason or "listener_halted"))
+        kwargs = {"state": state, "holder": holder}
+        if prompt:
+            kwargs["prompt"] = prompt
+        return emit_notification_nonfatal(agent, "blocked", message, **kwargs)
+
     save()
     ticks = 0
     try:
@@ -7357,6 +7376,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                         "The relay is left for operator recovery; clear with "
                         "`listener start --restart`.")
                     save()
+                    notify_halt(state, lk.get("holder", ""))
                     continue
                 wake = "stuck_retry"
             if not wake:
@@ -7421,6 +7441,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     or last_classification == "environment_blocked"):
                 fails += 1
                 phase = "halted"
+                notification_message = ""
+                notification_prompt = ""
                 if rc == 2 and not ledger_classification:
                     last_classification = "runner_refused_argv"
                     reason = "runner_refused_argv"
@@ -7431,10 +7453,11 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     reason = "environment_blocked:write_probe_denied"
                     message = ENVIRONMENT_BLOCKED_NOTIFICATIONS["write_probe_denied"]
                     say(f"{agent}: {message}")
-                    emit_notification_nonfatal(
-                        agent, "blocked", message, prompt=message,
-                        state=state, holder=lk.get("holder", ""))
+                    notification_message = message
+                    notification_prompt = message
                 save()
+                notify_halt(state, lk.get("holder", ""),
+                            notification_message, notification_prompt)
                 continue
             if rc == 0:
                 fails = 0
@@ -7457,6 +7480,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 say(f"{agent}: run {run_id} failed ({last_classification}); {fails}/{max_retries} — "
                     "HALTED. The relay is left for operator recovery; no force-claim is ever attempted.")
                 save()
+                notify_halt(state, lk.get("holder", ""))
                 continue
             phase = "backoff"
             delay = listener_backoff(fails, cap=max_backoff)
@@ -7614,9 +7638,8 @@ def cmd_listener_status(args):
     doc, state_err = read_json_diagnostic(paths["state"], {})
     doc = doc if isinstance(doc, dict) else {}
     phase = doc.get("phase") if doc.get("phase") in LISTENER_PHASES else ""
-    generation_matches = bool(
-        alive and pid_generation and doc.get("generation") == pid_generation
-        and doc.get("process_pid") == pid)
+    generation_matches = load_core().listener_generation_matches(
+        alive, pid_generation, doc, pid)
     row = load_core().listener_snapshot(
         "", "", {
             "pid_status": pid_status, "process_resident": alive,

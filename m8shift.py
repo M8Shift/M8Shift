@@ -9448,6 +9448,8 @@ def _usage_signature(lk):
 
 
 STATUS_SNAPSHOT_SCHEMA = "m8shift.status/1"
+LISTENER_PHASES = ("polling", "backoff", "halted")
+USAGE_WATCH_SCHEMA = "m8shift.usage-watch.lifecycle.v1"
 STATUS_SNAPSHOT_TEXT_MAX = 120
 STATUS_ACTIVITY_LIMIT = 200
 STATUS_ACTIVITY_DEFAULT_LIMIT = 8
@@ -9590,6 +9592,22 @@ def _status_ledger_counts():
             "doctor_findings": doctor_findings, "gate_armed": gate_armed}
 
 
+def listener_generation_matches(resident, pid_generation, state_doc, pid):
+    """Validate cross-file listener identity without claiming PID-reuse proof.
+
+    Pre-cookie listener sidecars remain valid when neither file has a generation.
+    A cookie, when present, binds the pid and state files to each other; it does
+    not identify the current OS process or its start time after PID recycling.
+    """
+    if not resident or not isinstance(state_doc, dict):
+        return False
+    state_generation = state_doc.get("generation", "")
+    if not pid_generation and not state_generation:
+        return True
+    return bool(pid_generation and state_generation == pid_generation
+                and state_doc.get("process_pid") == pid)
+
+
 def listener_snapshot(state, since, listener, presence=None, usage_watch=None, *,
                       now_utc=None, stale_after_seconds=300, evidence=None):
     """Pure listener lifecycle, coverage, and attention decision table.
@@ -9613,7 +9631,7 @@ def listener_snapshot(state, since, listener, presence=None, usage_watch=None, *
     generation_matches = listener.get("generation_matches") is True
     listener_unknown = (listener_malformed or
                         (resident and (not sidecar_valid or not generation_matches
-                                       or phase not in ("polling", "backoff", "halted"))))
+                                       or phase not in LISTENER_PHASES)))
     if listener_unknown:
         lifecycle = "UNKNOWN"
     elif resident and phase == "halted":
@@ -9723,10 +9741,8 @@ def _status_listener_rows(lk, ref=None, stale_after_seconds=300):
             pid_exists, pid_error = True, type(exc).__name__
         resident = alive(listener_pid)
         phase = state_doc.get("phase", "") if isinstance(state_doc, dict) else ""
-        generation_matches = bool(
-            resident and isinstance(state_doc, dict) and pid_generation
-            and state_doc.get("generation") == pid_generation
-            and state_doc.get("process_pid") == listener_pid)
+        generation_matches = listener_generation_matches(
+            resident, pid_generation, state_doc, listener_pid)
         listener = {
             "pid_status": ("alive" if resident else "stale" if pid_exists else "dead"),
             "process_resident": resident,
@@ -9741,10 +9757,15 @@ def _status_listener_rows(lk, ref=None, stale_after_seconds=300):
             lane = dict(lane, process_resident=alive(lane.get("pid")))
         watch, watch_err = read_json_diagnostic(
             os.path.join(runtime, "usage-watchers", agent + ".json"), {})
+        if isinstance(watch, dict) and watch.get("schema") != USAGE_WATCH_SCHEMA:
+            watch = {}
         if isinstance(watch, dict) and isinstance(watch.get("pid"), int):
             watch = dict(watch, process_resident=alive(watch.get("pid")))
+        agent_state = (lk.get("state", "")
+                       if lk.get("state", "") == "AWAITING_" + agent.upper()
+                       else "")
         out[agent] = listener_snapshot(
-            lk.get("state", ""), lk.get("since", ""), listener,
+            agent_state, lk.get("since", ""), listener,
             lane if not presence_err else presence_err,
             watch if not watch_err else watch_err,
             now_utc=ref, stale_after_seconds=stale_after_seconds)

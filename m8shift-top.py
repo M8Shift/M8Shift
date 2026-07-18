@@ -280,9 +280,11 @@ def _attention_display(snapshot):
     for agent, row in rows.items():
         if not isinstance(row, dict) or row.get("relay_attention") == "not_applicable":
             continue
-        return "ATTENTION %s %s (%s)" % (
+        cause = clean(row.get("cause") or "", 40)
+        return "ATTENTION %s %s (%s)%s" % (
             clean(agent, 18), clean(row.get("relay_attention") or "unknown", 24),
-            clean(row.get("producer_coverage") or "unknown", 20))
+            clean(row.get("producer_coverage") or "unknown", 20),
+            (" cause=" + cause) if cause else "")
     return ""
 
 
@@ -773,6 +775,7 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         _value(listeners), ("  " + attention) if attention else ""))
     listen_row = paint(listen_row, "ALIVE", green)
     listen_row = paint(listen_row, "HALTED (resident)", red)
+    listen_row = paint(listen_row, "UNKNOWN", red)
     listen_row = paint(listen_row, "stranded", red)
     listen_row = paint(listen_row, "operator_action_required", red)
     listen_row = paint(listen_row, "(halted)", red)
@@ -975,6 +978,7 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         ("  LISTEN", listen_payload), (0, 10), (10, 108), (0, 1)) + "│"
     listen_line = paint(listen_line, "ALIVE", green)
     listen_line = paint(listen_line, "HALTED (resident)", red)
+    listen_line = paint(listen_line, "UNKNOWN", red)
     listen_line = paint(listen_line, "stranded", red)
     listen_line = paint(listen_line, "operator_action_required", red)
     listen_line = paint(listen_line, "(halted)", red)
