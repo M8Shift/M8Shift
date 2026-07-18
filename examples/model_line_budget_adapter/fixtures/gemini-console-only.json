@@ -1,0 +1,19 @@
+{
+  "schema": "m8shift.model-line.evidence.v1",
+  "provider": "google",
+  "mode": "cloud",
+  "requested_model": "model-gemini-example",
+  "scope": "model",
+  "applicability": "exact_model",
+  "provider_bucket_id": null,
+  "used_ratio": null,
+  "remaining_ratio": null,
+  "reset_at": null,
+  "signal": "console",
+  "provenance": "console_only",
+  "captured_at": "2026-07-18T17:00:00Z",
+  "fresh_until": "2026-07-18T17:00:00Z",
+  "documented_mapping": null,
+  "estimate": null,
+  "adapter": {"name": "fixture-gemini", "version": "1.0.0"}
+}

@@ -404,6 +404,7 @@ published site, or use the repository-local docs when working from a clone.
 | 074 | [Standardized inter-agent exchange](docs/en/rfc/074-rfc-standardized-inter-agent-exchange.md) | Explicit shift stages, vendor-neutral structured turns, and portable whole-shift exchange | draft / design-only | — | operator arbitration required before implementation; legacy turns remain unstamped and immutable |
 | 075 | [Model-line budget observability](docs/en/rfc/075-rfc-model-line-budget-observability.md) | Vendor evidence for model/model-family quota visibility and honest unknowns | Phase 1 research / design-only | — | live vendor-contract recheck and Claude review required before failover design |
 | 076 | [Incident-first, deterministic, re-entrant discipline](docs/en/rfc/076-rfc-incident-first-deterministic-reentrant-discipline.md) | Problem packets, hermetic gates, and blank-agent reconstruction | draft / design-only | — | review and operator arbitration required before tooling |
+| 077 | [Safe-boundary model-line routing](docs/en/rfc/077-rfc-safe-boundary-model-line-routing.md) | Same-provider model-line evidence, safe-boundary decisions, and reconstructible audit records | accepted design; Slice A implemented | — | schemas/fixtures/base conformance only; automatic routing disabled; live pilot operator-gated |
 
 ## 🔁 How it works
 

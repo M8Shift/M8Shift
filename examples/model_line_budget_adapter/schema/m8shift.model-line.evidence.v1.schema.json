@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m8shift.model-line.evidence.v1",
+  "title": "M8Shift model-line evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "provider", "mode", "requested_model", "scope",
+    "applicability", "provider_bucket_id", "used_ratio", "remaining_ratio",
+    "reset_at", "signal", "provenance", "captured_at", "fresh_until",
+    "documented_mapping", "estimate", "adapter"
+  ],
+  "properties": {
+    "schema": {"const": "m8shift.model-line.evidence.v1"},
+    "provider": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["api", "subscription_cli", "cloud"]},
+    "requested_model": {"type": "string", "minLength": 1},
+    "scope": {"enum": ["account", "organization", "project", "workspace", "model_group", "model"]},
+    "applicability": {"enum": ["exact_model", "documented_group", "unknown"]},
+    "provider_bucket_id": {"type": ["string", "null"], "minLength": 1},
+    "used_ratio": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "remaining_ratio": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "reset_at": {"type": ["string", "null"], "format": "date-time"},
+    "signal": {"enum": ["response_header", "usage_report", "quota_metric", "console", "runtime_observation", "rejection"]},
+    "provenance": {"enum": ["documented", "runtime_observed", "console_only", "unknown"]},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "fresh_until": {"type": "string", "format": "date-time"},
+    "documented_mapping": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reference", "version"],
+          "properties": {
+            "reference": {"type": "string", "minLength": 1},
+            "version": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "estimate": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "captured_at", "used_ratio", "remaining_ratio", "reset_at"],
+          "properties": {
+            "method": {"type": "string", "minLength": 1},
+            "captured_at": {"type": "string", "format": "date-time"},
+            "used_ratio": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "remaining_ratio": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "reset_at": {"type": ["string", "null"], "format": "date-time"}
+          }
+        }
+      ]
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
