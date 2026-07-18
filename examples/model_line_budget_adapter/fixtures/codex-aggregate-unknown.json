@@ -1,0 +1,19 @@
+{
+  "schema": "m8shift.model-line.evidence.v1",
+  "provider": "openai",
+  "mode": "subscription_cli",
+  "requested_model": "model-codex-example",
+  "scope": "account",
+  "applicability": "unknown",
+  "provider_bucket_id": "subscription-weekly",
+  "used_ratio": 0.3,
+  "remaining_ratio": 0.7,
+  "reset_at": "2026-07-25T05:00:00Z",
+  "signal": "runtime_observation",
+  "provenance": "runtime_observed",
+  "captured_at": "2026-07-18T17:00:00Z",
+  "fresh_until": "2026-07-18T17:05:00Z",
+  "documented_mapping": null,
+  "estimate": null,
+  "adapter": {"name": "fixture-codex", "version": "1.0.0"}
+}

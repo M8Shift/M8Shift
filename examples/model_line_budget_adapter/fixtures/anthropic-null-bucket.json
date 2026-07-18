@@ -1,0 +1,22 @@
+{
+  "schema": "m8shift.model-line.evidence.v1",
+  "provider": "anthropic",
+  "mode": "api",
+  "requested_model": "model-sonnet-example",
+  "scope": "model_group",
+  "applicability": "documented_group",
+  "provider_bucket_id": null,
+  "used_ratio": 0.2,
+  "remaining_ratio": 0.8,
+  "reset_at": "2026-07-18T17:02:00Z",
+  "signal": "response_header",
+  "provenance": "documented",
+  "captured_at": "2026-07-18T17:00:00Z",
+  "fresh_until": "2026-07-18T17:01:00Z",
+  "documented_mapping": {
+    "reference": "provider-docs/model-group-example",
+    "version": "2026-07-18"
+  },
+  "estimate": null,
+  "adapter": {"name": "fixture-anthropic", "version": "1.0.0"}
+}

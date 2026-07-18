@@ -1,0 +1,33 @@
+{
+  "schema": "m8shift.route-decision.v1",
+  "decision_id": "decision-0001",
+  "recorded_at": "2026-07-18T17:00:01Z",
+  "session": "session-example",
+  "run_id": "run-example",
+  "agent": "agent-a",
+  "provider": "example-provider",
+  "requested_model": "model-a",
+  "selected_model": "model-b",
+  "policy_id": "operator-policy-example",
+  "reason_code": "active_exhausted_target_available",
+  "switch_ordinal": 1,
+  "adapter": {"name": "fixture-split", "version": "1.0.0"},
+  "evidence_refs": [
+    {
+      "path": ".m8shift/runtime/model-line-routing/session-example/evidence/evidence-a.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "captured_at": "2026-07-18T17:00:00Z",
+      "freshness": "fresh"
+    }
+  ],
+  "checkpoint": {
+    "attempt_plan_ref": ".m8shift/runtime/fleet/attempts/attempt-example.json",
+    "attempt_plan_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "relay_session": "session-example",
+    "relay_turn": 41,
+    "relay_turn_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "relay_state": "AWAITING_AGENT-A",
+    "completed_invocation": 3,
+    "next_invocation": 4
+  }
+}
