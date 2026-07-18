@@ -130,6 +130,8 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [072-rfc-exact-identity-fleet-bootstrap.md](rfc/072-rfc-exact-identity-fleet-bootstrap.md) | Implemented exact-identity fleet orchestration (slices 1–6): declarative plan/health, holder-attributed identity bootstrap and enrollment, batch listener reconciliation, and immutable recipe-verified jobs with at most two producer worktrees and integrator-only merge/handoff/drop. |
 | [073-rfc-adapter-registry-detached-durability.md](rfc/073-rfc-adapter-registry-detached-durability.md) | Implemented slices 1–3 plus routing phase 1: provider-keyed adapters, detached durable fleet control, live API-key/model-pinned Gemini CLI 0.51.0 fresh launches (native resume fails closed on its unbound index/`latest` surface), and a five-class advisory tier/effort matrix with no automatic routing. |
 | [074-rfc-standardized-inter-agent-exchange.md](rfc/074-rfc-standardized-inter-agent-exchange.md) | Draft design for explicit bounded shift stages, a vendor-neutral structured turn schema, and a portable whole-shift exchange; implementation waits on operator arbitration. |
+| [075-rfc-model-line-budget-observability.md](rfc/075-rfc-model-line-budget-observability.md) | Phase 1 vendor research on model-line quota observability across API, subscription CLI, cloud, and console surfaces; failover design remains gated. |
+| [076-rfc-incident-first-deterministic-reentrant-discipline.md](rfc/076-rfc-incident-first-deterministic-reentrant-discipline.md) | Draft incident-first, deterministic, and re-entrant contribution discipline with blank-agent reconstruction gates. |
 
 ## Security docs
 
