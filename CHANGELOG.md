@@ -2,11 +2,37 @@
 
 ## Unreleased
 
+## v3.64.0 — 2026-07-18
+
+- **Executable bootstrap incident and compatibility gate (#208, #216).** The
+  reference runner exposes a bounded `m8shift.runner.handshake.v1` capability
+  document before any provider launch. Listener startup classifies absent,
+  broken, legacy, and current runners deterministically, gives a provisioning
+  remedy, and persists no child output from a failed probe. Runner output is
+  captured through a bounded TTY tee with signature IDs; an environment block
+  is terminal only after the write probe confirms it.
 - **Runner exit vocabulary hardening (#208).** `runner-exit-v2` reserves exit 2
   for argparse refusal and moves retryable infrastructure failures and timeouts
   to exit 5. Listener-side launch errors remain retryable, ledger classifications
   are never overwritten by an exit-code fallback, and listener dry-runs no longer
   execute runner handshakes.
+- **One listener truth table (#209, #219).** Core status, runtime status, doctor,
+  and the bootstrap runbook now consume one `listener_snapshot` decision table
+  for lifecycle, coverage, attention, and bounded cause vocabulary. `ALIVE`,
+  `HALTED (resident)`, `UNKNOWN`, invoker/notifier/absent coverage, and
+  human/operator/stranded attention can no longer contradict one another across
+  surfaces; each status fold reads every sidecar once.
+- **Reentrant bootstrap and verified provisioning (#207, #215, #220).** Init
+  provisions and version-locks the headless runner, emits a marker-owned
+  `.m8shift/BOOTSTRAP.md` with self-documenting commands, and applies one scaffold
+  write gate before mutation. Re-init preserves operator prose, cleanly refuses
+  malformed or reversed markers, and replaces the exact pre-marker legacy
+  renderer once. Update now preflights a conflicting `M8SHIFT_ROOT` before any
+  component write, preventing a half-applied companion refresh.
+- **Pre-release regression cleanup.** In-process capability tests scrub an
+  inherited relay-root binding, and all distributed core, companion, runner,
+  documentation-generator, and test version surfaces move in lockstep to
+  3.64.0.
 
 ## v3.63.0 — 2026-07-17
 

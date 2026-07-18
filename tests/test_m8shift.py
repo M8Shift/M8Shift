@@ -37,7 +37,7 @@ SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since
 sys.path.insert(0, REPO)
 import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
-VERSION = "3.63.0"
+VERSION = "3.64.0"
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -746,9 +746,11 @@ class TestInit(CLIBase):
             }],
             "never_auto": True,
         }
-        with mock.patch.object(cowork, "HERE", self.d), \
-             mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
-            cowork.apply_init_capabilities(["probe"], "bare", confirm_script_dir=True)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("M8SHIFT_ROOT", None)
+            with mock.patch.object(cowork, "HERE", self.d), \
+                 mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
+                cowork.apply_init_capabilities(["probe"], "bare", confirm_script_dir=True)
         self.assertFalse(os.path.exists(sentinel))
 
     def test_init_multiple_render_only_capabilities_are_preserved_and_idempotent(self):
@@ -761,16 +763,18 @@ class TestInit(CLIBase):
                              "open(%r, 'w').close()" % sentinel], "approval": "operator"}],
                 "never_auto": True,
             }
-        with mock.patch.object(cowork, "HERE", self.d), \
-             mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
-            cowork.apply_init_capabilities(
-                ["probe-0", "probe-1"], "bare", confirm_script_dir=True)
-            with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
-                first = fh.read()
-            cowork.apply_init_capabilities(
-                ["probe-0", "probe-1"], "bare", confirm_script_dir=True)
-            with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
-                second = fh.read()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("M8SHIFT_ROOT", None)
+            with mock.patch.object(cowork, "HERE", self.d), \
+                 mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
+                cowork.apply_init_capabilities(
+                    ["probe-0", "probe-1"], "bare", confirm_script_dir=True)
+                with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
+                    first = fh.read()
+                cowork.apply_init_capabilities(
+                    ["probe-0", "probe-1"], "bare", confirm_script_dir=True)
+                with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
+                    second = fh.read()
         self.assertEqual([c["id"] for c in json.loads(first)["capabilities"]],
                          ["probe-0", "probe-1"])
         self.assertEqual(second, first)
@@ -793,6 +797,35 @@ class TestInit(CLIBase):
         self.assertIn("additive `cause` field", body)
         self.assertIn("./m8shift-top.py", body)
         self.assertIn("`core.version`, reconciled by `update`, is authoritative", body)
+
+    def test_bootstrap_runbook_refuses_reversed_markers_cleanly(self):
+        self.init()
+        path = os.path.join(self.d, ".m8shift", "BOOTSTRAP.md")
+        malformed = "%s\noperator text\n%s\n" % (
+            cowork.BOOTSTRAP_END, cowork.BOOTSTRAP_BEGIN)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(malformed)
+        r = self.cw("init")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("malformed or duplicate generated block", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), malformed)
+
+    def test_bootstrap_runbook_replaces_exact_legacy_renderer_once(self):
+        self.init()
+        path = os.path.join(self.d, ".m8shift", "BOOTSTRAP.md")
+        legacy = ("# Bootstrap plan\n\nProfile: `bare`\n\n"
+                  "Capabilities: `relay-core`\n\n"
+                  "Actions below are rendered guidance only; init executes none of them.\n")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(legacy)
+        self.init()
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertNotIn("# Bootstrap plan", body)
+        self.assertEqual(body.count(cowork.BOOTSTRAP_BEGIN), 1)
+        self.assertEqual(body.count(cowork.BOOTSTRAP_END), 1)
 
     def test_bare_bootstrap_runbook_gates_absent_companions(self):
         self.init("--profile", "bare", "--no-companions")
@@ -13455,6 +13488,23 @@ class TestRFC048PRB(CLIBase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--target", r.stderr)
 
+    def test_conflicting_m8shift_root_refuses_before_any_component_write(self):
+        self.init("--companions", "runtime", "--companion-source", REPO)
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"), self.src)
+        with open(os.path.join(self.d, "M8SHIFT.protocol.md"), "a", encoding="utf-8") as fh:
+            fh.write("\nLOCAL PROTOCOL DRIFT\n")
+        with open(os.path.join(self.d, "m8shift-runtime.py"), "a", encoding="utf-8") as fh:
+            fh.write("\n# LOCAL COMPANION DRIFT\n")
+        before = self._snapshot(self.d)
+        conflicting = tempfile.mkdtemp(prefix="m8shift-conflicting-root-")
+        self.addCleanup(shutil.rmtree, conflicting, True)
+        with mock.patch.dict(os.environ, {"M8SHIFT_ROOT": conflicting}):
+            r = self.update("--components", "protocol,pack,anchors,companions,core",
+                            "--companions", "runtime", "--json")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("M8SHIFT_ROOT", r.stdout + r.stderr)
+        self.assertEqual(self._snapshot(self.d), before)
+
     # ── dry-run / result vocabulary ──────────────────────────────────────────
 
     def test_dry_run_writes_nothing_and_reports_a_full_plan(self):
@@ -15846,9 +15896,11 @@ class TestRFC052ScrubCheck(CLIBase):
             env.pop("M8SHIFT_SCRUB_ENFORCE", None)
             env.pop("M8SHIFT_AGENT", None)
             env.update(env_extra)
+            # input="" pins the git-contract stdin to EOF: a pushed-range read
+            # must terminate identically under every harness (no inherited fd).
             return subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
                                   cwd=self.d, capture_output=True, text=True,
-                                  env=env)
+                                  env=env, input="")
 
         # pre-push: findings -> advisory (rc 0); enforce -> blocked (rc 1).
         r = hook("pre-push")
@@ -15877,8 +15929,11 @@ class TestRFC052ScrubCheck(CLIBase):
         env.pop("M8SHIFT_AGENT", None)
         env.pop("M8SHIFT_DENYLIST", None)
         for name in ("pre-commit", "pre-push"):
+            # input="" pins stdin to EOF (see hook() above): the pre-push
+            # pushed-range read must never inherit a live harness descriptor.
             r = subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
-                               cwd=self.d, capture_output=True, text=True, env=env)
+                               cwd=self.d, capture_output=True, text=True, env=env,
+                               input="")
             self.assertEqual(r.returncode, 0, (name, r.stderr))
             self.assertIn("continuing without it", r.stderr, name)
 

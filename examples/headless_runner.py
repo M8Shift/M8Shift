@@ -88,7 +88,7 @@ class RunnerInfrastructureError(Exception):
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "3.63.0"
+VERSION = "3.64.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
 HANDSHAKE_SCHEMA = "m8shift.runner.handshake.v1"

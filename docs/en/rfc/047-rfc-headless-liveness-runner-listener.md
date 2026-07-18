@@ -32,6 +32,37 @@ during a long headless turn, a runner may refresh its own valid `WORKING_<agent>
 lock before expiry through a new refresh-only core guard. It does **not** close #6's
 broader holder-liveness model, force-claim policy, or worktree-ownership model.
 
+### v3.64 compatibility amendment (#208/#216/#217/#219)
+
+Before a real listener start creates pid/state sidecars or launches a provider,
+it MUST probe the runner with `--handshake`. The response is one JSON line, no
+larger than 4096 bytes, with this additive schema:
+
+```json
+{
+  "schema": "m8shift.runner.handshake.v1",
+  "version": "3.64.0",
+  "capabilities": [
+    "bounded-tty-tee-v1",
+    "environment-write-probe-v1",
+    "runner-exit-v2"
+  ],
+  "options": ["--agent-model", "--once", "--resume-working"]
+}
+```
+
+The complete emitted `options` list is source-derived. Probing is read-only and
+MUST NOT inspect relay state, write sidecars, or launch the provider. The
+listener classifies runner evidence as `CURRENT`, `LEGACY`, `BROKEN`, or
+`ABSENT`; only `CURRENT` proceeds. Dry-run does not execute the probe and reports
+`not_probed`.
+
+Provider stdout/stderr flows through a bounded TTY tee. Public/persisted evidence
+contains only byte/line counts and allowlisted signature IDs. Text that merely
+resembles a sandbox refusal is not authoritative: `environment-write-probe-v1`
+must confirm the configured working directory is unwritable before the listener
+classifies `environment_blocked` and halts.
+
 ## Problem
 
 `examples/headless_runner.py` is currently a foreground loop. It can launch a
@@ -160,6 +191,13 @@ For a one-shot run:
   a supervising listener
 - `suspended` => dedicated neutral code
 - timeout => existing timeout non-zero behavior
+
+The normative `runner-exit-v2` mapping is 0 success, 1 classified run failure,
+2 argparse refusal, 3 external transition, 4 suspended, and 5 infrastructure
+failure/timeout. The run ledger is the primary classification authority. A
+listener may infer `runner_refused_argv` from exit 2 only when no authoritative
+`run.ended` classification exists; it MUST NOT overwrite a recorded timeout or
+non-completion.
 
 For a continuous runner/listener:
 
