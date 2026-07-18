@@ -4956,6 +4956,155 @@ class ListenerCLIBase(CLIBase):
         self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
 
 
+class TestListenerCompatibilityIncident(ListenerCLIBase):
+    """Executable incident record for #208.
+
+    The expected-failure contracts state the corrected behavior. Slice C must
+    remove each decorator in the same change that makes its assertion pass; an
+    unexpected success therefore fails both unittest discovery and pytest.
+    """
+
+    def setUp(self):
+        # The relay driving a developer session may export an exact-root binding.
+        # These subprocess fixtures are independent synthetic projects.
+        inherited_root = os.environ.pop("M8SHIFT_ROOT", None)
+        if inherited_root is not None:
+            self.addCleanup(os.environ.__setitem__, "M8SHIFT_ROOT", inherited_root)
+        super().setUp()
+        self.blocked_cwd = ""
+
+    def tearDown(self):
+        if self.blocked_cwd and os.path.isdir(self.blocked_cwd):
+            os.chmod(self.blocked_cwd, 0o755)
+        super().tearDown()
+
+    def legacy_runner(self, provider_marker):
+        """Write a deterministic pre-handshake runner that rejects new flags."""
+        body = """import argparse, json, sys
+with open('legacy-invocations.jsonl', 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps(sys.argv[1:]) + '\\n')
+p = argparse.ArgumentParser()
+p.add_argument('agent')
+p.add_argument('--once', action='store_true')
+p.add_argument('--m8shift')
+p.add_argument('--m8shift-py')
+p.add_argument('--runtime-dir')
+p.add_argument('--run-id')
+p.add_argument('--cwd')
+p.add_argument('--env-allowlist')
+p.add_argument('--cmd', nargs=argparse.REMAINDER)
+args = p.parse_args()
+with open(%r, 'a', encoding='utf-8') as fh:
+    fh.write('provider launched\\n')
+""" % provider_marker
+        path = os.path.join(self.d, "legacy_runner.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return "legacy_runner.py"
+
+    def legacy_invocations(self):
+        path = os.path.join(self.d, "legacy-invocations.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def test_legacy_fixture_rejects_the_conditionally_emitted_model_flag(self):
+        marker = os.path.join(self.d, "provider-launched.txt")
+        runner = self.legacy_runner(marker)
+        result = subprocess.run([
+            sys.executable, runner, "claude", "--once",
+            "--agent-model", "model-a", "--cmd", sys.executable, "-c", "pass",
+        ], cwd=self.d, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments: --agent-model", result.stderr)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(len(self.legacy_invocations()), 1)
+
+    @unittest.expectedFailure
+    def test_listener_start_rejects_a_legacy_runner_before_provider_launch(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-launched.txt")
+        runner = self.legacy_runner(marker)
+        profile = self.profile_path(agent_model="model-a")
+
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", runner, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-backoff", "1",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("legacy", (result.stdout + result.stderr).lower())
+        self.assertIn("provision", (result.stdout + result.stderr).lower())
+        self.assertEqual(self.legacy_invocations(), [["--handshake"]])
+        self.assertFalse(os.path.exists(marker))
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
+    def provider_profile(self, cwd, marker, signature):
+        code = (
+            "import sys\n"
+            "with open(%r, 'a', encoding='utf-8') as fh: fh.write('launch\\n')\n"
+            "print(%r, file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        ) % (marker, signature)
+        return self.profile_path(
+            argv=[sys.executable, "-c", code], cwd=cwd, env_allowlist=[])
+
+    def test_read_only_words_alone_remain_retryable_non_completion(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-launches.txt")
+        profile = self.provider_profile(
+            self.d, marker, "synthetic read-only file system message")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-backoff", "1",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["last_classification"], "non_completion")
+        self.assertEqual(state["consecutive_failures"], 1)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission fixture")
+    @unittest.expectedFailure
+    def test_confirmed_environment_block_halts_after_one_redacted_attempt(self):
+        self.awaiting_me()
+        self.blocked_cwd = os.path.join(self.d, "read-only-cwd")
+        os.mkdir(self.blocked_cwd)
+        os.chmod(self.blocked_cwd, 0o555)
+        probe = os.path.join(self.blocked_cwd, "probe")
+        try:
+            fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError:
+            pass
+        else:
+            os.close(fd)
+            os.unlink(probe)
+            self.skipTest("permission bits do not provide a deterministic write refusal")
+
+        marker = os.path.join(self.d, "provider-launches.txt")
+        signature = "synthetic sandbox refusal: read-only file system"
+        profile = self.provider_profile(self.blocked_cwd, marker, signature)
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-backoff", "1",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "halted")
+        self.assertEqual(state["last_classification"], "environment_blocked")
+        self.assertEqual(state["consecutive_failures"], 1)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.readlines(), ["launch\n"])
+        self.assertNotIn(signature, result.stdout + result.stderr)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as fh:
+            self.assertNotIn(signature, fh.read())
+
+
 class TestRFC047ListenerPR1(ListenerCLIBase):
     """RFC 047 Phases B+C (PR 1) — listener lifecycle companion, local backend:
     profile validation (argv arrays, never shell strings), dry-run planning, PID
