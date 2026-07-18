@@ -132,6 +132,7 @@ RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 TURN_BEGIN_RE = re.compile(r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN -->")
+TURN_END_RE = re.compile(r"<!-- M8SHIFT:TURN \d+ [a-z][a-z0-9_-]* END -->")
 # RFC 047 total classification vocabulary (verify_post_run status values).
 SUCCESS_STATUSES = ("completed", "advanced", "not_required")
 FAILURE_STATUSES = ("non_completion", "stuck_working", "invalid_relay")
@@ -156,6 +157,7 @@ class BoundedTTYTee:
         self.proc = proc
         self.limit = limit
         self._capture = bytearray()
+        self._tail = bytearray()
         self._lock = threading.Lock()
         self._counts = {
             "stdout": {"bytes": 0, "lines": 0},
@@ -187,6 +189,9 @@ class BoundedTTYTee:
                     room = self.limit - len(self._capture)
                     if room > 0:
                         self._capture.extend(chunk[:room])
+                    self._tail.extend(chunk)
+                    if len(self._tail) > self.limit:
+                        del self._tail[:-self.limit]
                 if echo:
                     target.write(chunk.decode("utf-8", errors="replace"))
                     target.flush()
@@ -209,16 +214,26 @@ class BoundedTTYTee:
             for name in counts:
                 if counts[name]["bytes"] and self._last[name] != b"\n":
                     counts[name]["lines"] += 1
-            captured = bytes(self._capture)
-        text = captured.decode("utf-8", errors="replace").lower()
+            captured_head = bytes(self._capture)
+            captured_tail = bytes(self._tail)
+        text = (captured_head + b"\n" + captured_tail).decode(
+            "utf-8", errors="replace").lower()
         signature_ids = sorted(
             signature_id for signature_id, needles in ENVIRONMENT_SIGNATURES.items()
             if any(needle in text for needle in needles))
+        tail_text = captured_tail.decode("utf-8", errors="replace")
+        turn_ends = list(TURN_END_RE.finditer(tail_text))
+        final_text = (tail_text[turn_ends[-1].end():]
+                      if turn_ends else tail_text).lower()
+        final_signature_ids = sorted(
+            signature_id for signature_id, needles in ENVIRONMENT_SIGNATURES.items()
+            if any(needle in final_text for needle in needles))
         return {
             "bytes": sum(row["bytes"] for row in counts.values()),
             "lines": sum(row["lines"] for row in counts.values()),
             "streams": counts,
             "signature_ids": signature_ids,
+            "final_signature_ids": final_signature_ids,
         }
 
 
@@ -274,16 +289,21 @@ def confirmed_environment_block(pre_probe, post_probe):
             and post_probe.get("status") == "blocked")
 
 
-def confirmed_approval_required(output_summary, returncode, relay_status):
+def confirmed_approval_required(output_summary, returncode, relay_status,
+                                timed_out=False):
     """Corroborate an advisory output signature before making it terminal.
 
     Provider text alone is never authoritative.  The bounded signature must be
     accompanied by a non-zero provider exit and an unchanged/failed relay
-    classification for this invocation.
+    classification for this invocation.  A stuck/timeout deadlock is sufficient;
+    otherwise the signature must occur after the final captured relay transcript.
     """
     return (returncode not in (None, 0)
             and relay_status in FAILURE_STATUSES
-            and "approval_required" in output_summary.get("signature_ids", ()))
+            and "approval_required" in output_summary.get("signature_ids", ())
+            and (relay_status == "stuck_working" or timed_out
+                 or "approval_required" in
+                 output_summary.get("final_signature_ids", ())))
 
 
 def read_lock(m8shift_path):
@@ -996,6 +1016,7 @@ def main():
             "output_bytes": output_summary["bytes"],
             "output_lines": output_summary["lines"],
             "output_signature_ids": output_summary["signature_ids"],
+            "output_final_signature_ids": output_summary["final_signature_ids"],
         }
 
         # Post-run classification (RFC 047): re-read the LOCK (bounded re-read for
@@ -1020,7 +1041,8 @@ def main():
                     "hint": "Grant exact-project workspace write access, then restart the listener.",
                 },
             })
-        elif confirmed_approval_required(output_summary, proc.returncode, status):
+        elif confirmed_approval_required(
+                output_summary, proc.returncode, status, timed_out=timed_out):
             status = "approval_required"
             reason = "provider_permission_allowlist"
             verification = dict(verification)
@@ -1058,7 +1080,7 @@ def main():
         process_ok = proc.returncode == 0
         success = (not timed_out) and process_ok and verification["ok"] and ledger_ok
         once_rc = 1
-        if timed_out:
+        if timed_out and status != "approval_required":
             fails += 1
             once_rc = 5
             append_run_event(args, "run.ended", run_id, me, status="timeout",

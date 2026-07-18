@@ -6824,17 +6824,18 @@ def load_listener_profile(args, agent):
         row = provider_by_name(agent)
         if not row:
             sys.exit(f"m8shift-runtime: no provider entry for {agent} in .m8shift/providers.json")
-        if row.get("mode") not in {"headless", "hybrid"}:
-            sys.exit(
-                f"m8shift-runtime: provider entry for {agent} has mode="
-                f"{row.get('mode', '') or 'unset'} and cannot be launched by a headless "
-                "listener (provider_mode_interactive); configure a separate mode=headless "
-                "or mode=hybrid entry and its documented permission allowlist"
-            )
         errors = [f for f in provider_entry_findings(row, agent) if f["severity"] == "error"]
         if errors:
             sys.exit(f"m8shift-runtime: provider entry for {agent} is invalid: "
                      + "; ".join(f["message"] for f in errors))
+        if (not getattr(args, "notify_only", False)
+                and row.get("mode") == "interactive"):
+            sys.exit(
+                f"m8shift-runtime: provider entry for {agent} has mode="
+                f"{row.get('mode', '') or 'unset'} and cannot be launched by a headless "
+                "listener (provider_mode_interactive); configure a separate mode=headless "
+                "or mode=hybrid/local entry and its documented permission allowlist"
+            )
         argv_template, _platform = select_provider_argv(row)
         if not argv_template:
             sys.exit(f"m8shift-runtime: provider entry for {agent} has no argv (nothing to launch headlessly)")

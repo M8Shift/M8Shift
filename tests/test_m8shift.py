@@ -4932,6 +4932,34 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(ended["status"], "non_completion")
         self.assertEqual(ended["output_signature_ids"], ["approval_required"])
 
+    def test_approval_words_inside_relay_transcript_are_not_terminal(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import sys\n"
+            "print('<!-- M8SHIFT:TURN 8 codex BEGIN -->')\n"
+            "print('requires approval before continuing')\n"
+            "print('<!-- M8SHIFT:TURN 8 codex END -->')\n"
+            "print('ordinary final response')\n"
+            "sys.exit(7)\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "non_completion")
+        self.assertEqual(ended["output_signature_ids"], ["approval_required"])
+        self.assertEqual(ended["output_final_signature_ids"], [])
+
+    def test_trailing_approval_prompt_after_long_output_is_terminal(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import sys\n"
+            "print('x' * (70 * 1024))\n"
+            "print('permission request was not approved', file=sys.stderr)\n"
+            "sys.exit(7)\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "approval_required")
+        self.assertEqual(ended["output_signature_ids"], ["approval_required"])
+        self.assertEqual(ended["output_final_signature_ids"], ["approval_required"])
+
     def test_t3_advanced_when_provider_appends_to_peer(self):
         # RFC 047 test 3: an authored newer turn is success even though the relay is open.
         self.awaiting_me()
@@ -5379,6 +5407,21 @@ with open(%r, 'a', encoding='utf-8') as fh:
         with open(path, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 
+    def write_provider_row(self, mode, marker):
+        providers = os.path.join(self.d, ".m8shift", "providers.json")
+        os.makedirs(os.path.dirname(providers), exist_ok=True)
+        row = {
+            "name": "claude", "provider": "anthropic-claude",
+            "mode": mode, "anchor": "CLAUDE.md",
+            "model": "claude-test-model",
+            "argv": [sys.executable, "-c", "open(%r, 'w').close()" % marker,
+                     "$M8SHIFT_PROMPT"],
+            "capabilities": [], "requires_env": [], "env_allowlist": [],
+            "permissions": "human-driven",
+        }
+        with open(providers, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.providers.v1", "agents": [row]}, fh)
+
     def test_current_runner_exposes_the_bounded_capability_handshake(self):
         result = subprocess.run(
             [sys.executable, self.RUNNER, "--handshake"],
@@ -5458,19 +5501,7 @@ with open(%r, 'a', encoding='utf-8') as fh:
     def test_listener_rejects_interactive_provider_before_sidecar_or_launch(self):
         self.init()
         marker = os.path.join(self.d, "provider-launched.txt")
-        providers = os.path.join(self.d, ".m8shift", "providers.json")
-        os.makedirs(os.path.dirname(providers), exist_ok=True)
-        row = {
-            "name": "claude", "provider": "anthropic-claude",
-            "mode": "interactive", "anchor": "CLAUDE.md",
-            "model": "claude-test-model",
-            "argv": [sys.executable, "-c", "open(%r, 'w').close()" % marker,
-                     "$M8SHIFT_PROMPT"],
-            "capabilities": [], "requires_env": [], "env_allowlist": [],
-            "permissions": "human-driven",
-        }
-        with open(providers, "w", encoding="utf-8") as fh:
-            json.dump({"schema": "m8shift.providers.v1", "agents": [row]}, fh)
+        self.write_provider_row("interactive", marker)
 
         result = self.rt(
             "listener", "start", "--agent", "claude", "--provider",
@@ -5481,6 +5512,33 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertIn("mode=headless", result.stderr)
         self.assertFalse(os.path.exists(marker))
         self.assertFalse(os.path.exists(self.listeners_dir()))
+
+    def test_listener_launches_local_provider_mode(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-launched.txt")
+        self.write_provider_row("local", marker)
+
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--provider",
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-backoff", "1")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(os.path.exists(marker))
+
+    def test_notify_only_accepts_interactive_provider_without_launching_it(self):
+        self.init()
+        marker = os.path.join(self.d, "provider-launched.txt")
+        self.write_provider_row("interactive", marker)
+
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--provider",
+            "--notify-only", "--runner", self.RUNNER, "--foreground",
+            "--max-ticks", "1", "--poll-interval", "0.01")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(marker))
+        self.assertTrue(self.state_doc()["notify_only"])
 
     def provider_profile(self, cwd, marker, signature):
         code = (
