@@ -592,7 +592,7 @@ class InjectedFRBase(CLIBase):
 
 class TestInit(CLIBase):
     def test_init_profiles_render_only_and_idempotent(self):
-        self.init("--profile", "full")
+        self.init("--profile", "full", "--companion-source", REPO)
         bootstrap = os.path.join(self.d, ".m8shift", "bootstrap.json")
         with open(bootstrap, encoding="utf-8") as f:
             first = f.read()
@@ -602,7 +602,7 @@ class TestInit(CLIBase):
         self.assertEqual(data["capability_registry_version"], 1)
         hook = next(x for x in data["capabilities"] if x["id"] == "hook-samples")
         self.assertIsInstance(hook["actions"][0]["argv"], list)
-        self.init("--profile", "full")
+        self.init("--profile", "full", "--companion-source", REPO)
         with open(bootstrap, encoding="utf-8") as f:
             self.assertEqual(f.read(), first)
 
@@ -653,9 +653,30 @@ class TestInit(CLIBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("full: relay-core,headless-config", r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
-        self.init("--profile", "headless")
+        self.init("--profile", "headless", "--companion-source", REPO)
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "LISTENER.md")))
         self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "HOOKS.md")))
+
+    def test_headless_init_provisions_a_compatible_runner_without_host_source_path(self):
+        self.init("--profile", "headless", "--companion-source", REPO)
+        runner = os.path.join(self.d, "examples", "headless_runner.py")
+        self.assertTrue(os.path.isfile(runner))
+        handshake = subprocess.run(
+            [sys.executable, runner, "--handshake"],
+            cwd=self.d, capture_output=True, text=True, timeout=10)
+        self.assertEqual(handshake.returncode, 0, handshake.stderr)
+        self.assertEqual(json.loads(handshake.stdout)["schema"],
+                         "m8shift.runner.handshake.v1")
+        with open(os.path.join(self.d, ".m8shift", "kit.json"),
+                  encoding="utf-8") as fh:
+            kit = json.load(fh)
+        entry = next(row for row in kit["runners"]
+                     if row["name"] == "headless-runner")
+        self.assertEqual(entry["path"], "examples/headless_runner.py")
+        self.assertEqual(entry["version"], cowork.VERSION)
+        self.assertEqual(len(entry["sha256"]), 64)
+        self.assertEqual(entry["source"], "verified-kit")
+        self.assertNotIn(REPO, json.dumps(entry))
 
     def test_init_capability_artifacts_do_not_clobber(self):
         path = os.path.join(self.d, ".m8shift", "HOOKS.md")
@@ -4804,6 +4825,9 @@ class ListenerCLIBase(CLIBase):
     def setUp(self):
         super().setUp()
         shutil.copy(self.RUNTIME, os.path.join(self.d, "m8shift-runtime.py"))
+        default_runner = os.path.join(self.d, "examples", "headless_runner.py")
+        os.makedirs(os.path.dirname(default_runner), exist_ok=True)
+        shutil.copy(self.RUNNER, default_runner)
 
     def rt(self, *args, env=None, timeout=60):
         run_env = None
@@ -4849,6 +4873,14 @@ class ListenerCLIBase(CLIBase):
         sleeps, then exits with `rc` (the RFC 047 one-shot exit vocabulary)."""
         lines = [
             "import json, os, sys, time",
+            "if sys.argv[1:] == ['--handshake']:",
+            "    print(json.dumps({'schema': 'm8shift.runner.handshake.v1', "
+            "'version': 'test', 'capabilities': ['bounded-tty-tee-v1', "
+            "'environment-write-probe-v1', 'runner-exit-v1'], 'options': "
+            "['--agent-model', '--cmd', '--cwd', '--env-allowlist', '--m8shift', "
+            "'--m8shift-py', '--once', '--resume-working', '--run-id', "
+            "'--runtime-dir', '--start-on-idle']}))",
+            "    sys.exit(0)",
             "with open('launches.txt', 'a', encoding='utf-8') as fh:",
             "    fh.write(json.dumps(sys.argv[1:]) + '\\n')",
         ]
@@ -5009,6 +5041,40 @@ with open(%r, 'a', encoding='utf-8') as fh:
         with open(path, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 
+    def test_current_runner_exposes_the_bounded_capability_handshake(self):
+        result = subprocess.run(
+            [sys.executable, self.RUNNER, "--handshake"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLessEqual(len(result.stdout.encode("utf-8")), 4096)
+        doc = json.loads(result.stdout.splitlines()[0])
+        self.assertEqual(doc["schema"], "m8shift.runner.handshake.v1")
+        self.assertIn("bounded-tty-tee-v1", doc["capabilities"])
+        self.assertIn("--agent-model", doc["options"])
+
+    def test_notify_only_rejects_an_absent_runner_before_sidecar_writes(self):
+        self.init()
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--notify-only",
+            "--runner", "missing-runner.py", "--foreground", "--max-ticks", "1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("absent", (result.stdout + result.stderr).lower())
+        self.assertIn("provision", (result.stdout + result.stderr).lower())
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
+    def test_broken_handshake_never_persists_or_echoes_runner_output(self):
+        self.init()
+        runner = os.path.join(self.d, "broken-runner.py")
+        with open(runner, "w", encoding="utf-8") as fh:
+            fh.write("import sys\nprint('synthetic-sensitive-handshake')\nsys.exit(7)\n")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--notify-only",
+            "--runner", runner, "--foreground", "--max-ticks", "1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("broken", (result.stdout + result.stderr).lower())
+        self.assertNotIn("synthetic-sensitive-handshake", result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
     def test_legacy_fixture_rejects_the_conditionally_emitted_model_flag(self):
         marker = os.path.join(self.d, "provider-launched.txt")
         runner = self.legacy_runner(marker)
@@ -5021,7 +5087,6 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertFalse(os.path.exists(marker))
         self.assertEqual(len(self.legacy_invocations()), 1)
 
-    @unittest.expectedFailure
     def test_listener_start_rejects_a_legacy_runner_before_provider_launch(self):
         self.awaiting_me()
         marker = os.path.join(self.d, "provider-launched.txt")
@@ -5065,9 +5130,40 @@ with open(%r, 'a', encoding='utf-8') as fh:
         state = self.state_doc()
         self.assertEqual(state["last_classification"], "non_completion")
         self.assertEqual(state["consecutive_failures"], 1)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as fh:
+            ledger = fh.read()
+        self.assertNotIn("synthetic read-only file system message", ledger)
+        ended = [row for row in map(json.loads, ledger.splitlines())
+                 if row.get("event") == "run.ended"][-1]
+        self.assertGreater(ended["output_bytes"], 0)
+        self.assertGreater(ended["output_lines"], 0)
+        self.assertEqual(ended["output_signature_ids"], ["filesystem_read_only"])
+
+    def test_runner_rc2_is_terminal_and_classified_without_retry(self):
+        self.awaiting_me()
+        runner = self.stub_runner(rc=2)
+        profile = self.profile_path()
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", runner, "--foreground", "--max-ticks", "2",
+            "--poll-interval", "0.01", "--max-retries", "3")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "halted")
+        self.assertEqual(state["consecutive_failures"], 1)
+        self.assertEqual(state["last_classification"], "runner_refused_argv")
+        self.assertEqual(len(self.launches()), 1)
+
+    def test_listener_state_rejects_unbounded_classification_text(self):
+        runtime = self._load_runtime()
+        with mock.patch.object(runtime, "LISTENERS_DIR", self.listeners_dir()):
+            runtime.write_listener_state(
+                "claude", phase="polling", consecutive_failures=0,
+                last_classification="synthetic child output")
+        self.assertEqual(self.state_doc()["last_classification"], "")
 
     @unittest.skipIf(os.name == "nt", "POSIX permission fixture")
-    @unittest.expectedFailure
     def test_confirmed_environment_block_halts_after_one_redacted_attempt(self):
         self.awaiting_me()
         self.blocked_cwd = os.path.join(self.d, "read-only-cwd")
@@ -5102,7 +5198,23 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertNotIn(signature, result.stdout + result.stderr)
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
                   encoding="utf-8") as fh:
-            self.assertNotIn(signature, fh.read())
+            ledger = fh.read()
+        self.assertNotIn(signature, ledger)
+        ended = [row for row in map(json.loads, ledger.splitlines())
+                 if row.get("event") == "run.ended"][-1]
+        self.assertEqual(ended["status"], "environment_blocked")
+        self.assertEqual(ended["output_signature_ids"], ["filesystem_read_only"])
+        self.assertNotIn("detail", ended)
+        notify_dir = os.path.join(self.d, ".m8shift", "runtime", "notify")
+        persisted = ""
+        for name in os.listdir(notify_dir):
+            path = os.path.join(notify_dir, name)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as fh:
+                    persisted += fh.read()
+        self.assertNotIn(signature, persisted)
+        self.assertIn("write_probe_denied", persisted)
+        self.assertIn("~/code/My Project", persisted)
 
 
 class TestRFC047ListenerPR1(ListenerCLIBase):

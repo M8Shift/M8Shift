@@ -145,7 +145,28 @@ LISTENER_PROFILE_SCHEMA = "m8shift.listener.profile.v1"
 LISTENER_STATE_SCHEMA = "m8shift.listener.state.v1"
 LISTENER_PLAN_SCHEMA = "m8shift.listener.plan.v1"
 LISTENER_BACKEND_SCHEMA = "m8shift.listener.backend.v1"
+RUNNER_HANDSHAKE_SCHEMA = "m8shift.runner.handshake.v1"
+RUNNER_HANDSHAKE_LIMIT = 4 * 1024
+RUNNER_HANDSHAKE_TIMEOUT_S = 5
+RUNNER_REQUIRED_CAPABILITIES = {
+    "bounded-tty-tee-v1",
+    "environment-write-probe-v1",
+    "runner-exit-v1",
+}
+RUNNER_REQUIRED_OPTIONS = {
+    "--agent-model", "--cmd", "--cwd", "--env-allowlist",
+    "--m8shift", "--m8shift-py", "--once", "--resume-working",
+    "--run-id", "--runtime-dir", "--start-on-idle",
+}
 LISTENER_PHASES = ("polling", "backoff", "halted")
+LISTENER_CLASSIFICATIONS = {
+    "", "success", "completed", "advanced", "not_required",
+    "non_completion", "stuck_working", "invalid_relay",
+    "external_transition", "suspended", "failed_partial",
+    "failed_missing_ledger", "timeout", "run_failure",
+    "infrastructure_failure", "runner_crash", "runner_refused_argv",
+    "environment_blocked",
+}
 LISTENER_BACKENDS = ("auto", "local", "launchd", "systemd", "windows")
 LISTENER_SERVICE_BACKENDS = ("launchd", "systemd", "windows")
 LISTENER_BACKOFF_BASE_S = 20
@@ -177,9 +198,16 @@ MACOS_PROTECTED_FOLDERS = ("Documents", "Desktop", "Downloads",
 LISTENER_RUNNER_EXITS = {
     0: "success",
     1: "run_failure",
-    2: "infrastructure_failure",
+    2: "runner_refused_argv",
     3: "external_transition",
     4: "suspended",
+}
+ENVIRONMENT_BLOCKED_NOTIFICATIONS = {
+    "write_probe_denied": (
+        "environment blocked (write_probe_denied): add the provider trust entry "
+        "for this project's exact path or grant workspace-write; trusting ~/code "
+        "does not cover ~/code/My Project. Restart the listener after correcting access."
+    ),
 }
 LISTENER_TURN_PROMPT = (
     "Apply M8SHIFT.protocol.md: you are {agent}; take exactly one relay turn "
@@ -6779,6 +6807,105 @@ def new_listener_run_id(agent):
     return f"{stamp}-{agent}-{uuid.uuid4().hex[:8]}"
 
 
+def probe_runner_handshake(runner_path, timeout=RUNNER_HANDSHAKE_TIMEOUT_S):
+    """Return NEW/LEGACY/BROKEN/ABSENT with at most 4 KiB retained output.
+
+    The probe invokes only the runner itself with ``--handshake``. It never
+    renders or launches a provider command. Stderr is discarded so a broken
+    runner cannot inject durable diagnostics through the listener.
+    """
+    if not os.path.isfile(runner_path):
+        return {"kind": "ABSENT", "signature_id": "runner_absent"}
+    retained = bytearray()
+    oversized = [False]
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, runner_path, "--handshake"],
+            cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_launch_error",
+                "exception_type": type(exc).__name__}
+
+    def drain():
+        try:
+            while True:
+                chunk = proc.stdout.read(1024)
+                if not chunk:
+                    break
+                room = RUNNER_HANDSHAKE_LIMIT + 1 - len(retained)
+                if room > 0:
+                    retained.extend(chunk[:room])
+                if len(retained) > RUNNER_HANDSHAKE_LIMIT:
+                    oversized[0] = True
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        rc = proc.wait(timeout=min(max(float(timeout), 0.1), 10.0))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        reader.join(timeout=1.0)
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_timeout"}
+    reader.join(timeout=1.0)
+    if reader.is_alive():
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_drain_timeout"}
+    raw = bytes(retained)
+    if rc == 2 and not raw:
+        return {"kind": "LEGACY", "signature_id": "runner_legacy"}
+    if rc != 0:
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_exit"}
+    if oversized[0]:
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_oversized"}
+    first = raw.splitlines()[0] if raw.splitlines() else b""
+    try:
+        doc = json.loads(first.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_malformed"}
+    if not isinstance(doc, dict) or doc.get("schema") != RUNNER_HANDSHAKE_SCHEMA:
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_schema"}
+    capabilities = doc.get("capabilities")
+    options = doc.get("options")
+    if not isinstance(capabilities, list) or not all(isinstance(x, str) for x in capabilities):
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_capabilities"}
+    if not isinstance(options, list) or not all(isinstance(x, str) for x in options):
+        return {"kind": "BROKEN", "signature_id": "runner_handshake_options"}
+    missing_capabilities = sorted(RUNNER_REQUIRED_CAPABILITIES - set(capabilities))
+    missing_options = sorted(RUNNER_REQUIRED_OPTIONS - set(options))
+    if missing_capabilities or missing_options:
+        return {"kind": "NEW", "compatible": False,
+                "signature_id": "runner_handshake_incompatible",
+                "missing_capabilities": missing_capabilities,
+                "missing_options": missing_options}
+    return {"kind": "NEW", "compatible": True,
+            "signature_id": "runner_handshake_compatible",
+            "version": doc.get("version", "") if isinstance(doc.get("version"), str) else ""}
+
+
+def require_runner_handshake(runner_path):
+    """Refuse non-compatible runners with stable, non-output-derived messages."""
+    result = probe_runner_handshake(runner_path)
+    provision = ("provision from a verified kit with `./m8shift.py init --profile "
+                 "headless --with-runtime --companion-source <verified-kit>`")
+    kind = result["kind"]
+    if kind == "ABSENT":
+        sys.exit("m8shift-runtime: headless runner is absent; " + provision)
+    if kind == "LEGACY":
+        sys.exit("m8shift-runtime: legacy headless runner has no compatibility handshake; "
+                 + provision)
+    if kind == "BROKEN":
+        sys.exit("m8shift-runtime: headless runner handshake is broken (%s); %s"
+                 % (result["signature_id"], provision))
+    if not result.get("compatible"):
+        sys.exit("m8shift-runtime: headless runner capabilities are incompatible; " + provision)
+    return result
+
+
 def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=False):
     """One bounded runner turn as an explicit argv array (never a shell string).
 
@@ -6827,6 +6954,8 @@ def write_listener_state(agent, *, phase, consecutive_failures,
                          last_run_id="", last_classification="", reason="",
                          start_on_idle=False, notify_only=False):
     os.makedirs(LISTENERS_DIR, exist_ok=True)
+    if last_classification not in LISTENER_CLASSIFICATIONS:
+        last_classification = ""
     previous = read_listener_state(agent)
     last_successful_run = previous.get("last_successful_run", "")
     if last_classification == "success" and last_run_id:
@@ -6993,7 +7122,7 @@ def listener_run_classification(run_id):
     for row in reversed(rows):
         if row.get("run_id") == run_id and row.get("event") == "run.ended":
             status = row.get("status") or row.get("verification_status") or ""
-            return status if isinstance(status, str) else ""
+            return status if status in LISTENER_CLASSIFICATIONS else ""
     return ""
 
 
@@ -7108,7 +7237,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
     fails = fails if isinstance(fails, int) and fails >= 0 else 0
     last_run_id = persisted.get("last_run_id") if isinstance(persisted.get("last_run_id"), str) else ""
     last_classification = (persisted.get("last_classification")
-                           if isinstance(persisted.get("last_classification"), str) else "")
+                           if persisted.get("last_classification") in
+                           LISTENER_CLASSIFICATIONS else "")
     reason = persisted.get("reason") if isinstance(persisted.get("reason"), str) else ""
 
     def say(msg):
@@ -7231,6 +7361,24 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             last_run_id = run_id
             last_classification = (listener_run_classification(run_id)
                                    or LISTENER_RUNNER_EXITS.get(rc, "runner_crash"))
+            if rc == 2 or last_classification == "environment_blocked":
+                fails += 1
+                phase = "halted"
+                if rc == 2:
+                    last_classification = "runner_refused_argv"
+                    reason = "runner_refused_argv"
+                    say(f"{agent}: runner refused its argv (runner_refused_argv); "
+                        "HALTED after one attempt. Provision a compatible runner, then "
+                        "clear with `listener start --restart`.")
+                else:
+                    reason = "environment_blocked:write_probe_denied"
+                    message = ENVIRONMENT_BLOCKED_NOTIFICATIONS["write_probe_denied"]
+                    say(f"{agent}: {message}")
+                    emit_notification_nonfatal(
+                        agent, "blocked", message, prompt=message,
+                        state=state, holder=lk.get("holder", ""))
+                save()
+                continue
             if rc == 0:
                 fails = 0
                 phase = "polling"
@@ -7294,6 +7442,10 @@ def cmd_listener_start(args):
                      f"{', '.join(repr(a) for a in others)} is already configured as the "
                      "starter — leave only one starter profile")
     runner_path = os.path.abspath(args.runner) if args.runner else DEFAULT_RUNNER_PATH
+    # Compatibility is a strict preflight for every mode, including notify-only:
+    # it runs before dry-run rendering, pid repair, service installation, state
+    # creation, or any listener/provider launch.
+    require_runner_handshake(runner_path)
     if args.dry_run:
         # Validation-only: prints the plan and writes NO pid, state, log, or
         # service file (service backends render their definition inside the plan).
@@ -7304,9 +7456,6 @@ def cmd_listener_start(args):
     if fallback_reason:
         # RFC 047: the fallback must be VISIBLE — never silently downgrade.
         print(f"backend {args.backend} → local: {fallback_reason}")
-    if not getattr(args, "notify_only", False) and not os.path.isfile(runner_path):
-        sys.exit(f"m8shift-runtime: headless runner not found at "
-                 f"{os.path.relpath(runner_path, HERE)} (pass --runner PATH)")
     supervised = os.environ.get(LISTENER_DETACHED_ENV) == "1" or args.service_payload
     if not supervised:
         exists, pid = read_listener_pid(agent)
