@@ -77,6 +77,30 @@ runtime sidecars, sessions ledger, `.m8shift.lock`, or anchors as state.
 
 ## Feature #18 — init-delivered discipline pack
 
+### v3.64 bootstrap runbook and write-gate amendment (#207/#215/#220)
+
+All init-owned scaffold mutations (capability artifacts, `.gitignore`,
+companions, runners, and the runbook) pass one physical-root write gate before
+their first mkdir/open. A script-local bootstrap whose current directory is
+different requires explicit confirmation; a conflicting `$M8SHIFT_ROOT` is a
+hard refusal because it would split local scaffold files from rebased relay
+state. Source-driven `update` MUST preflight that same companion gate before any
+component writes, not after protocol/pack/anchor mutations.
+
+Headless/full init provisions the version-locked reference runner and generates
+`.m8shift/BOOTSTRAP.md`. M8Shift owns only the single block delimited by
+`M8SHIFT:BOOTSTRAP:BEGIN/END`; re-init preserves all operator prose outside it.
+Missing, duplicate, unbalanced, or reversed markers refuse cleanly. The exact
+pre-marker renderer beginning `# Bootstrap plan`, with only its generated
+profile/capability fields, is recognized as wholly generated and replaced once;
+similar operator-authored prose is not consumed.
+
+The runbook documents `core.version` authority, capability/runner handshake,
+usage initialization, listener lifecycle, dashboard launch, and halted-listener
+recovery with the additive bounded `cause` field. Commands are sourced from the
+real CLI surfaces and tests, rather than copied from an independent command
+vocabulary.
+
 ### Generated file
 
 `m8shift.py init` MUST generate:

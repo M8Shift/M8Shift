@@ -13,7 +13,7 @@
 #   scripts/watch-status.sh --for agent-a
 #   scripts/watch-status.sh --interval 5 --changes-only
 set -uo pipefail
-M8SHIFT_RUNNER_VERSION="3.63.0"
+M8SHIFT_RUNNER_VERSION="3.64.0"
 export M8SHIFT_RUNNER_VERSION
 
 usage() {

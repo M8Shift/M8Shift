@@ -141,7 +141,7 @@ def scaffold_write_gate(confirm_script_dir=False, script_dir=None, command="init
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.63.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.64.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -2494,12 +2494,23 @@ def ensure_bootstrap_runbook(block):
     cur = read(path)
     begin_count = cur.count(BOOTSTRAP_BEGIN)
     end_count = cur.count(BOOTSTRAP_END)
-    if begin_count != end_count or begin_count > 1:
+    markers_reversed = (begin_count == 1 and
+                        cur.index(BOOTSTRAP_END) < cur.index(BOOTSTRAP_BEGIN))
+    if begin_count != end_count or begin_count > 1 or markers_reversed:
         sys.exit("refused: .m8shift/BOOTSTRAP.md has a malformed or duplicate generated block")
     if begin_count == 1:
         start = cur.index(BOOTSTRAP_BEGIN)
         end = cur.index(BOOTSTRAP_END, start) + len(BOOTSTRAP_END)
         new = cur[:start] + block + cur[end:]
+    elif re.fullmatch(
+            r"# Bootstrap plan\n\n"
+            r"Profile: `[^`\n]+`\n\n"
+            r"Capabilities: (?:`[^`\n]+`(?:, `[^`\n]+`)*)?\n\n"
+            r"Actions below are rendered guidance only; init executes none of them\.\n?",
+            cur):
+        # Pre-marker releases owned this entire byte-exact renderer. Replace it
+        # once instead of preserving stale generated text as operator prose.
+        new = block + "\n"
     else:
         separator = "" if not cur else ("\n" if cur.endswith("\n") else "\n\n")
         new = cur + separator + block + "\n"
@@ -3862,6 +3873,16 @@ def cmd_update(args):
         companion_selection = explicit_companions
     else:
         companion_selection = _installed_companions(target_root)
+
+    # apply_companions() retains the init scaffold gate.  Surface its hard
+    # M8SHIFT_ROOT refusal before any earlier component can write, so an update
+    # is never left half-applied when companions are selected.
+    if (not args.dry_run and "companions" in selected and companion_selection):
+        try:
+            scaffold_write_gate(True, script_dir=target_root,
+                                command="update companion scaffold")
+        except SystemExit as exc:
+            return _update_refusal(args, "refused", str(exc))
 
     def run_components(guard=None, dry_run=False):
         rows = []
