@@ -43,6 +43,22 @@ def run(*argv):
 
 
 class CliUsageTests(unittest.TestCase):
+    def test_agent_facing_entry_points_bare_pipe_print_full_help_and_exit_zero(self):
+        cases = {
+            "m8shift-runtime.py": "local sidecars",
+            "m8shift-context.py": "context records",
+            "m8shift-top.py": "bare pipe/agent invocation",
+            "examples/headless_runner.py": "bounded m8shift agent turn",
+        }
+        for relative, description in cases.items():
+            with self.subTest(script=relative):
+                result = run(sys.executable, str(ROOT / relative))
+                self.assertEqual(result.returncode, 0, (relative, result.stderr))
+                output = (result.stdout + result.stderr).lower()
+                self.assertIn("usage:", output)
+                self.assertIn("example", output)
+                self.assertIn(description, output)
+
     def test_every_python_entry_point_has_help_with_usage_and_example(self):
         for relative in PYTHON_ENTRY_POINTS:
             with self.subTest(script=relative):

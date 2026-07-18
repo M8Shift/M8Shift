@@ -30,11 +30,13 @@ Parameters:
 - `--profile {bare,headless,ops,full}`: stable initialization profile.
 - `--capabilities ID,...`: additive capability set.
 - `--list-profiles`: list profiles without writing.
+- `--confirm-script-dir`: explicitly accept that scaffold output goes beside
+  `m8shift.py` when the physical current directory differs.
 - `--gitignore` / `--no-gitignore`: enable or disable the generated ignore block.
 - `--companions NAME,...`: companions to install.
-- `--with-runtime`, `--with-context`, `--with-worktree`, `--with-headroom-companion`,
+- `--with-top`, `--with-runtime`, `--with-context`, `--with-worktree`, `--with-headroom-companion`,
   `--with-i18n`, `--with-e2e`: install individual companions.
-- `--full`: install all operational companions.
+- `--full`: install all operational companions, including the read-only `top` dashboard.
 - `--no-companions`: explicitly install no companions.
 - `--companion-source DIR`: directory from which companions are copied.
 - `--force-companions`: replace an older or edited local companion.

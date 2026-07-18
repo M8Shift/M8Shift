@@ -43,6 +43,9 @@ Usage:
 
 The agent command (everything after --cmd) is run verbatim as argv; it must, by itself,
 perform exactly one turn against this project's M8SHIFT.md (claim → work → append).
+Agents should inspect `m8shift.py status --json` and the listener profile before
+launch. This runner writes immutable run plans plus bounded lifecycle metadata to
+`.m8shift/runtime/`; provider output is not copied into durable logs.
 """
 import argparse
 import datetime as dt
@@ -803,7 +806,10 @@ def main():
         return 0
     p = HelpfulArgumentParser(
         usage="%(prog)s AGENT [options] --cmd COMMAND [ARG ...]",
-        description="Run one bounded M8Shift agent turn from a persistent listener.",
+        description=("Run one bounded M8Shift agent turn from a persistent listener. "
+                     "Inspect core status first; the runner records immutable plans and "
+                     "bounded lifecycle metadata under .m8shift/runtime/ without owning "
+                     "the relay pen or persisting provider output."),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "exit codes (RFC 047, one-shot --once):\n"
@@ -870,6 +876,9 @@ def main():
                    help="validate configuration, print the command argv as JSON, then exit")
     p.add_argument("--cmd", metavar="COMMAND", nargs=argparse.REMAINDER, required=True,
                    help="the headless agent command (static argv; runs ONE turn)")
+    if len(sys.argv) == 1:
+        p.print_help()
+        return 0
     args = p.parse_args()
     if not args.cmd:
         p.error("--cmd requires the agent command (e.g. --cmd claude -p \"...\")")
