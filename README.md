@@ -111,8 +111,9 @@ parity tests, and executed end-to-end where `pwsh` is available.
 
 For a read-only terminal dashboard, run `python3 m8shift-top.py`. It consumes
 the frozen `status --json` snapshot, uses an alternate screen on capable TTYs,
-and delegates byte-for-byte to the existing `watch` output for pipes, dumb
-terminals, `--plain`, or `M8SHIFT_NO_ALT_SCREEN`. Keys are display-only: `q`,
+prints full help for a bare non-TTY invocation, and delegates byte-for-byte to
+the existing `watch` output when scrolling mode is explicitly requested for
+pipes, dumb terminals, `--plain`, or `M8SHIFT_NO_ALT_SCREEN`. Keys are display-only: `q`,
 `?`, `r`, and navigation; the companion never claims or changes a relay.
 
 Optional aliases let both commands run from any working directory. The helper

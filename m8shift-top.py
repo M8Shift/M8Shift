@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Read-only, dependency-free dashboard for the M8Shift status snapshot."""
+"""Read-only, dependency-free dashboard for the M8Shift status snapshot.
+
+On an interactive TTY, a bare invocation opens the live dashboard. For agents,
+pipes, and other non-TTY callers, a bare invocation prints full help and exits
+instead of entering a refresh loop. The dashboard reads core status plus optional
+runtime sidecars; it writes no relay or log files.
+
+Examples:
+  m8shift-top.py
+  m8shift-top.py --interval 5 --utc
+  m8shift-top.py --plain --for agent-a
+"""
 import argparse
 import atexit
 import hashlib
@@ -1434,11 +1445,17 @@ def render_help(width, interval=2, height=None):
 def main(argv=None):
     p = argparse.ArgumentParser(
         usage="%(prog)s [dashboard options] [m8shift.py watch options]",
-        description="Open the read-only M8Shift terminal dashboard.",
+        description=("Open the read-only M8Shift terminal dashboard. A bare TTY "
+                     "invocation opens the TUI; a bare pipe/agent invocation prints "
+                     "this help and exits. It reads core status and optional runtime "
+                     "sidecars, and writes no relay or logs."),
         epilog="""examples:
   m8shift-top.py
   m8shift-top.py --interval 5 --utc
-  m8shift-top.py --plain --for agent-a""",
+  m8shift-top.py --plain --for agent-a
+
+Agent orientation: use --help first in automation; pass --plain explicitly only
+when a scrolling status stream is intended.""",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--interval", type=int, default=2,
                    help="refresh interval in seconds (default: 2)")
@@ -1450,9 +1467,13 @@ def main(argv=None):
                    help="relay project root (default: $M8SHIFT_ROOT or current directory)")
     p.add_argument("--engine", metavar="PATH", default=os.environ.get("M8SHIFT_ENGINE"),
                    help="m8shift.py engine path (default: <root>/m8shift.py)")
-    args, extra = p.parse_known_args(argv)
-    engine = args.engine or os.path.join(args.root, "m8shift.py")
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
     tty = sys.stdout.isatty() and sys.stdin.isatty()
+    if not raw_argv and not tty:
+        p.print_help()
+        return 0
+    args, extra = p.parse_known_args(raw_argv)
+    engine = args.engine or os.path.join(args.root, "m8shift.py")
     no_alt = args.plain or os.environ.get("TERM") == "dumb" or os.environ.get("M8SHIFT_NO_ALT_SCREEN")
     if not tty or no_alt or os.name == "nt":
         forwarded = (["--interval", str(args.interval)] if "--interval" not in extra else []) + extra

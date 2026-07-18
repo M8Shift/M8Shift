@@ -748,7 +748,7 @@ class TestInit(CLIBase):
         }
         with mock.patch.object(cowork, "HERE", self.d), \
              mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
-            cowork.apply_init_capabilities(["probe"], "bare")
+            cowork.apply_init_capabilities(["probe"], "bare", confirm_script_dir=True)
         self.assertFalse(os.path.exists(sentinel))
 
     def test_init_multiple_render_only_capabilities_are_preserved_and_idempotent(self):
@@ -763,16 +763,67 @@ class TestInit(CLIBase):
             }
         with mock.patch.object(cowork, "HERE", self.d), \
              mock.patch.object(cowork, "CAPABILITY_REGISTRY", injected):
-            cowork.apply_init_capabilities(["probe-0", "probe-1"], "bare")
+            cowork.apply_init_capabilities(
+                ["probe-0", "probe-1"], "bare", confirm_script_dir=True)
             with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
                 first = fh.read()
-            cowork.apply_init_capabilities(["probe-0", "probe-1"], "bare")
+            cowork.apply_init_capabilities(
+                ["probe-0", "probe-1"], "bare", confirm_script_dir=True)
             with open(os.path.join(self.d, ".m8shift", "bootstrap.json"), "rb") as fh:
                 second = fh.read()
         self.assertEqual([c["id"] for c in json.loads(first)["capabilities"]],
                          ["probe-0", "probe-1"])
         self.assertEqual(second, first)
         self.assertFalse(any(os.path.exists(path) for path in sentinels))
+
+    def test_bootstrap_runbook_is_reentrant_and_preserves_operator_prose(self):
+        self.init("--profile", "full", "--full", "--companion-source", REPO)
+        path = os.path.join(self.d, ".m8shift", "BOOTSTRAP.md")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\nOperator note: keep the local provider profile.\n")
+        self.init("--profile", "full", "--full", "--companion-source", REPO)
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertEqual(body.count(cowork.BOOTSTRAP_BEGIN), 1)
+        self.assertEqual(body.count(cowork.BOOTSTRAP_END), 1)
+        self.assertIn("Operator note: keep the local provider profile.", body)
+        self.assertIn("usage init", body)
+        self.assertIn("listener start", body)
+        self.assertIn("capability handshake", body)
+        self.assertIn("additive `cause` field", body)
+        self.assertIn("./m8shift-top.py", body)
+        self.assertIn("`core.version`, reconciled by `update`, is authoritative", body)
+
+    def test_bare_bootstrap_runbook_gates_absent_companions(self):
+        self.init("--profile", "bare", "--no-companions")
+        with open(os.path.join(self.d, ".m8shift", "BOOTSTRAP.md"), encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn("runtime` companion is absent", body)
+        self.assertIn("--companions runtime", body)
+        self.assertIn("top` companion is absent", body)
+        self.assertIn("--with-top", body)
+
+    def test_init_refuses_different_physical_cwd_without_confirmation(self):
+        kit = tempfile.mkdtemp(prefix="m8shift-kit-")
+        caller = tempfile.mkdtemp(prefix="m8shift-caller-")
+        self.addCleanup(shutil.rmtree, kit, True)
+        self.addCleanup(shutil.rmtree, caller, True)
+        shutil.copy(SCRIPT, os.path.join(kit, "m8shift.py"))
+        command = [sys.executable, os.path.join(kit, "m8shift.py"), "init"]
+        clean_env = os.environ.copy()
+        clean_env.pop("M8SHIFT_ROOT", None)
+        refused = subprocess.run(
+            command, cwd=caller, env=clean_env, capture_output=True, text=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("writes beside the kit", refused.stderr)
+        self.assertIn("--confirm-script-dir", refused.stderr)
+        self.assertFalse(os.path.exists(os.path.join(kit, "M8SHIFT.md")))
+        confirmed = subprocess.run(
+            command + ["--confirm-script-dir"], cwd=caller, env=clean_env,
+            capture_output=True, text=True)
+        self.assertEqual(confirmed.returncode, 0, confirmed.stdout + confirmed.stderr)
+        self.assertTrue(os.path.exists(os.path.join(kit, "M8SHIFT.md")))
+        self.assertFalse(os.path.exists(os.path.join(caller, "M8SHIFT.md")))
 
     def test_init_profiles_aliases_and_list_is_write_free(self):
         r = self.cw("init", "--list-profiles")
@@ -6823,6 +6874,36 @@ class TestRuntimeCompanion(CLIBase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_every_runtime_scaffold_refuses_wrong_cwd_before_writing(self):
+        commands = (
+            ("init",),
+            ("providers", "init"),
+            ("usage", "init"),
+        )
+        for args in commands:
+            with self.subTest(args=args), tempfile.TemporaryDirectory(
+                    prefix="m8shift-runtime-kit-") as kit, tempfile.TemporaryDirectory(
+                    prefix="m8shift-runtime-caller-") as caller:
+                shutil.copy(SCRIPT, os.path.join(kit, "m8shift.py"))
+                shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                            os.path.join(kit, "m8shift-runtime.py"))
+                result = subprocess.run(
+                    [sys.executable, os.path.join(kit, "m8shift-runtime.py"), *args],
+                    cwd=caller, env=self.clean_env(), capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("writes beside the kit", result.stderr)
+                self.assertFalse(os.path.exists(os.path.join(kit, ".m8shift")))
+
+    def test_runtime_scaffold_explicit_wrong_cwd_confirmation_targets_kit(self):
+        with tempfile.TemporaryDirectory(prefix="m8shift-runtime-caller-") as caller:
+            result = subprocess.run(
+                [sys.executable, os.path.join(self.d, "m8shift-runtime.py"),
+                 "usage", "init", "--confirm-script-dir"],
+                cwd=caller, env=self.clean_env(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.d, ".m8shift", "usage", "adapters.json")))
 
     def test_listener_status_json_capabilities_do_not_conflate_residency_with_detachment(self):
         self.init()

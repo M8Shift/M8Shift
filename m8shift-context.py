@@ -5,6 +5,17 @@ Phase 1 is intentionally native and boring: it builds referenced context packs,
 records receipts and metrics, and benchmarks "raw context" versus "native pack"
 without external dependencies. It never edits the core relay and never decides who
 may write.
+
+Agents should orient with the read-only `status`, `doctor`, `receipt`, and
+`metrics` commands. `init`, `pack --write`, compression, receipts, and metrics
+use bounded records under `.m8shift/context/`; adapter subprocesses are
+identity-pinned and their diagnostics stay in those local records.
+
+Examples:
+  m8shift-context.py status
+  m8shift-context.py doctor
+  m8shift-context.py pack --profile reviewer
+  m8shift-context.py retrieve RECORD_ID
 """
 import argparse
 import contextlib
@@ -2763,11 +2774,18 @@ def cmd_doctor(args):
 def main(argv=None):
     p = HelpfulArgumentParser(
         usage="%(prog)s [--root DIR] <command> [args]",
-        description="Build, compress, inspect, and retrieve bounded M8Shift context records.",
+        description=("Build, compress, inspect, and retrieve bounded M8Shift context "
+                     "records without editing the relay. Start with read-only status, "
+                     "doctor, receipt, or metrics; written artifacts and adapter "
+                     "diagnostics live under .m8shift/context/."),
         epilog="""examples:
   m8shift-context.py init
   m8shift-context.py pack --profile reviewer
-  m8shift-context.py retrieve RECORD_ID""",
+  m8shift-context.py retrieve RECORD_ID
+  m8shift-context.py doctor
+
+Agent orientation: inspect status/doctor first, use bounded retrieval for proof,
+and treat compressed summaries as navigation rather than exact evidence.""",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"m8shift-context.py {VERSION}",
                    help="show tool version and exit")
@@ -2881,7 +2899,11 @@ def main(argv=None):
     sd.add_argument("--json", action="store_true", help="print result as JSON instead of text")
     sd.set_defaults(func=cmd_doctor)
 
-    args = p.parse_args(argv)
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    if not raw_argv:
+        p.print_help()
+        return 0
+    args = p.parse_args(raw_argv)
     _binding_a1_preflight(args, getattr(args, "cmd", ""), getattr(args, "verb", ""))
     return args.func(args)
 

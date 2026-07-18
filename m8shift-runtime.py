@@ -8,6 +8,17 @@ explicitly launched listener additionally makes two bounded core argv calls whil
 child turn is alive — `claim <agent> --refresh` near TTL/2 (TTL extension + audit-only
 beat) and the protective `heartbeat` verb — and still never plain-claims, force-claims,
 appends, releases or completes.
+
+For agent orientation, begin with the read-only `status-runtime`, `doctor`,
+`providers check`, `usage status`, or `listener status` commands. Scaffold and
+runtime commands keep their state under `.m8shift/`; bounded listener output is
+available through `listener logs`.
+
+Examples:
+  m8shift-runtime.py status-runtime --json
+  m8shift-runtime.py doctor
+  m8shift-runtime.py listener status --agent agent-a --json
+  m8shift-runtime.py init --agents agent-a,agent-b
 """
 import abc
 import argparse
@@ -266,6 +277,19 @@ def load_core():
     core = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(core)
     return core
+
+
+def scaffold_write_gate(args, command):
+    """Use the core-owned target gate before any runtime scaffold write."""
+    core = load_core()
+    gate = getattr(core, "scaffold_write_gate", None)
+    if gate is None:
+        sys.exit("m8shift-runtime: core lacks the scaffold write gate; update the version-locked kit")
+    return gate(
+        bool(getattr(args, "confirm_script_dir", False)),
+        script_dir=HERE,
+        command=command,
+    )
 
 
 def ensure_runtime_dirs():
@@ -2711,6 +2735,7 @@ def provider_by_name(name):
 
 
 def cmd_runtime_init(args):
+    scaffold_write_gate(args, "runtime init")
     agents = active_roster_or_default(args.agents)
     ensure_project_dirs()
     ensure_runtime_dirs()
@@ -2753,6 +2778,7 @@ def cmd_runtime_init(args):
 
 
 def cmd_providers_init(args):
+    scaffold_write_gate(args, "runtime providers init")
     agents = active_roster_or_default(args.agents)
     ensure_project_dirs()
     created = write_json_if_missing(PROVIDERS, default_provider_registry(agents), args.force)
@@ -8837,6 +8863,7 @@ def default_usage_budget_example():
 
 
 def cmd_usage_init(args):
+    scaffold_write_gate(args, "runtime usage init")
     created = []
     if write_json_if_missing(USAGE_ADAPTERS, default_usage_adapters()):
         created.append(".m8shift/usage/adapters.json")
@@ -10082,11 +10109,18 @@ def main():
     p = HelpfulArgumentParser(
         prog=os.path.basename(sys.argv[0]),
         usage="%(prog)s [--version] <command> [args]",
-        description="Manage local M8Shift runtime presence, listeners, routing, and reports.",
+        description=("Manage advisory local M8Shift runtime state without owning the core "
+                     "pen. Start with read-only status-runtime, doctor, providers check, "
+                     "usage status, or listener status. Writes stay under .m8shift/ and "
+                     "listener logs are available through `listener logs`."),
         epilog="""examples:
   m8shift-runtime.py init
   m8shift-runtime.py status-runtime --json
-  m8shift-runtime.py listener status --agent agent-a""",
+  m8shift-runtime.py providers check agent-a
+  m8shift-runtime.py listener status --agent agent-a --json
+
+Agent orientation: inspect status-runtime/doctor first. The passive core remains
+the sole M8SHIFT.md writer; this companion owns only documented local sidecars.""",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"m8shift-runtime.py {VERSION}",
                    help="show the runtime companion version and exit")
@@ -10096,6 +10130,8 @@ def main():
     ri.add_argument("--agents", default="", help="comma-separated roster for provider defaults")
     ri.add_argument("--force", action="store_true", help="overwrite existing companion config files")
     ri.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
+    ri.add_argument("--confirm-script-dir", action="store_true",
+                    help="explicitly allow scaffold writes beside this script when cwd differs")
     ri.set_defaults(fn=cmd_runtime_init)
 
     w = sub.add_parser("watch", help="update local presence while watching relay state")
@@ -10198,6 +10234,8 @@ def main():
     pvi = pv_sub.add_parser("init", help="write .m8shift/providers.json")
     pvi.add_argument("--agents", default="", help="comma-separated roster for provider defaults")
     pvi.add_argument("--force", action="store_true", help="overwrite an existing .m8shift/providers.json")
+    pvi.add_argument("--confirm-script-dir", action="store_true",
+                     help="explicitly allow scaffold writes beside this script when cwd differs")
     pvi.set_defaults(fn=cmd_providers_init)
     pvl = pv_sub.add_parser("list", help="list provider entries")
     pvl.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
@@ -10498,6 +10536,8 @@ def main():
         "init", help="scaffold .m8shift/usage/adapters.json with disabled example adapters (no clobber)")
     uin.add_argument("--json", action="store_true",
                      help="emit machine-readable JSON instead of human output")
+    uin.add_argument("--confirm-script-dir", action="store_true",
+                     help="explicitly allow scaffold writes beside this script when cwd differs")
     uin.set_defaults(fn=cmd_usage_init)
     uad = usage_sub.add_parser("adapters", help="inspect and validate the usage adapter registry")
     uad_sub = uad.add_subparsers(dest="adapters_verb", required=True)
@@ -10596,6 +10636,9 @@ def main():
                      help="emit machine-readable JSON instead of human output")
     urs.set_defaults(fn=cmd_usage_resume)
 
+    if len(sys.argv) == 1:
+        p.print_help()
+        return 0
     args = p.parse_args()
     _binding_a1_preflight(args)
     sys.exit(args.fn(args))
