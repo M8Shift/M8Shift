@@ -57,11 +57,28 @@ listener classifies runner evidence as `CURRENT`, `LEGACY`, `BROKEN`, or
 `ABSENT`; only `CURRENT` proceeds. Dry-run does not execute the probe and reports
 `not_probed`.
 
-Provider stdout/stderr flows through a bounded TTY tee. Public/persisted evidence
-contains only byte/line counts and allowlisted signature IDs. Text that merely
+Provider stdout/stderr flows through a bounded TTY tee whose independent bounded
+head and tail windows cover both early failures and trailing prompts. Public/persisted
+evidence contains only byte/line counts and allowlisted signature IDs. Text that merely
 resembles a sandbox refusal is not authoritative: `environment-write-probe-v1`
 must confirm the configured working directory is unwritable before the listener
 classifies `environment_blocked` and halts.
+
+Provider-backed listener starts also fail closed on registry rows whose mode is
+`interactive`: the stable `provider_mode_interactive` preflight happens before
+PID/state creation, runner handshake, or provider launch. The three RFC 014 surface
+modes remain `interactive`, `headless`, and `hybrid`; the registry's older `local`
+value remains a launchable compatibility alias for local headless execution.
+`--notify-only --provider` validates its row but skips the mode gate because it launches
+nothing. Approval text is likewise advisory by itself. The runner classifies
+`approval_required` only when an allowlisted signature is corroborated by a non-zero
+provider exit, a failed relay-state classification, and either a stuck/timeout
+deadlock or the same signature after the final captured relay-turn marker. This can
+still be ambiguous when a provider emits an unmarked transcript as its final output;
+such failures remain diagnosable from signature IDs without persisting raw text. The
+classification is terminal for the invocation and points to the placeholder-only
+permission guide scaffolded by headless/full init at
+`.m8shift/PROVIDER-PERMISSIONS.md`.
 
 ## Problem
 
