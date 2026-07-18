@@ -116,7 +116,13 @@ runtime contract; it is never converted into certainty by prose.
 For a known failure, the packet and failing reproduction precede behavior
 changes. When the failure is discovered during implementation, the same commit
 may add the packet, an expected failure, and the fix, provided review can see the
-pre-fix expectation and the test demonstrably distinguishes old from new.
+pre-fix expectation and the test demonstrably distinguishes old from new. For a
+same-commit packet/guard/fix, the mechanical review runs the guard against the
+commit's parent and requires it to fail for the incident reason, then runs the
+same guard against the change commit and requires it to pass. If the parent
+lacks the new test harness, the change must include an isolated pre-fix fixture
+or compatibility wrapper that makes this parent check executable; prose saying
+the old behavior would fail is insufficient.
 
 An emergency may shorten review latency, but it still records the incident and
 guard before merge. A retrospective written after delivery is useful history,
@@ -177,7 +183,11 @@ Each change declares its gates before review:
 - delivery evidence under RFC 065.
 
 A filtered or compressed log is orientation only. Review verdicts cite the raw
-diff or retrievable raw test evidence.
+diff or retrievable raw test evidence. Review uses stable finding IDs so the
+same contract can later become advisory doctor output without renaming the
+failure: `incident.packet_missing`, `incident.guard_parent_passed`,
+`determinism.host_boundary_uncontrolled`, `reentry.durable_cause_missing`, and
+`reentry.second_run_missing`.
 
 ## 5. Re-entrant contract
 
@@ -197,6 +207,13 @@ tests, the issue lifecycle, changelog/release notes, and exact Git history.
 Runtime sidecars are recoverable evidence, never the only source of an invariant.
 Chat transcript, model memory, shell scrollback, a living process, and an
 operator's recollection are explicitly non-durable.
+
+For a halted listener, the durable carrier of its stable cause ID and next action
+is the append-only journal turn that records the halt (in current or archived
+`M8SHIFT.md` history). A listener sidecar or service log may supply raw evidence,
+but the blank-agent drill may not depend on that recoverable file surviving.
+The marker-managed runbook maps the journal's cause ID to the read-only diagnosis
+and recovery command.
 
 When durable sources disagree, the protocol/lock controls routing, `kit.json`
 controls installed component identity, immutable journal history controls what
