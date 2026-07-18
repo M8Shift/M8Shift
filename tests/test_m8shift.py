@@ -15896,9 +15896,11 @@ class TestRFC052ScrubCheck(CLIBase):
             env.pop("M8SHIFT_SCRUB_ENFORCE", None)
             env.pop("M8SHIFT_AGENT", None)
             env.update(env_extra)
+            # input="" pins the git-contract stdin to EOF: a pushed-range read
+            # must terminate identically under every harness (no inherited fd).
             return subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
                                   cwd=self.d, capture_output=True, text=True,
-                                  env=env)
+                                  env=env, input="")
 
         # pre-push: findings -> advisory (rc 0); enforce -> blocked (rc 1).
         r = hook("pre-push")
@@ -15927,8 +15929,11 @@ class TestRFC052ScrubCheck(CLIBase):
         env.pop("M8SHIFT_AGENT", None)
         env.pop("M8SHIFT_DENYLIST", None)
         for name in ("pre-commit", "pre-push"):
+            # input="" pins stdin to EOF (see hook() above): the pre-push
+            # pushed-range read must never inherit a live harness descriptor.
             r = subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
-                               cwd=self.d, capture_output=True, text=True, env=env)
+                               cwd=self.d, capture_output=True, text=True, env=env,
+                               input="")
             self.assertEqual(r.returncode, 0, (name, r.stderr))
             self.assertIn("continuing without it", r.stderr, name)
 
