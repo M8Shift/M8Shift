@@ -2736,6 +2736,7 @@ def plan_headless_runner(args, companion_plan):
                       % (version or "unparseable", VERSION))
         return None, errors
     source_sha = _sha256_file(source)
+    source_mode = stat.S_IMODE(os.stat(source).st_mode)
     dest = os.path.join(HERE, rel)
     if os.path.islink(dest) or (os.path.lexists(dest) and not os.path.isfile(dest)):
         errors.append("headless runner destination %s is not a regular file; refused" % rel)
@@ -2755,7 +2756,7 @@ def plan_headless_runner(args, companion_plan):
             action = "replace"
     return {"name": "headless-runner", "rel": rel, "source": source,
             "dest": dest, "version": version, "sha256": source_sha,
-            "action": action}, errors
+            "mode": source_mode, "action": action}, errors
 
 
 def apply_headless_runner(plan):
@@ -2777,10 +2778,7 @@ def apply_headless_runner(plan):
                 os.fsync(dest_fh.fileno())
             if _sha256_file(tmp) != plan["sha256"]:
                 raise OSError("verified runner checksum changed during copy")
-            try:
-                os.chmod(tmp, os.stat(plan["source"]).st_mode)
-            except OSError:
-                pass
+            os.chmod(tmp, plan["mode"])
             os.replace(tmp, plan["dest"])
             tmp = None
         except OSError as exc:
@@ -2797,9 +2795,14 @@ def apply_headless_runner(plan):
     entry = _kit_runner_entry(
         plan["name"], plan["rel"], plan["version"], plan["sha256"],
         "verified-kit")
-    _write_kit_manifest(
-        _kit_list(_read_kit_manifest(HERE), "companions"),
-        _merge_kit_runners([entry]))
+    try:
+        _write_kit_manifest(
+            _kit_list(_read_kit_manifest(HERE), "companions"),
+            _merge_kit_runners([entry]))
+    except OSError as exc:
+        errors.append(plan["name"])
+        lines.append("headless runner manifest failed (%s)" % type(exc).__name__)
+        return lines, errors
     lines.append("headless runner %s: %s v%s" %
                  (plan["rel"], "already current" if action in ("same", "uptodate")
                   else "installed", plan["version"]))

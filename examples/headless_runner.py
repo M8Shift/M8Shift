@@ -79,6 +79,10 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.epilog = old
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
+
+class RunnerInfrastructureError(Exception):
+    """Stable internal signal for retryable pre-launch infrastructure failures."""
+
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
 VERSION = "3.63.0"
@@ -88,7 +92,7 @@ HANDSHAKE_SCHEMA = "m8shift.runner.handshake.v1"
 HANDSHAKE_CAPABILITIES = (
     "bounded-tty-tee-v1",
     "environment-write-probe-v1",
-    "runner-exit-v1",
+    "runner-exit-v2",
 )
 HANDSHAKE_OPTIONS = (
     "--agent-model", "--cmd", "--cwd", "--env-allowlist",
@@ -405,14 +409,14 @@ def resolve_argv(argv):
         raise SystemExit("argv[0] must be one executable token, not a shell command")
     if os.path.isabs(exe):
         if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
-            raise SystemExit(f"argv[0] executable not found or not executable: {exe}")
+            raise RunnerInfrastructureError("provider_executable_unavailable")
         resolved = exe
     elif "/" in exe or "\\" in exe:
         raise SystemExit("argv[0] must be a bare PATH program or an absolute path")
     else:
         resolved = shutil.which(exe)
         if not resolved:
-            raise SystemExit(f"argv[0] executable not found on PATH: {exe}")
+            raise RunnerInfrastructureError("provider_executable_unavailable")
     return [resolved] + list(argv[1:])
 
 
@@ -580,7 +584,7 @@ def classify_post_run(expected, after, post_text):
                 return "external_transition", "integration merge in flight (active integrating sentinel)"
             return "stuck_working", "provider exited holding the pen without append"
         return "external_transition", "own working lock but the turn moved without this agent's authorship"
-    return "external_transition", f"relay moved to state {state} outside this run's authorship"
+    return "external_transition", "relay moved to another state outside this run's authorship"
 
 
 def verify_post_run(plan, after, post_text=None):
@@ -806,10 +810,11 @@ def main():
             "  0  success — post-run classification is completed, advanced, or not_required\n"
             "  1  run failure — non_completion, stuck_working, invalid_relay, partial/ledger\n"
             "     failure, or the consecutive-failure retry cap was reached\n"
-            "  2  infrastructure — launch failure, immutable run-plan collision, or turn timeout\n"
+            "  2  argv refusal — argparse rejected the runner invocation\n"
             "  3  external_transition — the relay moved outside this run's authorship (neutral,\n"
             "     never counted as a provider failure by a supervising listener)\n"
             "  4  suspended — relay is PAUSED (operator pause / usage cooldown; neutral)\n"
+            "  5  infrastructure — launch failure, immutable run-plan collision, or turn timeout\n"
             "\n"
             "resume-working (RFC 047 PR 2):\n"
             "  --resume-working (with --once) also makes the run eligible when the relay is\n"
@@ -876,8 +881,11 @@ def main():
     fails = 0
     if args.dry_run:
         lk0 = read_lock(args.m8shift) or {"state": "IDLE", "turn": "0"}
-        plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, lk0,
-                             resumed=resume_eligible(args, me, me_working, lk0))
+        try:
+            plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, lk0,
+                                 resumed=resume_eligible(args, me, me_working, lk0))
+        except RunnerInfrastructureError:
+            raise SystemExit("provider executable is unavailable")
         print(json.dumps({"agent": me, "cmd": plan["argv"], "run_plan": plan, "runner_version": VERSION}, sort_keys=True))
         return 0
 
@@ -906,12 +914,19 @@ def main():
         else:
             log(f"state={state} → running the agent for one turn.")
         run_id = validate_run_id(args.run_id or new_run_id(me))
-        plan = make_run_plan(args, run_id, me, lk, resumed=resumed)
+        try:
+            plan = make_run_plan(args, run_id, me, lk, resumed=resumed)
+        except RunnerInfrastructureError:
+            log("could not resolve the provider executable (provider_executable_unavailable).")
+            append_run_event(args, "run.launch_failed", run_id, me,
+                             detail="provider_executable_unavailable",
+                             signature_id="provider_executable_unavailable")
+            return 5
         try:
             plan_path = write_run_plan(args.runtime_dir, plan)
         except FileExistsError:
             log(f"immutable run plan already exists for {run_id}; refusing to overwrite.")
-            return 2
+            return 5
         append_run_event(args, "run.started", run_id, me, relay_state=state, relay_turn=lk.get("turn", ""),
                          run_plan=plan_path, run_plan_schema=RUN_PLAN_SCHEMA)
         child_env = child_env_for_plan(plan, lk, args.m8shift)
@@ -927,7 +942,7 @@ def main():
                              detail="provider_launch_error",
                              signature_id="provider_launch_error",
                              exception_type=exception_type)
-            return 2
+            return 5
         tee = BoundedTTYTee(proc)
         started = time.monotonic()
         timed_out = False
@@ -1001,7 +1016,7 @@ def main():
         once_rc = 1
         if timed_out:
             fails += 1
-            once_rc = 2
+            once_rc = 5
             append_run_event(args, "run.ended", run_id, me, status="timeout",
                              returncode=proc.returncode, relay_state=post_snapshot["state"],
                              relay_turn=post_snapshot["turn"],

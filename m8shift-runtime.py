@@ -151,7 +151,7 @@ RUNNER_HANDSHAKE_TIMEOUT_S = 5
 RUNNER_REQUIRED_CAPABILITIES = {
     "bounded-tty-tee-v1",
     "environment-write-probe-v1",
-    "runner-exit-v1",
+    "runner-exit-v2",
 }
 RUNNER_REQUIRED_OPTIONS = {
     "--agent-model", "--cmd", "--cwd", "--env-allowlist",
@@ -194,13 +194,15 @@ ATTENTION_STALE_AFTER_SECONDS = 300
 MACOS_PROTECTED_FOLDERS = ("Documents", "Desktop", "Downloads",
                            os.path.join("Library", "Mobile Documents"))
 # Runner one-shot exit vocabulary (RFC 047 Phase A / examples/headless_runner.py):
-# 0 success, 1 run failure, 2 infrastructure, 3 external_transition, 4 suspended.
+# 0 success, 1 run failure, 2 argparse refusal, 3 external_transition,
+# 4 suspended, 5 infrastructure failure.
 LISTENER_RUNNER_EXITS = {
     0: "success",
     1: "run_failure",
     2: "runner_refused_argv",
     3: "external_transition",
     4: "suspended",
+    5: "infrastructure_failure",
 }
 ENVIRONMENT_BLOCKED_NOTIFICATIONS = {
     "write_probe_denied": (
@@ -6814,8 +6816,21 @@ def probe_runner_handshake(runner_path, timeout=RUNNER_HANDSHAKE_TIMEOUT_S):
     renders or launches a provider command. Stderr is discarded so a broken
     runner cannot inject durable diagnostics through the listener.
     """
-    if not os.path.isfile(runner_path):
+    try:
+        runner_stat = os.stat(runner_path)
+    except FileNotFoundError:
         return {"kind": "ABSENT", "signature_id": "runner_absent"}
+    except OSError as exc:
+        return {"kind": "BROKEN", "signature_id": "runner_stat_error",
+                "exception_type": type(exc).__name__}
+    if not stat.S_ISREG(runner_stat.st_mode):
+        return {"kind": "BROKEN", "signature_id": "runner_not_regular"}
+    try:
+        with open(runner_path, "rb") as runner_fh:
+            runner_fh.read(1)
+    except OSError as exc:
+        return {"kind": "BROKEN", "signature_id": "runner_unreadable",
+                "exception_type": type(exc).__name__}
     retained = bytearray()
     oversized = [False]
     try:
@@ -7143,6 +7158,7 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
         "profile_source": profile["source"],
         "runner": os.path.relpath(runner_path, HERE),
         "runner_exists": os.path.isfile(runner_path),
+        "runner_handshake": {"status": "not_probed", "reason": "dry_run"},
         "runner_argv_preview": ([] if getattr(args, "notify_only", False) else
                                 listener_runner_argv(agent, profile, runner_path, "RUN_ID")),
         "poll_interval_seconds": args.poll_interval,
@@ -7223,8 +7239,9 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                                                       phase=halted instead
       PAUSED / AWAITING_<peer> / WORKING_<peer> /
         IDLE without starter / missing relay        → sleep (first-class neutral)
-    Runner exit mapping: 0 resets the failure counter; 1 and 2 increment it;
-    3 (external_transition) and 4 (suspended) leave it unchanged. At --max-retries
+    Runner exit mapping: 0 resets the failure counter; 1 and 5 increment it;
+    2 is an argparse-only terminal refusal; 3 (external_transition) and
+    4 (suspended) leave it unchanged. At --max-retries
     the loop persists phase=halted, stays resident, and launches nothing more; a
     restarted listener reloads the sidecar and honors an existing halt until an
     explicit `listener start --restart`.
@@ -7350,21 +7367,24 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             try:
                 child = subprocess.Popen(argv, cwd=HERE)
             except OSError as e:
-                say(f"{agent}: runner launch failed: {e}")
+                say(f"{agent}: runner launch failed ({type(e).__name__}; "
+                    "listener_runner_launch_error).")
                 child = None
             if child is None:
-                rc = 2
+                rc = 5
             else:
                 # RFC 049 PR B: the listener is the managed liveness producer
                 # while the child turn runs (protective beats + early refresh).
                 rc = supervise_child_with_liveness(child, agent, poll, say)
             last_run_id = run_id
-            last_classification = (listener_run_classification(run_id)
+            ledger_classification = listener_run_classification(run_id)
+            last_classification = (ledger_classification
                                    or LISTENER_RUNNER_EXITS.get(rc, "runner_crash"))
-            if rc == 2 or last_classification == "environment_blocked":
+            if ((rc == 2 and not ledger_classification)
+                    or last_classification == "environment_blocked"):
                 fails += 1
                 phase = "halted"
-                if rc == 2:
+                if rc == 2 and not ledger_classification:
                     last_classification = "runner_refused_argv"
                     reason = "runner_refused_argv"
                     say(f"{agent}: runner refused its argv (runner_refused_argv); "
@@ -7442,17 +7462,17 @@ def cmd_listener_start(args):
                      f"{', '.join(repr(a) for a in others)} is already configured as the "
                      "starter — leave only one starter profile")
     runner_path = os.path.abspath(args.runner) if args.runner else DEFAULT_RUNNER_PATH
-    # Compatibility is a strict preflight for every mode, including notify-only:
-    # it runs before dry-run rendering, pid repair, service installation, state
-    # creation, or any listener/provider launch.
-    require_runner_handshake(runner_path)
     if args.dry_run:
-        # Validation-only: prints the plan and writes NO pid, state, log, or
-        # service file (service backends render their definition inside the plan).
+        # Validation-only: do not execute even the runner handshake. The plan
+        # records that omission and writes NO pid, state, log, or service file.
         plan = build_listener_plan(agent, profile, runner_path, args, backend, fallback_reason)
         print(json.dumps({"dry_run": True, "plan": plan},
                          ensure_ascii=False, sort_keys=True, indent=2))
         return 0
+    # Compatibility is a strict preflight for every executable mode, including
+    # notify-only. It runs before pid repair, service installation, state
+    # creation, or any listener/provider launch.
+    require_runner_handshake(runner_path)
     if fallback_reason:
         # RFC 047: the fallback must be VISIBLE — never silently downgrade.
         print(f"backend {args.backend} → local: {fallback_reason}")

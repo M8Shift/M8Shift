@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Runner exit vocabulary hardening (#208).** `runner-exit-v2` reserves exit 2
+  for argparse refusal and moves retryable infrastructure failures and timeouts
+  to exit 5. Listener-side launch errors remain retryable, ledger classifications
+  are never overwritten by an exit-code fallback, and listener dry-runs no longer
+  execute runner handshakes.
+
 ## v3.63.0 — 2026-07-17
 
 - **Usage semantics: quota left, vendor-cumulative, reset-aware.** Every human
