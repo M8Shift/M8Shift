@@ -46,6 +46,7 @@ perform exactly one turn against this project's M8SHIFT.md (claim → work → a
 """
 import argparse
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
@@ -53,6 +54,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -77,11 +79,38 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.epilog = old
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
+
+class RunnerInfrastructureError(Exception):
+    """Stable internal signal for retryable pre-launch infrastructure failures."""
+
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
 VERSION = "3.63.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
+HANDSHAKE_SCHEMA = "m8shift.runner.handshake.v1"
+HANDSHAKE_CAPABILITIES = (
+    "bounded-tty-tee-v1",
+    "environment-write-probe-v1",
+    "runner-exit-v2",
+)
+HANDSHAKE_OPTIONS = (
+    "--agent-model", "--cmd", "--cwd", "--env-allowlist",
+    "--m8shift", "--m8shift-py", "--once", "--resume-working",
+    "--run-id", "--runtime-dir", "--start-on-idle",
+)
+TEE_CAPTURE_LIMIT = 64 * 1024
+ENVIRONMENT_SIGNATURES = {
+    "filesystem_read_only": (
+        "read-only file system",
+        "read only file system",
+    ),
+    "workspace_trust_refused": (
+        "workspace is not trusted",
+        "workspace trust denied",
+        "sandbox denied write access",
+    ),
+}
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 DEFAULT_ENV_ALLOWLIST = "HOME,PATH,LANG,LC_ALL,LC_CTYPE,TERM,USER"
 MANDATORY_ENV = ("M8SHIFT_ROOT", "M8SHIFT_AGENT", "M8SHIFT_RUN_ID", "M8SHIFT_TURN")
@@ -98,6 +127,142 @@ TURN_BEGIN_RE = re.compile(r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN --
 SUCCESS_STATUSES = ("completed", "advanced", "not_required")
 FAILURE_STATUSES = ("non_completion", "stuck_working", "invalid_relay")
 NEUTRAL_STATUSES = ("external_transition", "suspended")
+TERMINAL_FAILURE_STATUSES = ("environment_blocked",)
+
+
+def runner_handshake():
+    """Print the bounded listener/runner compatibility contract."""
+    print(json.dumps({
+        "schema": HANDSHAKE_SCHEMA,
+        "version": VERSION,
+        "capabilities": list(HANDSHAKE_CAPABILITIES),
+        "options": list(HANDSHAKE_OPTIONS),
+    }, ensure_ascii=False, sort_keys=True))
+
+
+class BoundedTTYTee:
+    """Drain both child pipes, retain bounded bytes, echo only to real TTYs."""
+
+    def __init__(self, proc, limit=TEE_CAPTURE_LIMIT):
+        self.proc = proc
+        self.limit = limit
+        self._capture = bytearray()
+        self._lock = threading.Lock()
+        self._counts = {
+            "stdout": {"bytes": 0, "lines": 0},
+            "stderr": {"bytes": 0, "lines": 0},
+        }
+        self._last = {"stdout": b"", "stderr": b""}
+        self._threads = []
+        for name, pipe, target in (
+                ("stdout", proc.stdout, sys.stdout),
+                ("stderr", proc.stderr, sys.stderr)):
+            thread = threading.Thread(
+                target=self._drain, args=(name, pipe, target), daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def _drain(self, name, pipe, target):
+        if pipe is None:
+            return
+        echo = bool(getattr(target, "isatty", lambda: False)())
+        try:
+            while True:
+                chunk = pipe.read(4096)
+                if not chunk:
+                    break
+                with self._lock:
+                    self._counts[name]["bytes"] += len(chunk)
+                    self._counts[name]["lines"] += chunk.count(b"\n")
+                    self._last[name] = chunk[-1:]
+                    room = self.limit - len(self._capture)
+                    if room > 0:
+                        self._capture.extend(chunk[:room])
+                if echo:
+                    target.write(chunk.decode("utf-8", errors="replace"))
+                    target.flush()
+        except OSError:
+            pass
+        finally:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+    def finish(self, join_timeout=2.0):
+        for thread in self._threads:
+            thread.join(timeout=join_timeout)
+        # A provider may leave a grandchild holding a copied pipe descriptor.
+        # Daemon drainers are therefore bounded here instead of being joined
+        # forever after the direct child has exited.
+        with self._lock:
+            counts = {name: dict(values) for name, values in self._counts.items()}
+            for name in counts:
+                if counts[name]["bytes"] and self._last[name] != b"\n":
+                    counts[name]["lines"] += 1
+            captured = bytes(self._capture)
+        text = captured.decode("utf-8", errors="replace").lower()
+        signature_ids = sorted(
+            signature_id for signature_id, needles in ENVIRONMENT_SIGNATURES.items()
+            if any(needle in text for needle in needles))
+        return {
+            "bytes": sum(row["bytes"] for row in counts.values()),
+            "lines": sum(row["lines"] for row in counts.values()),
+            "streams": counts,
+            "signature_ids": signature_ids,
+        }
+
+
+def probe_directory_writable(path):
+    """Return writable/blocked/ambiguous without persisting exception text."""
+    try:
+        if not os.path.isdir(path):
+            return {"status": "ambiguous", "signature_id": "directory_missing"}
+        if not os.access(path, os.W_OK):
+            return {"status": "blocked", "signature_id": "write_access_denied"}
+        probe = os.path.join(path, ".m8shift-write-probe-%s" % uuid.uuid4().hex)
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        os.unlink(probe)
+        return {"status": "writable", "signature_id": "write_probe_ok"}
+    except OSError as exc:
+        try:
+            if 'fd' in locals():
+                os.close(fd)
+        except OSError:
+            pass
+        try:
+            if 'probe' in locals() and os.path.exists(probe):
+                os.unlink(probe)
+        except OSError:
+            pass
+        if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+            return {"status": "blocked", "signature_id": "write_probe_denied",
+                    "exception_type": type(exc).__name__}
+        return {"status": "ambiguous", "signature_id": "write_probe_error",
+                "exception_type": type(exc).__name__}
+
+
+def environment_probe(cwd, runtime_dir):
+    """Probe both required write domains; any ambiguity stays retryable."""
+    rows = {
+        "cwd": probe_directory_writable(cwd),
+        "runtime_dir": probe_directory_writable(runtime_dir),
+    }
+    statuses = {row["status"] for row in rows.values()}
+    status = ("ambiguous" if "ambiguous" in statuses else
+              "blocked" if "blocked" in statuses else "writable")
+    signature_ids = sorted({row["signature_id"] for row in rows.values()})
+    exception_types = sorted({row.get("exception_type", "") for row in rows.values()
+                              if row.get("exception_type")})
+    return {"status": status, "signature_ids": signature_ids,
+            "exception_types": exception_types}
+
+
+def confirmed_environment_block(pre_probe, post_probe):
+    """A terminal block needs deterministic denial both before and after launch."""
+    return (pre_probe.get("status") == "blocked"
+            and post_probe.get("status") == "blocked")
 
 
 def read_lock(m8shift_path):
@@ -244,14 +409,14 @@ def resolve_argv(argv):
         raise SystemExit("argv[0] must be one executable token, not a shell command")
     if os.path.isabs(exe):
         if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
-            raise SystemExit(f"argv[0] executable not found or not executable: {exe}")
+            raise RunnerInfrastructureError("provider_executable_unavailable")
         resolved = exe
     elif "/" in exe or "\\" in exe:
         raise SystemExit("argv[0] must be a bare PATH program or an absolute path")
     else:
         resolved = shutil.which(exe)
         if not resolved:
-            raise SystemExit(f"argv[0] executable not found on PATH: {exe}")
+            raise RunnerInfrastructureError("provider_executable_unavailable")
     return [resolved] + list(argv[1:])
 
 
@@ -419,7 +584,7 @@ def classify_post_run(expected, after, post_text):
                 return "external_transition", "integration merge in flight (active integrating sentinel)"
             return "stuck_working", "provider exited holding the pen without append"
         return "external_transition", "own working lock but the turn moved without this agent's authorship"
-    return "external_transition", f"relay moved to state {state} outside this run's authorship"
+    return "external_transition", "relay moved to another state outside this run's authorship"
 
 
 def verify_post_run(plan, after, post_text=None):
@@ -614,20 +779,28 @@ def maybe_refresh_ttl(args, me, me_working, run_id):
         r = subprocess.run(cmd, check=False, text=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as e:
-        log(f"heartbeat failed to launch {args.m8shift_py}: {e}")
-        append_run_event(args, "run.heartbeat_failed", run_id, me, detail=str(e))
+        exception_type = type(e).__name__
+        log(f"heartbeat failed to launch ({exception_type}; heartbeat_launch_error).")
+        append_run_event(args, "run.heartbeat_failed", run_id, me,
+                         detail="heartbeat_launch_error",
+                         signature_id="heartbeat_launch_error",
+                         exception_type=exception_type)
         return
     if r.returncode == 0:
         log(f"heartbeat refreshed TTL ({remaining:.0f}s remained).")
         append_run_event(args, "run.heartbeat", run_id, me, remaining_seconds=int(remaining))
     else:
-        detail = (r.stderr or r.stdout or "").strip().splitlines()
-        detail = detail[0] if detail else f"rc={r.returncode}"
-        log(f"heartbeat refresh failed: {detail}")
-        append_run_event(args, "run.heartbeat_failed", run_id, me, detail=detail)
+        log(f"heartbeat refresh failed (heartbeat_refused; rc={r.returncode}).")
+        append_run_event(args, "run.heartbeat_failed", run_id, me,
+                         detail="heartbeat_refused",
+                         signature_id="heartbeat_refused",
+                         returncode=r.returncode)
 
 
 def main():
+    if sys.argv[1:] == ["--handshake"]:
+        runner_handshake()
+        return 0
     p = HelpfulArgumentParser(
         usage="%(prog)s AGENT [options] --cmd COMMAND [ARG ...]",
         description="Run one bounded M8Shift agent turn from a persistent listener.",
@@ -637,10 +810,11 @@ def main():
             "  0  success — post-run classification is completed, advanced, or not_required\n"
             "  1  run failure — non_completion, stuck_working, invalid_relay, partial/ledger\n"
             "     failure, or the consecutive-failure retry cap was reached\n"
-            "  2  infrastructure — launch failure, immutable run-plan collision, or turn timeout\n"
+            "  2  argv refusal — argparse rejected the runner invocation\n"
             "  3  external_transition — the relay moved outside this run's authorship (neutral,\n"
             "     never counted as a provider failure by a supervising listener)\n"
             "  4  suspended — relay is PAUSED (operator pause / usage cooldown; neutral)\n"
+            "  5  infrastructure — launch failure, immutable run-plan collision, or turn timeout\n"
             "\n"
             "resume-working (RFC 047 PR 2):\n"
             "  --resume-working (with --once) also makes the run eligible when the relay is\n"
@@ -707,8 +881,11 @@ def main():
     fails = 0
     if args.dry_run:
         lk0 = read_lock(args.m8shift) or {"state": "IDLE", "turn": "0"}
-        plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, lk0,
-                             resumed=resume_eligible(args, me, me_working, lk0))
+        try:
+            plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, lk0,
+                                 resumed=resume_eligible(args, me, me_working, lk0))
+        except RunnerInfrastructureError:
+            raise SystemExit("provider executable is unavailable")
         print(json.dumps({"agent": me, "cmd": plan["argv"], "run_plan": plan, "runner_version": VERSION}, sort_keys=True))
         return 0
 
@@ -737,21 +914,36 @@ def main():
         else:
             log(f"state={state} → running the agent for one turn.")
         run_id = validate_run_id(args.run_id or new_run_id(me))
-        plan = make_run_plan(args, run_id, me, lk, resumed=resumed)
+        try:
+            plan = make_run_plan(args, run_id, me, lk, resumed=resumed)
+        except RunnerInfrastructureError:
+            log("could not resolve the provider executable (provider_executable_unavailable).")
+            append_run_event(args, "run.launch_failed", run_id, me,
+                             detail="provider_executable_unavailable",
+                             signature_id="provider_executable_unavailable")
+            return 5
         try:
             plan_path = write_run_plan(args.runtime_dir, plan)
         except FileExistsError:
             log(f"immutable run plan already exists for {run_id}; refusing to overwrite.")
-            return 2
+            return 5
         append_run_event(args, "run.started", run_id, me, relay_state=state, relay_turn=lk.get("turn", ""),
                          run_plan=plan_path, run_plan_schema=RUN_PLAN_SCHEMA)
         child_env = child_env_for_plan(plan, lk, args.m8shift)
+        pre_environment = environment_probe(plan["cwd"], args.runtime_dir)
         try:
-            proc = subprocess.Popen(plan["argv"], cwd=plan["cwd"], env=child_env)
+            proc = subprocess.Popen(
+                plan["argv"], cwd=plan["cwd"], env=child_env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as e:
-            log(f"could not launch the agent: {e}")
-            append_run_event(args, "run.launch_failed", run_id, me, detail=str(e))
-            return 2
+            exception_type = type(e).__name__
+            log(f"could not launch the agent ({exception_type}; provider_launch_error).")
+            append_run_event(args, "run.launch_failed", run_id, me,
+                             detail="provider_launch_error",
+                             signature_id="provider_launch_error",
+                             exception_type=exception_type)
+            return 5
+        tee = BoundedTTYTee(proc)
         started = time.monotonic()
         timed_out = False
         while True:
@@ -771,12 +963,36 @@ def main():
             except subprocess.TimeoutExpired:
                 maybe_refresh_ttl(args, me, me_working, run_id)
 
+        output_summary = tee.finish()
+        post_environment = environment_probe(plan["cwd"], args.runtime_dir)
+        output_fields = {
+            "output_bytes": output_summary["bytes"],
+            "output_lines": output_summary["lines"],
+            "output_signature_ids": output_summary["signature_ids"],
+        }
+
         # Post-run classification (RFC 047): re-read the LOCK (bounded re-read for
         # transient read errors) and the transcript — authorship is the authority.
         after, post_text = read_relay_post_run(args.m8shift)
         verification = verify_post_run(plan, after, post_text)
         status = verification["status"]
         reason = verification.get("reason", "")
+        if status in FAILURE_STATUSES and confirmed_environment_block(
+                pre_environment, post_environment):
+            status = "environment_blocked"
+            reason = "write_probe_denied"
+            verification = dict(verification)
+            verification.update({
+                "ok": False,
+                "status": status,
+                "reason": reason,
+                "finding": {
+                    "severity": "error",
+                    "check": "headless.environment_write_probe",
+                    "message": "provider environment is blocked (write_probe_denied)",
+                    "hint": "Grant exact-project workspace write access, then restart the listener.",
+                },
+            })
         post_snapshot = verification["actual"]
         pre_snapshot = {
             "state": lk.get("state", ""),
@@ -800,7 +1016,7 @@ def main():
         once_rc = 1
         if timed_out:
             fails += 1
-            once_rc = 2
+            once_rc = 5
             append_run_event(args, "run.ended", run_id, me, status="timeout",
                              returncode=proc.returncode, relay_state=post_snapshot["state"],
                              relay_turn=post_snapshot["turn"],
@@ -808,7 +1024,7 @@ def main():
                              verification_status=status,
                              ledger_ok=ledger_ok,
                              success=False,
-                             runtime_findings=findings)
+                             runtime_findings=findings, **output_fields)
         elif status in NEUTRAL_STATUSES:
             # external_transition / suspended are NEUTRAL: not a provider failure, so
             # the consecutive-failure counter stays UNCHANGED — sleep, back to polling.
@@ -821,12 +1037,12 @@ def main():
                              ledger_ok=ledger_ok,
                              success=False,
                              reason=reason,
-                             runtime_findings=findings)
+                             runtime_findings=findings, **output_fields)
             if args.once:
                 return 3 if status == "external_transition" else 4
             time.sleep(args.interval)
             continue
-        elif status in FAILURE_STATUSES:
+        elif status in FAILURE_STATUSES + TERMINAL_FAILURE_STATUSES:
             # non_completion / stuck_working / invalid_relay are run failures even
             # when the provider exited rc 0 — never force-recovered, only retried.
             fails += 1
@@ -842,7 +1058,7 @@ def main():
                              ledger_ok=ledger_ok,
                              success=False,
                              reason=reason,
-                             runtime_findings=findings)
+                             runtime_findings=findings, **output_fields)
         elif success:
             fails = 0  # completed / advanced / not_required — authored, real progress.
             append_run_event(args, "run.ended", run_id, me, status=status,
@@ -852,7 +1068,7 @@ def main():
                              verification_status=status,
                              ledger_ok=True,
                              success=True,
-                             runtime_findings=[])
+                             runtime_findings=[], **output_fields)
             if args.once:
                 return 0
         else:
@@ -871,7 +1087,7 @@ def main():
                              verification_status=status,
                              ledger_ok=ledger_ok,
                              success=False,
-                             runtime_findings=findings)
+                             runtime_findings=findings, **output_fields)
 
         if fails >= args.max_retries:
             log("retry cap reached — stopping; leaving the pen for manual recovery.")

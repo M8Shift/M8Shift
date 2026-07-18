@@ -2597,10 +2597,22 @@ def _write_kit_manifest(installed, runners=None):
             "companions": installed}
     if runners:
         data["runners"] = runners
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
-    os.replace(tmp, path)
+    tmp = os.path.join(os.path.dirname(path),
+                       ".m8shift-kit-%s.tmp" % uuid.uuid4().hex)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def plan_companions(args):
@@ -2694,6 +2706,106 @@ def apply_companions(plan):
     if installed:
         _write_kit_manifest(_merge_kit_companions(installed))
         lines.append("kit manifest written to %s" % KIT_MANIFEST_REL)
+    return lines, errors
+
+
+def plan_headless_runner(args, companion_plan):
+    """Plan runner provisioning whenever init selects headless or runtime.
+
+    The source must be a regular, non-symlinked file inside the verified kit
+    source and version-locked to the core. The plan is read-only and runs before
+    init acquires its mutation lock.
+    """
+    selected = getattr(args, "profile", "bare") in ("headless", "full")
+    selected = selected or any(row.get("sel") == "runtime" for row in companion_plan)
+    if not selected:
+        return None, []
+    rel = RUNNER_REGISTRY["headless-runner"]
+    source_dir = os.path.realpath(getattr(args, "companion_source", "") or HERE)
+    source_link = os.path.join(source_dir, rel)
+    source = os.path.realpath(source_link)
+    errors = []
+    if (os.path.islink(source_link) or not os.path.isfile(source)
+            or not _physically_under(source_dir, source)):
+        errors.append("headless runner source %s is missing, symlinked, or escapes the verified kit"
+                      % rel)
+        return None, errors
+    version = _parse_runner_version(source, rel)
+    if version != VERSION:
+        errors.append("headless runner source version %s != core %s; refused"
+                      % (version or "unparseable", VERSION))
+        return None, errors
+    source_sha = _sha256_file(source)
+    source_mode = stat.S_IMODE(os.stat(source).st_mode)
+    dest = os.path.join(HERE, rel)
+    if os.path.islink(dest) or (os.path.lexists(dest) and not os.path.isfile(dest)):
+        errors.append("headless runner destination %s is not a regular file; refused" % rel)
+        return None, errors
+    action = "copy"
+    if os.path.realpath(dest) == source:
+        action = "same"
+    elif os.path.isfile(dest):
+        dest_sha = _sha256_file(dest)
+        if dest_sha == source_sha:
+            action = "uptodate"
+        elif not getattr(args, "force_companions", False):
+            errors.append("headless runner differs from the verified kit (sha %s); "
+                          "refused without --force-companions" % dest_sha[:8])
+            return None, errors
+        else:
+            action = "replace"
+    return {"name": "headless-runner", "rel": rel, "source": source,
+            "dest": dest, "version": version, "sha256": source_sha,
+            "mode": source_mode, "action": action}, errors
+
+
+def apply_headless_runner(plan):
+    """Install runner first, then atomically publish version+sha metadata."""
+    if plan is None:
+        return [], []
+    lines, errors = [], []
+    action = plan["action"]
+    if action not in ("same", "uptodate"):
+        os.makedirs(os.path.dirname(plan["dest"]), exist_ok=True)
+        tmp = os.path.join(os.path.dirname(plan["dest"]),
+                           ".m8shift-headless-runner-%s.tmp" % uuid.uuid4().hex)
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with open(plan["source"], "rb") as source_fh, os.fdopen(fd, "wb") as dest_fh:
+                for chunk in iter(lambda: source_fh.read(65536), b""):
+                    dest_fh.write(chunk)
+                dest_fh.flush()
+                os.fsync(dest_fh.fileno())
+            if _sha256_file(tmp) != plan["sha256"]:
+                raise OSError("verified runner checksum changed during copy")
+            os.chmod(tmp, plan["mode"])
+            os.replace(tmp, plan["dest"])
+            tmp = None
+        except OSError as exc:
+            errors.append(plan["name"])
+            lines.append("headless runner install failed (%s)" % type(exc).__name__)
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        if errors:
+            return lines, errors
+    entry = _kit_runner_entry(
+        plan["name"], plan["rel"], plan["version"], plan["sha256"],
+        "verified-kit")
+    try:
+        _write_kit_manifest(
+            _kit_list(_read_kit_manifest(HERE), "companions"),
+            _merge_kit_runners([entry]))
+    except OSError as exc:
+        errors.append(plan["name"])
+        lines.append("headless runner manifest failed (%s)" % type(exc).__name__)
+        return lines, errors
+    lines.append("headless runner %s: %s v%s" %
+                 (plan["rel"], "already current" if action in ("same", "uptodate")
+                  else "installed", plan["version"]))
     return lines, errors
 
 
@@ -3729,8 +3841,9 @@ def cmd_init(args):
     # (unknown/contradictory selector, missing/version-skewed/edited source) are hard
     # errors -> non-zero exit, no half-initialized relay.
     _companion_plan, _companion_errors = plan_companions(args)
-    if _companion_errors:
-        for _e in _companion_errors:
+    _runner_plan, _runner_errors = plan_headless_runner(args, _companion_plan)
+    if _companion_errors or _runner_errors:
+        for _e in _companion_errors + _runner_errors:
             print("  • " + _e)
         sys.exit("companion install refused; no changes made")
 
@@ -3743,6 +3856,11 @@ def cmd_init(args):
             for _l in _companion_lines:
                 print("  • " + _l)
             sys.exit("companion install failed; relay not initialized")
+        _runner_lines, _runner_apply_errors = apply_headless_runner(_runner_plan)
+        if _runner_apply_errors:
+            for _l in _runner_lines:
+                print("  • " + _l)
+            sys.exit("headless runner install failed; relay not initialized")
         # Determine the ACTIVE roster UNDER the lock, so two concurrent inits cannot
         # compute different rosters before serializing. ALL declared names are active
         # members; the first two only seed the __A__/__B__ stanza placeholders.
@@ -3823,6 +3941,7 @@ def cmd_init(args):
         else:
             results.append(tr("gitignore_skipped"))
         results.extend(_companion_lines)
+        results.extend(_runner_lines)
         guard.require_owned()
         results.extend(apply_init_capabilities(capability_ids, args.profile))
 

@@ -11,6 +11,7 @@ Tests keep the internal `cowork` alias only to reduce historical noise.
 Each regression test targets a fixed bug (NR-n) or a specification guarantee.
 Standard library only.
 """
+import argparse
 import datetime as dt
 import contextlib
 import hashlib
@@ -592,7 +593,7 @@ class InjectedFRBase(CLIBase):
 
 class TestInit(CLIBase):
     def test_init_profiles_render_only_and_idempotent(self):
-        self.init("--profile", "full")
+        self.init("--profile", "full", "--companion-source", REPO)
         bootstrap = os.path.join(self.d, ".m8shift", "bootstrap.json")
         with open(bootstrap, encoding="utf-8") as f:
             first = f.read()
@@ -602,7 +603,7 @@ class TestInit(CLIBase):
         self.assertEqual(data["capability_registry_version"], 1)
         hook = next(x for x in data["capabilities"] if x["id"] == "hook-samples")
         self.assertIsInstance(hook["actions"][0]["argv"], list)
-        self.init("--profile", "full")
+        self.init("--profile", "full", "--companion-source", REPO)
         with open(bootstrap, encoding="utf-8") as f:
             self.assertEqual(f.read(), first)
 
@@ -653,9 +654,80 @@ class TestInit(CLIBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("full: relay-core,headless-config", r.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
-        self.init("--profile", "headless")
+        self.init("--profile", "headless", "--companion-source", REPO)
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "LISTENER.md")))
         self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "HOOKS.md")))
+
+    def test_headless_init_provisions_a_compatible_runner_without_host_source_path(self):
+        self.init("--profile", "headless", "--companion-source", REPO)
+        runner = os.path.join(self.d, "examples", "headless_runner.py")
+        self.assertTrue(os.path.isfile(runner))
+        handshake = subprocess.run(
+            [sys.executable, runner, "--handshake"],
+            cwd=self.d, capture_output=True, text=True, timeout=10)
+        self.assertEqual(handshake.returncode, 0, handshake.stderr)
+        self.assertEqual(json.loads(handshake.stdout)["schema"],
+                         "m8shift.runner.handshake.v1")
+        with open(os.path.join(self.d, ".m8shift", "kit.json"),
+                  encoding="utf-8") as fh:
+            kit = json.load(fh)
+        entry = next(row for row in kit["runners"]
+                     if row["name"] == "headless-runner")
+        self.assertEqual(entry["path"], "examples/headless_runner.py")
+        self.assertEqual(entry["version"], cowork.VERSION)
+        self.assertEqual(len(entry["sha256"]), 64)
+        self.assertEqual(entry["source"], "verified-kit")
+        self.assertNotIn(REPO, json.dumps(entry))
+
+    def test_headless_runner_plan_captures_mode_before_apply(self):
+        args = argparse.Namespace(
+            profile="headless", companion_source=REPO, force_companions=False)
+        with mock.patch.object(cowork, "HERE", self.d):
+            plan, errors = cowork.plan_headless_runner(args, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(plan["mode"],
+                         os.stat(os.path.join(REPO, "examples", "headless_runner.py")).st_mode
+                         & 0o7777)
+
+    def test_headless_runner_apply_uses_planned_mode_not_source_mode_at_apply(self):
+        source = os.path.join(self.d, "source-runner.py")
+        dest = os.path.join(self.d, "examples", "headless_runner.py")
+        with open(source, "wb") as fh:
+            fh.write(b"runner\n")
+        os.chmod(source, 0o700)
+        with open(source, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        plan = {
+            "name": "headless-runner", "rel": "examples/headless_runner.py",
+            "source": source, "dest": dest, "version": cowork.VERSION,
+            "sha256": digest, "mode": 0o700, "action": "copy",
+        }
+        os.chmod(source, 0o755)
+        with mock.patch.object(cowork, "HERE", self.d):
+            lines, errors = cowork.apply_headless_runner(plan)
+        self.assertEqual(errors, [], lines)
+        self.assertEqual(os.stat(dest).st_mode & 0o7777, 0o700)
+
+    def test_headless_runner_manifest_oserror_is_reported_without_traceback(self):
+        source = os.path.join(self.d, "source-runner.py")
+        dest = os.path.join(self.d, "examples", "headless_runner.py")
+        with open(source, "wb") as fh:
+            fh.write(b"runner\n")
+        with open(source, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        plan = {
+            "name": "headless-runner", "rel": "examples/headless_runner.py",
+            "source": source, "dest": dest, "version": cowork.VERSION,
+            "sha256": digest, "mode": 0o755, "action": "copy",
+        }
+        with mock.patch.object(cowork, "HERE", self.d), \
+             mock.patch.object(cowork, "_write_kit_manifest",
+                               side_effect=OSError("synthetic-sensitive-error")):
+            lines, errors = cowork.apply_headless_runner(plan)
+        self.assertEqual(errors, ["headless-runner"])
+        self.assertTrue(os.path.isfile(dest))
+        self.assertIn("manifest failed (OSError)", "\n".join(lines))
+        self.assertNotIn("synthetic-sensitive-error", "\n".join(lines))
 
     def test_init_capability_artifacts_do_not_clobber(self):
         path = os.path.join(self.d, ".m8shift", "HOOKS.md")
@@ -4539,7 +4611,7 @@ sys.exit(7)
 class TestRFC047PhaseA(CLIBase):
     """RFC 047 Phase A — headless runner final-state enforcement: authorship-based
     total classification (transcript authority, not state diffs), the one-shot exit
-    code map (0/1/2/3/4), run.non_completion sidecar events, neutral statuses that
+    code map (0/1/2/3/4/5), run.non_completion sidecar events, neutral statuses that
     never burn retries, no automatic force recovery, and the core `claim --refresh`
     heartbeat guard."""
 
@@ -4733,15 +4805,48 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertEqual(self.ended()["status"], "external_transition")
 
-    def test_timeout_once_exits_2_when_retries_remain(self):
-        # Timeout keeps the infrastructure exit code (2) in one-shot mode.
+    def test_timeout_once_exits_5_when_retries_remain(self):
+        # Exit 2 is argparse-only; timeout uses retryable infrastructure exit 5.
         self.awaiting_me()
         r = self.runner_once("import time\ntime.sleep(10)\n",
                              "--turn-timeout", "1", "--kill-grace", "0", timeout=20)
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
         events = [row["event"] for row in self.rows()]
         self.assertIn("run.timeout", events)
         self.assertEqual(self.ended()["status"], "timeout")
+
+    def test_provider_popen_oserror_exits_retryable_5_with_redacted_event(self):
+        self.awaiting_me()
+        hr = self._load_runner()
+        argv = [
+            self.RUNNER, "claude", "--m8shift", "M8SHIFT.md",
+            "--m8shift-py", "m8shift.py", "--once", "--interval", "1",
+            "--max-retries", "3", "--cmd", sys.executable, "-c", "pass",
+        ]
+        previous_cwd = os.getcwd()
+        try:
+            os.chdir(self.d)
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(hr.subprocess, "Popen",
+                                   side_effect=OSError("synthetic-sensitive-eagain")):
+                rc = hr.main()
+        finally:
+            os.chdir(previous_cwd)
+        self.assertEqual(rc, 5)
+        failed = [row for row in self.rows() if row["event"] == "run.launch_failed"][-1]
+        self.assertEqual(failed["signature_id"], "provider_launch_error")
+        self.assertEqual(failed["exception_type"], "OSError")
+        self.assertNotIn("synthetic-sensitive-eagain", json.dumps(failed))
+
+    def test_unknown_lock_state_is_not_copied_into_classification_reason(self):
+        hr = self._load_runner()
+        injected = "SYNTHETIC_PROVIDER_LOCK_TEXT"
+        status, reason = hr.classify_post_run(
+            {"agent": "claude", "type": "transition", "pre_turn": "1",
+             "pre_state": "AWAITING_CLAUDE"},
+            {"state": injected, "holder": "", "turn": "1"}, "")
+        self.assertEqual(status, "external_transition")
+        self.assertNotIn(injected, reason)
 
     def test_authored_by_me_parses_turn_markers_defensively(self):
         hr = self._load_runner()
@@ -4804,6 +4909,9 @@ class ListenerCLIBase(CLIBase):
     def setUp(self):
         super().setUp()
         shutil.copy(self.RUNTIME, os.path.join(self.d, "m8shift-runtime.py"))
+        default_runner = os.path.join(self.d, "examples", "headless_runner.py")
+        os.makedirs(os.path.dirname(default_runner), exist_ok=True)
+        shutil.copy(self.RUNNER, default_runner)
 
     def rt(self, *args, env=None, timeout=60):
         run_env = None
@@ -4841,7 +4949,7 @@ class ListenerCLIBase(CLIBase):
         return name
 
     def stub_runner(self, *, rc=0, take_turn=False, append_as_holder=False,
-                    sleep_s=0, pid_file=""):
+                    sleep_s=0, pid_file="", ledger_status=""):
         """A recorded runner stand-in (the --runner test seam): appends its argv to
         launches.txt, optionally writes its own pid, takes one real relay turn
         (claim+append), appends directly as the current pen holder (the
@@ -4849,6 +4957,14 @@ class ListenerCLIBase(CLIBase):
         sleeps, then exits with `rc` (the RFC 047 one-shot exit vocabulary)."""
         lines = [
             "import json, os, sys, time",
+            "if sys.argv[1:] == ['--handshake']:",
+            "    print(json.dumps({'schema': 'm8shift.runner.handshake.v1', "
+            "'version': 'test', 'capabilities': ['bounded-tty-tee-v1', "
+            "'environment-write-probe-v1', 'runner-exit-v2'], 'options': "
+            "['--agent-model', '--cmd', '--cwd', '--env-allowlist', '--m8shift', "
+            "'--m8shift-py', '--once', '--resume-working', '--run-id', "
+            "'--runtime-dir', '--start-on-idle']}))",
+            "    sys.exit(0)",
             "with open('launches.txt', 'a', encoding='utf-8') as fh:",
             "    fh.write(json.dumps(sys.argv[1:]) + '\\n')",
         ]
@@ -4867,6 +4983,16 @@ class ListenerCLIBase(CLIBase):
             ]
         if sleep_s:
             lines.append(f"time.sleep({sleep_s})")
+        if ledger_status:
+            lines += [
+                "run_id = sys.argv[sys.argv.index('--run-id') + 1]",
+                "runtime_dir = sys.argv[sys.argv.index('--runtime-dir') + 1]",
+                "os.makedirs(runtime_dir, exist_ok=True)",
+                "with open(os.path.join(runtime_dir, 'runs.jsonl'), 'a', encoding='utf-8') as fh:",
+                "    fh.write(json.dumps({'schema': 'm8shift.runtime.event.v1', "
+                "'event': 'run.ended', 'run_id': run_id, 'status': %r}) + '\\n')"
+                % ledger_status,
+            ]
         lines.append(f"sys.exit({rc})")
         with open(os.path.join(self.d, "stub_runner.py"), "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
@@ -5009,6 +5135,51 @@ with open(%r, 'a', encoding='utf-8') as fh:
         with open(path, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 
+    def test_current_runner_exposes_the_bounded_capability_handshake(self):
+        result = subprocess.run(
+            [sys.executable, self.RUNNER, "--handshake"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLessEqual(len(result.stdout.encode("utf-8")), 4096)
+        doc = json.loads(result.stdout.splitlines()[0])
+        self.assertEqual(doc["schema"], "m8shift.runner.handshake.v1")
+        self.assertIn("bounded-tty-tee-v1", doc["capabilities"])
+        self.assertIn("runner-exit-v2", doc["capabilities"])
+        self.assertIn("--agent-model", doc["options"])
+
+    def test_handshake_precheck_classifies_nonregular_and_unreadable_as_broken(self):
+        runtime = self._load_runtime()
+        nonregular = runtime.probe_runner_handshake(self.d)
+        self.assertEqual(nonregular["kind"], "BROKEN")
+        self.assertEqual(nonregular["signature_id"], "runner_not_regular")
+        with mock.patch("builtins.open", side_effect=PermissionError("private detail")):
+            unreadable = runtime.probe_runner_handshake(self.RUNNER)
+        self.assertEqual(unreadable["kind"], "BROKEN")
+        self.assertEqual(unreadable["signature_id"], "runner_unreadable")
+
+    def test_notify_only_rejects_an_absent_runner_before_sidecar_writes(self):
+        self.init()
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--notify-only",
+            "--runner", "missing-runner.py", "--foreground", "--max-ticks", "1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("absent", (result.stdout + result.stderr).lower())
+        self.assertIn("provision", (result.stdout + result.stderr).lower())
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
+    def test_broken_handshake_never_persists_or_echoes_runner_output(self):
+        self.init()
+        runner = os.path.join(self.d, "broken-runner.py")
+        with open(runner, "w", encoding="utf-8") as fh:
+            fh.write("import sys\nprint('synthetic-sensitive-handshake')\nsys.exit(7)\n")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--notify-only",
+            "--runner", runner, "--foreground", "--max-ticks", "1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("broken", (result.stdout + result.stderr).lower())
+        self.assertNotIn("synthetic-sensitive-handshake", result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
     def test_legacy_fixture_rejects_the_conditionally_emitted_model_flag(self):
         marker = os.path.join(self.d, "provider-launched.txt")
         runner = self.legacy_runner(marker)
@@ -5021,7 +5192,6 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertFalse(os.path.exists(marker))
         self.assertEqual(len(self.legacy_invocations()), 1)
 
-    @unittest.expectedFailure
     def test_listener_start_rejects_a_legacy_runner_before_provider_launch(self):
         self.awaiting_me()
         marker = os.path.join(self.d, "provider-launched.txt")
@@ -5065,9 +5235,125 @@ with open(%r, 'a', encoding='utf-8') as fh:
         state = self.state_doc()
         self.assertEqual(state["last_classification"], "non_completion")
         self.assertEqual(state["consecutive_failures"], 1)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as fh:
+            ledger = fh.read()
+        self.assertNotIn("synthetic read-only file system message", ledger)
+        ended = [row for row in map(json.loads, ledger.splitlines())
+                 if row.get("event") == "run.ended"][-1]
+        self.assertGreater(ended["output_bytes"], 0)
+        self.assertGreater(ended["output_lines"], 0)
+        self.assertEqual(ended["output_signature_ids"], ["filesystem_read_only"])
+
+    def test_runner_rc2_is_terminal_and_classified_without_retry(self):
+        self.awaiting_me()
+        runner = self.stub_runner(rc=2)
+        profile = self.profile_path()
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", runner, "--foreground", "--max-ticks", "2",
+            "--poll-interval", "0.01", "--max-retries", "3")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "halted")
+        self.assertEqual(state["consecutive_failures"], 1)
+        self.assertEqual(state["last_classification"], "runner_refused_argv")
+        self.assertEqual(len(self.launches()), 1)
+
+    def test_runner_timeout_classification_is_retryable_and_not_overwritten(self):
+        self.awaiting_me()
+        runner = self.stub_runner(rc=5, ledger_status="timeout")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", self.profile_path(),
+            "--runner", runner, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-retries", "3", "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["last_classification"], "timeout")
+        self.assertEqual(state["consecutive_failures"], 1)
+        self.assertNotEqual(state["phase"], "halted")
+
+    def test_rc2_with_existing_timeout_ledger_does_not_halt_or_overwrite(self):
+        self.awaiting_me()
+        runner = self.stub_runner(rc=2, ledger_status="timeout")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", self.profile_path(),
+            "--runner", runner, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-retries", "3", "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["last_classification"], "timeout")
+        self.assertEqual(state["consecutive_failures"], 1)
+        self.assertNotEqual(state["phase"], "halted")
+
+    def test_runner_side_provider_launch_oserror_is_retryable_infrastructure(self):
+        self.awaiting_me()
+        profile = self.profile_path(argv=[os.path.join(self.d, "missing-provider")])
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-retries", "3", "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["last_classification"], "infrastructure_failure",
+                         result.stdout + result.stderr + repr(state))
+        self.assertEqual(state["consecutive_failures"], 1)
+        self.assertNotEqual(state["phase"], "halted")
+
+    def test_listener_side_runner_launch_oserror_is_retryable_and_redacted(self):
+        runtime = self._load_runtime()
+        writes, messages = [], []
+        profile = {"start_on_idle": False}
+        with mock.patch.object(runtime, "read_listener_state", return_value={}), \
+             mock.patch.object(runtime, "write_listener_state",
+                               side_effect=lambda _agent, **kw: writes.append(dict(kw))), \
+             mock.patch.object(runtime, "read_relay_lock_fields",
+                               return_value={"state": "AWAITING_CLAUDE", "holder": "claude"}), \
+             mock.patch.object(runtime, "maybe_notify_stranded"), \
+             mock.patch.object(runtime, "read_usage_hold", return_value=(None, "")), \
+             mock.patch.object(runtime, "listener_runner_argv", return_value=["runner"]), \
+             mock.patch.object(runtime, "new_listener_run_id", return_value="test-run"), \
+             mock.patch.object(runtime.subprocess, "Popen",
+                               side_effect=OSError("synthetic-sensitive-error")), \
+             mock.patch.object(runtime, "listener_run_classification", return_value=""), \
+             mock.patch.object(runtime, "listener_emit",
+                               side_effect=lambda _agent, message, _owns: messages.append(message)), \
+             mock.patch.object(runtime, "remove_own_listener_pid"), \
+             mock.patch.object(runtime.time, "sleep"):
+            rc = runtime.run_listener_loop(
+                "claude", profile, self.RUNNER, poll=0.01, max_ticks=1,
+                max_retries=3, max_backoff=1)
+        self.assertEqual(rc, 0)
+        self.assertEqual(writes[-1]["last_classification"], "infrastructure_failure")
+        self.assertEqual(writes[-1]["consecutive_failures"], 1)
+        self.assertNotEqual(writes[-1]["phase"], "halted")
+        self.assertNotIn("synthetic-sensitive-error", "\n".join(messages))
+        self.assertIn("listener_runner_launch_error", "\n".join(messages))
+
+    def test_listener_dry_run_does_not_execute_runner_handshake(self):
+        self.init()
+        marker = os.path.join(self.d, "handshake-ran")
+        runner = os.path.join(self.d, "marker-runner.py")
+        with open(runner, "w", encoding="utf-8") as fh:
+            fh.write("open(%r, 'w').close()\n" % marker)
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", self.profile_path(),
+            "--runner", runner, "--dry-run", "--backend", "local")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(marker))
+        plan = json.loads(result.stdout)["plan"]
+        self.assertEqual(plan["runner_handshake"],
+                         {"status": "not_probed", "reason": "dry_run"})
+
+    def test_listener_state_rejects_unbounded_classification_text(self):
+        runtime = self._load_runtime()
+        with mock.patch.object(runtime, "LISTENERS_DIR", self.listeners_dir()):
+            runtime.write_listener_state(
+                "claude", phase="polling", consecutive_failures=0,
+                last_classification="synthetic child output")
+        self.assertEqual(self.state_doc()["last_classification"], "")
 
     @unittest.skipIf(os.name == "nt", "POSIX permission fixture")
-    @unittest.expectedFailure
     def test_confirmed_environment_block_halts_after_one_redacted_attempt(self):
         self.awaiting_me()
         self.blocked_cwd = os.path.join(self.d, "read-only-cwd")
@@ -5102,7 +5388,23 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertNotIn(signature, result.stdout + result.stderr)
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
                   encoding="utf-8") as fh:
-            self.assertNotIn(signature, fh.read())
+            ledger = fh.read()
+        self.assertNotIn(signature, ledger)
+        ended = [row for row in map(json.loads, ledger.splitlines())
+                 if row.get("event") == "run.ended"][-1]
+        self.assertEqual(ended["status"], "environment_blocked")
+        self.assertEqual(ended["output_signature_ids"], ["filesystem_read_only"])
+        self.assertNotIn("detail", ended)
+        notify_dir = os.path.join(self.d, ".m8shift", "runtime", "notify")
+        persisted = ""
+        for name in os.listdir(notify_dir):
+            path = os.path.join(notify_dir, name)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as fh:
+                    persisted += fh.read()
+        self.assertNotIn(signature, persisted)
+        self.assertIn("write_probe_denied", persisted)
+        self.assertIn("~/code/My Project", persisted)
 
 
 class TestRFC047ListenerPR1(ListenerCLIBase):
