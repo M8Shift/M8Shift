@@ -2333,17 +2333,20 @@ BOOTSTRAP_END = "<!-- M8SHIFT:BOOTSTRAP:END -->"
 CAPABILITY_REGISTRY_VERSION = 1
 INIT_PROFILES = {
     "bare": ("relay-core",),
-    "headless": ("relay-core", "headless-config", "listener-docs"),
+    "headless": ("relay-core", "headless-config", "listener-docs",
+                 "provider-permissions"),
     "ops": ("relay-core", "gitignore-block", "hook-samples", "watch-launcher",
             "denylist-pointer"),
-    "full": ("relay-core", "headless-config", "listener-docs", "gitignore-block",
-             "hook-samples", "watch-launcher", "denylist-pointer"),
+    "full": ("relay-core", "headless-config", "listener-docs",
+             "provider-permissions", "gitignore-block", "hook-samples",
+             "watch-launcher", "denylist-pointer"),
 }
 CAPABILITY_REGISTRY = {
     "relay-core": {"description": "Core relay kit", "artifacts": [], "actions": [], "never_auto": False},
     "gitignore-block": {"description": "Generated M8Shift ignore block", "artifacts": [".gitignore"], "actions": [], "never_auto": False},
     "headless-config": {"description": "Headless runner sample configuration", "artifacts": [".m8shift/runner/config.sample.json"], "actions": [], "never_auto": False},
     "listener-docs": {"description": "Listener quickstart", "artifacts": [".m8shift/LISTENER.md"], "actions": [], "never_auto": False},
+    "provider-permissions": {"description": "Headless provider permission allowlist guidance", "artifacts": [".m8shift/PROVIDER-PERMISSIONS.md"], "actions": [], "never_auto": False},
     "hook-samples": {"description": "Opt-in hook configuration", "artifacts": [".m8shift/HOOKS.md"], "actions": [{"kind": "run_command", "argv": ["git", "config", "core.hooksPath", ".m8shift/hooks"], "approval": "operator", "verify_argv": ["git", "config", "--get", "core.hooksPath"]}], "never_auto": True},
     "watch-launcher": {"description": "Local status watcher launcher", "artifacts": [".m8shift/watch-status.sample.sh"], "actions": [], "never_auto": False},
     "denylist-pointer": {"description": "Private denylist setup guidance", "artifacts": [".m8shift/DENYLIST.md"], "actions": [], "never_auto": True},
@@ -2474,6 +2477,20 @@ def render_bootstrap_runbook(profile, ids, project_name=None, roster=None):
             "./m8shift-runtime.py listener start --agent %s --provider --restart" % agent,
             "./m8shift-runtime.py listener status --agent %s --json" % agent,
             "```",
+            "",
+            "If the halted lane cannot answer, recover routing only through the audited "
+            "cooperative-request path below. Replace every placeholder from current relay "
+            "state; `steer-turn --force` is an explicit operator action for an idle "
+            "`AWAITING_<holder>` lane, never permission to redirect an active holder:",
+            "",
+            "```sh",
+            "./m8shift.py request-turn <requester> --to <halted-holder> --reason \"<why the turn is needed>\"",
+            "./m8shift.py steer-turn <requester> --from <halted-holder> --request <request-id> --force --reason \"<operator-approved recovery>\"",
+            "```",
+            "",
+            "Read `M8SHIFT.requests.md` for the recorded request id, repair the reported "
+            "listener cause, and then use the restart command above. Do not force-claim "
+            "or steer through a live `WORKING_*` holder.",
         ])
     else:
         lines.extend([
@@ -2527,6 +2544,35 @@ def apply_init_capabilities(ids, profile, project_name=None, roster=None,
     bodies = {
         "headless-config": (".m8shift/runner/config.sample.json", '{\n  "agent": "codex",\n  "timeout_s": 1800\n}\n'),
         "listener-docs": (".m8shift/LISTENER.md", "# Listener quickstart\n\nRun `./m8shift-runtime.py listener start <agent>`, then check `./m8shift-runtime.py listener status <agent>`. Init never starts a listener.\n"),
+        "provider-permissions": (
+            ".m8shift/PROVIDER-PERMISSIONS.md",
+            "# Headless provider permission allowlists\n\n"
+            "Headless agents must be able to run the relay's own bounded commands without "
+            "waiting for an interactive approval UI. Translate the templates below into "
+            "the installed provider's documented permission-policy syntax. The angle-bracket "
+            "tokens are placeholders, not commands. Never guess or add a vendor bypass flag.\n\n"
+            "Use the same relay-command allowlist for each configured headless provider "
+            "(`anthropic-claude`, `openai-codex`, `google-gemini`, or `mistral-vibe`):\n\n"
+            "```text\n"
+            "<provider-policy-file>\n"
+            "<provider-allow-rule> ./m8shift.py bind <agent>\n"
+            "<provider-allow-rule> ./m8shift.py status --for <agent>\n"
+            "<provider-allow-rule> ./m8shift.py next <agent>\n"
+            "<provider-allow-rule> ./m8shift.py may-i-write <agent>\n"
+            "<provider-allow-rule> ./m8shift.py claim <agent> --refresh\n"
+            "<provider-allow-rule> ./m8shift.py append <agent> --to <peer> <bounded-turn-fields>\n"
+            "```\n\n"
+            "Bind that command set through the matching provider placeholder (keep vendor "
+            "syntax out of the generic kit):\n\n"
+            "```text\n"
+            "anthropic-claude: <anthropic-policy-file> + <anthropic-allow-rule>\n"
+            "openai-codex:     <openai-policy-file> + <openai-allow-rule>\n"
+            "google-gemini:    <gemini-policy-file> + <gemini-allow-rule>\n"
+            "mistral-vibe:     <vibe-policy-file> + <vibe-allow-rule>\n"
+            "```\n\n"
+            "Keep destructive, network, credential, `--force`, `release`, and `done` actions "
+            "outside this unattended allowlist. After adapting the policy, verify it with one "
+            "bounded listener turn and `./m8shift-runtime.py listener status --agent <agent> --json`.\n"),
         "hook-samples": (".m8shift/HOOKS.md", "# Hook sample\n\nOperator-approved setup: `git config core.hooksPath .m8shift/hooks`. Verify with `git config --get core.hooksPath`. Set the documented enforce variable explicitly; `doctor` reports `security.anti_leak_gate_dormant`. Init never runs this command.\n"),
         "watch-launcher": (".m8shift/watch-status.sample.sh", "#!/bin/sh\nexec ./m8shift.py status --for \"${1:-codex}\"\n"),
         "denylist-pointer": (".m8shift/DENYLIST.md", "# Private denylist\n\nExpected path: `.m8shift/denylist.txt`; one term per line; mode 600. Create and populate it yourself, and mirror it through a CI secret where needed. Init never creates the denylist.\n"),

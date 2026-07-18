@@ -176,7 +176,7 @@ LISTENER_CLASSIFICATIONS = {
     "external_transition", "suspended", "failed_partial",
     "failed_missing_ledger", "timeout", "run_failure",
     "infrastructure_failure", "runner_crash", "runner_refused_argv",
-    "environment_blocked",
+    "environment_blocked", "approval_required",
 }
 LISTENER_BACKENDS = ("auto", "local", "launchd", "systemd", "windows")
 LISTENER_SERVICE_BACKENDS = ("launchd", "systemd", "windows")
@@ -223,6 +223,11 @@ ENVIRONMENT_BLOCKED_NOTIFICATIONS = {
         "does not cover ~/code/My Project. Restart the listener after correcting access."
     ),
 }
+APPROVAL_REQUIRED_NOTIFICATION = (
+    "provider approval required (approval_required): add the relay commands in "
+    ".m8shift/PROVIDER-PERMISSIONS.md to this provider's documented headless "
+    "permission allowlist, verify one bounded turn, then restart the listener."
+)
 LISTENER_TURN_PROMPT = (
     "Apply M8SHIFT.protocol.md: you are {agent}; take exactly one relay turn "
     "(claim, work, append) and then exit."
@@ -6819,6 +6824,13 @@ def load_listener_profile(args, agent):
         row = provider_by_name(agent)
         if not row:
             sys.exit(f"m8shift-runtime: no provider entry for {agent} in .m8shift/providers.json")
+        if row.get("mode") not in {"headless", "hybrid"}:
+            sys.exit(
+                f"m8shift-runtime: provider entry for {agent} has mode="
+                f"{row.get('mode', '') or 'unset'} and cannot be launched by a headless "
+                "listener (provider_mode_interactive); configure a separate mode=headless "
+                "or mode=hybrid entry and its documented permission allowlist"
+            )
         errors = [f for f in provider_entry_findings(row, agent) if f["severity"] == "error"]
         if errors:
             sys.exit(f"m8shift-runtime: provider entry for {agent} is invalid: "
@@ -7464,7 +7476,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             last_classification = (ledger_classification
                                    or LISTENER_RUNNER_EXITS.get(rc, "runner_crash"))
             if ((rc == 2 and not ledger_classification)
-                    or last_classification == "environment_blocked"):
+                    or last_classification in {"environment_blocked",
+                                               "approval_required"}):
                 fails += 1
                 phase = "halted"
                 notification_message = ""
@@ -7475,9 +7488,15 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     say(f"{agent}: runner refused its argv (runner_refused_argv); "
                         "HALTED after one attempt. Provision a compatible runner, then "
                         "clear with `listener start --restart`.")
-                else:
+                elif last_classification == "environment_blocked":
                     reason = "environment_blocked:write_probe_denied"
                     message = ENVIRONMENT_BLOCKED_NOTIFICATIONS["write_probe_denied"]
+                    say(f"{agent}: {message}")
+                    notification_message = message
+                    notification_prompt = message
+                else:
+                    reason = "approval_required:provider_permission_allowlist"
+                    message = APPROVAL_REQUIRED_NOTIFICATION
                     say(f"{agent}: {message}")
                     notification_message = message
                     notification_prompt = message

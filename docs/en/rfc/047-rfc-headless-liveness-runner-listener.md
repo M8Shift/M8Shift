@@ -63,6 +63,15 @@ resembles a sandbox refusal is not authoritative: `environment-write-probe-v1`
 must confirm the configured working directory is unwritable before the listener
 classifies `environment_blocked` and halts.
 
+Provider-backed listener starts also fail closed on registry rows whose mode is
+`interactive`: the stable `provider_mode_interactive` preflight happens before
+PID/state creation, runner handshake, or provider launch. Approval text is likewise
+advisory by itself. The runner classifies `approval_required` only when an allowlisted
+signature is corroborated by a non-zero provider exit and a failed relay-state
+classification. That classification is terminal for the invocation, persists no raw
+provider text, and points to the placeholder-only permission guide scaffolded by
+headless/full init at `.m8shift/PROVIDER-PERMISSIONS.md`.
+
 ## Problem
 
 `examples/headless_runner.py` is currently a foreground loop. It can launch a

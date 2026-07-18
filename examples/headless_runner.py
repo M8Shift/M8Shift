@@ -113,6 +113,12 @@ ENVIRONMENT_SIGNATURES = {
         "workspace trust denied",
         "sandbox denied write access",
     ),
+    "approval_required": (
+        "approval is required",
+        "approval required to run",
+        "requires approval before",
+        "permission request was not approved",
+    ),
 }
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
 DEFAULT_ENV_ALLOWLIST = "HOME,PATH,LANG,LC_ALL,LC_CTYPE,TERM,USER"
@@ -130,7 +136,7 @@ TURN_BEGIN_RE = re.compile(r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN --
 SUCCESS_STATUSES = ("completed", "advanced", "not_required")
 FAILURE_STATUSES = ("non_completion", "stuck_working", "invalid_relay")
 NEUTRAL_STATUSES = ("external_transition", "suspended")
-TERMINAL_FAILURE_STATUSES = ("environment_blocked",)
+TERMINAL_FAILURE_STATUSES = ("environment_blocked", "approval_required")
 
 
 def runner_handshake():
@@ -266,6 +272,18 @@ def confirmed_environment_block(pre_probe, post_probe):
     """A terminal block needs deterministic denial both before and after launch."""
     return (pre_probe.get("status") == "blocked"
             and post_probe.get("status") == "blocked")
+
+
+def confirmed_approval_required(output_summary, returncode, relay_status):
+    """Corroborate an advisory output signature before making it terminal.
+
+    Provider text alone is never authoritative.  The bounded signature must be
+    accompanied by a non-zero provider exit and an unchanged/failed relay
+    classification for this invocation.
+    """
+    return (returncode not in (None, 0)
+            and relay_status in FAILURE_STATUSES
+            and "approval_required" in output_summary.get("signature_ids", ()))
 
 
 def read_lock(m8shift_path):
@@ -1000,6 +1018,23 @@ def main():
                     "check": "headless.environment_write_probe",
                     "message": "provider environment is blocked (write_probe_denied)",
                     "hint": "Grant exact-project workspace write access, then restart the listener.",
+                },
+            })
+        elif confirmed_approval_required(output_summary, proc.returncode, status):
+            status = "approval_required"
+            reason = "provider_permission_allowlist"
+            verification = dict(verification)
+            verification.update({
+                "ok": False,
+                "status": status,
+                "reason": reason,
+                "finding": {
+                    "severity": "error",
+                    "check": "headless.approval_required",
+                    "message": "provider approval is required (approval_required)",
+                    "hint": ("Add only the relay commands from "
+                             ".m8shift/PROVIDER-PERMISSIONS.md to the provider's "
+                             "documented headless permission allowlist, then restart."),
                 },
             })
         post_snapshot = verification["actual"]
