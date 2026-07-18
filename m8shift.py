@@ -9448,6 +9448,8 @@ def _usage_signature(lk):
 
 
 STATUS_SNAPSHOT_SCHEMA = "m8shift.status/1"
+LISTENER_PHASES = ("polling", "backoff", "halted")
+USAGE_WATCH_SCHEMA = "m8shift.usage-watch.lifecycle.v1"
 STATUS_SNAPSHOT_TEXT_MAX = 120
 STATUS_ACTIVITY_LIMIT = 200
 STATUS_ACTIVITY_DEFAULT_LIMIT = 8
@@ -9590,36 +9592,122 @@ def _status_ledger_counts():
             "doctor_findings": doctor_findings, "gate_armed": gate_armed}
 
 
-def _status_listeners(lk):
-    """Compact live-listener summary from bounded, roster-owned PID sidecars."""
-    rows = []
-    base = os.path.join(project_root(), ".m8shift", "runtime", "listeners")
-    for agent in active_agents(lk):
-        alive = False
-        try:
-            with open(os.path.join(base, agent + ".pid"), encoding="ascii") as fh:
-                pid = int(fh.read(32).strip())
-            if pid > 0:
-                os.kill(pid, 0)
-                alive = True
-        except (OSError, ValueError):
-            pass
-        if alive:
-            rows.append(agent + " ALIVE")
-    return " · ".join(rows) if rows else "none"
+def listener_generation_matches(resident, pid_generation, state_doc, pid):
+    """Validate cross-file listener identity without claiming PID-reuse proof.
 
-
-def _status_attention(lk, ref=None, stale_after_seconds=300):
-    """Read-only producer coverage and relay-attention projection.
-
-    These sidecars are advisory evidence only.  In particular, a resident
-    notify-only listener and foreground watchers never imply agent invocation.
+    Pre-cookie listener sidecars remain valid when neither file has a generation.
+    A cookie, when present, binds the pid and state files to each other; it does
+    not identify the current OS process or its start time after PID recycling.
     """
+    if not resident or not isinstance(state_doc, dict):
+        return False
+    state_generation = state_doc.get("generation", "")
+    if not pid_generation and not state_generation:
+        return True
+    return bool(pid_generation and state_generation == pid_generation
+                and state_doc.get("process_pid") == pid)
+
+
+def listener_snapshot(state, since, listener, presence=None, usage_watch=None, *,
+                      now_utc=None, stale_after_seconds=300, evidence=None):
+    """Pure listener lifecycle, coverage, and attention decision table.
+
+    Callers own all I/O and process probes.  Keeping the complete vocabulary in
+    this passive core function prevents the CLI, runtime companion, and TOP from
+    independently reclassifying the same sidecars.
+    """
+    now_utc = now_utc or now()
+    listener_malformed = not isinstance(listener, dict)
+    presence_malformed = presence is not None and not isinstance(presence, dict)
+    watch_malformed = usage_watch is not None and not isinstance(usage_watch, dict)
+    listener = listener if isinstance(listener, dict) else {}
+    presence = presence if isinstance(presence, dict) else {}
+    usage_watch = usage_watch if isinstance(usage_watch, dict) else {}
+
+    resident = listener.get("process_resident") is True
+    pid_status = listener.get("pid_status", "unknown")
+    phase = listener.get("phase", "")
+    sidecar_valid = listener.get("sidecar_valid") is True
+    generation_matches = listener.get("generation_matches") is True
+    listener_unknown = (listener_malformed or
+                        (resident and (not sidecar_valid or not generation_matches
+                                       or phase not in LISTENER_PHASES)))
+    if listener_unknown:
+        lifecycle = "UNKNOWN"
+    elif resident and phase == "halted":
+        lifecycle = "HALTED (resident)"
+    elif resident:
+        lifecycle = "ALIVE"
+    elif sidecar_valid and phase == "halted":
+        lifecycle = "HALTED"
+    elif pid_status == "stale":
+        lifecycle = "STALE"
+    else:
+        lifecycle = "DEAD"
+
+    def fresh(doc, key):
+        stamp = parse_iso(doc.get(key)) if isinstance(doc, dict) else None
+        return bool(stamp and (now_utc - stamp).total_seconds() <= stale_after_seconds)
+
+    if isinstance(evidence, dict) and evidence.get("coverage"):
+        coverage = evidence.get("coverage", "unknown")
+        source = evidence.get("source", "unknown")
+    elif listener_unknown:
+        coverage, source = "unknown", "malformed"
+    elif resident and phase == "halted":
+        coverage, source = "halted", "listener"
+    elif resident:
+        coverage = "notifier" if listener.get("notify_only") else "invoker"
+        source = "listener"
+    elif presence_malformed or watch_malformed:
+        coverage, source = "unknown", "malformed"
+    elif (fresh(presence, "last_seen") and
+          (presence.get("process_resident") is True or
+           not isinstance(presence.get("pid"), int))):
+        coverage, source = "foreground_watch", "presence"
+    elif (usage_watch.get("phase") == "running" and
+          fresh(usage_watch, "last_tick") and
+          usage_watch.get("process_resident") is True):
+        coverage, source = "foreground_watch", "usage_watch"
+    else:
+        coverage, source = "absent", "none"
+
+    when = parse_iso(since) if isinstance(since, str) else None
+    age = max(0, int((now_utc - when).total_seconds())) if when else None
+    if not isinstance(state, str) or not state.startswith("AWAITING_"):
+        attention, attention_age = "not_applicable", None
+    elif coverage == "invoker":
+        attention, attention_age = "covered", age
+    elif coverage == "halted":
+        attention, attention_age = "operator_action_required", age
+    elif coverage in ("notifier", "foreground_watch"):
+        attention, attention_age = "human_resume_needed", age
+    elif coverage == "unknown" or age is None:
+        attention, attention_age = "unknown", age
+    elif age > stale_after_seconds:
+        attention, attention_age = "stranded", age
+    else:
+        attention, attention_age = "human_resume_needed", age
+
+    reason = (evidence.get("cause", "") if isinstance(evidence, dict)
+              else listener.get("reason", ""))
+    cause = (reason if coverage == "halted" and isinstance(reason, str)
+             and re.fullmatch(r"[a-z][a-z0-9_.:-]{0,127}", reason) else "")
+    return {
+        "lifecycle": lifecycle, "pid_status": pid_status,
+        "process_resident": resident, "phase": phase,
+        "coverage": coverage, "source": source, "attention": attention,
+        "age_seconds": attention_age, "threshold_seconds": stale_after_seconds,
+        "cause": cause,
+    }
+
+
+def _status_listener_rows(lk, ref=None, stale_after_seconds=300):
+    """Read each bounded sidecar once, then apply :func:`listener_snapshot`."""
     ref = ref or now()
     runtime = os.path.join(project_root(), ".m8shift", "runtime")
     listeners = os.path.join(runtime, "listeners")
     presence, presence_err = read_json_diagnostic(os.path.join(runtime, "presence.json"), {})
-    out = {}
 
     def alive(pid):
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
@@ -9627,60 +9715,89 @@ def _status_attention(lk, ref=None, stale_after_seconds=300):
         try:
             os.kill(pid, 0)
             return True
+        except PermissionError:
+            return True
         except OSError:
             return False
 
-    def fresh(doc, key):
-        stamp = parse_iso(doc.get(key)) if isinstance(doc, dict) else None
-        return bool(stamp and (ref - stamp).total_seconds() <= stale_after_seconds)
-
-    state = lk.get("state", "")
-    since = parse_iso(lk.get("since"))
-    age = max(0, int((ref - since).total_seconds())) if since else None
+    out = {}
     for agent in active_agents(lk):
-        listener, listener_err = read_json_diagnostic(
+        state_doc, state_err = read_json_diagnostic(
             os.path.join(listeners, agent + ".json"), {})
+        pid_exists, listener_pid, pid_generation, pid_error = False, None, "", ""
         try:
-            with open(os.path.join(listeners, agent + ".pid"), encoding="ascii") as fh:
-                listener_pid = int(fh.read(32).strip())
-        except (OSError, ValueError):
-            listener_pid = None
+            with open(os.path.join(listeners, agent + ".pid"), encoding="utf-8") as fh:
+                raw_pid = fh.read(4096).strip()
+            pid_exists = True
+            if raw_pid.startswith("{"):
+                pid_doc = json.loads(raw_pid)
+                listener_pid = pid_doc.get("pid")
+                pid_generation = pid_doc.get("generation", "")
+            else:
+                listener_pid = int(raw_pid)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            pid_exists, pid_error = True, type(exc).__name__
         resident = alive(listener_pid)
-        lane = presence.get(agent) if isinstance(presence, dict) else None
+        phase = state_doc.get("phase", "") if isinstance(state_doc, dict) else ""
+        generation_matches = listener_generation_matches(
+            resident, pid_generation, state_doc, listener_pid)
+        listener = {
+            "pid_status": ("alive" if resident else "stale" if pid_exists else "dead"),
+            "process_resident": resident,
+            "sidecar_valid": bool(state_doc) and not state_err and not pid_error,
+            "generation_matches": generation_matches,
+            "phase": phase,
+            "notify_only": bool(state_doc.get("notify_only")) if isinstance(state_doc, dict) else False,
+            "reason": state_doc.get("reason", "") if isinstance(state_doc, dict) else "",
+        }
+        lane = presence.get(agent) if isinstance(presence, dict) else presence_err
+        if isinstance(lane, dict) and isinstance(lane.get("pid"), int):
+            lane = dict(lane, process_resident=alive(lane.get("pid")))
         watch, watch_err = read_json_diagnostic(
             os.path.join(runtime, "usage-watchers", agent + ".json"), {})
-        listener_valid = bool(listener) and isinstance(listener, dict) and not listener_err
-        if resident and listener_valid and listener.get("phase") != "halted":
-            coverage = "notifier" if listener.get("notify_only") else "invoker"
-            source = "listener"
-        elif listener_err or presence_err or watch_err or (resident and not listener_valid):
-            coverage, source = "unknown", "malformed"
-        else:
-            if isinstance(lane, dict) and fresh(lane, "last_seen") \
-                    and (not isinstance(lane.get("pid"), int) or alive(lane.get("pid"))):
-                coverage, source = "foreground_watch", "presence"
-            elif isinstance(watch, dict) and watch.get("phase") == "running" \
-                    and fresh(watch, "last_tick") and alive(watch.get("pid")):
-                coverage, source = "foreground_watch", "usage_watch"
-            else:
-                coverage, source = "absent", "none"
-        if state != "AWAITING_" + agent.upper():
-            verdict = "not_applicable"
-            agent_age = None
-        elif coverage == "invoker":
-            verdict, agent_age = "covered", age
-        elif coverage in ("notifier", "foreground_watch"):
-            verdict, agent_age = "human_resume_needed", age
-        elif age is None:
-            verdict, agent_age = "unknown", None
-        elif age > stale_after_seconds:
-            verdict, agent_age = "stranded", age
-        else:
-            verdict, agent_age = "human_resume_needed", age
-        out[agent] = {"producer_coverage": coverage, "source": source,
-                      "relay_attention": verdict, "age_seconds": agent_age,
-                      "threshold_seconds": stale_after_seconds}
+        if isinstance(watch, dict) and watch.get("schema") != USAGE_WATCH_SCHEMA:
+            watch = {}
+        if isinstance(watch, dict) and isinstance(watch.get("pid"), int):
+            watch = dict(watch, process_resident=alive(watch.get("pid")))
+        agent_state = (lk.get("state", "")
+                       if lk.get("state", "") == "AWAITING_" + agent.upper()
+                       else "")
+        out[agent] = listener_snapshot(
+            agent_state, lk.get("since", ""), listener,
+            lane if not presence_err else presence_err,
+            watch if not watch_err else watch_err,
+            now_utc=ref, stale_after_seconds=stale_after_seconds)
     return out
+
+
+def _status_listeners(lk, rows=None):
+    """Compact listener lifecycle summary projected from the shared table."""
+    rows = rows if isinstance(rows, dict) else _status_listener_rows(lk)
+    display = []
+    for agent, row in rows.items():
+        if row.get("lifecycle") in ("ALIVE", "HALTED (resident)", "UNKNOWN"):
+            display.append(agent + " " + row["lifecycle"])
+    return " · ".join(display) if display else "none"
+
+
+def _status_attention(lk, ref=None, stale_after_seconds=300, rows=None):
+    """Additive dict projection of the shared listener decision table."""
+    rows = rows if isinstance(rows, dict) else _status_listener_rows(
+        lk, ref=ref, stale_after_seconds=stale_after_seconds)
+    return {
+        agent: {
+            "producer_coverage": row.get("coverage", "unknown"),
+            "source": row.get("source", "unknown"),
+            "relay_attention": row.get("attention", "unknown"),
+            "age_seconds": row.get("age_seconds"),
+            "threshold_seconds": row.get("threshold_seconds", stale_after_seconds),
+            "cause": row.get("cause", ""),
+            "lifecycle": row.get("lifecycle", "UNKNOWN"),
+        }
+        for agent, row in rows.items()
+    }
 
 
 def _status_heartbeat_timestamp(lk):
@@ -9731,11 +9848,12 @@ def status_snapshot_v1(lk, last, session_info, turns=None,
                 "windows": _status_usage_windows(snap, last_known),
             },
         })
+    listener_rows = _status_listener_rows(lk)
     return {
         "schema": STATUS_SNAPSHOT_SCHEMA,
         "agents": agents,
-        "listeners": _status_listeners(lk),
-        "attention": _status_attention(lk),
+        "listeners": _status_listeners(lk, rows=listener_rows),
+        "attention": _status_attention(lk, rows=listener_rows),
         "last_turn": ({"n": last.get("n"), "agent": _status_snapshot_text(last.get("agent")),
                        "model": _status_snapshot_text((last.get("fields") or {}).get("model")) or None,
                        "model_source": ("self_declared" if (last.get("fields") or {}).get("model")
@@ -9823,11 +9941,13 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
     if lk.get("state", "").startswith("AWAITING_"):
         target = lk["state"][len("AWAITING_"):].lower()
         attention = _status_attention(lk).get(target, {})
-        print("  attention %-19s coverage=%s · age=%s · threshold=>%ss" % (
+        print("  attention %-19s coverage=%s · age=%s · threshold=>%ss%s" % (
             attention.get("relay_attention", "unknown"),
             attention.get("producer_coverage", "unknown"),
             attention.get("age_seconds") if attention.get("age_seconds") is not None else "?",
-            attention.get("threshold_seconds", 300)))
+            attention.get("threshold_seconds", 300),
+            (" · cause=" + attention.get("cause", ""))
+            if attention.get("cause") else ""))
     if last:
         print(tr("last_turn", n=last["n"], who=last["agent"]))
     if accounting is not None and not brief:
@@ -9849,8 +9969,11 @@ def _status_signature(lk, stale, last, for_agent=""):
         "stale": bool(stale),
         "last_turn": last or {},
         "usage": _usage_signature(lk),   # RFC 051: reprint on a usage-line delta (--changes-only)
-        "attention": {agent: (row.get("relay_attention"), row.get("producer_coverage"))
-                      for agent, row in _status_attention(lk).items()},
+        "attention": {agent: {
+            "relay_attention": row.get("relay_attention"),
+            "producer_coverage": row.get("producer_coverage"),
+            "cause": row.get("cause", ""),
+        } for agent, row in _status_attention(lk).items()},
         # RFC 049: a beat appearing, flipping protective, or aging out of its
         # window re-renders; raw age is bucketed so each tick does not churn.
         "liveness": lock_liveness(lk),

@@ -741,6 +741,29 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             "1b6a457d8c060080ee8b450d50f3273b201296a97a6bb09c17a9381c319617ee",
         )
 
+    def test_listener_attention_tokens_share_semantic_paint_and_show_cause(self):
+        top = load_top()
+        halted = fixture()
+        halted["listeners"] = "codex HALTED (resident)"
+        halted["attention"] = {"codex": {
+            "relay_attention": "operator_action_required",
+            "producer_coverage": "halted",
+        }}
+        red = "\x1b[38;2;244;112;103m%s\x1b[0m"
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}, clear=True):
+            for width in (96, 120):
+                output = top.render(halted, width, self.NOW)
+                for token in ("HALTED (resident)", "operator_action_required", "(halted)"):
+                    self.assertIn(red % token, output)
+
+            unknown = fixture()
+            unknown["listeners"] = "codex UNKNOWN"
+            for width in (96, 120):
+                self.assertIn(red % "UNKNOWN", top.render(unknown, width, self.NOW))
+
+        halted["attention"]["codex"]["cause"] = "runner_refused_argv"
+        self.assertIn("cause=runner_refused_argv", top._attention_display(halted))
+
     def test_weighted_largest_remainder_track_plans_are_exact(self):
         top = load_top()
         plans = (

@@ -174,6 +174,7 @@ LISTENER_MAX_BACKOFF_S = 300
 LISTENER_DEFAULT_POLL_S = 20.0
 LISTENER_DEFAULT_MAX_RETRIES = 3
 LISTENER_DETACHED_ENV = "M8SHIFT_LISTENER_DETACHED"
+LISTENER_GENERATION_ENV = "M8SHIFT_LISTENER_GENERATION"
 # Injectable backend-probe seam (RFC 047 Phase D): a JSON object in this env var
 # overrides any probed fact (platform/launchctl/systemctl/schtasks/gui_session/
 # user_session/protected_folder), so tests and selection debugging never have to
@@ -1422,6 +1423,8 @@ def pid_alive(pid):
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        return True
     except OSError:
         return False
 
@@ -1455,60 +1458,45 @@ def producer_evidence(listener, presence, usage_watch, *, now_utc=None,
     usage watcher only proves a currently blocked local process.
     """
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
-
-    def stamp(value):
-        parsed = parse_utc(value) if isinstance(value, str) else None
-        return parsed
-
-    def heartbeat_fresh(doc, key):
-        when = stamp(doc.get(key)) if isinstance(doc, dict) else None
-        return bool(when and (now_utc - when).total_seconds() <= stale_after_seconds)
-
-    malformed = any(value is not None and not isinstance(value, dict)
-                    for value in (listener, presence, usage_watch))
-    listener = listener if isinstance(listener, dict) else {}
-    presence = presence if isinstance(presence, dict) else {}
-    usage_watch = usage_watch if isinstance(usage_watch, dict) else {}
-    if listener.get("process_resident") and listener.get("can_invoke_agent"):
-        return {"coverage": "invoker", "source": "listener", "fresh": True}
-    if listener.get("process_resident") and listener.get("can_notify"):
-        return {"coverage": "notifier", "source": "listener", "fresh": True}
-    if malformed:
-        return {"coverage": "unknown", "source": "malformed", "fresh": False}
-    if isinstance(presence, dict) and heartbeat_fresh(presence, "last_seen"):
-        live = presence.get("pid")
-        if not isinstance(live, int) or pid_alive(live):
-            return {"coverage": "foreground_watch", "source": "presence", "fresh": True}
-    if isinstance(usage_watch, dict) and usage_watch.get("schema") == USAGE_WATCH_SCHEMA:
-        if usage_watch.get("phase") == "running" and heartbeat_fresh(usage_watch, "last_tick"):
-            live = usage_watch.get("pid")
-            if isinstance(live, int) and pid_alive(live):
-                return {"coverage": "foreground_watch", "source": "usage_watch", "fresh": True}
-    return {"coverage": "absent", "source": "none", "fresh": False}
+    observation = listener
+    if isinstance(listener, dict) and "sidecar_valid" not in listener:
+        resident = listener.get("process_resident") is True
+        observation = {
+            "pid_status": "alive" if resident else "dead",
+            "process_resident": resident,
+            "sidecar_valid": True,
+            "generation_matches": True,
+            "phase": ("polling" if (listener.get("can_invoke_agent") or
+                                      listener.get("can_notify")) else ""),
+            "notify_only": bool(listener.get("can_notify") and
+                                not listener.get("can_invoke_agent")),
+        }
+    if isinstance(presence, dict) and isinstance(presence.get("pid"), int):
+        presence = dict(presence, process_resident=pid_alive(presence.get("pid")))
+    if isinstance(usage_watch, dict) and isinstance(usage_watch.get("pid"), int):
+        usage_watch = dict(usage_watch,
+                           process_resident=pid_alive(usage_watch.get("pid")))
+    if (isinstance(usage_watch, dict)
+            and usage_watch.get("schema") != USAGE_WATCH_SCHEMA):
+        usage_watch = {}
+    row = load_core().listener_snapshot(
+        "", "", observation, presence, usage_watch,
+        now_utc=now_utc, stale_after_seconds=stale_after_seconds)
+    return {"coverage": row["coverage"], "source": row["source"],
+            "fresh": row["coverage"] in ("invoker", "notifier", "foreground_watch"),
+            "lifecycle": row["lifecycle"], "cause": row.get("cause", "")}
 
 
 def relay_attention(state, since, evidence, *, now_utc=None,
                     stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS):
     """Advisory attention verdict with strict-``>`` threshold semantics."""
-    if not isinstance(state, str) or not state.startswith("AWAITING_"):
-        return {"verdict": "not_applicable", "age_seconds": None,
-                "threshold_seconds": stale_after_seconds, "coverage": evidence.get("coverage", "unknown")}
-    now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
-    when = parse_utc(since) if isinstance(since, str) else None
-    age = max(0, int((now_utc - when).total_seconds())) if when else None
-    coverage = evidence.get("coverage", "unknown")
-    if coverage == "invoker":
-        verdict = "covered"
-    elif coverage in ("notifier", "foreground_watch"):
-        verdict = "human_resume_needed"
-    elif age is None:
-        verdict = "unknown"
-    elif age > stale_after_seconds:
-        verdict = "stranded"
-    else:
-        verdict = "human_resume_needed"
-    return {"verdict": verdict, "age_seconds": age,
-            "threshold_seconds": stale_after_seconds, "coverage": coverage}
+    row = load_core().listener_snapshot(
+        state, since, {}, {}, {}, evidence=evidence,
+        now_utc=now_utc or dt.datetime.now(dt.timezone.utc),
+        stale_after_seconds=stale_after_seconds)
+    return {"verdict": row["attention"], "age_seconds": row["age_seconds"],
+            "threshold_seconds": row["threshold_seconds"],
+            "coverage": row["coverage"], "cause": row.get("cause", "")}
 
 
 def usage_watch_path(agent):
@@ -1534,31 +1522,46 @@ def write_usage_watch(agent, *, mode, interval, started, phase,
 def runtime_attention(status, agent, stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS,
                       now_utc=None):
     """Read bounded sidecars and apply the shared pure producer/attention rules."""
-    exists, pid = read_listener_pid(agent)
+    exists, pid, pid_generation = read_listener_identity(agent)
     state_doc, state_err = read_json_diagnostic(listener_paths(agent)["state"], {})
     # Match the core attention classifier: unverifiable advisory evidence does
-    # not prove coverage.  Listener lifecycle commands retain their separate
-    # EPERM-as-resident semantics for safe stop/status handling.
+    # not prove coverage. Both passive and lifecycle probes treat EPERM as
+    # resident because signal-0 permission denial still proves process presence.
     alive = bool(pid and pid_alive(pid))
-    halted = isinstance(state_doc, dict) and state_doc.get("phase") == "halted"
-    notify_only = isinstance(state_doc, dict) and bool(state_doc.get("notify_only"))
+    generation_matches = load_core().listener_generation_matches(
+        alive, pid_generation, state_doc, pid)
     listener_problem = state_err or (
         "resident listener has missing/empty state" if alive and not state_doc else "")
-    listener = ({"process_resident": alive,
-                 "can_invoke_agent": bool(alive and state_doc and not halted and not notify_only),
-                 "can_notify": bool(alive and state_doc and not halted and notify_only)}
-                if not listener_problem else listener_problem)
+    listener = {
+        "pid_status": "alive" if alive else "stale" if exists else "dead",
+        "process_resident": alive,
+        "sidecar_valid": bool(state_doc) and not bool(listener_problem),
+        "generation_matches": generation_matches,
+        "phase": state_doc.get("phase", "") if isinstance(state_doc, dict) else "",
+        "notify_only": bool(state_doc.get("notify_only")) if isinstance(state_doc, dict) else False,
+        "reason": state_doc.get("reason", "") if isinstance(state_doc, dict) else "",
+    }
     presence_doc, presence_err = read_json_diagnostic(PRESENCE, {})
     presence = presence_doc.get(agent) if isinstance(presence_doc, dict) else presence_doc
     watch, watch_err = read_usage_watch(agent)
-    evidence = producer_evidence(
-        listener,
+    if isinstance(presence, dict) and isinstance(presence.get("pid"), int):
+        presence = dict(presence, process_resident=pid_alive(presence.get("pid")))
+    if isinstance(watch, dict) and isinstance(watch.get("pid"), int):
+        watch = dict(watch, process_resident=pid_alive(watch.get("pid")))
+    if isinstance(watch, dict) and watch.get("schema") != USAGE_WATCH_SCHEMA:
+        watch = {}
+    row = load_core().listener_snapshot(
+        status.get("state", ""), status.get("since", ""), listener,
         presence if not presence_err else presence_err,
         watch if not watch_err else watch_err,
-        now_utc=now_utc, stale_after_seconds=stale_after_seconds)
-    attention = relay_attention(
-        status.get("state", ""), status.get("since", ""), evidence,
-        now_utc=now_utc, stale_after_seconds=stale_after_seconds)
+        now_utc=now_utc or dt.datetime.now(dt.timezone.utc),
+        stale_after_seconds=stale_after_seconds)
+    evidence = {"coverage": row["coverage"], "source": row["source"],
+                "fresh": row["coverage"] in ("invoker", "notifier", "foreground_watch"),
+                "lifecycle": row["lifecycle"], "cause": row.get("cause", "")}
+    attention = {"verdict": row["attention"], "age_seconds": row["age_seconds"],
+                 "threshold_seconds": row["threshold_seconds"],
+                 "coverage": row["coverage"], "cause": row.get("cause", "")}
     return {"producer": evidence, "attention": attention,
             "sidecar_errors": [e for e in (listener_problem, presence_err, watch_err) if e]}
 
@@ -1575,7 +1578,21 @@ def maybe_notify_stranded(status, stale_after_seconds=ATTENTION_STALE_AFTER_SECO
         return None
     agent = state[len("AWAITING_"):].lower()
     verdict = runtime_attention(status, agent, stale_after_seconds)
-    if verdict["attention"].get("verdict") != "stranded":
+    attention = verdict["attention"]
+    attention_verdict = attention.get("verdict")
+    cause = attention.get("cause", "")
+    if attention_verdict == "operator_action_required":
+        # The listener loop already emits the environment-blocked notification
+        # at the transition that persists this cause.  Do not send it twice from
+        # the observer path; other resident halts still need an operator alert.
+        if cause.startswith("environment_blocked:"):
+            return None
+        return emit_notification_nonfatal(
+            agent, "blocked",
+            "%s has a resident halted listener; operator action is required (%s)" % (
+                state, cause or "listener_halted"),
+            state=state, holder=status.get("holder", ""))
+    if attention_verdict != "stranded":
         return None
     return emit_notification_nonfatal(
         agent, "stranded",
@@ -6967,7 +6984,8 @@ def read_listener_state(agent):
 
 def write_listener_state(agent, *, phase, consecutive_failures,
                          last_run_id="", last_classification="", reason="",
-                         start_on_idle=False, notify_only=False):
+                         start_on_idle=False, notify_only=False,
+                         generation="", process_pid=None):
     os.makedirs(LISTENERS_DIR, exist_ok=True)
     if last_classification not in LISTENER_CLASSIFICATIONS:
         last_classification = ""
@@ -6990,6 +7008,9 @@ def write_listener_state(agent, *, phase, consecutive_failures,
         "runtime_version": VERSION,
         "updated_at": iso(),
     }
+    if generation and isinstance(process_pid, int) and process_pid > 0:
+        doc["generation"] = generation
+        doc["process_pid"] = process_pid
     if reason:
         doc["reason"] = reason
     path = listener_paths(agent)["state"]
@@ -7001,29 +7022,51 @@ def write_listener_state(agent, *, phase, consecutive_failures,
     return doc
 
 
-def read_listener_pid(agent):
-    """Return (pid_file_exists, pid_or_None); malformed content yields (True, None)."""
+def read_listener_identity(agent):
+    """Return ``(exists, pid, generation)``; legacy integer files have no cookie.
+
+    The cookie binds the pid file to the state file. It is not a portable OS
+    process-start identity and cannot detect PID reuse by itself.
+    """
     path = listener_paths(agent)["pid"]
     try:
         with open(path, encoding="utf-8") as fh:
             raw = fh.read().strip()
     except FileNotFoundError:
-        return False, None
+        return False, None, ""
     except OSError:
-        return True, None
+        return True, None, ""
     try:
-        pid = int(raw)
-    except ValueError:
-        return True, None
-    return True, pid if pid > 0 else None
+        if raw.startswith("{"):
+            identity = json.loads(raw)
+            pid = identity.get("pid")
+            generation = identity.get("generation", "")
+            if not isinstance(generation, str):
+                generation = ""
+        else:
+            pid, generation = int(raw), ""
+    except (ValueError, json.JSONDecodeError, AttributeError):
+        return True, None, ""
+    return True, pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None, generation
 
 
-def write_listener_pid(agent, pid):
+def read_listener_pid(agent):
+    """Compatibility projection of :func:`read_listener_identity`."""
+    exists, pid, _generation = read_listener_identity(agent)
+    return exists, pid
+
+
+def write_listener_pid(agent, pid, generation=""):
     os.makedirs(LISTENERS_DIR, exist_ok=True)
     path = listener_paths(agent)["pid"]
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(f"{pid}\n")
+        if generation:
+            json.dump({"pid": pid, "generation": generation}, fh,
+                      ensure_ascii=False, sort_keys=True)
+            fh.write("\n")
+        else:
+            fh.write(f"{pid}\n")
     os.replace(tmp, path)
 
 
@@ -7198,6 +7241,8 @@ def spawn_detached_listener(args, agent, runner_path, backend):
     child_argv = listener_child_argv(args, agent, runner_path)
     env = os.environ.copy()
     env[LISTENER_DETACHED_ENV] = "1"
+    generation = uuid.uuid4().hex
+    env[LISTENER_GENERATION_ENV] = generation
     popen_kwargs = {
         "stdin": subprocess.DEVNULL,
         "cwd": HERE,
@@ -7216,12 +7261,12 @@ def spawn_detached_listener(args, agent, runner_path, backend):
         popen_kwargs["stdout"] = log_fh
         popen_kwargs["stderr"] = log_fh
         proc = subprocess.Popen(child_argv, **popen_kwargs)
-    write_listener_pid(agent, proc.pid)
+    write_listener_pid(agent, proc.pid, generation)
     return proc.pid
 
 
 def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retries,
-                      max_backoff, owns_log=False, notify_only=False):
+                      max_backoff, owns_log=False, notify_only=False, generation=""):
     """The RFC 047 listener loop — one bounded runner turn per wake, zero model spend
     while it is not this agent's turn.
 
@@ -7275,7 +7320,18 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                              last_run_id=last_run_id,
                              last_classification=last_classification, reason=reason,
                              start_on_idle=profile["start_on_idle"],
-                             notify_only=notify_only)
+                             notify_only=notify_only, generation=generation,
+                             process_pid=os.getpid())
+
+    def notify_halt(state, holder, message="", prompt=""):
+        """Notify once at the transition; durable event dedup covers observers."""
+        message = message or (
+            "%s has a resident halted listener; operator action is required (%s)" % (
+                state, reason or "listener_halted"))
+        kwargs = {"state": state, "holder": holder}
+        if prompt:
+            kwargs["prompt"] = prompt
+        return emit_notification_nonfatal(agent, "blocked", message, **kwargs)
 
     save()
     ticks = 0
@@ -7320,6 +7376,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                         "The relay is left for operator recovery; clear with "
                         "`listener start --restart`.")
                     save()
+                    notify_halt(state, lk.get("holder", ""))
                     continue
                 wake = "stuck_retry"
             if not wake:
@@ -7384,6 +7441,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     or last_classification == "environment_blocked"):
                 fails += 1
                 phase = "halted"
+                notification_message = ""
+                notification_prompt = ""
                 if rc == 2 and not ledger_classification:
                     last_classification = "runner_refused_argv"
                     reason = "runner_refused_argv"
@@ -7394,10 +7453,11 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     reason = "environment_blocked:write_probe_denied"
                     message = ENVIRONMENT_BLOCKED_NOTIFICATIONS["write_probe_denied"]
                     say(f"{agent}: {message}")
-                    emit_notification_nonfatal(
-                        agent, "blocked", message, prompt=message,
-                        state=state, holder=lk.get("holder", ""))
+                    notification_message = message
+                    notification_prompt = message
                 save()
+                notify_halt(state, lk.get("holder", ""),
+                            notification_message, notification_prompt)
                 continue
             if rc == 0:
                 fails = 0
@@ -7420,6 +7480,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 say(f"{agent}: run {run_id} failed ({last_classification}); {fails}/{max_retries} — "
                     "HALTED. The relay is left for operator recovery; no force-claim is ever attempted.")
                 save()
+                notify_halt(state, lk.get("holder", ""))
                 continue
             phase = "backoff"
             delay = listener_backoff(fails, cap=max_backoff)
@@ -7501,12 +7562,15 @@ def cmd_listener_start(args):
         # The loop always records its own pid: for a local detach this is the same
         # value the parent already wrote; for an OS-service payload there IS no
         # parent, so this write is the only source of pid truth for status/stop.
-        write_listener_pid(agent, os.getpid())
+        generation = (os.environ.get(LISTENER_GENERATION_ENV, "")
+                      or uuid.uuid4().hex)
+        write_listener_pid(agent, os.getpid(), generation)
         return run_listener_loop(
             agent, profile, runner_path,
             poll=args.poll_interval, max_ticks=args.max_ticks,
             max_retries=args.max_retries, max_backoff=args.max_backoff,
-            owns_log=supervised, notify_only=getattr(args, "notify_only", False))
+            owns_log=supervised, notify_only=getattr(args, "notify_only", False),
+            generation=generation)
     paths = listener_paths(agent)
     if backend in LISTENER_SERVICE_BACKENDS:
         # OS service lifecycle (RFC 047 Phase D): generate the definition under
@@ -7563,7 +7627,7 @@ def cmd_listener_stop(args):
 def cmd_listener_status(args):
     agent = validate_listener_agent(args.agent)
     paths = listener_paths(agent)
-    exists, pid = read_listener_pid(agent)
+    exists, pid, pid_generation = read_listener_identity(agent)
     alive = bool(pid) and listener_pid_alive(pid)
     if not exists:
         pid_status = "dead"
@@ -7571,15 +7635,26 @@ def cmd_listener_status(args):
         pid_status = "alive"
     else:
         pid_status = "stale"
-    doc = read_listener_state(agent)
+    doc, state_err = read_json_diagnostic(paths["state"], {})
+    doc = doc if isinstance(doc, dict) else {}
     phase = doc.get("phase") if doc.get("phase") in LISTENER_PHASES else ""
-    halted = phase == "halted"  # persisted: rendered even when the process is gone
+    generation_matches = load_core().listener_generation_matches(
+        alive, pid_generation, doc, pid)
+    row = load_core().listener_snapshot(
+        "", "", {
+            "pid_status": pid_status, "process_resident": alive,
+            "sidecar_valid": bool(doc) and not state_err,
+            "generation_matches": generation_matches, "phase": phase,
+            "notify_only": bool(doc.get("notify_only")),
+            "reason": doc.get("reason", ""),
+        }, {}, {}, now_utc=dt.datetime.now(dt.timezone.utc))
+    halted = bool(doc) and not state_err and phase == "halted"
     repaired = False
     if args.repair and pid_status == "stale":
         repaired = remove_listener_pid(agent)
         if repaired:
             pid_status = "dead"
-    status_label = "HALTED" if halted else pid_status.upper()
+    status_label = row["lifecycle"]
     fails = doc.get("consecutive_failures")
     fails = fails if isinstance(fails, int) and fails >= 0 else 0
     # RFC 047 Phase D visibility: when an OS-service backend is installed, status
@@ -7592,8 +7667,8 @@ def cmd_listener_status(args):
     # parent exits. Only an installed lifecycle backend carries that guarantee.
     survives_parent_exit = bool(record)
     notify_only = bool(doc.get("notify_only"))
-    can_invoke_agent = bool(alive and doc and not halted and not notify_only)
-    can_notify = bool(alive and doc and not halted and notify_only)
+    can_invoke_agent = row["coverage"] == "invoker"
+    can_notify = row["coverage"] == "notifier"
     last_successful_run = doc.get("last_successful_run", "")
     payload = {
         "agent": agent,
@@ -7613,6 +7688,9 @@ def cmd_listener_status(args):
         "can_invoke_agent": can_invoke_agent,
         "can_notify": can_notify,
         "notify_only": notify_only,
+        "coverage": row["coverage"],
+        "attention": row["attention"],
+        "cause": row.get("cause", ""),
         "last_successful_run": last_successful_run,
         "consecutive_failures": fails,
         "last_run_id": doc.get("last_run_id", ""),

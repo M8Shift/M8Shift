@@ -45,6 +45,131 @@ TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 # ───────────────────────────── unit tests: pure functions ───────────────────
 
 class TestPureFunctions(unittest.TestCase):
+    def test_listener_phase_vocabularies_stay_in_lockstep(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_phase_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        self.assertEqual(runtime.LISTENER_PHASES, cowork.LISTENER_PHASES)
+
+    def test_listener_snapshot_decision_table(self):
+        instant = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        awaiting = "AWAITING_CODEX"
+        recent = "2025-12-31T23:59:00Z"
+        old = "2025-12-31T23:50:00Z"
+
+        def classify(listener, since=old):
+            return cowork.listener_snapshot(
+                awaiting, since, listener, {}, {}, now_utc=instant,
+                stale_after_seconds=300)
+
+        polling = classify({
+            "pid_status": "alive", "process_resident": True,
+            "sidecar_valid": True, "generation_matches": True,
+            "phase": "polling", "notify_only": False,
+        })
+        self.assertEqual(
+            (polling["lifecycle"], polling["coverage"], polling["attention"]),
+            ("ALIVE", "invoker", "covered"))
+
+        halted = classify({
+            "pid_status": "alive", "process_resident": True,
+            "sidecar_valid": True, "generation_matches": True,
+            "phase": "halted", "notify_only": False,
+            "reason": "environment_blocked:write_probe_denied",
+        })
+        self.assertEqual(
+            (halted["lifecycle"], halted["coverage"], halted["attention"]),
+            ("HALTED (resident)", "halted", "operator_action_required"))
+        self.assertEqual(halted["cause"],
+                         "environment_blocked:write_probe_denied")
+
+        invalid = classify({
+            "pid_status": "alive", "process_resident": True,
+            "sidecar_valid": False, "generation_matches": None,
+        })
+        self.assertEqual(
+            (invalid["lifecycle"], invalid["coverage"], invalid["attention"]),
+            ("UNKNOWN", "unknown", "unknown"))
+
+        absent_recent = classify({"pid_status": "dead", "process_resident": False},
+                                 since=recent)
+        self.assertEqual((absent_recent["coverage"], absent_recent["attention"]),
+                         ("absent", "human_resume_needed"))
+        absent_old = classify({"pid_status": "dead", "process_resident": False})
+        self.assertEqual((absent_old["coverage"], absent_old["attention"]),
+                         ("absent", "stranded"))
+
+        malformed = cowork.listener_snapshot(
+            awaiting, old, "malformed", {}, {}, now_utc=instant,
+            stale_after_seconds=300)
+        self.assertEqual((malformed["lifecycle"], malformed["coverage"],
+                          malformed["attention"]),
+                         ("UNKNOWN", "unknown", "unknown"))
+
+        notify_only = classify({
+            "pid_status": "alive", "process_resident": True,
+            "sidecar_valid": True, "generation_matches": True,
+            "phase": "polling", "notify_only": True,
+        })
+        self.assertEqual((notify_only["coverage"], notify_only["attention"]),
+                         ("notifier", "human_resume_needed"))
+
+    def test_status_listener_snapshot_reads_each_sidecar_once(self):
+        instant = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as root:
+            runtime = os.path.join(root, ".m8shift", "runtime")
+            listeners = os.path.join(runtime, "listeners")
+            watchers = os.path.join(runtime, "usage-watchers")
+            os.makedirs(listeners)
+            os.makedirs(watchers)
+            paths = {
+                "presence": os.path.join(runtime, "presence.json"),
+                "state": os.path.join(listeners, "codex.json"),
+                "pid": os.path.join(listeners, "codex.pid"),
+                "watch": os.path.join(watchers, "codex.json"),
+            }
+            with open(paths["presence"], "w", encoding="utf-8") as fh:
+                json.dump({}, fh)
+            with open(paths["state"], "w", encoding="utf-8") as fh:
+                json.dump({"phase": "polling", "generation": "g",
+                           "process_pid": os.getpid()}, fh)
+            with open(paths["pid"], "w", encoding="utf-8") as fh:
+                json.dump({"pid": os.getpid(), "generation": "g"}, fh)
+            with open(paths["watch"], "w", encoding="utf-8") as fh:
+                json.dump({}, fh)
+            lk = {"agents": "codex", "state": "AWAITING_CODEX",
+                  "since": "2025-12-31T23:59:00Z"}
+            real_open = open
+            with mock.patch.object(cowork, "project_root", return_value=root), \
+                    mock.patch("builtins.open", wraps=real_open) as opened:
+                rows = cowork._status_listener_rows(lk, ref=instant)
+            self.assertEqual(rows["codex"]["coverage"], "invoker")
+            opened_paths = [call.args[0] for call in opened.call_args_list]
+            for path in paths.values():
+                self.assertEqual(opened_paths.count(path), 1, path)
+
+    def test_status_listener_rows_keep_agent_scope_and_usage_watch_schema(self):
+        instant = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as root:
+            runtime = os.path.join(root, ".m8shift", "runtime")
+            watchers = os.path.join(runtime, "usage-watchers")
+            os.makedirs(watchers)
+            with open(os.path.join(runtime, "presence.json"), "w", encoding="utf-8") as fh:
+                json.dump({}, fh)
+            with open(os.path.join(watchers, "codex.json"), "w", encoding="utf-8") as fh:
+                json.dump({"schema": "foreign.watch.v1", "phase": "running",
+                           "last_tick": "2026-01-01T00:00:00Z",
+                           "pid": os.getpid()}, fh)
+            lk = {"agents": "claude,codex", "state": "AWAITING_CLAUDE",
+                  "since": "2025-12-31T23:59:00Z"}
+            with mock.patch.object(cowork, "project_root", return_value=root):
+                rows = cowork._status_listener_rows(lk, ref=instant)
+        self.assertEqual(rows["claude"]["attention"], "human_resume_needed")
+        self.assertEqual(rows["codex"]["attention"], "not_applicable")
+        self.assertEqual((rows["codex"]["coverage"], rows["codex"]["source"]),
+                         ("absent", "none"))
+
     def test_status_activity_boundaries_clamp_and_fail_open(self):
         turns = [
             {"n": n, "agent": "codex", "fields": {"done": "turn %d" % n}}
@@ -2384,7 +2509,10 @@ class TestReadCommands(CLIBase):
         listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
         os.makedirs(listeners)
         with open(os.path.join(listeners, "claude.pid"), "w", encoding="ascii") as fh:
-            fh.write(str(os.getpid()))
+            json.dump({"pid": os.getpid(), "generation": "test-generation"}, fh)
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({"phase": "polling", "process_pid": os.getpid(),
+                       "generation": "test-generation"}, fh)
         snapshot = json.loads(self.cw("status", "--json").stdout)["snapshot"]
         self.assertEqual(snapshot["ledger"]["decisions_pending"], 1)
         self.assertIsInstance(snapshot["ledger"]["doctor_findings"], int)
@@ -5259,6 +5387,7 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertEqual(state["consecutive_failures"], 1)
         self.assertEqual(state["last_classification"], "runner_refused_argv")
         self.assertEqual(len(self.launches()), 1)
+        self.assertIn("notify blocked claude", result.stdout)
 
     def test_runner_timeout_classification_is_retryable_and_not_overwritten(self):
         self.awaiting_me()
@@ -5558,7 +5687,7 @@ class TestRFC047ListenerPR1(ListenerCLIBase):
                     "--runner", stub, "--poll-interval", "0.2", "--backend", "local")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         with open(self.pid_path(), encoding="utf-8") as fh:
-            listener_pid = int(fh.read().strip())
+            listener_pid = json.load(fh)["pid"]
         runner_pid_path = os.path.join(self.d, "runner.pid")
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and not os.path.exists(runner_pid_path):
@@ -5680,6 +5809,7 @@ class TestRFC047ListenerPR1(ListenerCLIBase):
         doc = self.state_doc()
         self.assertEqual(doc["phase"], "halted")
         self.assertIn("max_retries", doc["reason"])
+        self.assertIn("notify blocked claude", r.stdout)
         self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")   # relay untouched
         st = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
         self.assertEqual(st["status"], "HALTED")
@@ -5709,6 +5839,7 @@ class TestRFC047ListenerPR1(ListenerCLIBase):
         self.assertEqual(doc["phase"], "halted")
         self.assertEqual(doc["consecutive_failures"], 1)
         self.assertIn("max_retries", doc["reason"])
+        self.assertIn("notify blocked claude", r.stdout)
         st = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
         self.assertEqual(st["status"], "HALTED")
         self.assertTrue(st["halted"])
@@ -6698,9 +6829,10 @@ class TestRuntimeCompanion(CLIBase):
         listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
         os.makedirs(listeners, exist_ok=True)
         with open(os.path.join(listeners, "claude.pid"), "w", encoding="utf-8") as fh:
-            fh.write(str(os.getpid()))
+            json.dump({"pid": os.getpid(), "generation": "test-generation"}, fh)
         with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
-            json.dump({"phase": "watching"}, fh)
+            json.dump({"phase": "polling", "process_pid": os.getpid(),
+                       "generation": "test-generation"}, fh)
         r = self.rt("listener", "status", "--agent", "claude", "--json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         payload = json.loads(r.stdout)
@@ -6708,6 +6840,44 @@ class TestRuntimeCompanion(CLIBase):
         self.assertTrue(payload["can_invoke_agent"])
         self.assertTrue(payload["backend_configured"])
         self.assertFalse(payload["survives_parent_exit"])
+
+    def test_legacy_listener_sidecars_remain_alive_and_invoking(self):
+        self.init()
+        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        with open(os.path.join(listeners, "claude.pid"), "w", encoding="ascii") as fh:
+            fh.write(str(os.getpid()))
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({"phase": "polling"}, fh)
+        payload = json.loads(self.rt(
+            "listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(payload["status"], "ALIVE")
+        self.assertEqual(payload["coverage"], "invoker")
+        self.assertTrue(payload["can_invoke_agent"])
+        status = {"state": "AWAITING_CLAUDE", "since": "2020-01-01T00:00:00Z"}
+        attention = self.load_runtime().runtime_attention(status, "claude")
+        self.assertEqual(attention["producer"]["lifecycle"], "ALIVE")
+        self.assertEqual(attention["producer"]["coverage"], "invoker")
+
+    def test_listener_status_reports_resident_halt_from_shared_table(self):
+        self.init()
+        listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        identity = {"pid": os.getpid(), "generation": "halt-generation"}
+        with open(os.path.join(listeners, "claude.pid"), "w", encoding="utf-8") as fh:
+            json.dump(identity, fh)
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({"phase": "halted", "process_pid": os.getpid(),
+                       "generation": "halt-generation",
+                       "reason": "runner_refused_argv"}, fh)
+        payload = json.loads(self.rt(
+            "listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(payload["status"], "HALTED (resident)")
+        self.assertEqual(payload["coverage"], "halted")
+        self.assertEqual(payload["cause"], "runner_refused_argv")
+        status = {"state": "AWAITING_CLAUDE", "since": "2020-01-01T00:00:00Z"}
+        row = self.load_runtime().runtime_attention(status, "claude")
+        self.assertEqual(row["attention"]["verdict"], "operator_action_required")
 
     def test_liveness_evidence_matrix_and_strict_attention_boundary(self):
         runtime = self.load_runtime()
@@ -6727,6 +6897,10 @@ class TestRuntimeCompanion(CLIBase):
                 {}, {}, {"schema": runtime.USAGE_WATCH_SCHEMA, "phase": "running",
                          "last_tick": fresh, "pid": 123}, now_utc=instant
             )["coverage"], "foreground_watch")
+            self.assertEqual(runtime.producer_evidence(
+                {}, {}, {"schema": "foreign.watch.v1", "phase": "running",
+                         "last_tick": fresh, "pid": 123}, now_utc=instant
+            )["coverage"], "absent")
         self.assertEqual(runtime.producer_evidence({}, {}, {}, now_utc=instant)["coverage"],
                          "absent")
         self.assertEqual(runtime.producer_evidence("bad", {}, {}, now_utc=instant)["coverage"],
@@ -6756,6 +6930,19 @@ class TestRuntimeCompanion(CLIBase):
                 mock.patch.object(runtime, "emit_notification", return_value={"ok": True}) as emit:
             runtime.maybe_notify_stranded({"state": "AWAITING_CODEX", "holder": "codex"})
             self.assertEqual(emit.call_args.args[1], "stranded")
+        with mock.patch.object(runtime, "runtime_attention", return_value={
+                "attention": {"verdict": "operator_action_required",
+                              "cause": "runner_refused_argv"}}), \
+                mock.patch.object(runtime, "emit_notification", return_value={"ok": True}) as emit:
+            runtime.maybe_notify_stranded({"state": "AWAITING_CODEX", "holder": "codex"})
+            self.assertEqual(emit.call_args.args[1], "blocked")
+        with mock.patch.object(runtime, "runtime_attention", return_value={
+                "attention": {"verdict": "operator_action_required",
+                              "cause": "environment_blocked:write_probe_denied"}}), \
+                mock.patch.object(runtime, "emit_notification") as emit:
+            self.assertIsNone(runtime.maybe_notify_stranded(
+                {"state": "AWAITING_CODEX", "holder": "codex"}))
+            emit.assert_not_called()
 
     def test_runtime_attention_marks_resident_empty_or_damaged_state_unknown(self):
         self.init()
@@ -6763,7 +6950,7 @@ class TestRuntimeCompanion(CLIBase):
         listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
         os.makedirs(listeners, exist_ok=True)
         with open(os.path.join(listeners, "claude.pid"), "w", encoding="ascii") as fh:
-            fh.write(str(os.getpid()))
+            json.dump({"pid": os.getpid(), "generation": "test-generation"}, fh)
         state_path = os.path.join(listeners, "claude.json")
         status = {"state": "AWAITING_CLAUDE", "since": "2020-01-01T00:00:00Z"}
         for payload in (b"{}", b"\xff\xfe"):
@@ -6773,11 +6960,18 @@ class TestRuntimeCompanion(CLIBase):
                 result = runtime.runtime_attention(status, "claude")
                 self.assertEqual(result["producer"]["coverage"], "unknown")
                 self.assertNotEqual(result["attention"]["verdict"], "covered")
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump({"phase": "polling", "process_pid": os.getpid(),
+                       "generation": "wrong-generation"}, fh)
+        result = runtime.runtime_attention(status, "claude")
+        self.assertEqual(result["producer"]["coverage"], "unknown")
         with mock.patch.object(runtime.os, "kill", side_effect=PermissionError("protected")):
-            self.assertFalse(runtime.pid_alive(123))
+            self.assertTrue(runtime.pid_alive(123))
 
         with open(state_path, "w", encoding="utf-8") as fh:
-            json.dump({"phase": "polling", "notify_only": True}, fh)
+            json.dump({"phase": "polling", "notify_only": True,
+                       "process_pid": os.getpid(),
+                       "generation": "test-generation"}, fh)
         presence = os.path.join(self.d, ".m8shift", "runtime", "presence.json")
         with open(presence, "wb") as fh:
             fh.write(b"\xff\xfe")
@@ -6809,9 +7003,11 @@ class TestRuntimeCompanion(CLIBase):
         listeners = os.path.join(self.d, ".m8shift", "runtime", "listeners")
         os.makedirs(listeners, exist_ok=True)
         with open(os.path.join(listeners, "claude.pid"), "w", encoding="utf-8") as fh:
-            fh.write(str(os.getpid()))
+            json.dump({"pid": os.getpid(), "generation": "test-generation"}, fh)
         with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
-            json.dump({"phase": "polling", "notify_only": True}, fh)
+            json.dump({"phase": "polling", "notify_only": True,
+                       "process_pid": os.getpid(),
+                       "generation": "test-generation"}, fh)
         payload = json.loads(self.rt(
             "listener", "status", "--agent", "claude", "--json").stdout)
         self.assertTrue(payload["process_resident"])
