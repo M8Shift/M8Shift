@@ -31,6 +31,7 @@ import math
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -1594,7 +1595,7 @@ def write_usage_watch(agent, *, mode, interval, started, phase,
                       last_tick="", last_success="", pid=None, lease_id="",
                       consecutive_unknown=0, total_ticks=0, successful_ticks=0,
                       tick_timeout=USAGE_WATCH_PROBE_TIMEOUT_S,
-                      process_start_ref=""):
+                      process_start_ref="", desired_state="running"):
     os.makedirs(USAGE_WATCHERS_DIR, exist_ok=True)
     actual_pid = os.getpid() if pid is None else pid
     doc = {"schema": USAGE_WATCH_SCHEMA, "kind": "usage_watch", "agent": agent,
@@ -1602,6 +1603,7 @@ def write_usage_watch(agent, *, mode, interval, started, phase,
            "process_start_ref": (process_start_ref
                                  or fleet_process_start_ref(actual_pid)),
            "lease_id": lease_id, "mode": mode, "interval": interval,
+           "desired_state": desired_state,
            "started": started, "last_tick": last_tick,
            "last_success": last_success, "phase": phase,
            "tick_timeout": tick_timeout,
@@ -1625,11 +1627,18 @@ def acquire_usage_watch_lock(agent):
     while True:
         try:
             fd = os.open(path, flags, 0o600)
-            break
         except FileExistsError:
             lock, err = read_json_diagnostic(path, {})
             owner = lock.get("pid") if not err else None
-            if not err and (not isinstance(owner, int) or not pid_alive(owner)):
+            expected_start = lock.get("process_start_ref", "") if not err else ""
+            current_start = fleet_process_start_ref(owner) \
+                if isinstance(owner, int) and pid_alive(owner) else ""
+            stale = not isinstance(owner, int) or not pid_alive(owner)
+            if expected_start and current_start and current_start != expected_start:
+                stale = True
+            elif not expected_start and isinstance(owner, int) and pid_alive(owner):
+                stale = not runtime_process_matches(owner)
+            if not err and stale:
                 try:
                     os.unlink(path)
                 except OSError:
@@ -1638,11 +1647,33 @@ def acquire_usage_watch_lock(agent):
             if time.monotonic() >= deadline:
                 raise ValueError("usage watcher registry transaction is busy")
             time.sleep(0.02)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump({"pid": os.getpid(), "token": token, "created_at": iso()}, fh,
-                  ensure_ascii=False, sort_keys=True)
-        fh.write("\n")
-    return token
+            continue
+        try:
+            opened = os.fstat(fd)
+            current = os.stat(path, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                os.close(fd)
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"pid": os.getpid(), "token": token,
+                           "process_start_ref": fleet_process_start_ref(os.getpid()),
+                           "created_at": iso()}, fh,
+                          ensure_ascii=False, sort_keys=True)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+                opened = os.fstat(fh.fileno())
+                current = os.stat(path, follow_symlinks=False)
+                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                    continue
+            return token
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise ValueError("usage watcher registry transaction is busy")
 
 
 def release_usage_watch_lock(agent, token):
@@ -1669,6 +1700,9 @@ def usage_watch_health(watch, *, now_utc=None, pid_probe=pid_alive,
         return {"status": "stopped", "finding": "watcher is intentionally stopped"}
     if not alive:
         return {"status": "dead", "finding": "registered watcher pid is dead"}
+    if phase == "running" and not watch.get("lease_id"):
+        return {"status": "legacy",
+                "finding": "live pre-lease watcher must be stopped before adoption"}
     expected_start = watch.get("process_start_ref")
     if isinstance(expected_start, str) and expected_start:
         current_start = fleet_process_start_ref(pid)
@@ -1704,7 +1738,10 @@ def usage_watch_health(watch, *, now_utc=None, pid_probe=pid_alive,
 
 def usage_watch_start_decision(watch, *, replace=False, pid_probe=pid_alive):
     health = usage_watch_health(watch, pid_probe=pid_probe)
-    if health["status"] in ("healthy", "stale", "degraded"):
+    pid = watch.get("pid") if isinstance(watch, dict) else None
+    if health["status"] == "invalid" and isinstance(pid, int) and pid_probe(pid):
+        return {"allowed": False, "action": "investigate", "health": health}
+    if health["status"] in ("healthy", "stale", "degraded", "legacy"):
         if replace:
             return {"allowed": True, "action": "replace", "health": health}
         return {"allowed": False, "action": "refuse_live", "health": health}
@@ -1715,12 +1752,98 @@ def usage_watch_reconcile_decision(watch, *, probe_ok=False, now_utc=None,
                                    pid_probe=pid_alive):
     health = usage_watch_health(watch, now_utc=now_utc, pid_probe=pid_probe)
     status = health["status"]
+    desired = watch.get("desired_state") if isinstance(watch, dict) else None
+    if desired == "stopped" or (status == "stopped" and desired is None):
+        return {"action": "keep_stopped", "health": health}
     if status in ("dead", "stopped"):
         return {"action": "start", "health": health}
+    if status == "legacy":
+        return {"action": "recycle", "health": health}
     if status in ("stale", "degraded"):
         return {"action": "recycle" if probe_ok else "investigate", "health": health}
     return {"action": "keep" if status == "healthy" else "investigate",
             "health": health}
+
+
+def process_argv(pid):
+    """Return a live process argv when the host exposes it, else an empty list."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return []
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as fh:
+                return [part.decode("utf-8", "surrogateescape")
+                        for part in fh.read().split(b"\0") if part]
+        except OSError:
+            return []
+    if os.name == "nt":  # pragma: no cover - fail closed without /proc
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+            text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    command = " ".join((result.stdout or "").split())
+    if result.returncode != 0 or not command:
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return []
+
+
+def process_cwd(pid):
+    """Return a process cwd where available, for resolving relative argv paths."""
+    if sys.platform.startswith("linux"):
+        try:
+            return os.readlink("/proc/%d/cwd" % pid)
+        except OSError:
+            return ""
+    if os.name == "nt":  # pragma: no cover - fail closed without /proc
+        return ""
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode == 0:
+        for line in (result.stdout or "").splitlines():
+            if line.startswith("n") and len(line) > 1:
+                return line[1:]
+    return ""
+
+
+def process_arg_matches_self(pid, arg):
+    if not isinstance(arg, str) or not arg:
+        return False
+    if os.path.isabs(arg):
+        return os.path.abspath(arg) == SELF_PATH
+    cwd = process_cwd(pid)
+    return bool(cwd and os.path.abspath(os.path.join(cwd, arg)) == SELF_PATH)
+
+
+def runtime_process_matches(pid):
+    """Fail-closed check that pid still runs this runtime companion."""
+    argv = process_argv(pid)
+    if not argv:
+        return False
+    return any(process_arg_matches_self(pid, arg) for arg in argv)
+
+
+def usage_watch_process_matches(pid):
+    """Fail-closed legacy identity check before signalling a watcher."""
+    argv = process_argv(pid)
+    if not argv:
+        return False
+    try:
+        script_index = next(index for index, arg in enumerate(argv)
+                            if process_arg_matches_self(pid, arg))
+    except StopIteration:
+        return False
+    return any(argv[index:index + 2] == ["usage", "watch"]
+               for index in range(script_index + 1, len(argv) - 1))
 
 
 def usage_watch_terminate(pid, process_start_ref=""):
@@ -1736,6 +1859,8 @@ def usage_watch_terminate(pid, process_start_ref=""):
         current_start = fleet_process_start_ref(pid)
         if not current_start or current_start != process_start_ref:
             return False
+    elif not usage_watch_process_matches(pid):
+        return False
     if os.name == "nt":  # pragma: no cover - Windows-only process control
         try:
             result = subprocess.run(
@@ -10768,6 +10893,13 @@ def usage_watch_tick_probe(args, agent):
                         "message": error}]
     findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
     success = bool(payload.get("ok") and payload.get("snapshots"))
+    no_adapter = bool(payload.get("ok") and not payload.get("snapshots")
+                      and any(row.get("check") == "usage.no_adapter"
+                              for row in findings if isinstance(row, dict)))
+    if no_adapter:
+        # An intentionally empty adapter set is observable configuration, not a
+        # failed read. Keep the watcher healthy without inventing usage data.
+        return True, findings
     if not success:
         findings = list(findings) + [{
             "severity": "warning", "check": "usage.watch_read_unknown",
@@ -10831,7 +10963,8 @@ def register_usage_watch(args, agent):
             agent, mode="apply" if args.apply else "advisory",
             interval=args.interval, started=started, phase="running",
             lease_id=lease_id, tick_timeout=(args.tick_timeout if args.tick_timeout > 0
-                                             else max(1.0, args.interval)))
+                                             else max(1.0, args.interval)),
+            desired_state="running")
         row.update({"warn_threshold": args.warn_threshold,
                     "limit_threshold": args.limit_threshold,
                     "stale_after_minutes": args.stale_after_minutes})
@@ -10842,7 +10975,11 @@ def register_usage_watch(args, agent):
 
 
 def cmd_usage_watch_stop(args, agent):
-    token = acquire_usage_watch_lock(agent)
+    try:
+        token = acquire_usage_watch_lock(agent)
+    except ValueError as exc:
+        print("m8shift-runtime: %s" % exc, file=sys.stderr)
+        return USAGE_GUARD_EXIT_ERROR
     try:
         watch, err = read_usage_watch(agent)
         if err:
@@ -10862,6 +10999,7 @@ def cmd_usage_watch_stop(args, agent):
                 "agent": agent, "pid": None, "process_start_ref": "",
                 "lease_id": "",
                 "mode": "advisory", "interval": USAGE_WATCH_INTERVAL_DEFAULT_S,
+                "desired_state": "stopped",
                 "started": iso(), "last_tick": "", "last_success": "",
                 "phase": "stopped", "stopped_at": iso(),
                 "tick_timeout": USAGE_WATCH_PROBE_TIMEOUT_S,
@@ -10870,7 +11008,9 @@ def cmd_usage_watch_stop(args, agent):
             }
             atomic_write_json(usage_watch_path(agent), watch)
         else:
-            watch.update({"phase": "stopped", "stopped_at": iso()})
+            watch.update({"phase": "stopped", "desired_state": "stopped",
+                          "pid": None, "process_start_ref": "", "lease_id": "",
+                          "stopped_at": iso()})
             atomic_write_json(usage_watch_path(agent), watch)
     finally:
         release_usage_watch_lock(agent, token)
@@ -10895,6 +11035,29 @@ def usage_watch_registry_agents(agent_filter):
                   if name.endswith(".json") and AGENT_RE.fullmatch(name[:-5]))
 
 
+def default_usage_watch(agent, *, desired_state="running"):
+    """Build a conservative lifecycle record without probing or signalling."""
+    return {
+        "schema": USAGE_WATCH_SCHEMA, "kind": "usage_watch", "agent": agent,
+        "mode": "advisory", "interval": USAGE_WATCH_INTERVAL_DEFAULT_S,
+        "tick_timeout": USAGE_WATCH_PROBE_TIMEOUT_S, "phase": "stopped",
+        "desired_state": desired_state, "pid": None, "process_start_ref": "",
+        "lease_id": "", "started": iso(), "last_tick": "", "last_success": "",
+        "consecutive_unknown": 0, "total_ticks": 0, "successful_ticks": 0,
+        "success_rate": None,
+    }
+
+
+def quarantine_usage_watch(agent):
+    """Move a malformed derived registry aside and return its sidecar path."""
+    path = usage_watch_path(agent)
+    quarantine = "%s.malformed-%s-%s" % (
+        path, dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        uuid.uuid4().hex)
+    os.replace(path, quarantine)
+    return quarantine
+
+
 def usage_watch_residual_hold_finding(agent, args):
     hold, err = read_usage_hold(agent)
     if err or not hold:
@@ -10912,29 +11075,61 @@ def cmd_usage_watch_reconcile(args, agent_filter):
     findings = []
     results = []
     for agent in usage_watch_registry_agents(agent_filter):
-        token = acquire_usage_watch_lock(agent)
+        malformed_note = ""
+        try:
+            token = acquire_usage_watch_lock(agent)
+        except ValueError as exc:
+            findings.append({"severity": "error", "check": "usage.watch_lock",
+                             "message": "%s: %s" % (agent, exc)})
+            results.append({"agent": agent, "action": "busy",
+                            "health": "unknown", "pid": None})
+            continue
         try:
             watch, err = read_usage_watch(agent)
             if err:
-                findings.append({"severity": "error", "check": "usage.watch_registry",
-                                 "message": "%s: %s" % (agent, err)})
-                results.append({"agent": agent, "action": "investigate"})
-                continue
+                quarantine = quarantine_usage_watch(agent)
+                watch = default_usage_watch(agent, desired_state="stopped")
+                atomic_write_json(usage_watch_path(agent), watch)
+                malformed_note = "%s quarantined as %s" % (err, os.path.basename(quarantine))
             if not watch:
-                watch = {
-                    "schema": USAGE_WATCH_SCHEMA, "agent": agent,
-                    "mode": "advisory", "interval": USAGE_WATCH_INTERVAL_DEFAULT_S,
-                    "tick_timeout": USAGE_WATCH_PROBE_TIMEOUT_S,
-                    "phase": "stopped", "pid": None,
-                }
+                watch = default_usage_watch(agent)
             health = usage_watch_health(watch)
-            probe_ok = False
-            probe_note = ""
-            if health["status"] in ("stale", "degraded"):
-                probe_ok, probe_note = usage_watch_adapter_probe(agent)
-            decision = usage_watch_reconcile_decision(watch, probe_ok=probe_ok)
+        finally:
+            release_usage_watch_lock(agent, token)
+
+        # Adapter subprocesses may block for their full deadline. Never hold the
+        # registry transaction while probing external state.
+        probe_ok = False
+        probe_note = ""
+        if health["status"] in ("stale", "degraded"):
+            probe_ok, probe_note = usage_watch_adapter_probe(agent)
+
+        try:
+            token = acquire_usage_watch_lock(agent)
+        except ValueError as exc:
+            findings.append({"severity": "error", "check": "usage.watch_lock",
+                             "message": "%s: %s" % (agent, exc)})
+            results.append({"agent": agent, "action": "busy",
+                            "health": health["status"], "pid": watch.get("pid")})
+            continue
+        try:
+            watch, err = read_usage_watch(agent)
+            if err:
+                quarantine = quarantine_usage_watch(agent)
+                watch = default_usage_watch(agent, desired_state="stopped")
+                atomic_write_json(usage_watch_path(agent), watch)
+                malformed_note = "%s quarantined as %s" % (err, os.path.basename(quarantine))
+            health = usage_watch_health(watch)
+            decision = usage_watch_reconcile_decision(
+                watch, probe_ok=(probe_ok if health["status"] in ("stale", "degraded")
+                                 else False))
             action = decision["action"]
-            if action == "recycle":
+            if malformed_note:
+                action = "quarantined"
+                findings.append({"severity": "warning", "check": "usage.watch_registry",
+                                 "message": "%s: %s; watcher left durably stopped" %
+                                 (agent, malformed_note)})
+            elif action == "recycle":
                 if not usage_watch_terminate(
                         watch.get("pid"), watch.get("process_start_ref", "")):
                     action = "investigate"
@@ -10947,6 +11142,8 @@ def cmd_usage_watch_reconcile(args, agent_filter):
                 action = "started"
             elif action == "keep":
                 action = "kept"
+            elif action == "keep_stopped":
+                action = "stopped"
             if action == "investigate":
                 findings.append({"severity": "warning", "check": "usage.watch_health",
                                  "message": "%s: %s; %s" %

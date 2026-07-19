@@ -1033,7 +1033,8 @@ A watch tick that observes an `ok` verdict **never** resumes anything.
 
 `usage watch --agent AGENT` is a per-agent singleton. Its durable
 `usage-watchers/<agent>.json` record carries the lease id, pid, mode, interval,
-process-start identity when the host exposes one, whole-tick timeout,
+operator `desired_state` (`running` or durably `stopped`), process-start
+identity when the host exposes one, whole-tick timeout,
 tick/success counters, consecutive unknown-read count, and last tick/success
 timestamps. Startup is serialized by a short `O_EXCL`
 registry transaction: a second live watcher is refused, while `--replace`
@@ -1046,7 +1047,8 @@ a deadline (`--tick-timeout`, default `max(1, interval)`). An adapter or
 Keychain call can therefore fail one tick but cannot freeze the long-lived
 loop. Health requires both a fresh tick and successful adapter reads: three
 consecutive unknown reads are degraded even while the pid and tick timestamp
-remain fresh.
+remain fresh. An intentionally empty enabled-adapter set is distinct from a
+failed read: the watcher remains healthy but records no usage snapshot.
 
 The managed repair surface is:
 
@@ -1055,12 +1057,24 @@ python3 m8shift-runtime.py usage watch stop --agent AGENT
 python3 m8shift-runtime.py usage watch reconcile [--agent AGENT]
 ```
 
-`stop` signals the registered pid and records `phase=stopped`. `reconcile`
-uses the durable registry alone, starts a dead/stopped watcher, keeps one
-healthy watcher, and recycles a stale-tick or degraded-read watcher only after
-a fresh bounded adapter probe succeeds. A fresh `ok` verdict with a residual
-hold produces `usage.hold_residual` and names `usage resume --agent AGENT` as
-the remedy; reconciliation never clears the hold or resumes automatically.
+`stop` signals the registered pid and records `desired_state=stopped`; that
+operator intent is durable, so `reconcile` does not restart it. An explicit
+`usage watch` start restores `desired_state=running`. `reconcile` starts a dead
+desired-running watcher, keeps one healthy watcher, and recycles a stale-tick
+or degraded-read watcher only after a fresh bounded adapter probe succeeds.
+Malformed derived registry state is quarantined and replaced by a durably
+stopped record rather than wedging every lifecycle command.
+
+Upgrade note: stop all pre-#214 usage watchers before installing/adopting this
+lifecycle. A live `phase=running` record without a lease is treated as legacy:
+reconciliation first verifies its command identity, terminates it, and only
+then publishes a fresh managed lease. A pid without either an exact stored
+start identity or a matching runtime `usage watch` command line is never
+signalled; the result is `investigate`.
+
+A fresh `ok` verdict with a residual hold produces `usage.hold_residual` and
+names `usage resume --agent AGENT` as the remedy; reconciliation never clears
+the hold or resumes automatically.
 
 **`usage wait`** — token-free local blocker for cooled-down runners: each
 tick re-reads the ledger verdict only. It releases with exit `0` when the
