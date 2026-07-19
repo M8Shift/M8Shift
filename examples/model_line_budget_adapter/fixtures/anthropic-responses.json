@@ -1,0 +1,29 @@
+{
+  "success": {
+    "status": "success",
+    "surface": "response_headers",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "fresh_until": "2026-07-19T10:01:00Z",
+    "limit_tokens": 100000,
+    "remaining_tokens": 80000,
+    "reset_at": "2026-07-19T10:02:00Z",
+    "header_family": "tokens"
+  },
+  "throttle": {
+    "status": "throttle",
+    "surface": "response_headers",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "reset_at": "2026-07-19T10:02:00Z",
+    "header_family": "tokens"
+  },
+  "malformed": {
+    "status": "success",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "limit_tokens": "many",
+    "remaining_tokens": -1
+  },
+  "auth_absent": {
+    "status": "auth_absent",
+    "captured_at": "2026-07-19T10:00:00Z"
+  }
+}

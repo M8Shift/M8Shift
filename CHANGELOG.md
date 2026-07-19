@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **RFC 077 Slice B — disabled vendor evidence adapters (#212).** The external
+  model-line example package now supplies fixture-backed Anthropic, OpenAI,
+  Google, and Mistral subclasses behind an injected bounded retriever. All four
+  registrations remain disabled and fixture-only, with no SDK, credential
+  lookup, socket, subprocess, routing decision, or relay mutation. Vendor
+  mappings preserve Anthropic's null bucket, OpenAI's documented shared groups,
+  Google's console-only diagnostic boundary, and Mistral's forecast-only Admin
+  history. Per-vendor success/throttle/malformed/auth-absent fixtures prove that
+  missing or unverified applicability degrades to unknown without invented
+  headroom.
+
 - **Bounded advisory provider consultations (#225).** `m8shift-runtime.py
   consult` compiles a separate shell-free provider argv and refuses launch
   without adapter-produced `sandbox=read_only`, physical-root cwd,

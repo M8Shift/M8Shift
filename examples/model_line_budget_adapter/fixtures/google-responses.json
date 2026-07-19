@@ -1,0 +1,40 @@
+{
+  "success": {
+    "status": "success",
+    "surface": "quota_metric",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "fresh_until": "2026-07-19T10:05:00Z",
+    "quota_metric": "generativelanguage.googleapis.com/model-example-requests",
+    "model_dimension": "model-gemini-example",
+    "limit": 200,
+    "remaining": 120,
+    "reset_at": "2026-07-19T11:00:00Z"
+  },
+  "throttle": {
+    "status": "throttle",
+    "surface": "quota_failure",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "quota_metric": "generativelanguage.googleapis.com/model-example-requests",
+    "model_dimension": "model-gemini-example",
+    "reset_at": "2026-07-19T11:00:00Z"
+  },
+  "malformed": {
+    "status": "success",
+    "surface": "quota_metric",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "quota_metric": "quota-without-model-dimension",
+    "limit": 200,
+    "remaining": 120
+  },
+  "auth_absent": {
+    "status": "auth_absent",
+    "captured_at": "2026-07-19T10:00:00Z"
+  },
+  "console_only": {
+    "status": "success",
+    "surface": "console",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "model_dimension": "model-gemini-example",
+    "displayed_remaining": 120
+  }
+}
