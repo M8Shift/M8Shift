@@ -100,6 +100,14 @@ CONSULT_MAX_TIMEOUT_S = 900
 CONSULT_DEFAULT_OUTPUT_BYTES = 64 * 1024
 CONSULT_MAX_OUTPUT_BYTES = 1024 * 1024
 CONSULT_MAX_BRIEF_BYTES = 256 * 1024
+CONSULT_WRITE_SELECTORS = frozenset((
+    "--dangerously-write",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-skip-permissions",
+    "--full-auto",
+    "--yolo",
+))
+CONSULT_WRITE_SANDBOXES = frozenset(("workspace-write", "danger-full-access"))
 CONSULT_SECRET_PATTERNS = (
     re.compile(r"(?i)\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"),
@@ -747,7 +755,8 @@ def append_jsonl_rows(path, rows):
             fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def reject_symlinked_runtime_path(path):
+def reject_symlinked_runtime_path(path, error_type=SystemExit):
+    """Reject runtime symlinks with a caller-selected failure type."""
     runtime_abs = os.path.abspath(RUNTIME_DIR)
     candidate = os.path.abspath(path)
     try:
@@ -757,7 +766,9 @@ def reject_symlinked_runtime_path(path):
         return
     current = runtime_abs
     if os.path.lexists(current) and os.path.islink(current):
-        sys.exit(f"m8shift-runtime: refusing to append through symlink {os.path.relpath(current, HERE)}")
+        raise error_type(
+            f"m8shift-runtime: refusing to append through symlink "
+            f"{os.path.relpath(current, HERE)}")
     relpath = os.path.relpath(candidate, runtime_abs)
     if relpath in ("", "."):
         return
@@ -766,7 +777,9 @@ def reject_symlinked_runtime_path(path):
             continue
         current = os.path.join(current, part)
         if os.path.lexists(current) and os.path.islink(current):
-            sys.exit(f"m8shift-runtime: refusing to append through symlink {os.path.relpath(current, HERE)}")
+            raise error_type(
+                f"m8shift-runtime: refusing to append through symlink "
+                f"{os.path.relpath(current, HERE)}")
         if not os.path.exists(current):
             break
 
@@ -2638,6 +2651,25 @@ def managed_selector_in_argv(provider, argv):
     return provider_adapter(provider).managed_selector(argv)
 
 
+def consult_write_selector_in_argv(argv):
+    """Return one known write-capable selector from an attested consult argv."""
+    for index, arg in enumerate(argv):
+        if not isinstance(arg, str):
+            continue
+        normalized = arg.lower()
+        if normalized in CONSULT_WRITE_SELECTORS:
+            return arg
+        if normalized.startswith("--sandbox="):
+            if normalized.split("=", 1)[1] in CONSULT_WRITE_SANDBOXES:
+                return arg
+        if normalized == "--sandbox" and index + 1 < len(argv):
+            value = argv[index + 1]
+            if (isinstance(value, str)
+                    and value.lower() in CONSULT_WRITE_SANDBOXES):
+                return f"{arg} {argv[index + 1]}"
+    return ""
+
+
 def provider_managed_options(row):
     """Compatibility wrapper; managed option compilation lives on adapters."""
     return provider_adapter(row.get("provider", "")).managed_options(row)
@@ -2668,6 +2700,10 @@ def compile_consult_argv(row, brief, root, run_id="", platform=None):
             or not all(isinstance(arg, str) and arg and "\x00" not in arg
                        for arg in argv)):
         raise ValueError("compiled consult argv must be a non-empty string array")
+    competing = consult_write_selector_in_argv(argv)
+    if competing:
+        raise ValueError(
+            f"compiled consult argv embeds write-capable selector {competing!r}")
     if not isinstance(attestation, dict):
         raise ValueError("consult adapter returned no structured attestation")
     if attestation.get("sandbox") != "read_only":
@@ -2726,6 +2762,13 @@ def consult_policy_findings(agent, label):
                 "severity": "error", "check": "providers.consult_prompt",
                 "message": (f"{label} consult {template_label} must contain exactly "
                             "one literal $M8SHIFT_PROMPT item"),
+            })
+        competing = consult_write_selector_in_argv(template)
+        if competing:
+            findings.append({
+                "severity": "error", "check": "providers.consult_write_selector",
+                "message": (f"{label} consult {template_label} embeds write-capable "
+                            f"selector {competing!r}"),
             })
     attestation = policy.get("attestation")
     if not isinstance(attestation, dict):
@@ -3106,16 +3149,16 @@ def consult_response_target(relative):
         inside = False
     if not inside or target == runtime:
         raise ValueError("--save-response must stay under .m8shift/runtime/")
-    reject_symlinked_runtime_path(target)
+    reject_symlinked_runtime_path(target, ValueError)
     stored = os.path.relpath(target, HERE).replace(os.sep, "/")
     return target, stored
 
 
 def write_consult_response(path, raw):
     """Create a private response artifact without overwriting or symlink traversal."""
-    reject_symlinked_runtime_path(path)
+    reject_symlinked_runtime_path(path, OSError)
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    reject_symlinked_runtime_path(path)
+    reject_symlinked_runtime_path(path, OSError)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -6254,11 +6297,33 @@ def provider_row_launchable(row):
                    for finding in findings)
 
 
+def provider_registry_is_default_scaffold(registry):
+    """Match the exact deterministic bytes written by providers init."""
+    agents = registry.get("agents", []) if isinstance(registry, dict) else []
+    if (not isinstance(agents, list)
+            or not all(isinstance(row, dict) for row in agents)):
+        return False
+    names = [row.get("name") for row in agents]
+    if not names or not all(isinstance(name, str) and name for name in names):
+        return False
+    expected = json.dumps(
+        default_provider_registry(names), ensure_ascii=False,
+        sort_keys=True, indent=2,
+    ) + "\n"
+    try:
+        with open(PROVIDERS, "rb") as fh:
+            return fh.read() == expected.encode("utf-8")
+    except OSError:
+        return False
+
+
 def consult_kit_findings():
     """Graduated advisory diagnostics for the observed half-provisioned kit."""
     if not os.path.exists(PROVIDERS):
         return []
     registry = load_provider_registry()
+    if provider_registry_is_default_scaffold(registry):
+        return []
     agents = registry.get("agents", []) if isinstance(registry, dict) else []
     has_launchable = any(provider_row_launchable(row) for row in agents or [])
     if has_launchable:

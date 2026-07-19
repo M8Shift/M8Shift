@@ -112,7 +112,7 @@ Since RFC 073 slice 1, every managed provider launch dispatches through a formal
 | `stop(process_ref, mode)` | returns a normalized `graceful`/`force` **intent** with the process-group strategy; the generic supervisor performs the actual termination |
 | `resume(row, prompt, session_ref, ...)` | renders a resume attempt only when the adapter declares probed resume support; the baseline **fails closed** (`<provider> adapter does not declare resume support`) |
 | `health(process_ref, session_ref)` | returns a normalized lifecycle observation with `relay_completion` always `false` — an adapter can never imply an authored relay transition |
-| `compile_consult(row, prompt, root, ...)` | fails closed unless the row provides a separate consult argv and structured `sandbox=read_only` attestation whose exact evidence occurs in the compiled argv; the generic layer invents no vendor flag |
+| `compile_consult(row, prompt, root, ...)` | fails closed unless the row provides a separate consult argv and structured `sandbox=read_only` attestation whose exact evidence occurs in the compiled argv; a closed denylist rejects competing write-capable selectors and the generic layer invents no vendor flag |
 
 Registered adapters in this release:
 
@@ -133,6 +133,12 @@ Registered adapters in this release:
   promotion.
 
 Dispatch is keyed solely by the row's `provider`; an **unknown provider retains the existing explicit declarative-argv behavior** (the safe baseline adapter). Registering a new provider requires no generic call-site or core change — `register_adapter` validates the provider key and refuses duplicates. The interface never executes a shell string, never persists or prints a raw session reference, never signals a process itself, and never infers relay completion.
+
+Consult argv and its read-only attestation are operator-owned configuration and
+therefore part of the operator trust boundary, not cryptographic proof about a
+provider. The compiler verifies exact evidence and rejects a closed set of known
+competing write selectors, but operators must still audit provider-specific argv
+when provisioning or changing a consult policy.
 
 ## Detached durable fleet control plane (RFC 073 slice 2)
 
@@ -315,7 +321,19 @@ python3 m8shift-runtime.py fleet supervise --spec fleet.json --detach --dry-run 
 | `listener.multiple_starters` | warning | more than one agent has `start_on_idle=true` |
 | `listener.log_too_large` | info | a listener log reached the rotation threshold; the owning listener rotates it at its next write |
 
-Consult provisioning adds two graduated, advisory-only doctor findings. `providers.registry_empty` warns whenever an existing registry has no structurally launchable active row and names `providers init` plus explicit row configuration as the remedy. `consult.kit_incomplete` is emitted only for the observed compound condition: the registry has no launchable row **and** the kit has no handshake-compatible reference runner; its remedy is the canonical `m8shift.py init --profile headless`. A missing runner alone remains owned by the existing listener preflight and is not duplicated here. Doctor also validates every `consults.jsonl` row against `m8shift.consult.exchange.v1` and the closed `completed|timed_out|launch_refused|provider_failed|invalid_output` classification enum.
+Consult provisioning adds two graduated, advisory-only doctor findings. An exact,
+byte-identical `providers init` scaffold is an expected fresh-kit state and emits
+neither warning. Once the registry differs from that scaffold,
+`providers.registry_empty` warns when it has no structurally launchable active row
+and names `providers init` plus explicit row configuration as the remedy.
+`consult.kit_incomplete` is emitted only for the observed compound condition: that
+edited registry has no launchable row **and** the kit has no handshake-compatible
+reference runner; its remedy is the canonical `m8shift.py init --profile headless`.
+A missing runner alone remains owned by the existing listener preflight and is not
+duplicated here. Doctor also validates every `consults.jsonl` row against
+`m8shift.consult.exchange.v1` and the closed
+`completed|timed_out|launch_refused|provider_failed|invalid_output` classification
+enum.
 
 **Honesty note on the surfaced RTK / compression line.** `status-runtime` and `doctor` display a context-adapter status such as `RTK: ON (pinned, compressing packs)` plus a `last pack` `compression_ratio`. These are **read-only surfaces of the context companion's state**, not runtime work: RTK here is the identity-pinned (`sha256`) `rtk-shell-output` adapter, a **mode-specific lossy semantic filter** for shell output (e.g. `rtk err`/`test`/`git-log`) — it is **not** a compressor and has no standalone compression percentage. The `compression_ratio` shown comes from `.m8shift/context/metrics.jsonl`, which the context companion writes for its own prose-compression backend (Kompress/Headroom), and is unrelated to RTK. This module neither compresses nor filters; it only reports what the context companion recorded.
 

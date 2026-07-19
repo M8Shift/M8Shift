@@ -11,9 +11,12 @@
   brief, argv/response digests, closed classification, and response-sink
   reference; provider response bodies never enter durable logs. Optional saved
   responses are non-overwriting, kit-relative private artifacts under
-  `.m8shift/runtime/`. Doctor distinguishes an empty provider registry from the
-  compound half-provisioned registry-plus-runner condition without granting the
-  companion any relay authority.
+  `.m8shift/runtime/`; symlink races still produce exactly one terminal audit
+  record. The compiler rejects known competing write-capable selectors while
+  documenting consult argv as operator-trusted policy. Doctor leaves a
+  byte-identical fresh provider scaffold quiet, then distinguishes an edited
+  empty registry from the compound registry-plus-runner condition without
+  granting the companion any relay authority.
 
 ## v3.64.0 — 2026-07-18
 

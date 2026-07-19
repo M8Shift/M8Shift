@@ -8366,6 +8366,20 @@ class TestRuntimeCompanion(CLIBase):
         embedded["consult"]["argv"][-1] = "prompt=$M8SHIFT_PROMPT"
         with self.assertRaisesRegex(ValueError, "literal"):
             runtime.compile_consult_argv(embedded, "review this", root, "consult-4")
+        competing = json.loads(json.dumps(row))
+        competing["consult"]["argv"].insert(-1, "--dangerously-write")
+        self.assertIn("providers.consult_write_selector", {
+            finding["check"]
+            for finding in runtime.consult_policy_findings(competing, "peer")
+        })
+        with self.assertRaisesRegex(ValueError, "write-capable selector"):
+            runtime.compile_consult_argv(
+                competing, "review this", root, "consult-5")
+        competing_sandbox = json.loads(json.dumps(row))
+        competing_sandbox["consult"]["argv"].insert(-1, "--sandbox=workspace-write")
+        with self.assertRaisesRegex(ValueError, "write-capable selector"):
+            runtime.compile_consult_argv(
+                competing_sandbox, "review this", root, "consult-6")
 
     def test_consult_records_redacted_digest_only_exchange_and_private_sink(self):
         self.init()
@@ -8511,10 +8525,75 @@ class TestRuntimeCompanion(CLIBase):
         self.assertEqual(len(bounded["stdout"]), 64)
         self.assertTrue(bounded["truncated"])
 
+    def test_consult_mid_run_response_symlink_records_one_invalid_output(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        outside = os.path.join(self.d, "outside")
+        os.makedirs(outside)
+        response_parent = os.path.join(
+            self.d, ".m8shift", "runtime", "consult-responses")
+        provider = os.path.join(self.d, "symlink-provider.py")
+        with open(provider, "w", encoding="utf-8") as fh:
+            fh.write(
+                "import os, sys\n"
+                "os.symlink(sys.argv[1], sys.argv[2])\n"
+                "sys.stdout.write('private response')\n"
+            )
+        registry = {
+            "schema": "m8shift.providers.v1", "examples": [],
+            "agents": [{
+                "name": "peer", "provider": "placeholder-provider",
+                "mode": "local", "anchor": "AGENTS.md", "model": "UNSET",
+                "argv": [sys.executable, provider, outside, response_parent,
+                         "$M8SHIFT_PROMPT"],
+                "capabilities": ["review"], "requires_env": [],
+                "env_allowlist": [], "permissions": "read-only",
+                "consult": {
+                    "argv": [sys.executable, provider, outside, response_parent,
+                             "--sandbox=read_only", "$M8SHIFT_PROMPT"],
+                    "attestation": {
+                        "sandbox": "read_only",
+                        "sandbox_argv": ["--sandbox=read_only"],
+                        "cwd": "$M8SHIFT_ROOT", "prompt": "literal",
+                    },
+                },
+            }],
+        }
+        with open(os.path.join(self.d, ".m8shift", "providers.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        brief = os.path.join(self.d, "brief.txt")
+        with open(brief, "w", encoding="utf-8") as fh:
+            fh.write("review")
+
+        result = self.rt(
+            "consult", "--from", "codex", "--to", "peer",
+            "--brief-file", brief, "--save-response",
+            ".m8shift/runtime/consult-responses/peer.txt",
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        ledger = os.path.join(self.d, ".m8shift", "runtime", "consults.jsonl")
+        with open(ledger, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["classification"], "invalid_output")
+        self.assertFalse(os.path.exists(os.path.join(outside, "peer.txt")))
+
     def test_doctor_graduates_empty_registry_and_missing_compatible_runner(self):
         self.init()
         self.assertEqual(self.rt("init").returncode, 0)
+        fresh = json.loads(self.rt("doctor", "--json").stdout)
+        fresh_checks = {finding["check"] for finding in fresh["findings"]}
+        self.assertNotIn("providers.registry_empty", fresh_checks)
+        self.assertNotIn("consult.kit_incomplete", fresh_checks)
         registry_path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry_path, "a", encoding="utf-8") as fh:
+            fh.write("\n")
+        edited = json.loads(self.rt("doctor", "--json").stdout)
+        edited_checks = {finding["check"] for finding in edited["findings"]}
+        self.assertIn("providers.registry_empty", edited_checks)
+        self.assertIn("consult.kit_incomplete", edited_checks)
         with open(registry_path, "w", encoding="utf-8") as fh:
             json.dump({"schema": "m8shift.providers.v1", "agents": [],
                        "examples": []}, fh)
