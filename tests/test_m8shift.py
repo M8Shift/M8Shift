@@ -795,6 +795,9 @@ class TestInit(CLIBase):
         self.assertIn("listener start", body)
         self.assertIn("capability handshake", body)
         self.assertIn("additive `cause` field", body)
+        self.assertIn("request-turn <requester>", body)
+        self.assertIn("steer-turn <requester>", body)
+        self.assertIn("never permission to redirect an active holder", body)
         self.assertIn("./m8shift-top.py", body)
         self.assertIn("`core.version`, reconciled by `update`, is authoritative", body)
 
@@ -865,6 +868,14 @@ class TestInit(CLIBase):
         self.assertFalse(os.path.exists(os.path.join(self.d, "M8SHIFT.md")))
         self.init("--profile", "headless", "--companion-source", REPO)
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "LISTENER.md")))
+        permissions = os.path.join(self.d, ".m8shift", "PROVIDER-PERMISSIONS.md")
+        self.assertTrue(os.path.exists(permissions))
+        with open(permissions, encoding="utf-8") as fh:
+            permission_body = fh.read()
+        self.assertIn("<provider-allow-rule> ./m8shift.py next <agent>", permission_body)
+        self.assertIn("anthropic-claude: <anthropic-policy-file>", permission_body)
+        self.assertIn("openai-codex:     <openai-policy-file>", permission_body)
+        self.assertIn("Never guess or add a vendor bypass flag", permission_body)
         self.assertFalse(os.path.exists(os.path.join(self.d, ".m8shift", "HOOKS.md")))
 
     def test_headless_init_provisions_a_compatible_runner_without_host_source_path(self):
@@ -4900,6 +4911,55 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(lk["holder"], "claude")
         self.assertNotIn("claim --force", r.stdout + r.stderr)
 
+    def test_approval_signature_is_terminal_only_when_exit_and_relay_corroborate(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import sys\nprint('approval is required: SYNTHETIC_PRIVATE_DETAIL', "
+            "file=sys.stderr)\nsys.exit(7)\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "approval_required")
+        self.assertEqual(ended["verification_status"], "approval_required")
+        self.assertEqual(ended["reason"], "provider_permission_allowlist")
+        self.assertEqual(ended["output_signature_ids"], ["approval_required"])
+        self.assertNotIn("SYNTHETIC_PRIVATE_DETAIL", json.dumps(ended))
+
+    def test_approval_words_without_nonzero_exit_remain_ordinary_non_completion(self):
+        self.awaiting_me()
+        r = self.runner_once("print('approval is required')\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "non_completion")
+        self.assertEqual(ended["output_signature_ids"], ["approval_required"])
+
+    def test_approval_words_inside_relay_transcript_are_not_terminal(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import sys\n"
+            "print('<!-- M8SHIFT:TURN 8 codex BEGIN -->')\n"
+            "print('requires approval before continuing')\n"
+            "print('<!-- M8SHIFT:TURN 8 codex END -->')\n"
+            "print('ordinary final response')\n"
+            "sys.exit(7)\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "non_completion")
+        self.assertEqual(ended["output_signature_ids"], ["approval_required"])
+        self.assertEqual(ended["output_final_signature_ids"], [])
+
+    def test_trailing_approval_prompt_after_long_output_is_terminal(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import sys\n"
+            "print('x' * (70 * 1024))\n"
+            "print('permission request was not approved', file=sys.stderr)\n"
+            "sys.exit(7)\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "approval_required")
+        self.assertEqual(ended["output_signature_ids"], ["approval_required"])
+        self.assertEqual(ended["output_final_signature_ids"], ["approval_required"])
+
     def test_t3_advanced_when_provider_appends_to_peer(self):
         # RFC 047 test 3: an authored newer turn is success even though the relay is open.
         self.awaiting_me()
@@ -5347,6 +5407,21 @@ with open(%r, 'a', encoding='utf-8') as fh:
         with open(path, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 
+    def write_provider_row(self, mode, marker):
+        providers = os.path.join(self.d, ".m8shift", "providers.json")
+        os.makedirs(os.path.dirname(providers), exist_ok=True)
+        row = {
+            "name": "claude", "provider": "anthropic-claude",
+            "mode": mode, "anchor": "CLAUDE.md",
+            "model": "claude-test-model",
+            "argv": [sys.executable, "-c", "open(%r, 'w').close()" % marker,
+                     "$M8SHIFT_PROMPT"],
+            "capabilities": [], "requires_env": [], "env_allowlist": [],
+            "permissions": "human-driven",
+        }
+        with open(providers, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.providers.v1", "agents": [row]}, fh)
+
     def test_current_runner_exposes_the_bounded_capability_handshake(self):
         result = subprocess.run(
             [sys.executable, self.RUNNER, "--handshake"],
@@ -5423,6 +5498,48 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertFalse(os.path.exists(marker))
         self.assertFalse(os.path.exists(self.listeners_dir()))
 
+    def test_listener_rejects_interactive_provider_before_sidecar_or_launch(self):
+        self.init()
+        marker = os.path.join(self.d, "provider-launched.txt")
+        self.write_provider_row("interactive", marker)
+
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--provider",
+            "--runner", "missing-runner.py", "--foreground", "--max-ticks", "1")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("provider_mode_interactive", result.stderr)
+        self.assertIn("mode=headless", result.stderr)
+        self.assertFalse(os.path.exists(marker))
+        self.assertFalse(os.path.exists(self.listeners_dir()))
+
+    def test_listener_launches_local_provider_mode(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-launched.txt")
+        self.write_provider_row("local", marker)
+
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--provider",
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.01", "--max-backoff", "1")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(os.path.exists(marker))
+
+    def test_notify_only_accepts_interactive_provider_without_launching_it(self):
+        self.init()
+        marker = os.path.join(self.d, "provider-launched.txt")
+        self.write_provider_row("interactive", marker)
+
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--provider",
+            "--notify-only", "--runner", self.RUNNER, "--foreground",
+            "--max-ticks", "1", "--poll-interval", "0.01")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(marker))
+        self.assertTrue(self.state_doc()["notify_only"])
+
     def provider_profile(self, cwd, marker, signature):
         code = (
             "import sys\n"
@@ -5472,6 +5589,23 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertEqual(state["last_classification"], "runner_refused_argv")
         self.assertEqual(len(self.launches()), 1)
         self.assertIn("notify blocked claude", result.stdout)
+
+    def test_approval_required_ledger_classification_halts_after_one_attempt(self):
+        self.awaiting_me()
+        runner = self.stub_runner(rc=1, ledger_status="approval_required")
+        result = self.rt(
+            "listener", "start", "--agent", "claude",
+            "--cmd-file", self.profile_path(), "--runner", runner,
+            "--foreground", "--max-ticks", "2", "--poll-interval", "0.01",
+            "--max-retries", "3", "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "halted")
+        self.assertEqual(state["last_classification"], "approval_required")
+        self.assertEqual(state["reason"],
+                         "approval_required:provider_permission_allowlist")
+        self.assertEqual(len(self.launches()), 1)
+        self.assertIn("PROVIDER-PERMISSIONS.md", result.stdout)
 
     def test_runner_timeout_classification_is_retryable_and_not_overwritten(self):
         self.awaiting_me()
