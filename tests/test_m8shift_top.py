@@ -1279,8 +1279,10 @@ class IncrementalStatusReaderTests(unittest.TestCase):
         self.assert_equivalent(reader, 8, "full")
         source = self.engine.read_text(encoding="utf-8")
         replacement = self.root / "m8shift.next.py"
+        current_version = 'VERSION = "%s"' % self.top.VERSION
+        self.assertIn(current_version, source)
         replacement.write_text(
-            source.replace('VERSION = "3.64.0"', 'VERSION = "3.64.1"', 1),
+            source.replace(current_version, 'VERSION = "999.0.0"', 1),
             encoding="utf-8")
         os.replace(str(replacement), str(self.engine))
         actual = reader.load(8)

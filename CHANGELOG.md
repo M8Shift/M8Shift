@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.65.0 — 2026-07-20
+
 - **RFC 077 Slice C — pure safe-boundary route policy (#212).** A fixture-side
   eight-rule state machine now consumes normalized model-line facts and explicit
   ordered RFC 070 pins without invoking an adapter or provider. Usage holds win
@@ -13,6 +15,23 @@
   closed-turn hashes before reconstructing the switch boundary. Listener
   integration, live switching, credentials, and relay mutation remain absent.
 
+- **Managed usage-watcher lifecycle (#214).** `usage watch` now owns a
+  per-agent singleton lease with durable running/stopped intent, bounded
+  out-of-process ticks, independent tick/read health, and explicit `stop` and
+  `reconcile` verbs. Dead, stale-tick (formerly HUNG), degraded-read, and
+  legacy pre-lease watchers converge without duplicate launch; malformed
+  registries are quarantined, and unverifiable process identity fails closed
+  before any signal can reach an unrelated process.
+
+- **Forge-gateway delivery ledger (#229).** The runtime companion adds the
+  explicit, advisory `gateway-event` emitter and bounded
+  `m8shift.gateway.event.v1` rows in `gateway.jsonl`. Delivery refs, forge ids,
+  causes, and evidence digests are shape-validated and redacted; the passive
+  core never performs the remote action. Recent events appear on a compact
+  `GATEWAY` line in `m8shift-top`, including while the relay is `PAUSED`, and
+  RFC 065 now records the recovery ordering and stacked-lineage rules learned
+  from real gateway incidents.
+
 - **RFC 077 Slice B — disabled vendor evidence adapters (#212).** The external
   model-line example package now supplies fixture-backed Anthropic, OpenAI,
   Google, and Mistral subclasses behind an injected bounded retriever. All four
@@ -23,6 +42,13 @@
   history. Per-vendor success/throttle/malformed/auth-absent fixtures prove that
   missing or unverified applicability degrades to unknown without invented
   headroom.
+
+- **RFC implementation-gap audit (#231).** A checked-in 77-row inventory maps
+  every RFC to implemented, partial, design-only, or superseded evidence and
+  separates accepted issue follow-ups from normative RFC gaps. Its prioritized
+  register keeps the missing RFC 068 artifact, scrub reachability (#222), TIME
+  presentation (#218), RFC 077 Slice D, and the separately gated Slice E pilot
+  visible instead of implying completion from prose or fixtures.
 
 - **Bounded advisory provider consultations (#225).** `m8shift-runtime.py
   consult` compiles a separate shell-free provider argv and refuses launch
@@ -39,6 +65,12 @@
   byte-identical fresh provider scaffold quiet, then distinguishes an edited
   empty registry from the compound registry-plus-runner condition without
   granting the companion any relay authority.
+
+- **Release lockstep.** Core, runtime, top, context, i18n, worktree, headroom,
+  e2e, reference runner/handshake, documentation generator, wrapper, module
+  examples, and version fixtures move together to 3.65.0. Version-sensitive
+  test fixtures now derive the release value from the authoritative source
+  instead of requiring a new hard-coded pin on every cut.
 
 ## v3.64.0 — 2026-07-18
 

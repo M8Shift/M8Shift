@@ -216,6 +216,9 @@ sequenceDiagram
 | EF-44 | **Cached interactive navigation and neutral no-lease display**: `m8shift-top` reloads the status fold only on interval expiry, explicit refresh, or activity-provision growth. Navigation/help keys use the cached snapshot with zero engine subprocesses, queued key bursts render once, immutable expanded-turn payloads are cached until explicit refresh, and a missing expiry renders neutral `no TTL`/`not applicable` cells rather than stale lease styling. | `test_navigation_burst_renders_once_without_engine_subprocess`, `test_pending_key_burst_is_drained_before_one_render_cycle`, `test_awaiting_state_renders_neutral_no_ttl_strip` |
 | EF-45 | **Mistral Vibe source-validated stub**: upstream 2.20.0 source establishes `vibe -p PROMPT`, `MISTRAL_API_KEY`, and trusted project `AGENTS.md` loading. The runtime registry dispatches declarative argv through `mistral-vibe`; resume fails closed and health stays unknown until a separately accepted local probe promotes it. Core anchor mapping adds the confirmed `vibe` name while retaining `lechat`/`mistral` aliases. | `test_agent_cli_adapter_registry_dispatch_and_live_gemini`, `test_vibe_uses_confirmed_agents_anchor`, `test_runtime_init_providers_roles_workflows_and_report` |
 | EF-46 | **Reentrant bootstrap runbook and shared scaffold write gate (#207/#215).** Init capability, gitignore, companion, runner, and generated runbook writes pass the same physical-root gate before mutation. Headless/full profiles provision a version-locked runner and render a marker-owned `.m8shift/BOOTSTRAP.md` containing version authority, self-documenting usage/listener/handshake/dashboard commands, and halted-lane recovery. Re-init replaces only one well-ordered generated block and preserves operator prose; missing/duplicate/reversed markers refuse cleanly, and the exact pre-marker `# Bootstrap plan` renderer is migrated once. | `test_bootstrap_runbook_is_reentrant_and_preserves_operator_prose`, `test_bootstrap_runbook_refuses_reversed_markers_cleanly`, `test_bootstrap_runbook_replaces_exact_legacy_renderer_once`, `test_headless_init_provisions_a_compatible_runner_without_host_source_path` |
+| EF-47 | **Advisory forge-gateway lifecycle ledger (#229).** `m8shift-runtime.py gateway-event` explicitly appends one bounded `m8shift.gateway.event.v1` record to `.m8shift/runtime/gateway.jsonl`; it records a safe actor, allowlisted action/outcome, required stable cause for non-`ok`, bounded repo-relative refs/ids, optional SHA-256 digests, and tool/version source. URLs, absolute/parent paths, userinfo, raw multiline output, duplicate keys, non-digest evidence, and records over 8 KiB are refused or denylist-redacted. The helper performs no forge action and never reads or mutates relay ownership. Core status projects only recent valid events, and TOP renders the advisory `GATEWAY` line even while `PAUSED`. | `test_gateway_event_appends_validated_side_ledger_without_touching_relay`, `test_gateway_event_refuses_unsafe_or_ambiguous_evidence`, `test_gateway_event_bounds_records_and_concurrent_appends`, `test_status_snapshot_projects_only_recent_valid_gateway_events`, `test_recent_gateway_event_remains_visible_while_paused` |
+| EF-48 | **Managed usage-watcher lifecycle (#214).** `usage watch --agent AGENT` owns one lease-bound `m8shift.usage-watch.lifecycle.v1` registry under `usage-watchers/<agent>.json`, serialized by a short `O_EXCL` transaction. Whole ticks run in bounded subprocess groups; health treats process life, tick freshness, and successful adapter reads independently, so dead, stale-tick, degraded-read, and legacy pre-lease states are not reported healthy. `usage watch stop` records durable stopped intent; `usage watch reconcile` keeps stopped/healthy epochs, starts a dead desired-running watcher, and recycles stale/degraded/legacy state only under the documented probe and identity gates. Malformed state is quarantined to stopped. PID plus lease ownership prevents an old finalizer from overwriting an adopted epoch, and exact start identity or matching watcher argv is required before signalling; unverifiable identity fails closed to `investigate`. Reconciliation never clears a usage hold or resumes the relay. | `test_usage_watch_incident_variants_detect_and_converge`, `test_usage_watch_legacy_identity_fails_closed_before_signal`, `test_usage_watch_whole_tick_probe_timeout_is_a_failed_tick`, `test_usage_watch_singleton_refuses_duplicate_and_stop_manages_registry`, `test_usage_watch_reconcile_quarantines_malformed_registry` |
+| EF-49 | **Pure safe-boundary model-line route policy (RFC 077 Slice C, #212).** The external fixture package consumes an operator policy, validated same-provider/mode/auth RFC 070 pins, normalized `m8shift.model-line.evidence.v1` rows, invocation effects, switch count, and a durable non-`WORKING` checkpoint. Usage hold active/corrupt is priority zero and returns before evidence inspection; only explicit `usage resume` can clear a hold. The eight ordered rules distinguish available/drain/exhausted/unknown/stale evidence, safe refusal, partial output/tool effects, subscription CLI limits, target applicability, missing checkpoints, and the default one-switch cap, producing only `continue`, `observe_only`, `route_next_invocation`, or `clean_halt` with stable reasons. Dry-run compiles requested/selected pins for the next invocation with `replay=false`, launches nothing, and emits a canonical create-exclusive `m8shift.route-decision.v1` record whose checkpoint hashes reconstruct the boundary. No listener integration, credential access, provider process, live switch, hold mutation, or relay write ships in Slice C. | `test_rule_zero_active_and_corrupt_holds_precede_evidence`, `test_rule_three_exhaustion_and_safe_refusal_route_next_only`, `test_rule_four_partial_effect_ambiguity_and_unsafe_refusal_halt`, `test_rule_five_unknown_stale_and_console_targets_never_route`, `test_rule_eight_cap_and_all_rejected_have_stable_causes`, `test_dry_run_compiles_rfc070_pins_without_launch_or_replay`, `test_record_matches_checked_in_schema_shape`, `test_immutable_writer_is_create_exclusive_and_canonical`, `test_blank_agent_reconstructs_boundary_from_durable_bytes` |
 
 ## 5. Non-functional requirements
 
@@ -331,7 +334,118 @@ runtime JSONL append paths refuse symlink redirection before archive/index write
 Deleting
 `.m8shift/runtime/` never corrupts `M8SHIFT.md`, the turn log, or claimability.
 
-### 6.2 State machine
+### 6.2 Gateway delivery side-ledger
+
+The forge-gateway emitter is an explicit runtime-companion operation:
+
+```text
+python3 m8shift-runtime.py gateway-event --actor ACTOR --action ACTION
+  --outcome OUTCOME [--cause TOKEN] [--ref KEY=VALUE]
+  [--id KEY=VALUE] [--digest KEY=sha256:<64-lowercase-hex>] [--json]
+```
+
+It appends, under the normal non-symlink-following JSONL guard, to:
+
+```text
+.m8shift/runtime/gateway.jsonl       ← m8shift.gateway.event.v1
+```
+
+Every row has exactly the following contract shape (maps may be empty):
+
+```json
+{
+  "schema": "m8shift.gateway.event.v1",
+  "ts": "2026-07-20T00:00:00Z",
+  "actor": "forge-gateway",
+  "action": "push",
+  "outcome": "ok",
+  "cause": "",
+  "refs": {"branch": "feat/example", "commit": "0123456789abcdef"},
+  "ids": {"ticket": "229"},
+  "digests": {"review": "sha256:<64-lowercase-hex>"},
+  "source": {"tool": "m8shift-runtime.py", "version": "3.65.0"}
+}
+```
+
+Actions are `push`, `pr_open`, `pr_merge`, `pr_close`, `tag`,
+`branch_delete`, `merge_resolve`, or `publish_mirror`; outcomes are `ok`,
+`refused`, `retrying`, or `failed`. A non-`ok` row requires a stable cause.
+The row is local advisory evidence: it neither proves remote state nor grants
+forge or relay authority. Core status reads only a recent valid row for display,
+and TOP may render that projection while the mutex remains `PAUSED`.
+
+### 6.3 Managed usage-watcher registry
+
+Each agent has at most one durable watcher registry:
+
+```text
+.m8shift/runtime/usage-watchers/<agent>.json
+  schema = m8shift.usage-watch.lifecycle.v1
+```
+
+The record carries `kind`, `agent`, `pid`, `process_start_ref`, `lease_id`,
+`mode`, `interval`, `desired_state`, `started`, `last_tick`, `last_success`,
+`phase`, `tick_timeout`, `consecutive_unknown`, `total_ticks`,
+`successful_ticks`, and derived `success_rate`. `desired_state=stopped` is
+operator intent, not a process-health inference.
+
+Health is the conjunction of three independent observations:
+
+1. the registered process is live and its start identity still matches;
+2. `last_tick` is fresh relative to the configured interval; and
+3. fewer than three consecutive adapter reads are unknown.
+
+A live PID with stale ticks is `stale` (the former HUNG class), not healthy; a
+fresh ticker with three failed reads is `degraded`. Every tick executes the
+snapshot path in a new bounded subprocess group. An intentionally empty enabled
+adapter set is a successful read with no snapshots, while timeout, malformed
+output, or adapter failure is a failed read.
+
+`usage watch stop --agent AGENT` signals only a proven owned process and persists
+stopped intent. `usage watch reconcile [--agent AGENT]` keeps one healthy epoch,
+starts dead desired-running state, recycles stale/degraded state only after a
+fresh bounded probe, adopts legacy pre-lease state only after verified
+termination, and quarantines malformed registries to stopped. PID plus lease id
+guards every update/finalizer. If process identity cannot be proven, the action
+is `investigate`: no signal and no duplicate launch. A residual usage hold is a
+separate finding with `usage resume --agent AGENT` as its only remedy.
+
+### 6.4 Safe-boundary model-line route records
+
+RFC 077's fixture-safe schemas are checked in at:
+
+```text
+examples/model_line_budget_adapter/schema/
+├── m8shift.model-line.evidence.v1.schema.json
+└── m8shift.route-decision.v1.schema.json
+```
+
+The pure Slice-C policy applies the eight ordered rules in EF-49 only between
+managed invocations. It never changes a pin inside a response. Before any
+evidence validation, an active or corrupt
+`.m8shift/runtime/usage-holds/<agent>.json` stops routing; this priority-zero
+hold gate intentionally creates no model-line record.
+
+An eligible dry-run compiles the old and selected RFC 070 pins without launching
+and produces `m8shift.route-decision.v1`. The record includes policy and stable
+reason, requested/selected model, hashed evidence references, switch ordinal,
+`replay=false`, the next invocation ordinal, and a checkpoint binding the
+immutable attempt plan plus exact last closed relay turn. Runtime decision files
+are canonical, create-exclusive, and never overwritten:
+
+```text
+.m8shift/runtime/model-line-routing/<relay-session>/
+├── evidence/<evidence-id>.json      ← m8shift.model-line.evidence.v1
+└── decisions/<decision-id>.json     ← m8shift.route-decision.v1
+```
+
+Reconstruction verifies both hashes before returning the old/new pins and
+invocation boundary. Missing, conflicting, or mismatched evidence fails closed;
+directory mtime and the current configured model are not reconstruction proof.
+Slice C is a pure/example boundary only: no runtime listener consumes these
+records in v3.65.0.
+
+### 6.5 State machine
 
 Legitimate transitions:
 
@@ -351,7 +465,7 @@ stateDiagram-v2
     DONE --> [*]
 ```
 
-### 6.3 Fleet durable store — `.m8shift/runtime/fleet/`
+### 6.6 Fleet durable store — `.m8shift/runtime/fleet/`
 
 The RFC 072/073 fleet control plane persists its evidence in a crash-consistent,
 git-ignored store under `.m8shift/runtime/fleet/` (fsync + atomic replace,
@@ -447,6 +561,12 @@ the core:
 `fleet jobs assign --spec FILE --by HOLDER [--json]` ·
 `fleet jobs attempt --id ID --by PRODUCER --provider-exit N [--json]` ·
 `fleet jobs integrate --id ID --by INTEGRATOR --to AGENT [--json]`
+
+Other runtime-companion verbs added to the normative surface are:
+`gateway-event --actor ACTOR --action ACTION --outcome OUTCOME [evidence flags] [--json]` ·
+`usage watch --agent AGENT [--replace] [--tick-timeout N]` ·
+`usage watch stop --agent AGENT [--json]` ·
+`usage watch reconcile [--agent AGENT] [--json]`.
 
 > The single shipped file is **English-only**; `--lang` selects among languages bundled into
 > a localized variant built with `m8shift-i18n.py` (see the i18n note).

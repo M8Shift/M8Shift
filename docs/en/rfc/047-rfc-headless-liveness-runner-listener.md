@@ -41,7 +41,7 @@ larger than 4096 bytes, with this additive schema:
 ```json
 {
   "schema": "m8shift.runner.handshake.v1",
-  "version": "3.64.0",
+  "version": "3.65.0",
   "capabilities": [
     "bounded-tty-tee-v1",
     "environment-write-probe-v1",
