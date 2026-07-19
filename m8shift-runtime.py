@@ -101,6 +101,9 @@ GATEWAY_KEY_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 GATEWAY_CAUSE_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 GATEWAY_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 GATEWAY_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/#:@+-]{0,255}\Z")
+GATEWAY_USERINFO_RE = re.compile(r"[^/@\s]+:[^/@\s]*@")
+GATEWAY_MAX_PAIRS_PER_OPTION = 16
+GATEWAY_MAX_RECORD_BYTES = 8 * 1024
 CONSULT_CLASSIFICATIONS = frozenset((
     "completed", "timed_out", "launch_refused", "provider_failed",
     "invalid_output",
@@ -2200,8 +2203,12 @@ def cmd_notify_event(args):
 
 def _gateway_pairs(values, option, *, digests=False):
     """Parse repeated key=value arguments without retaining unsafe free text."""
+    values = values or []
+    if len(values) > GATEWAY_MAX_PAIRS_PER_OPTION:
+        sys.exit("m8shift-runtime: %s accepts at most %d entries" % (
+            option, GATEWAY_MAX_PAIRS_PER_OPTION))
     out = {}
-    for item in values or []:
+    for item in values:
         if not isinstance(item, str) or "=" not in item:
             sys.exit(f"m8shift-runtime: {option} requires key=value")
         key, value = item.split("=", 1)
@@ -2216,6 +2223,9 @@ def _gateway_pairs(values, option, *, digests=False):
         else:
             # Refs and forge-local ids are intentionally not URLs, filesystem
             # absolutes, parent traversals, multiline output, or unbounded logs.
+            if GATEWAY_USERINFO_RE.search(value):
+                sys.exit("m8shift-runtime: %s value must not contain credential "
+                         "userinfo" % option)
             value = redact_consult_brief(value)
             if (value != "[REDACTED]" and not GATEWAY_VALUE_RE.fullmatch(value)):
                 sys.exit(f"m8shift-runtime: {option} value must be a repo-relative ref or id")
@@ -2250,6 +2260,10 @@ def cmd_gateway_event(args):
         "digests": _gateway_pairs(args.digest, "--digest", digests=True),
         "source": {"tool": "m8shift-runtime.py", "version": VERSION},
     }
+    encoded = (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    if len(encoded) > GATEWAY_MAX_RECORD_BYTES:
+        sys.exit("m8shift-runtime: gateway event exceeds the %d-byte record cap" %
+                 GATEWAY_MAX_RECORD_BYTES)
     append_jsonl(GATEWAY, row)
     ensure_runtime_gitignore()
     if args.json:

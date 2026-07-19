@@ -153,6 +153,9 @@ does not perform a forge action itself. Each record has UTC time, actor, one act
 requires a stable machine-readable cause. URLs, absolute paths, parent traversal,
 multiline/raw command output, credentials, and non-digest content evidence are
 refused; bounded free identifiers pass through the project denylist redactor.
+Ledger ref fields carry short SHAs only; full 40-hex SHAs match the intentional
+secret-shaped blob redactor, while immutable full-SHA evidence remains in Git and the
+ticketed handoff.
 
 The ledger is advisory delivery evidence, never forge authority. Recent events appear
 as a compact `GATEWAY` line in TOP even while the relay is `PAUSED`, so the operational

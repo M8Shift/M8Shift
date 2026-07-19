@@ -403,6 +403,17 @@ def _gateway_display(gateway):
     return "%s %s · %s · %s" % (action, outcome, actor, age)
 
 
+def _paint_exact_token(plain, token, style, enabled):
+    """Colour one complete status token without matching it inside another word."""
+    if not enabled or not token:
+        return plain
+    match = re.search(r"(?<![A-Za-z0-9_.-])%s(?![A-Za-z0-9_.-])" %
+                      re.escape(token), plain)
+    if match is None:
+        return plain
+    return plain[:match.start()] + style(token) + plain[match.end():]
+
+
 def _time_duration(seconds):
     """Compact cumulative duration used by the permanent RFC-064 strip."""
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
@@ -822,10 +833,12 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     gateway_payload = _gateway_display(snapshot.get("gateway"))
     if gateway_payload:
         gateway_row = row("GATEWAY  " + gateway_payload)
-        gateway_row = paint(gateway_row, "ok", green)
-        gateway_row = paint(gateway_row, "retrying", amber)
-        gateway_row = paint(gateway_row, "refused", red)
-        gateway_row = paint(gateway_row, "failed", red)
+        outcome = (snapshot.get("gateway") or {}).get("outcome")
+        outcome_style = {"ok": green, "retrying": amber,
+                         "refused": red, "failed": red}.get(outcome)
+        if outcome_style:
+            gateway_row = _paint_exact_token(
+                gateway_row, outcome, outcome_style, colored)
         lines.append(gateway_row)
     last = snapshot.get("last_turn") or {}
     last_model = _model_effort(last)
@@ -1037,10 +1050,12 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     if gateway_payload:
         gateway_line = "│" + adaptive_cells(
             ("  GATEWAY", gateway_payload), (0, 10), (10, 108), (0, 1)) + "│"
-        gateway_line = paint(gateway_line, "ok", green)
-        gateway_line = paint(gateway_line, "retrying", amber)
-        gateway_line = paint(gateway_line, "refused", red)
-        gateway_line = paint(gateway_line, "failed", red)
+        outcome = (snapshot.get("gateway") or {}).get("outcome")
+        outcome_style = {"ok": green, "retrying": amber,
+                         "refused": red, "failed": red}.get(outcome)
+        if outcome_style:
+            gateway_line = _paint_exact_token(
+                gateway_line, outcome, outcome_style, colored)
     last_model = _model_effort(last)
     turn_payload = "#%s %s/%s → %s  %s" % (
         _value(last.get("n")), _value(last.get("agent")), last_model,

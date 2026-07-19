@@ -104,6 +104,28 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertIn("02:05 ago", output)
             self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
+    def test_gateway_outcome_colours_are_exact_tokens(self):
+        top = load_top()
+        colours = {
+            "ok": "\x1b[38;2;87;171;90m",
+            "retrying": "\x1b[38;2;198;144;38m",
+            "refused": "\x1b[38;2;244;112;103m",
+            "failed": "\x1b[38;2;244;112;103m",
+        }
+        for width in (80, 120):
+            for outcome, prefix in colours.items():
+                snap = fixture()
+                snap["gateway"] = {
+                    "action": "push", "outcome": outcome,
+                    "actor": "okay-gateway", "age_seconds": 1,
+                }
+                with self.subTest(width=width, outcome=outcome), \
+                        mock.patch.dict(os.environ, {"COLORTERM": "truecolor"},
+                                        clear=True):
+                    output = top.render(snap, width, self.NOW)
+                self.assertIn(prefix + outcome + "\x1b[0m", output)
+                self.assertNotIn(colours["ok"] + "ok\x1b[0may-gateway", output)
+
     def test_wide_layout_tabulates_and_pins_right_edge(self):
         top = load_top()
         with mock.patch.dict(os.environ, {"TERM": "xterm-color"}, clear=True):
@@ -821,31 +843,40 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         template = fixture()["agents"][0]
         for width in widths:
             for agent_count, activity_count in count_pairs:
-                snap = fixture()
-                snap["agents"] = []
-                for index in range(agent_count):
-                    agent = copy.deepcopy(template)
-                    agent["id"] = "agent-%d" % index
-                    snap["agents"].append(agent)
-                snap["activity"] = [
-                    {"turn": index + 1, "agent": "agent-0", "model": "model",
-                     "summary": "event %d" % (index + 1)}
-                    for index in range(activity_count)
-                ]
-                chrome = (14 if width >= 100 else 17) + agent_count
-                heights = sorted(set((max(1, chrome - 1), chrome, chrome + 1,
-                                      24, 40, 60)))
-                for env in tiers:
-                    with mock.patch.dict(os.environ, env, clear=True):
-                        for height in heights:
-                            output = top.render(snap, width, self.NOW, height=height)
-                            plain = self._plain(output)
-                            lines = plain.splitlines()
-                            self.assertTrue(all(len(line) == max(24, width)
-                                                for line in lines))
-                            expected_height = height if height >= chrome else chrome
-                            self.assertEqual(len(lines), expected_height)
-                            self.assertTrue(lines[-1].startswith("└"))
+                for with_gateway in (False, True):
+                    snap = fixture()
+                    snap["agents"] = []
+                    for index in range(agent_count):
+                        agent = copy.deepcopy(template)
+                        agent["id"] = "agent-%d" % index
+                        snap["agents"].append(agent)
+                    snap["activity"] = [
+                        {"turn": index + 1, "agent": "agent-0", "model": "model",
+                         "summary": "event %d" % (index + 1)}
+                        for index in range(activity_count)
+                    ]
+                    if with_gateway:
+                        snap["gateway"] = {
+                            "action": "push", "outcome": "ok",
+                            "actor": "forge-gateway", "age_seconds": 1,
+                        }
+                    chrome = ((14 if width >= 100 else 17) + agent_count
+                              + (1 if with_gateway else 0))
+                    heights = sorted(set((max(1, chrome - 1), chrome, chrome + 1,
+                                          24, 40, 60)))
+                    for env in tiers:
+                        with mock.patch.dict(os.environ, env, clear=True):
+                            for height in heights:
+                                output = top.render(
+                                    snap, width, self.NOW, height=height)
+                                plain = self._plain(output)
+                                lines = plain.splitlines()
+                                self.assertTrue(all(
+                                    len(line) == max(24, width) for line in lines))
+                                expected_height = (
+                                    height if height >= chrome else chrome)
+                                self.assertEqual(len(lines), expected_height)
+                                self.assertTrue(lines[-1].startswith("└"))
 
     def test_self_pipe_coalesces_resize_bursts(self):
         top = load_top()

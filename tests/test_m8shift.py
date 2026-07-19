@@ -8232,6 +8232,7 @@ class TestRuntimeCompanion(CLIBase):
             ("--outcome", "failed"),
             ("--outcome", "ok", "--cause", "network.timeout"),
             ("--outcome", "ok", "--ref", "pr=https://forge.invalid/pr/1"),
+            ("--outcome", "ok", "--ref", "remote=admin:hunter2@forge.example/owner/repo"),
             ("--outcome", "ok", "--ref", "branch=../foreign"),
             ("--outcome", "ok", "--id", "diagnostic=fatal: raw command output"),
             ("--outcome", "ok", "--digest", "review=not-a-digest"),
@@ -8243,6 +8244,49 @@ class TestRuntimeCompanion(CLIBase):
                 self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(os.path.exists(os.path.join(
             self.d, ".m8shift", "runtime", "gateway.jsonl")))
+
+    def test_gateway_event_bounds_records_and_concurrent_appends(self):
+        self.init()
+        refs = tuple(
+            part
+            for index in range(16)
+            for part in ("--ref", "ref%d=value%d" % (index, index))
+        )
+        procs = [subprocess.Popen(
+            [sys.executable, "m8shift-runtime.py", "gateway-event",
+             "--actor", "forge-gateway-%d" % index, "--action", "push",
+             "--outcome", "ok", *refs],
+            cwd=self.d, env=self.clean_env(), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        ) for index in range(2)]
+        outputs = [proc.communicate() for proc in procs]
+        for proc, (stdout, stderr) in zip(procs, outputs):
+            self.assertEqual(proc.returncode, 0, stdout + stderr)
+        rows = self.read_runtime_rows("gateway.jsonl")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["actor"] for row in rows},
+                         {"forge-gateway-0", "forge-gateway-1"})
+        self.assertTrue(all(len(row["refs"]) == 16 for row in rows))
+
+        too_many = refs + ("--ref", "overflow=value")
+        refused = self.rt(
+            "gateway-event", "--actor", "forge-gateway", "--action", "push",
+            "--outcome", "ok", *too_many)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--ref accepts at most 16 entries", refused.stderr)
+
+        huge = tuple(
+            part
+            for option in ("--ref", "--id")
+            for index in range(16)
+            for part in (option, "%s%d=%s" % (option[2:], index, "x." * 125))
+        )
+        refused = self.rt(
+            "gateway-event", "--actor", "forge-gateway", "--action", "push",
+            "--outcome", "ok", *huge)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("8192-byte record cap", refused.stderr)
+        self.assertEqual(len(self.read_runtime_rows("gateway.jsonl")), 2)
 
     def test_gateway_event_redacts_secret_shapes_in_free_identifiers(self):
         self.init()
