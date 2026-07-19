@@ -4,7 +4,7 @@ See the [module index](./README.md).
 
 ## Purpose
 
-`m8shift-runtime.py` is the optional, host-side runtime companion for the core relay. It **owns** the local, advisory sidecar surface under `.m8shift/`: per-agent **presence** lanes (`watch`), the **operator inbox** (`operator`), **long-turn progress** notes (`progress`), **turn-ready/stale/blocked/done notifications** (`notify`, with `stdout`/`file`/`bell`/`os`/`hook` tiers), the **provider/agent registry** (`providers`) with the RFC 073 vendor-neutral **agent-CLI adapter registry** behind every managed launch (`m8shift.agent-cli-adapter.v1` — provider-keyed `launch_argv`/`stop`/`resume`/`health` dispatch), RFC 072 exact-identity **fleet bootstrap and reconciliation** (`fleet`) extended by the RFC 073 slice-2 **detached durable control plane** (`fleet supervise --detach`, persisting crash-consistent records under `.m8shift/runtime/fleet/`), **advisory model/task routing** (`route recommend`), **local approval** records (`approve`), **run reports** (`report`), **bounded JSONL retention** (`retention`), **role/workflow contracts** (`roles`/`workflows`), the RFC 047 **headless listener lifecycle** (`listener start/stop/status/logs` — supervising `examples/headless_runner.py` lanes), and read-only **headroom** estimation and **doctor** diagnostics. It does **not** own the pen: it never edits `M8SHIFT.md` or the LOCK directly; fleet enrollment is explicitly holder-attributed and delegates each mutation to core `roster add`. The listener is a **supervisor, not a routing authority**: it polls the LOCK read-only, launches at most one bounded runner turn per wake, and the runner *child* performs the normal relay workflow (`claim --refresh` TTL extension, `append`) through the core. Since RFC 049 PR B, an EXPLICITLY LAUNCHED listener additionally makes two bounded core argv calls while its child turn is alive — `claim <agent> --refresh` near TTL/2 (TTL extension + audit-only beat) and `heartbeat <agent> --source runtime-listener --cadence-seconds N` (the PROTECTIVE beat) — and still never plain-claims, force-claims, appends, releases or completes; all pen authority and binding checks stay in `m8shift.py`. It reads the relay state through `m8shift.py` (subprocess `status --json` / imported helpers) and delegates any pen action — roster enrollment, a `headroom --checkpoint` session report, or a `headroom --pause-on` pause — back to the core so the LOCK stays single-owner. It performs no network mutation; the only external calls are best-effort OS-notifier/hook subprocesses under the `os`/`hook` notify tiers, the runner/provider child a listener wake launches, and — for the `launchd`/`systemd`/`windows` listener and detached fleet-supervisor backends — explicit bounded argv calls to the local service manager (`launchctl`/`systemctl`/`schtasks`/`taskkill`); all of these are host-local processes, never a network service.
+`m8shift-runtime.py` is the optional, host-side runtime companion for the core relay. It **owns** the local, advisory sidecar surface under `.m8shift/`: per-agent **presence** lanes (`watch`), the **operator inbox** (`operator`), **long-turn progress** notes (`progress`), **turn-ready/stale/blocked/done notifications** (`notify`, with `stdout`/`file`/`bell`/`os`/`hook` tiers), bounded read-only peer **consultations** (`consult`), the **provider/agent registry** (`providers`) with the RFC 073 vendor-neutral **agent-CLI adapter registry** behind every managed launch (`m8shift.agent-cli-adapter.v1` — provider-keyed `launch_argv`/`stop`/`resume`/`health` dispatch), RFC 072 exact-identity **fleet bootstrap and reconciliation** (`fleet`) extended by the RFC 073 slice-2 **detached durable control plane** (`fleet supervise --detach`, persisting crash-consistent records under `.m8shift/runtime/fleet/`), **advisory model/task routing** (`route recommend`), **local approval** records (`approve`), **run reports** (`report`), **bounded JSONL retention** (`retention`), **role/workflow contracts** (`roles`/`workflows`), the RFC 047 **headless listener lifecycle** (`listener start/stop/status/logs` — supervising `examples/headless_runner.py` lanes), and read-only **headroom** estimation and **doctor** diagnostics. It does **not** own the pen: it never edits `M8SHIFT.md` or the LOCK directly; fleet enrollment is explicitly holder-attributed and delegates each mutation to core `roster add`. A consultation is a one-shot provider subprocess at the pinned physical project root, never a relay turn: it cannot claim, append, release, complete, or derive authority from `WORKING_*`. The listener is a **supervisor, not a routing authority**: it polls the LOCK read-only, launches at most one bounded runner turn per wake, and the runner *child* performs the normal relay workflow (`claim --refresh` TTL extension, `append`) through the core. Since RFC 049 PR B, an EXPLICITLY LAUNCHED listener additionally makes two bounded core argv calls while its child turn is alive — `claim <agent> --refresh` near TTL/2 (TTL extension + audit-only beat) and `heartbeat <agent> --source runtime-listener --cadence-seconds N` (the PROTECTIVE beat) — and still never plain-claims, force-claims, appends, releases or completes; all pen authority and binding checks stay in `m8shift.py`. It reads the relay state through `m8shift.py` (subprocess `status --json` / imported helpers) and delegates any pen action — roster enrollment, a `headroom --checkpoint` session report, or a `headroom --pause-on` pause — back to the core so the LOCK stays single-owner. It performs no network mutation; the only external calls are best-effort OS-notifier/hook subprocesses under the `os`/`hook` notify tiers, an explicitly invoked consult child, the runner/provider child a listener wake launches, and — for the `launchd`/`systemd`/`windows` listener and detached fleet-supervisor backends — explicit bounded argv calls to the local service manager (`launchctl`/`systemctl`/`schtasks`/`taskkill`); all of these are host-local processes, never a network service.
 
 ## Ownership diagram
 
@@ -15,6 +15,7 @@ flowchart LR
     core["m8shift.py (core relay)"]:::script
     presence[".m8shift/runtime/presence.json"]:::state
     ledgers[".m8shift/runtime/*.jsonl&#8203;<br/>inbox · progress · runs · approvals"]:::state
+    consults[".m8shift/runtime/consults.jsonl&#8203;<br/>digest-only advisory exchanges"]:::state
     notify[".m8shift/runtime/notify/*"]:::state
     registry[".m8shift/providers.json + routing/*.json"]:::state
     adapters["agent-CLI adapter registry&#8203;<br/>m8shift.agent-cli-adapter.v1&#8203;<br/>launch_argv · stop · resume · health"]:::script
@@ -27,6 +28,7 @@ flowchart LR
     user --> script
     script -- "watch" --> presence
     script -- "operator / progress / approve" --> ledgers
+    script -- "consult terminal record" --> consults
     script -- "notify" --> notify
     script -- "providers / route (read)" --> registry
     script -- "managed launch compile (provider-keyed)" --> adapters
@@ -73,6 +75,7 @@ The dashed edges are the boundary: the companion never directly **writes** the L
 | `status-runtime [<agent>] [--brief] [--json]` | read-only | core `status --json`, `presence.json`, `inbox/*`, `runs.jsonl`, `progress.jsonl`, headroom inputs, context RTK adapter status | none | Aggregate human/JSON view of relay + runtime sidecars + headroom + surfaced context-pack status. |
 | `headroom [<agent>] [--json] [--checkpoint] [--pause-on warning\|high] [--reason R] [--window-status ...] [--window-reason ...] [threshold flags]` | read-only (default); local-state + delegated session-report write with `--checkpoint`/`--pause-on` | `M8SHIFT.md` turns (via core), `runs.jsonl` checkpoints | `runs.jsonl` (checkpoint record) and, via core subprocess, a session report + `pause` | Local proxy estimate of context-window pressure. `--pause-on` requires `<agent>` + `--reason` and delegates the actual pause to `m8shift.py`. |
 | `doctor [--json] [--stale-after 300]` | read-only | core status, runtime ledgers/config, providers/routing, fleet-job records, listener state, gitignore | none | Exits `1` on error findings. Includes RFC 047 `listener.*`, RFC 072 `fleet.job_*`, `runtime.stale_state`, and `runtime.rtk_adoption`; never queries a service manager. |
+| `consult --from A --to B --brief-file FILE [--timeout 120] [--max-output-bytes 65536] [--save-response PATH]` | local-state | bounded UTF-8 brief, responder provider row, operator denylist | `runtime/consults.jsonl`; optional private response artifact under `runtime/` | One shell-free, process-group-bounded advisory invocation. The provider row must carry an explicit `consult` argv plus structured `sandbox=read_only`, physical-root cwd, literal-prompt, and `sandbox_argv` evidence. Default response sink is stdout; `--save-response` accepts only a non-existing kit-relative path under `.m8shift/runtime/`. |
 | `providers init [--agents CSV] [--force]` | local-state | roster via core | `.m8shift/providers.json` | Writes the host-side registry (with opt-in `examples`). Managed Codex/Claude rows expose `model: UNSET`; Gemini rows pin the probed CLI default `gemini-2.5-pro` and require API-key env before launch. |
 | `providers list [--json]` / `providers show <agent>` | read-only | `providers.json` | none | Inspect registry entries, including the visible model pin. |
 | `providers check [<agent>] [--json]` | read-only | `providers.json`, `os.environ` for `requires_env` | none | Validates argv arrays, modes, env allowlists, model/profile/effort safe tokens, one literal prompt marker, and absence of competing managed flags; exits `1` on any `error`. |
@@ -101,7 +104,7 @@ The dashed edges are the boundary: the companion never directly **writes** the L
 
 ## Adapter registry (`m8shift.agent-cli-adapter.v1`)
 
-Since RFC 073 slice 1, every managed provider launch dispatches through a formal, provider-keyed **agent-CLI adapter registry** inside this companion. An adapter implements exactly four lifecycle methods and returns **normalized intent/observation data only** — process creation, signalling, retry, persistence, and relay verification stay in the generic runner/supervisor, and an adapter never gains relay authority:
+Since RFC 073 slice 1, every managed provider launch dispatches through a formal, provider-keyed **agent-CLI adapter registry** inside this companion. An adapter implements four lifecycle methods plus the separately gated consult compiler and returns **normalized intent/observation data only** — process creation, signalling, retry, persistence, and relay verification stay in the generic runner/supervisor, and an adapter never gains relay authority:
 
 | Method | Contract |
 |--------|----------|
@@ -109,6 +112,7 @@ Since RFC 073 slice 1, every managed provider launch dispatches through a formal
 | `stop(process_ref, mode)` | returns a normalized `graceful`/`force` **intent** with the process-group strategy; the generic supervisor performs the actual termination |
 | `resume(row, prompt, session_ref, ...)` | renders a resume attempt only when the adapter declares probed resume support; the baseline **fails closed** (`<provider> adapter does not declare resume support`) |
 | `health(process_ref, session_ref)` | returns a normalized lifecycle observation with `relay_completion` always `false` — an adapter can never imply an authored relay transition |
+| `compile_consult(row, prompt, root, ...)` | fails closed unless the row provides a separate consult argv and structured `sandbox=read_only` attestation whose exact evidence occurs in the compiled argv; a closed denylist rejects competing write-capable selectors and the generic layer invents no vendor flag |
 
 Registered adapters in this release:
 
@@ -129,6 +133,12 @@ Registered adapters in this release:
   promotion.
 
 Dispatch is keyed solely by the row's `provider`; an **unknown provider retains the existing explicit declarative-argv behavior** (the safe baseline adapter). Registering a new provider requires no generic call-site or core change — `register_adapter` validates the provider key and refuses duplicates. The interface never executes a shell string, never persists or prints a raw session reference, never signals a process itself, and never infers relay completion.
+
+Consult argv and its read-only attestation are operator-owned configuration and
+therefore part of the operator trust boundary, not cryptographic proof about a
+provider. The compiler verifies exact evidence and rejects a closed set of known
+competing write selectors, but operators must still audit provider-specific argv
+when provisioning or changing a consult policy.
 
 ## Detached durable fleet control plane (RFC 073 slice 2)
 
@@ -172,7 +182,7 @@ the prior process is gone.
 **Files read**
 
 - `M8SHIFT.md` — the LOCK/roster: most companion reads go through `m8shift.py` (`status --json` subprocess or imported `load_or_die`/`get_lock`/`active_agents`); the listener's wake/liveness decisions use its own bounded direct read-only parser. Neither path grants authority.
-- `.m8shift/runtime/*` — `presence.json`, `runs.jsonl`, `progress.jsonl`, `approvals.jsonl`, `idempotency.jsonl`, `inbox/<agent>.jsonl`, `notify.config.json`, `notify/log.jsonl`, `usage-watchers/<agent>.json`, `retention.json`.
+- `.m8shift/runtime/*` — `presence.json`, `runs.jsonl`, `consults.jsonl`, `progress.jsonl`, `approvals.jsonl`, `idempotency.jsonl`, `inbox/<agent>.jsonl`, `notify.config.json`, `notify/log.jsonl`, `usage-watchers/<agent>.json`, `retention.json`.
 - `.m8shift/providers.json` and `.m8shift/routing/{models,skills}.json` — registry and advisory routing manifests. The generated skills manifest carries a five-class provider-neutral table: `mechanical-edit` (economy→balanced, low), `documentation-edit` (balanced, medium), `implementation` (balanced→flagship, high), `review-critique` (balanced→flagship, high), and pinned `adversarial-verify` (flagship, xhigh). It is price-free and advisory only (`launch=false`); RFC 066 remains separate.
 - `.m8shift/providers/*.json` — operator-owned `m8shift.listener.profile.v1` listener profiles (argv array, `cwd`, `env_allowlist`, `start_on_idle`); scanned for the at-most-one-starter guard and `doctor`.
 - `.m8shift/runtime/listeners/<agent>.pid` / `<agent>.json` / `<agent>.backend.json` and `.m8shift/runtime/logs/<agent>-listener.log` — listener process, state, backend-record, and log sidecars (`listener status/logs`, `doctor`).
@@ -185,6 +195,7 @@ the prior process is gone.
 **Files written** (all under `M8SHIFT.*` / `.m8shift/`, atomically via `os.replace`; JSONL appends use `O_APPEND|O_NOFOLLOW` with symlink rejection and mode `0600`)
 
 - `runtime/presence.json` (`watch`), `runtime/inbox/<agent>.jsonl` (`operator`), `runtime/progress.jsonl` (`progress`), `runtime/approvals.jsonl` (`approve`), `runtime/idempotency.jsonl`, `runtime/runs.jsonl` (`headroom --checkpoint`).
+- `runtime/consults.jsonl` (`m8shift.consult.exchange.v1`) contains exactly one terminal advisory record per accepted consult: redacted brief plus digest/bytes, compiled-argv digest (never argv), opaque root fingerprint, sandbox/cwd/prompt attestations, bounds, closed classification, response digest/bytes/truncation, and sink reference. Provider response bodies never enter the ledger. `--save-response` writes the bounded body privately (`0600`) under `runtime/`; stdout remains the default sink.
 - `runtime/notify.config.json`, `runtime/notify/<agent>.prompt`, `runtime/notify/<agent>.event.json`, `runtime/notify/log.jsonl` (`notify`).
 - `runtime/archive/*` (retention archival), `.m8shift/runs/<run>/report.md` (`report --write`).
 - `runtime/fleet/jobs/*` and `runtime/fleet/events.jsonl` — immutable RFC 072 job evidence. Worktree creation/merge/removal is delegated to `m8shift-worktree.py`; relay handoff remains core-mediated.
@@ -199,6 +210,7 @@ the prior process is gone.
 - `M8SHIFT_RTK` — self-declared `on`/`off` (accepts `1/true/yes/on/enabled/rtk` and `0/false/no/off/disabled/native`), recorded into the presence row's `rtk` field. Any other value warns and is treated as `off`.
 - `CI` — forces headless behavior: the `bell`, `os`, and `hook` notification tiers are skipped (also skipped when stdout is not a TTY).
 - Provider entries may declare `requires_env`; `providers check` verifies those names exist in `os.environ`.
+- `M8SHIFT_DENYLIST` (or the RFC 052 default config path) redacts protected terms from the durable consult brief; credential-shaped values are also redacted. The original brief is sent only to the explicitly selected local provider subprocess.
 - Provider-backed managed launches pass the validated row model to the runner as
   `--agent-model`; the runner records it in the immutable plan and injects
   `M8SHIFT_AGENT_MODEL` directly into the child environment, overriding a
@@ -308,6 +320,20 @@ python3 m8shift-runtime.py fleet supervise --spec fleet.json --detach --dry-run 
 | `listener.halted` | warning | a persisted halted phase awaits an explicit `listener start --restart` |
 | `listener.multiple_starters` | warning | more than one agent has `start_on_idle=true` |
 | `listener.log_too_large` | info | a listener log reached the rotation threshold; the owning listener rotates it at its next write |
+
+Consult provisioning adds two graduated, advisory-only doctor findings. An exact,
+byte-identical `providers init` scaffold is an expected fresh-kit state and emits
+neither warning. Once the registry differs from that scaffold,
+`providers.registry_empty` warns when it has no structurally launchable active row
+and names `providers init` plus explicit row configuration as the remedy.
+`consult.kit_incomplete` is emitted only for the observed compound condition: that
+edited registry has no launchable row **and** the kit has no handshake-compatible
+reference runner; its remedy is the canonical `m8shift.py init --profile headless`.
+A missing runner alone remains owned by the existing listener preflight and is not
+duplicated here. Doctor also validates every `consults.jsonl` row against
+`m8shift.consult.exchange.v1` and the closed
+`completed|timed_out|launch_refused|provider_failed|invalid_output` classification
+enum.
 
 **Honesty note on the surfaced RTK / compression line.** `status-runtime` and `doctor` display a context-adapter status such as `RTK: ON (pinned, compressing packs)` plus a `last pack` `compression_ratio`. These are **read-only surfaces of the context companion's state**, not runtime work: RTK here is the identity-pinned (`sha256`) `rtk-shell-output` adapter, a **mode-specific lossy semantic filter** for shell output (e.g. `rtk err`/`test`/`git-log`) — it is **not** a compressor and has no standalone compression percentage. The `compression_ratio` shown comes from `.m8shift/context/metrics.jsonl`, which the context companion writes for its own prose-compression backend (Kompress/Headroom), and is unrelated to RTK. This module neither compresses nor filters; it only reports what the context companion recorded.
 

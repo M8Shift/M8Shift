@@ -47,7 +47,7 @@ python3 m8shift-top.py --plain --for agent-a
 ### `m8shift-runtime.py`
 
 The optional runtime companion manages local presence, notifications, operator
-messages, progress, providers, routing, roles, workflows, approvals, reports,
+messages, progress, bounded advisory consultations, providers, routing, roles, workflows, approvals, reports,
 retention, listeners, and usage snapshots. Invoke it as
 `m8shift-runtime.py <command> [args]`; use `<command> -h` for that command's
 parameters.
@@ -55,6 +55,8 @@ parameters.
 ```bash
 python3 m8shift-runtime.py status-runtime --json
 python3 m8shift-runtime.py listener status --agent agent-a
+python3 m8shift-runtime.py consult --from agent-a --to agent-b \
+  --brief-file .m8shift/runtime/brief.txt --timeout 120
 ```
 
 Required option values use descriptive metavars. Missing required values print the

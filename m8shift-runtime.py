@@ -85,9 +85,35 @@ POLICIES_DIR = os.path.join(PROJECT_DIR, "policies")
 RUN_REPORTS_DIR = os.path.join(PROJECT_DIR, "runs")
 PRESENCE = os.path.join(RUNTIME_DIR, "presence.json")
 RUNS = os.path.join(RUNTIME_DIR, "runs.jsonl")
+CONSULTS = os.path.join(RUNTIME_DIR, "consults.jsonl")
 PROGRESS = os.path.join(RUNTIME_DIR, "progress.jsonl")
 IDEMPOTENCY = os.path.join(RUNTIME_DIR, "idempotency.jsonl")
 APPROVALS = os.path.join(RUNTIME_DIR, "approvals.jsonl")
+CONSULT_SCHEMA = "m8shift.consult.exchange.v1"
+CONSULT_CLASSIFICATIONS = frozenset((
+    "completed", "timed_out", "launch_refused", "provider_failed",
+    "invalid_output",
+))
+CONSULT_ROOT_MARKER = "$M8SHIFT_ROOT"
+CONSULT_DEFAULT_TIMEOUT_S = 120
+CONSULT_MAX_TIMEOUT_S = 900
+CONSULT_DEFAULT_OUTPUT_BYTES = 64 * 1024
+CONSULT_MAX_OUTPUT_BYTES = 1024 * 1024
+CONSULT_MAX_BRIEF_BYTES = 256 * 1024
+CONSULT_WRITE_SELECTORS = frozenset((
+    "--dangerously-write",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-skip-permissions",
+    "--full-auto",
+    "--yolo",
+))
+CONSULT_WRITE_SANDBOXES = frozenset(("workspace-write", "danger-full-access"))
+CONSULT_SECRET_PATTERNS = (
+    re.compile(r"(?i)\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?key|token|secret|password|authorization|credential)\b\s*[:=]\s*\S+"),
+    re.compile(r"\b[A-Za-z0-9+/_-]{32,}={0,2}\b"),
+)
 INBOX_DIR = os.path.join(RUNTIME_DIR, "inbox")
 RETENTION_POLICY = os.path.join(RUNTIME_DIR, "retention.json")
 RETENTION_ARCHIVE_INDEX = os.path.join(RUNTIME_DIR, "archive", "index.jsonl")
@@ -729,7 +755,8 @@ def append_jsonl_rows(path, rows):
             fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def reject_symlinked_runtime_path(path):
+def reject_symlinked_runtime_path(path, error_type=SystemExit):
+    """Reject runtime symlinks with a caller-selected failure type."""
     runtime_abs = os.path.abspath(RUNTIME_DIR)
     candidate = os.path.abspath(path)
     try:
@@ -739,7 +766,9 @@ def reject_symlinked_runtime_path(path):
         return
     current = runtime_abs
     if os.path.lexists(current) and os.path.islink(current):
-        sys.exit(f"m8shift-runtime: refusing to append through symlink {os.path.relpath(current, HERE)}")
+        raise error_type(
+            f"m8shift-runtime: refusing to append through symlink "
+            f"{os.path.relpath(current, HERE)}")
     relpath = os.path.relpath(candidate, runtime_abs)
     if relpath in ("", "."):
         return
@@ -748,7 +777,9 @@ def reject_symlinked_runtime_path(path):
             continue
         current = os.path.join(current, part)
         if os.path.lexists(current) and os.path.islink(current):
-            sys.exit(f"m8shift-runtime: refusing to append through symlink {os.path.relpath(current, HERE)}")
+            raise error_type(
+                f"m8shift-runtime: refusing to append through symlink "
+                f"{os.path.relpath(current, HERE)}")
         if not os.path.exists(current):
             break
 
@@ -2322,6 +2353,15 @@ class AdapterInterface(abc.ABC):
     def health(self, process_ref=None, session_ref=""):
         """Return a normalized lifecycle observation, never relay completion."""
 
+    def compile_consult(self, row, prompt, root, run_id="", platform=None):
+        """Compile an explicitly configured read-only one-shot consultation.
+
+        The adapter must return both argv and machine-checkable evidence.  The
+        generic runtime never invents a vendor sandbox flag.
+        """
+        raise ValueError(
+            f"{self.provider or 'provider'} adapter does not attest read-only consults")
+
 
 class DeclarativeAdapter(AdapterInterface):
     """Safe argv adapter and fail-closed lifecycle baseline for any provider."""
@@ -2383,6 +2423,49 @@ class DeclarativeAdapter(AdapterInterface):
             "process_ref": process_ref,
             "session_ref_present": bool(session_ref),
             "relay_completion": False,
+        }
+
+    def compile_consult(self, row, prompt, root, run_id="", platform=None):
+        policy = row.get("consult")
+        if not isinstance(policy, dict):
+            raise ValueError("provider row has no consult policy")
+        attestation = policy.get("attestation")
+        if not isinstance(attestation, dict):
+            raise ValueError("consult policy has no structured attestation")
+        if attestation.get("sandbox") != "read_only":
+            raise ValueError("consult sandbox attestation must be read_only")
+        if attestation.get("cwd") != CONSULT_ROOT_MARKER:
+            raise ValueError("consult cwd attestation must pin $M8SHIFT_ROOT")
+        if attestation.get("prompt") != "literal":
+            raise ValueError("consult prompt attestation must be literal")
+        evidence = attestation.get("sandbox_argv")
+        if (not isinstance(evidence, list) or not evidence
+                or not all(isinstance(arg, str) and arg for arg in evidence)):
+            raise ValueError("consult sandbox_argv evidence must be a non-empty argv array")
+
+        consult_row = dict(row)
+        consult_row["argv"] = policy.get("argv", [])
+        consult_row["argv_by_platform"] = policy.get("argv_by_platform", {})
+        template, _selected = select_provider_argv(consult_row, platform)
+        template = list(template or [])
+        if (sum(arg == PROMPT_MARKER for arg in template) != 1
+                or any(PROMPT_MARKER in arg and arg != PROMPT_MARKER
+                       for arg in template)):
+            raise ValueError(
+                "consult argv must contain exactly one literal $M8SHIFT_PROMPT item")
+        argv = self.launch_argv(consult_row, prompt, run_id, platform)
+        width = len(evidence)
+        if not any(argv[index:index + width] == evidence
+                   for index in range(len(argv) - width + 1)):
+            raise ValueError("compiled consult argv does not contain sandbox evidence")
+        return {
+            "argv": argv,
+            "attestation": {
+                "sandbox": "read_only",
+                "sandbox_argv": list(evidence),
+                "cwd": root,
+                "prompt": "literal",
+            },
         }
 
 
@@ -2568,6 +2651,25 @@ def managed_selector_in_argv(provider, argv):
     return provider_adapter(provider).managed_selector(argv)
 
 
+def consult_write_selector_in_argv(argv):
+    """Return one known write-capable selector from an attested consult argv."""
+    for index, arg in enumerate(argv):
+        if not isinstance(arg, str):
+            continue
+        normalized = arg.lower()
+        if normalized in CONSULT_WRITE_SELECTORS:
+            return arg
+        if normalized.startswith("--sandbox="):
+            if normalized.split("=", 1)[1] in CONSULT_WRITE_SANDBOXES:
+                return arg
+        if normalized == "--sandbox" and index + 1 < len(argv):
+            value = argv[index + 1]
+            if (isinstance(value, str)
+                    and value.lower() in CONSULT_WRITE_SANDBOXES):
+                return f"{arg} {argv[index + 1]}"
+    return ""
+
+
 def provider_managed_options(row):
     """Compatibility wrapper; managed option compilation lives on adapters."""
     return provider_adapter(row.get("provider", "")).managed_options(row)
@@ -2578,6 +2680,123 @@ def provider_launch_argv(row, prompt, run_id="", platform=None):
     return provider_adapter(row.get("provider", "")).launch_argv(
         row, prompt, run_id, platform,
     )
+
+
+def compile_consult_argv(row, brief, root, run_id="", platform=None):
+    """Pure, shell-free consult compiler with fail-closed adapter attestation."""
+    if not isinstance(row, dict):
+        raise ValueError("provider row must be an object")
+    if not isinstance(brief, str) or not brief.strip():
+        raise ValueError("consult brief must contain text")
+    physical_root = os.path.realpath(root)
+    if os.path.abspath(root) != physical_root:
+        raise ValueError("consult root must be the pinned physical project root")
+    result = provider_adapter(row.get("provider", "")).compile_consult(
+        row, brief, physical_root, run_id, platform,
+    )
+    argv = result.get("argv") if isinstance(result, dict) else None
+    attestation = result.get("attestation") if isinstance(result, dict) else None
+    if (not isinstance(argv, list) or not argv
+            or not all(isinstance(arg, str) and arg and "\x00" not in arg
+                       for arg in argv)):
+        raise ValueError("compiled consult argv must be a non-empty string array")
+    competing = consult_write_selector_in_argv(argv)
+    if competing:
+        raise ValueError(
+            f"compiled consult argv embeds write-capable selector {competing!r}")
+    if not isinstance(attestation, dict):
+        raise ValueError("consult adapter returned no structured attestation")
+    if attestation.get("sandbox") != "read_only":
+        raise ValueError("consult adapter did not attest sandbox=read_only")
+    if attestation.get("cwd") != physical_root:
+        raise ValueError("consult adapter did not attest the pinned physical cwd")
+    if attestation.get("prompt") != "literal" or argv.count(brief) != 1:
+        raise ValueError("consult adapter did not preserve one literal prompt item")
+    evidence = attestation.get("sandbox_argv")
+    width = len(evidence) if isinstance(evidence, list) else 0
+    if not width or not any(argv[index:index + width] == evidence
+                            for index in range(len(argv) - width + 1)):
+        raise ValueError("consult adapter sandbox evidence is absent from compiled argv")
+    return {"argv": list(argv), "attestation": dict(attestation)}
+
+
+def consult_policy_findings(agent, label):
+    policy = agent.get("consult")
+    if policy in (None, ""):
+        return []
+    if not isinstance(policy, dict):
+        return [{"severity": "error", "check": "providers.consult",
+                 "message": f"{label} consult policy must be an object"}]
+    findings = []
+    templates = []
+    argv = policy.get("argv", [])
+    if isinstance(argv, list) and argv:
+        templates.append(("argv", argv))
+    elif argv not in (None, []):
+        findings.append({"severity": "error", "check": "providers.consult_argv",
+                         "message": f"{label} consult argv must be a string array"})
+    by_platform = policy.get("argv_by_platform", {})
+    if by_platform not in (None, "", {}) and not isinstance(by_platform, dict):
+        findings.append({"severity": "error", "check": "providers.consult_argv",
+                         "message": f"{label} consult argv_by_platform must be an object"})
+    elif isinstance(by_platform, dict):
+        for platform, platform_argv in by_platform.items():
+            if (not isinstance(platform, str) or not PLATFORM_RE.fullmatch(platform)
+                    or not isinstance(platform_argv, list) or not platform_argv
+                    or not all(isinstance(arg, str) and arg for arg in platform_argv)):
+                findings.append({
+                    "severity": "error", "check": "providers.consult_argv",
+                    "message": f"{label} consult argv_by_platform[{platform!r}] is invalid",
+                })
+            else:
+                templates.append((f"argv_by_platform[{platform!r}]", platform_argv))
+    if not templates:
+        findings.append({"severity": "error", "check": "providers.consult_argv",
+                         "message": f"{label} consult policy has no argv template"})
+    for template_label, template in templates:
+        if (not all(isinstance(arg, str) and arg for arg in template)
+                or sum(arg == PROMPT_MARKER for arg in template) != 1
+                or any(PROMPT_MARKER in arg and arg != PROMPT_MARKER
+                       for arg in template if isinstance(arg, str))):
+            findings.append({
+                "severity": "error", "check": "providers.consult_prompt",
+                "message": (f"{label} consult {template_label} must contain exactly "
+                            "one literal $M8SHIFT_PROMPT item"),
+            })
+        competing = consult_write_selector_in_argv(template)
+        if competing:
+            findings.append({
+                "severity": "error", "check": "providers.consult_write_selector",
+                "message": (f"{label} consult {template_label} embeds write-capable "
+                            f"selector {competing!r}"),
+            })
+    attestation = policy.get("attestation")
+    if not isinstance(attestation, dict):
+        findings.append({"severity": "error", "check": "providers.consult_attestation",
+                         "message": f"{label} consult attestation must be an object"})
+        return findings
+    evidence = attestation.get("sandbox_argv")
+    if (attestation.get("sandbox") != "read_only"
+            or attestation.get("cwd") != CONSULT_ROOT_MARKER
+            or attestation.get("prompt") != "literal"
+            or not isinstance(evidence, list) or not evidence
+            or not all(isinstance(arg, str) and arg for arg in evidence)):
+        findings.append({
+            "severity": "error", "check": "providers.consult_attestation",
+            "message": (f"{label} consult attestation must declare sandbox=read_only, "
+                        "cwd=$M8SHIFT_ROOT, prompt=literal, and non-empty sandbox_argv"),
+        })
+    elif templates:
+        width = len(evidence)
+        for template_label, template in templates:
+            if not any(template[index:index + width] == evidence
+                       for index in range(len(template) - width + 1)):
+                findings.append({
+                    "severity": "error", "check": "providers.consult_attestation",
+                    "message": (f"{label} consult {template_label} does not contain "
+                                "the attested sandbox_argv evidence"),
+                })
+    return findings
 
 
 def provider_entry_findings(agent, prefix, seen=None, active=True):
@@ -2592,6 +2811,7 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
     if seen is not None and isinstance(name, str):
         seen.add(name)
     label = name or prefix
+    findings.extend(consult_policy_findings(agent, label))
     if not isinstance(agent.get("provider", ""), str) or not agent.get("provider", "").strip():
         findings.append({"severity": "error", "check": "providers.provider", "message": f"{label} provider is required"})
     provider = agent.get("provider", "")
@@ -2766,6 +2986,7 @@ def cmd_runtime_init(args):
         created.append(".m8shift/runtime/notify.config.json")
     for path, label in (
         (RUNS, ".m8shift/runtime/runs.jsonl"),
+        (CONSULTS, ".m8shift/runtime/consults.jsonl"),
         (PROGRESS, ".m8shift/runtime/progress.jsonl"),
         (IDEMPOTENCY, ".m8shift/runtime/idempotency.jsonl"),
         (APPROVALS, ".m8shift/runtime/approvals.jsonl"),
@@ -2866,6 +3087,352 @@ def cmd_providers_render(args):
     else:
         print(json.dumps(argv, ensure_ascii=False))
     return 0
+
+
+def read_consult_brief(path):
+    """Read one bounded regular brief without following a final symlink."""
+    absolute = os.path.abspath(path)
+    try:
+        st = os.lstat(absolute)
+    except OSError as exc:
+        raise ValueError(f"cannot read brief file: {exc.__class__.__name__}")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ValueError("brief file must be a regular non-symlink file")
+    if st.st_size > CONSULT_MAX_BRIEF_BYTES:
+        raise ValueError(
+            f"brief file exceeds {CONSULT_MAX_BRIEF_BYTES} bytes")
+    try:
+        with open(absolute, "rb") as fh:
+            raw = fh.read(CONSULT_MAX_BRIEF_BYTES + 1)
+    except OSError as exc:
+        raise ValueError(f"cannot read brief file: {exc.__class__.__name__}")
+    if len(raw) > CONSULT_MAX_BRIEF_BYTES:
+        raise ValueError(
+            f"brief file exceeds {CONSULT_MAX_BRIEF_BYTES} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("brief file must be valid UTF-8")
+    if not text.strip():
+        raise ValueError("brief file must contain text")
+    return text
+
+
+def redact_consult_brief(text):
+    """Redact credential shapes and the operator's RFC 052 denylist."""
+    redacted = text
+    for pattern in CONSULT_SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    try:
+        core = load_core()
+        rules, _allows, _findings = core._load_denylist()
+        redacted = core._denylist_redact(redacted, rules)
+    except Exception:  # noqa: BLE001 - unavailable denylist never exposes more
+        pass
+    return redacted
+
+
+def consult_response_target(relative):
+    """Resolve a response artifact strictly inside the ignored runtime tree."""
+    if not isinstance(relative, str) or not relative.strip():
+        raise ValueError("--save-response requires a relative runtime path")
+    relative = relative.strip()
+    if os.path.isabs(relative) or relative.startswith(("/", "\\")):
+        raise ValueError("--save-response must be relative to the kit")
+    if any(part in ("", ".", "..") for part in re.split(r"[/\\]", relative)):
+        raise ValueError("--save-response contains an unsafe path segment")
+    target = os.path.abspath(os.path.join(HERE, relative))
+    runtime = os.path.abspath(RUNTIME_DIR)
+    try:
+        inside = os.path.commonpath([runtime, target]) == runtime
+    except ValueError:
+        inside = False
+    if not inside or target == runtime:
+        raise ValueError("--save-response must stay under .m8shift/runtime/")
+    reject_symlinked_runtime_path(target, ValueError)
+    stored = os.path.relpath(target, HERE).replace(os.sep, "/")
+    return target, stored
+
+
+def write_consult_response(path, raw):
+    """Create a private response artifact without overwriting or symlink traversal."""
+    reject_symlinked_runtime_path(path, OSError)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    reject_symlinked_runtime_path(path, OSError)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(raw)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def consult_process_env(row, root, run_id):
+    allow = row.get("env_allowlist") or []
+    if not isinstance(allow, list):
+        raise ValueError("provider env_allowlist must be an array")
+    env = {name: os.environ[name] for name in allow
+           if isinstance(name, str) and name in os.environ}
+    derived = {
+        "M8SHIFT_ROOT": root,
+        "M8SHIFT_AGENT": row.get("name", ""),
+        "M8SHIFT_RUN_ID": run_id,
+    }
+    for name, value in derived.items():
+        if name in allow:
+            env[name] = value
+    return env
+
+
+def terminate_consult_process(proc):
+    """Terminate the whole consult process group, then hard-kill if needed."""
+    try:
+        if os.name == "nt":  # pragma: no cover - Windows-only process control
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=2)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        if os.name == "nt":  # pragma: no cover - Windows-only process control
+            proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def run_consult_process(argv, root, env, timeout_s, max_output_bytes):
+    """Run shell-free argv with bounded capture and concurrent pipe draining."""
+    creationflags = 0
+    popen_extra = {}
+    if os.name == "nt":  # pragma: no cover - Windows-only process control
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_extra["start_new_session"] = True
+    proc = subprocess.Popen(
+        argv, cwd=root, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+        creationflags=creationflags, **popen_extra,
+    )
+    stdout_chunks = []
+    stdout_total = [0]
+    stdout_stored = [0]
+
+    def drain(stream, keep):
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    return
+                if keep:
+                    stdout_total[0] += len(chunk)
+                    remaining = max_output_bytes - stdout_stored[0]
+                    if remaining > 0:
+                        kept = chunk[:remaining]
+                        stdout_chunks.append(kept)
+                        stdout_stored[0] += len(kept)
+        except (OSError, ValueError):
+            return
+
+    threads = [
+        threading.Thread(target=drain, args=(proc.stdout, True), daemon=True),
+        threading.Thread(target=drain, args=(proc.stderr, False), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    try:
+        returncode = proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        terminate_consult_process(proc)
+        returncode = proc.returncode
+    for thread in threads:
+        thread.join(timeout=5)
+    drain_incomplete = any(thread.is_alive() for thread in threads)
+    if drain_incomplete:
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+        for thread in threads:
+            thread.join(timeout=1)
+    raw = b"".join(stdout_chunks)
+    return {
+        "returncode": returncode,
+        "stdout": raw,
+        "truncated": stdout_total[0] > len(raw) or drain_incomplete,
+        "timed_out": timed_out,
+    }
+
+
+def consult_record_base(consult_id, requester, responder, row, brief,
+                        root, timeout_s, max_output_bytes, response_sink):
+    redacted = redact_consult_brief(brief)
+    redacted_raw = redacted.encode("utf-8")
+    return {
+        "schema": CONSULT_SCHEMA,
+        "authority": "advisory",
+        "consult_id": consult_id,
+        "at": iso(),
+        "requester": requester,
+        "responder": responder,
+        "root_fingerprint": "sha256:" + hashlib.sha256(
+            root.encode("utf-8")).hexdigest(),
+        "provider": row.get("provider", "") if isinstance(row, dict) else "",
+        "model": row.get("model", "") if isinstance(row, dict) else "",
+        "brief_redacted": redacted,
+        "brief_sha256": hashlib.sha256(redacted_raw).hexdigest(),
+        "brief_bytes": len(redacted_raw),
+        "compiled_argv_sha256": "",
+        "sandbox": "",
+        "cwd_attested": False,
+        "prompt_attested": False,
+        "timeout_seconds": timeout_s,
+        "max_output_bytes": max_output_bytes,
+        "classification": "launch_refused",
+        "response_sha256": hashlib.sha256(b"").hexdigest(),
+        "response_bytes": 0,
+        "response_truncated": False,
+        "response_sink": response_sink,
+        "response_saved": False,
+    }
+
+
+def append_consult_record(record):
+    if record.get("classification") not in CONSULT_CLASSIFICATIONS:
+        raise ValueError("invalid consult terminal classification")
+    append_jsonl(CONSULTS, record)
+
+
+def cmd_consult(args):
+    if not 1 <= args.timeout <= CONSULT_MAX_TIMEOUT_S:
+        print(f"m8shift-runtime: --timeout must be between 1 and "
+              f"{CONSULT_MAX_TIMEOUT_S} seconds", file=sys.stderr)
+        return 2
+    if not 1 <= args.max_output_bytes <= CONSULT_MAX_OUTPUT_BYTES:
+        print(f"m8shift-runtime: --max-output-bytes must be between 1 and "
+              f"{CONSULT_MAX_OUTPUT_BYTES}", file=sys.stderr)
+        return 2
+    requester = parse_agent_csv(args.requester)
+    responder = parse_agent_csv(args.responder)
+    if len(requester) != 1 or len(responder) != 1:
+        print("m8shift-runtime: consult requires one valid requester and responder",
+              file=sys.stderr)
+        return 2
+    try:
+        brief = read_consult_brief(args.brief_file)
+    except ValueError as exc:
+        print(f"m8shift-runtime: {exc}", file=sys.stderr)
+        return 2
+    root = os.path.realpath(HERE)
+    consult_id = "consult-" + uuid.uuid4().hex
+    row = provider_by_name(responder[0])
+    response_path = ""
+    response_sink = "stdout"
+    path_error = ""
+    if args.save_response:
+        try:
+            response_path, response_sink = consult_response_target(args.save_response)
+            if os.path.lexists(response_path):
+                raise ValueError("--save-response target already exists")
+        except ValueError as exc:
+            path_error = str(exc)
+            response_sink = "invalid"
+    record = consult_record_base(
+        consult_id, requester[0], responder[0], row, brief, root,
+        args.timeout, args.max_output_bytes, response_sink,
+    )
+
+    refusal = path_error
+    if row is None:
+        refusal = refusal or "responder has no active provider row"
+    if row is not None and not refusal:
+        errors = [finding for finding in provider_entry_findings(
+            row, f"agent {responder[0]}") if finding["severity"] == "error"]
+        if errors:
+            refusal = "responder provider row is not launchable"
+    compiled = None
+    if not refusal:
+        try:
+            compiled = compile_consult_argv(row, brief, root, consult_id)
+            argv_raw = json.dumps(
+                compiled["argv"], ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            record["compiled_argv_sha256"] = hashlib.sha256(argv_raw).hexdigest()
+            record["sandbox"] = compiled["attestation"]["sandbox"]
+            record["cwd_attested"] = compiled["attestation"]["cwd"] == root
+            record["prompt_attested"] = compiled["attestation"]["prompt"] == "literal"
+        except ValueError as exc:
+            refusal = str(exc)
+    if refusal:
+        append_consult_record(record)
+        print(f"m8shift-runtime: consult {consult_id} launch_refused: {refusal}",
+              file=sys.stderr)
+        return 2
+
+    try:
+        outcome = run_consult_process(
+            compiled["argv"], root,
+            consult_process_env(row, root, consult_id),
+            args.timeout, args.max_output_bytes,
+        )
+    except (OSError, ValueError) as exc:
+        append_consult_record(record)
+        print(f"m8shift-runtime: consult {consult_id} launch_refused: "
+              f"{exc.__class__.__name__}", file=sys.stderr)
+        return 2
+
+    response = outcome["stdout"]
+    record["response_sha256"] = hashlib.sha256(response).hexdigest()
+    record["response_bytes"] = len(response)
+    record["response_truncated"] = bool(outcome["truncated"])
+    if outcome["timed_out"]:
+        classification = "timed_out"
+        exit_code = 124
+    elif outcome["returncode"] != 0:
+        classification = "provider_failed"
+        exit_code = 1
+    else:
+        try:
+            decoded = response.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded = ""
+        if not decoded.strip():
+            classification = "invalid_output"
+            exit_code = 65
+        else:
+            classification = "completed"
+            exit_code = 0
+    if response_path and classification != "invalid_output":
+        try:
+            write_consult_response(response_path, response)
+            record["response_saved"] = True
+        except OSError:
+            classification = "invalid_output"
+            exit_code = 65
+    record["classification"] = classification
+    append_consult_record(record)
+
+    if response_sink == "stdout" and classification != "invalid_output" and response:
+        sys.stdout.buffer.write(response)
+        sys.stdout.buffer.flush()
+    elif response_path and record["response_saved"]:
+        print(f"✓ consult {consult_id} {classification}; response saved to {response_sink}")
+    if classification != "completed":
+        print(f"m8shift-runtime: consult {consult_id} {classification}", file=sys.stderr)
+    return exit_code
 
 
 def load_fleet_spec(path):
@@ -5119,7 +5686,7 @@ def cmd_report(args):
 
 
 def runtime_ledger_paths():
-    paths = [RUNS, PROGRESS, IDEMPOTENCY, APPROVALS]
+    paths = [RUNS, CONSULTS, PROGRESS, IDEMPOTENCY, APPROVALS]
     if os.path.exists(NOTIFY_LOG):
         paths.append(NOTIFY_LOG)
     if os.path.isdir(INBOX_DIR):
@@ -5317,7 +5884,7 @@ def retention_rules_for_existing_ledgers(policy):
 
 
 def retention_row_ts(row):
-    return parse_utc(row.get("ts", ""))
+    return parse_utc(row.get("ts", "") or row.get("at", ""))
 
 
 def ts_bounds(rows):
@@ -5721,6 +6288,69 @@ def ensure_runtime_gitignore():
     return added
 
 
+def provider_row_launchable(row):
+    if not isinstance(row, dict) or not provider_argv_templates(row):
+        return False
+    findings = provider_entry_findings(row, "provider", active=True)
+    return not any(finding["severity"] == "error"
+                   and not finding["check"].startswith("providers.consult")
+                   for finding in findings)
+
+
+def provider_registry_is_default_scaffold(registry):
+    """Match the exact deterministic bytes written by providers init."""
+    agents = registry.get("agents", []) if isinstance(registry, dict) else []
+    if (not isinstance(agents, list)
+            or not all(isinstance(row, dict) for row in agents)):
+        return False
+    names = [row.get("name") for row in agents]
+    if not names or not all(isinstance(name, str) and name for name in names):
+        return False
+    expected = json.dumps(
+        default_provider_registry(names), ensure_ascii=False,
+        sort_keys=True, indent=2,
+    ) + "\n"
+    try:
+        with open(PROVIDERS, "rb") as fh:
+            return fh.read() == expected.encode("utf-8")
+    except OSError:
+        return False
+
+
+def consult_kit_findings():
+    """Graduated advisory diagnostics for the observed half-provisioned kit."""
+    if not os.path.exists(PROVIDERS):
+        return []
+    registry = load_provider_registry()
+    if provider_registry_is_default_scaffold(registry):
+        return []
+    agents = registry.get("agents", []) if isinstance(registry, dict) else []
+    has_launchable = any(provider_row_launchable(row) for row in agents or [])
+    if has_launchable:
+        return []
+    findings = [{
+        "severity": "warning",
+        "check": "providers.registry_empty",
+        "message": (
+            "providers.json has no launchable active provider row — run "
+            "`python3 m8shift-runtime.py providers init --agents <agents>` and "
+            "configure an explicit model, argv, environment, and consult attestation"),
+    }]
+    runner_probe = probe_runner_handshake(DEFAULT_RUNNER_PATH)
+    runner_compatible = (runner_probe.get("kind") == "NEW"
+                         and runner_probe.get("compatible") is True)
+    if not runner_compatible:
+        findings.append({
+            "severity": "warning",
+            "check": "consult.kit_incomplete",
+            "message": (
+                "providers.json has no launchable row and no compatible headless "
+                "runner is installed — regenerate the canonical headless kit with "
+                "`python3 m8shift.py init --profile headless`"),
+        })
+    return findings
+
+
 def cmd_doctor(args):
     findings = []
     core = load_core()
@@ -5759,6 +6389,20 @@ def cmd_doctor(args):
                 "check": "runtime.event_schema",
                 "message": f"{os.path.relpath(path, HERE)} has an event without schema {RUNTIME_EVENT_SCHEMA}",
             })
+    consult_rows, consult_err = read_jsonl_diagnostic(CONSULTS)
+    if consult_err:
+        findings.append({"severity": "warning", "check": "runtime.jsonl",
+                         "message": consult_err})
+    elif any(row.get("schema") != CONSULT_SCHEMA
+             or row.get("classification") not in CONSULT_CLASSIFICATIONS
+             for row in consult_rows):
+        findings.append({
+            "severity": "warning",
+            "check": "consult.event_schema",
+            "message": (".m8shift/runtime/consults.jsonl has an invalid consult "
+                        f"record; expected {CONSULT_SCHEMA} and the closed terminal "
+                         "classification enum"),
+        })
     if os.path.isdir(INBOX_DIR):
         for name in os.listdir(INBOX_DIR):
             if name.endswith(".jsonl"):
@@ -5804,6 +6448,7 @@ def cmd_doctor(args):
                          "message": f"RTK routing adoption: unavailable ({e})"})
     if os.path.exists(PROVIDERS):
         findings.extend(provider_findings(load_provider_registry()))
+        findings.extend(consult_kit_findings())
     if os.path.exists(ROUTING_MODELS) or os.path.exists(ROUTING_SKILLS):
         models_manifest, skills_manifest, route_findings = load_routing_manifests()
         findings.extend(route_findings)
@@ -10248,6 +10893,24 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
     dr.add_argument("--stale-after", type=int, default=300,
                     help="seconds after which a runtime presence lane counts as stale (default: 300)")
     dr.set_defaults(fn=cmd_doctor)
+
+    consult = sub.add_parser(
+        "consult", help="run one bounded advisory read-only provider consultation")
+    consult.add_argument("--from", dest="requester", required=True,
+                         help="requesting agent identity recorded in the advisory ledger")
+    consult.add_argument("--to", dest="responder", required=True,
+                         help="responder whose active provider row compiles the invocation")
+    consult.add_argument("--brief-file", required=True,
+                         help="bounded UTF-8 brief file (provider text is never put in argv logs)")
+    consult.add_argument("--timeout", type=int, default=CONSULT_DEFAULT_TIMEOUT_S,
+                         help="hard process-group timeout in seconds (default: 120; max: 900)")
+    consult.add_argument(
+        "--max-output-bytes", type=int, default=CONSULT_DEFAULT_OUTPUT_BYTES,
+        help="maximum response bytes retained or emitted (default: 65536; max: 1048576)")
+    consult.add_argument(
+        "--save-response", default="",
+        help="relative path under .m8shift/runtime/ for the private response artifact")
+    consult.set_defaults(fn=cmd_consult)
 
     pv = sub.add_parser("providers", help="local provider/agent registry")
     pv_sub = pv.add_subparsers(dest="verb", required=True)
