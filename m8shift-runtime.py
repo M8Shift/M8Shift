@@ -86,10 +86,21 @@ RUN_REPORTS_DIR = os.path.join(PROJECT_DIR, "runs")
 PRESENCE = os.path.join(RUNTIME_DIR, "presence.json")
 RUNS = os.path.join(RUNTIME_DIR, "runs.jsonl")
 CONSULTS = os.path.join(RUNTIME_DIR, "consults.jsonl")
+GATEWAY = os.path.join(RUNTIME_DIR, "gateway.jsonl")
 PROGRESS = os.path.join(RUNTIME_DIR, "progress.jsonl")
 IDEMPOTENCY = os.path.join(RUNTIME_DIR, "idempotency.jsonl")
 APPROVALS = os.path.join(RUNTIME_DIR, "approvals.jsonl")
 CONSULT_SCHEMA = "m8shift.consult.exchange.v1"
+GATEWAY_EVENT_SCHEMA = "m8shift.gateway.event.v1"
+GATEWAY_ACTIONS = frozenset((
+    "push", "pr_open", "pr_merge", "pr_close", "tag", "branch_delete",
+    "merge_resolve", "publish_mirror",
+))
+GATEWAY_OUTCOMES = frozenset(("ok", "refused", "retrying", "failed"))
+GATEWAY_KEY_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
+GATEWAY_CAUSE_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
+GATEWAY_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+GATEWAY_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/#:@+-]{0,255}\Z")
 CONSULT_CLASSIFICATIONS = frozenset((
     "completed", "timed_out", "launch_refused", "provider_failed",
     "invalid_output",
@@ -2187,6 +2198,71 @@ def cmd_notify_event(args):
     return 0
 
 
+def _gateway_pairs(values, option, *, digests=False):
+    """Parse repeated key=value arguments without retaining unsafe free text."""
+    out = {}
+    for item in values or []:
+        if not isinstance(item, str) or "=" not in item:
+            sys.exit(f"m8shift-runtime: {option} requires key=value")
+        key, value = item.split("=", 1)
+        if not GATEWAY_KEY_RE.fullmatch(key):
+            sys.exit(f"m8shift-runtime: {option} has an unsafe key")
+        if key in out:
+            sys.exit(f"m8shift-runtime: duplicate {option} key {key!r}")
+        value = value.strip()
+        if digests:
+            if not GATEWAY_DIGEST_RE.fullmatch(value):
+                sys.exit(f"m8shift-runtime: {option} values must be sha256:<64 lowercase hex>")
+        else:
+            # Refs and forge-local ids are intentionally not URLs, filesystem
+            # absolutes, parent traversals, multiline output, or unbounded logs.
+            value = redact_consult_brief(value)
+            if (value != "[REDACTED]" and not GATEWAY_VALUE_RE.fullmatch(value)):
+                sys.exit(f"m8shift-runtime: {option} value must be a repo-relative ref or id")
+            if (not value or len(value) > 256 or "\n" in value or "\r" in value
+                    or "://" in value or os.path.isabs(value)
+                    or ".." in value.replace("\\", "/").split("/")):
+                sys.exit(f"m8shift-runtime: {option} value must be a bounded repo-relative identifier")
+        out[key] = value
+    return out
+
+
+def cmd_gateway_event(args):
+    """Append one validated delivery event; never read or mutate relay state."""
+    actor = redact_consult_brief(args.actor.strip())
+    if not AGENT_RE.fullmatch(actor):
+        sys.exit("m8shift-runtime: --actor must be a safe local role or agent id")
+    cause = args.cause.strip()
+    if args.outcome == "ok":
+        if cause:
+            sys.exit("m8shift-runtime: --cause is only valid for a non-ok outcome")
+    elif not GATEWAY_CAUSE_RE.fullmatch(cause):
+        sys.exit("m8shift-runtime: non-ok outcomes require a stable --cause token")
+    row = {
+        "schema": GATEWAY_EVENT_SCHEMA,
+        "ts": iso(),
+        "actor": actor,
+        "action": args.action,
+        "outcome": args.outcome,
+        "cause": cause,
+        "refs": _gateway_pairs(args.ref, "--ref"),
+        "ids": _gateway_pairs(args.id, "--id"),
+        "digests": _gateway_pairs(args.digest, "--digest", digests=True),
+        "source": {"tool": "m8shift-runtime.py", "version": VERSION},
+    }
+    append_jsonl(GATEWAY, row)
+    ensure_runtime_gitignore()
+    if args.json:
+        print(json.dumps({
+            "event": row,
+            "ledger": os.path.relpath(GATEWAY, HERE),
+        }, ensure_ascii=False, sort_keys=True))
+    else:
+        print("gateway event recorded: %s %s (%s)" % (
+            row["action"], row["outcome"], os.path.relpath(GATEWAY, HERE)))
+    return 0
+
+
 def idempotency_seen(key):
     if not key:
         return False
@@ -2987,6 +3063,7 @@ def cmd_runtime_init(args):
     for path, label in (
         (RUNS, ".m8shift/runtime/runs.jsonl"),
         (CONSULTS, ".m8shift/runtime/consults.jsonl"),
+        (GATEWAY, ".m8shift/runtime/gateway.jsonl"),
         (PROGRESS, ".m8shift/runtime/progress.jsonl"),
         (IDEMPOTENCY, ".m8shift/runtime/idempotency.jsonl"),
         (APPROVALS, ".m8shift/runtime/approvals.jsonl"),
@@ -5686,7 +5763,7 @@ def cmd_report(args):
 
 
 def runtime_ledger_paths():
-    paths = [RUNS, CONSULTS, PROGRESS, IDEMPOTENCY, APPROVALS]
+    paths = [RUNS, CONSULTS, GATEWAY, PROGRESS, IDEMPOTENCY, APPROVALS]
     if os.path.exists(NOTIFY_LOG):
         paths.append(NOTIFY_LOG)
     if os.path.isdir(INBOX_DIR):
@@ -10703,7 +10780,7 @@ def _runtime_is_mutating(args):
     --pause-on/config-changing notify options) IS gated."""
     cmd = getattr(args, "cmd", "")
     verb = getattr(args, "verb", "") or ""
-    if cmd in ("init", "watch", "operator", "progress", "approve"):
+    if cmd in ("init", "watch", "operator", "progress", "approve", "gateway-event"):
         return True
     if (cmd, verb) in (("providers", "init"), ("retention", "prune"),
                        ("listener", "stop"), ("usage", "init"),
@@ -10838,6 +10915,27 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
     nt.add_argument("--show", action="store_true", help="config: show effective config")
     nt.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     nt.set_defaults(fn=cmd_notify)
+
+    ge = sub.add_parser(
+        "gateway-event",
+        help="append one validated forge-gateway delivery event to the local side-ledger")
+    ge.add_argument("--actor", required=True,
+                    help="local agent or role performing the gateway action")
+    ge.add_argument("--action", required=True, choices=tuple(sorted(GATEWAY_ACTIONS)),
+                    help="delivery lifecycle action")
+    ge.add_argument("--outcome", required=True, choices=tuple(sorted(GATEWAY_OUTCOMES)),
+                    help="validated action outcome")
+    ge.add_argument("--cause", default="",
+                    help="stable machine token required for non-ok outcomes")
+    ge.add_argument("--ref", action="append", default=[], metavar="KEY=VALUE",
+                    help="repo-relative ref (repeatable; URLs and paths are refused)")
+    ge.add_argument("--id", action="append", default=[], metavar="KEY=VALUE",
+                    help="forge-local identifier (repeatable; URLs and paths are refused)")
+    ge.add_argument("--digest", action="append", default=[], metavar="KEY=SHA256",
+                    help="content evidence as key=sha256:<64 lowercase hex> (repeatable)")
+    ge.add_argument("--json", action="store_true",
+                    help="emit the stored event as machine-readable JSON")
+    ge.set_defaults(fn=cmd_gateway_event)
 
     op = sub.add_parser("operator", help="queue an operator message for one agent lane")
     op.add_argument("agent", help="agent lane the message is queued for")

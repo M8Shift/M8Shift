@@ -85,6 +85,25 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertIn("model/effort self-declared (unverified; may be stale)", output)
         self.assertIn("claude-opus-4-8/xhigh*", output)
 
+    def test_recent_gateway_event_remains_visible_while_paused(self):
+        top = load_top()
+        snap = fixture()
+        snap["state"] = "PAUSED"
+        snap["holder"] = "none"
+        snap["gateway"] = {
+            "action": "pr_merge", "outcome": "retrying",
+            "actor": "forge-gateway", "age_seconds": 125,
+        }
+        for width in (80, 120):
+            with self.subTest(width=width), \
+                    mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                output = top.render(snap, width, self.NOW)
+            self.assertIn("GATEWAY", output)
+            self.assertIn("pr_merge retrying", output)
+            self.assertIn("forge-gateway", output)
+            self.assertIn("02:05 ago", output)
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
     def test_wide_layout_tabulates_and_pins_right_edge(self):
         top = load_top()
         with mock.patch.dict(os.environ, {"TERM": "xterm-color"}, clear=True):

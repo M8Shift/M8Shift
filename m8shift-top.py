@@ -391,6 +391,18 @@ def _fmt_dur(seconds):
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%02d:%02d" % (m, s)
 
 
+def _gateway_display(gateway):
+    """Compact, terminal-safe projection of one core-validated recent event."""
+    if not isinstance(gateway, dict):
+        return ""
+    action = clean(gateway.get("action"), 24, ellipsis=True)
+    outcome = clean(gateway.get("outcome"), 16, ellipsis=True)
+    actor = clean(gateway.get("actor"), 24, ellipsis=True)
+    age = gateway.get("age_seconds")
+    age = _fmt_dur(age) + " ago" if isinstance(age, int) and age >= 0 else "age unavailable"
+    return "%s %s · %s · %s" % (action, outcome, actor, age)
+
+
 def _time_duration(seconds):
     """Compact cumulative duration used by the permanent RFC-064 strip."""
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
@@ -447,7 +459,8 @@ def _activity_capacity(snapshot, width, height):
         return None
     agent_rows = len(snapshot.get("agents") or [])
     # RFC 064's permanent global TIME strip consumes one physical row.
-    fixed_rows = (14 if max(24, width) >= 100 else 17) + agent_rows
+    fixed_rows = ((14 if max(24, width) >= 100 else 17) + agent_rows
+                  + (1 if isinstance(snapshot.get("gateway"), dict) else 0))
     return max(0, height - fixed_rows)
 
 
@@ -806,6 +819,14 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         green if lg[3] == "armed" else amber if lg[3] == "disarmed" else dim,
         colored)
     lines += [sep, listen_row, ledger_row]
+    gateway_payload = _gateway_display(snapshot.get("gateway"))
+    if gateway_payload:
+        gateway_row = row("GATEWAY  " + gateway_payload)
+        gateway_row = paint(gateway_row, "ok", green)
+        gateway_row = paint(gateway_row, "retrying", amber)
+        gateway_row = paint(gateway_row, "refused", red)
+        gateway_row = paint(gateway_row, "failed", red)
+        lines.append(gateway_row)
     last = snapshot.get("last_turn") or {}
     last_model = _model_effort(last)
     lines.append(row("LAST TURN  #%s %s/%s → %s  %s" %
@@ -1011,13 +1032,25 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         ledger_line, ledger_segments[3], lg[3],
         green if lg[3] == "armed" else amber if lg[3] == "disarmed" else dim,
         colored)
+    gateway_payload = _gateway_display(snapshot.get("gateway"))
+    gateway_line = None
+    if gateway_payload:
+        gateway_line = "│" + adaptive_cells(
+            ("  GATEWAY", gateway_payload), (0, 10), (10, 108), (0, 1)) + "│"
+        gateway_line = paint(gateway_line, "ok", green)
+        gateway_line = paint(gateway_line, "retrying", amber)
+        gateway_line = paint(gateway_line, "refused", red)
+        gateway_line = paint(gateway_line, "failed", red)
     last_model = _model_effort(last)
     turn_payload = "#%s %s/%s → %s  %s" % (
         _value(last.get("n")), _value(last.get("agent")), last_model,
         _value(last.get("to")), _value(last.get("ask_excerpt")))
     turn_line = "│" + adaptive_cells(
         ("  TURN", turn_payload), (0, 10), (10, 108), (0, 1)) + "│"
-    lines += [blank, listen_line, ledger_line, turn_line, blank]
+    lines += [blank, listen_line, ledger_line]
+    if gateway_line:
+        lines.append(gateway_line)
+    lines += [turn_line, blank]
     # ACTIVITY: recent -> oldest, tabulated (turn | ts-local | hold-dur | agent | action | note).
     stamped = [(_stamp(e.get("ts")), e) for e in (snapshot.get("activity") or [])]
     if any(t for t, _ in stamped):

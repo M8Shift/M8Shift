@@ -133,6 +133,33 @@ The gateway owns remote transport and forge records; it does not become code aut
 pushing. Commit authorship and agent/model trailers remain unchanged. If transport
 fails, the local commit stays pending and nobody claims it was pushed or delivered.
 
+### 3.3 Gateway lifecycle ledger
+
+Gateway tooling records every delivery transition through the explicit local helper:
+
+```bash
+python3 m8shift-runtime.py gateway-event \
+  --actor forge-gateway --action push --outcome ok \
+  --ref branch=feat/example --ref commit=0123456789abcdef \
+  --id ticket=123 --digest review=sha256:<64-lowercase-hex>
+```
+
+The helper appends `m8shift.gateway.event.v1` records to
+`.m8shift/runtime/gateway.jsonl`. It does not inspect or mutate the relay pen and it
+does not perform a forge action itself. Each record has UTC time, actor, one action
+(`push`, `pr_open`, `pr_merge`, `pr_close`, `tag`, `branch_delete`,
+`merge_resolve`, or `publish_mirror`), one outcome (`ok`, `refused`, `retrying`, or
+`failed`), repo-relative refs/ids, and optional SHA-256 digests. A non-`ok` outcome
+requires a stable machine-readable cause. URLs, absolute paths, parent traversal,
+multiline/raw command output, credentials, and non-digest content evidence are
+refused; bounded free identifiers pass through the project denylist redactor.
+
+The ledger is advisory delivery evidence, never forge authority. Recent events appear
+as a compact `GATEWAY` line in TOP even while the relay is `PAUSED`, so the operational
+drill “what was the gateway doing during the pause?” is answerable from this ledger
+alone. Gateway shell automation calls the helper explicitly; there is no implicit
+push/merge instrumentation in the passive core.
+
 ## 4. Evidence and completion language
 
 | Evidence | Direct author | Network-isolated author | Gateway |
@@ -196,6 +223,27 @@ receives credentials or network access.
 - Forge outage leaves the change committed and pending, not delivered or merged.
 - Emergency fixes still receive ticket and remote trace before merge; urgency may
   shorten review but does not erase provenance.
+
+The gateway applies these incident-derived recovery rules in order:
+
+1. **Verify merge before deleting a branch.** A successful merge response is not
+   sufficient evidence by itself. First run
+   `git merge-base --is-ancestor <head-sha> <base-ref>` (or verify the equivalent
+   immutable forge state); only then record `pr_merge=ok` and proceed to
+   `branch_delete`. A failed ancestor check records a stable non-`ok` cause and keeps
+   the branch.
+2. **Replace a wedged mergeability cache with a fresh PR.** When a PR remains
+   contradictory after the head/base refs and checks are refreshed, close it with
+   recorded evidence and open a fresh PR for the same exact head. Do not rewrite the
+   handed-off SHA merely to perturb a cache.
+3. **Diagnose ambiguous HTTP 405 responses from reachability.** A “try again later”
+   merge response can mean the head is already reachable from base. Check
+   `git merge-base --is-ancestor <head-sha> <base-ref>` before classifying it as a
+   retryable outage; record the resulting `merge_resolve` outcome and stable cause.
+4. **Declare stacked lineage.** Every delivery turn for a stacked change includes
+   `stacked_on=<ticket-or-branch>` alongside its base ref. Review, merge, and deletion
+   follow that declared lineage rather than assuming every head starts directly from
+   `main`.
 
 ## 7. Implementation record
 
