@@ -2466,8 +2466,10 @@ class TestReadCommands(CLIBase):
         self.assertEqual([a["role_state"] for a in d["snapshot"]["agents"]],
                          ["awaiting", "idle"])
         self.assertEqual(set(d["snapshot"]),
-                         {"schema", "agents", "listeners", "attention", "last_turn", "ledger", "pen",
+                         {"schema", "agents", "listeners", "attention", "gateway",
+                          "last_turn", "ledger", "pen",
                           "activity", "activity_limit", "activity_truncated"})
+        self.assertIsNone(d["snapshot"]["gateway"])
         self.assertIsInstance(d["snapshot"]["activity"], list)
         self.assertLessEqual(len(d["snapshot"]["activity"]), 8)
         self.assertEqual([event["turn"] for event in d["snapshot"]["activity"]], [0, 1, 2])
@@ -2613,6 +2615,24 @@ class TestReadCommands(CLIBase):
         self.assertIsInstance(snapshot["ledger"]["doctor_findings"], int)
         self.assertIs(snapshot["ledger"]["gate_armed"], True)
         self.assertEqual(snapshot["listeners"], "claude ALIVE")
+
+    def test_status_snapshot_projects_only_recent_valid_gateway_events(self):
+        self.init()
+        runtime = os.path.join(self.d, ".m8shift", "runtime")
+        os.makedirs(runtime, exist_ok=True)
+        path = os.path.join(runtime, "gateway.jsonl")
+        fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{bad json}\n")
+            fh.write(json.dumps({
+                "schema": "m8shift.gateway.event.v1", "ts": fresh,
+                "actor": "forge-gateway", "action": "pr_merge", "outcome": "retrying",
+            }) + "\n")
+        snapshot = json.loads(self.cw("status", "--json").stdout)["snapshot"]
+        self.assertEqual(snapshot["gateway"]["action"], "pr_merge")
+        self.assertEqual(snapshot["gateway"]["outcome"], "retrying")
+        self.assertEqual(snapshot["gateway"]["actor"], "forge-gateway")
+        self.assertGreaterEqual(snapshot["gateway"]["age_seconds"], 0)
 
     def test_status_snapshot_usage_keeps_absent_window_explicit(self):
         self.init()
@@ -8187,6 +8207,98 @@ class TestRuntimeCompanion(CLIBase):
             self.assertEqual(fh.read(), "sentinel\n")
         self.assertEqual([row["n"] for row in self.read_runtime_rows("runs.jsonl")], [0, 1])
 
+    def test_gateway_event_appends_validated_side_ledger_without_touching_relay(self):
+        self.init()
+        before = self.md()
+        digest = "sha256:" + ("a" * 64)
+        r = self.rt(
+            "gateway-event", "--actor", "forge-gateway", "--action", "push",
+            "--outcome", "ok", "--ref", "branch=feat/example",
+            "--ref", "commit=0123456789abcdef", "--id", "ticket=229",
+            "--digest", "review=" + digest, "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.read_runtime_rows("gateway.jsonl")[-1]
+        self.assertEqual(row["schema"], "m8shift.gateway.event.v1")
+        self.assertEqual((row["actor"], row["action"], row["outcome"]),
+                         ("forge-gateway", "push", "ok"))
+        self.assertEqual(row["refs"]["branch"], "feat/example")
+        self.assertEqual(row["ids"], {"ticket": "229"})
+        self.assertEqual(row["digests"], {"review": digest})
+        self.assertEqual(self.md(), before)
+
+    def test_gateway_event_refuses_unsafe_or_ambiguous_evidence(self):
+        self.init()
+        cases = (
+            ("--outcome", "failed"),
+            ("--outcome", "ok", "--cause", "network.timeout"),
+            ("--outcome", "ok", "--ref", "pr=https://forge.invalid/pr/1"),
+            ("--outcome", "ok", "--ref", "remote=admin:hunter2@forge.example/owner/repo"),
+            ("--outcome", "ok", "--ref", "branch=../foreign"),
+            ("--outcome", "ok", "--id", "diagnostic=fatal: raw command output"),
+            ("--outcome", "ok", "--digest", "review=not-a-digest"),
+        )
+        for tail in cases:
+            with self.subTest(tail=tail):
+                r = self.rt("gateway-event", "--actor", "forge-gateway",
+                            "--action", "push", *tail)
+                self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "gateway.jsonl")))
+
+    def test_gateway_event_bounds_records_and_concurrent_appends(self):
+        self.init()
+        refs = tuple(
+            part
+            for index in range(16)
+            for part in ("--ref", "ref%d=value%d" % (index, index))
+        )
+        procs = [subprocess.Popen(
+            [sys.executable, "m8shift-runtime.py", "gateway-event",
+             "--actor", "forge-gateway-%d" % index, "--action", "push",
+             "--outcome", "ok", *refs],
+            cwd=self.d, env=self.clean_env(), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        ) for index in range(2)]
+        outputs = [proc.communicate() for proc in procs]
+        for proc, (stdout, stderr) in zip(procs, outputs):
+            self.assertEqual(proc.returncode, 0, stdout + stderr)
+        rows = self.read_runtime_rows("gateway.jsonl")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["actor"] for row in rows},
+                         {"forge-gateway-0", "forge-gateway-1"})
+        self.assertTrue(all(len(row["refs"]) == 16 for row in rows))
+
+        too_many = refs + ("--ref", "overflow=value")
+        refused = self.rt(
+            "gateway-event", "--actor", "forge-gateway", "--action", "push",
+            "--outcome", "ok", *too_many)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--ref accepts at most 16 entries", refused.stderr)
+
+        huge = tuple(
+            part
+            for option in ("--ref", "--id")
+            for index in range(16)
+            for part in (option, "%s%d=%s" % (option[2:], index, "x." * 125))
+        )
+        refused = self.rt(
+            "gateway-event", "--actor", "forge-gateway", "--action", "push",
+            "--outcome", "ok", *huge)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("8192-byte record cap", refused.stderr)
+        self.assertEqual(len(self.read_runtime_rows("gateway.jsonl")), 2)
+
+    def test_gateway_event_redacts_secret_shapes_in_free_identifiers(self):
+        self.init()
+        r = self.rt(
+            "gateway-event", "--actor", "forge-gateway", "--action", "pr_open",
+            "--outcome", "retrying", "--cause", "mergeability.pending",
+            "--id", "diagnostic=token=sk-placeholder123456", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.read_runtime_rows("gateway.jsonl")[-1]
+        self.assertNotIn("sk-placeholder", json.dumps(row))
+        self.assertIn("[REDACTED]", row["ids"]["diagnostic"])
+
     def test_runtime_init_providers_roles_workflows_and_report(self):
         self.init("--agents", "claude,codex,gemini")
         r = self.rt("init", "--json")
@@ -8198,6 +8310,8 @@ class TestRuntimeCompanion(CLIBase):
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl")))
         self.assertTrue(os.path.exists(os.path.join(
             self.d, ".m8shift", "runtime", "consults.jsonl")))
+        self.assertTrue(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "gateway.jsonl")))
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "inbox")))
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "roles", "implementer.md")))
 

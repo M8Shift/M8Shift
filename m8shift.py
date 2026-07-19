@@ -9166,6 +9166,15 @@ USAGE_WINDOW_ALIASES = {"session_5h": "5h", "weekly": "wk", "daily": "day", "mon
 USAGE_WINDOW_LABELS = {"session_5h": "5h"}             # #106 unified line labels; other kinds render sanitized as-is
 USAGE_LINE_MAX_WINDOWS = 4                             # cap per-window fragments on the unified line; excess → "+N"
 _USAGE_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 _.:%()/+-]")  # display whitelist (amendment C)
+GATEWAY_SIDECAR_REL = os.path.join(".m8shift", "runtime", "gateway.jsonl")
+GATEWAY_EVENT_SCHEMA = "m8shift.gateway.event.v1"
+GATEWAY_TAIL_BYTES = 64 * 1024
+GATEWAY_RECENT_SECONDS = 60 * 60
+GATEWAY_ACTIONS = frozenset((
+    "push", "pr_open", "pr_merge", "pr_close", "tag", "branch_delete",
+    "merge_resolve", "publish_mirror",
+))
+GATEWAY_OUTCOMES = frozenset(("ok", "refused", "retrying", "failed"))
 
 
 def usage_sidecar_path():
@@ -9309,6 +9318,75 @@ def _usage_read_snapshots(lk):
         return found
     except Exception:
         return {}                                   # fail-open: never crash status/watch
+
+
+def _gateway_recent_event(ref=None):
+    """Return the newest recent validated gateway event, or None fail-open.
+
+    The passive core reads one bounded regular-file tail. It neither interprets
+    delivery authority nor contacts the forge; the runtime companion remains the
+    only writer and the side-ledger remains independent of the relay pen.
+    """
+    try:
+        path = os.path.join(project_root(), GATEWAY_SIDECAR_REL)
+        flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            return None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            with os.fdopen(fd, "rb") as fh:
+                fd = None
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                offset = max(0, size - GATEWAY_TAIL_BYTES)
+                fh.seek(offset)
+                raw = fh.read(GATEWAY_TAIL_BYTES + 1)
+        finally:
+            if fd is not None:
+                os.close(fd)
+        lines = raw.decode("utf-8", errors="replace").split("\n")
+        if offset > 0 and lines:
+            lines = lines[1:]
+        latest = None
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                continue
+            if (not isinstance(row, dict)
+                    or row.get("schema") != GATEWAY_EVENT_SCHEMA
+                    or row.get("action") not in GATEWAY_ACTIONS
+                    or row.get("outcome") not in GATEWAY_OUTCOMES
+                    or not isinstance(row.get("actor"), str)
+                    or not re.fullmatch(AGENT_RE, row["actor"])):
+                continue
+            stamped = parse_iso(row.get("ts"))
+            if stamped is None:
+                continue
+            latest = (row, stamped)
+        if latest is None:
+            return None
+        row, stamped = latest
+        observed = ref or now()
+        age = int((observed - stamped).total_seconds())
+        if age < -300 or age > GATEWAY_RECENT_SECONDS:
+            return None
+        return {
+            "action": _usage_sanitize(row.get("action"), cap=24, fallback="unknown"),
+            "outcome": _usage_sanitize(row.get("outcome"), cap=16, fallback="unknown"),
+            "actor": _usage_sanitize(row.get("actor"), cap=40, fallback="unknown"),
+            "at": row.get("ts"),
+            "age_seconds": max(0, age),
+        }
+    except Exception:
+        return None
 
 
 def _usage_ratio_valid(dr):
@@ -10089,11 +10167,13 @@ def status_snapshot_v1(lk, last, session_info, turns=None,
             },
         })
     listener_rows = _status_listener_rows(lk)
+    gateway = _gateway_recent_event()
     return {
         "schema": STATUS_SNAPSHOT_SCHEMA,
         "agents": agents,
         "listeners": _status_listeners(lk, rows=listener_rows),
         "attention": _status_attention(lk, rows=listener_rows),
+        "gateway": gateway,
         "last_turn": ({"n": last.get("n"), "agent": _status_snapshot_text(last.get("agent")),
                        "model": _status_snapshot_text((last.get("fields") or {}).get("model")) or None,
                        "model_source": ("self_declared" if (last.get("fields") or {}).get("model")
