@@ -1,0 +1,29 @@
+{
+  "success": {
+    "status": "success",
+    "surface": "admin_history",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "fresh_until": "2026-07-19T10:05:00Z",
+    "model": "model-mistral-example",
+    "configured_limit": 100000,
+    "observed_usage": 60000,
+    "history_reset_at": "2026-07-19T11:00:00Z"
+  },
+  "throttle": {
+    "status": "throttle",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "retry_after_seconds": 60
+  },
+  "malformed": {
+    "status": "success",
+    "surface": "admin_history",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "model": "model-mistral-example",
+    "configured_limit": 100000,
+    "observed_usage": 200000
+  },
+  "auth_absent": {
+    "status": "auth_absent",
+    "captured_at": "2026-07-19T10:00:00Z"
+  }
+}

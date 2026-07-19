@@ -1,7 +1,8 @@
 # RFC 077 — Safe-boundary model-line evidence and routing
 
-- **Status:** accepted design; Slice A schema, fixtures, and fixture-only base
-  conformance implemented; automatic routing remains disabled
+- **Status:** accepted design; Slices A/B schemas, fixture conformance, and
+  disabled fixture-backed vendor subclasses implemented; automatic routing
+  remains disabled
 - **Date:** 2026-07-18
 - **Issue:** #212
 - **Scope:** same-provider model-line evidence, deterministic safe-boundary
@@ -243,15 +244,46 @@ This change implements only the fixture-safe contract surface:
   target binding, nullability, freshness, redaction-by-shape, schema ids, and
   fail-closed unknown fields.
 
-It includes no vendor subclass, provider SDK, network call, credential lookup,
-live authentication, route policy integration, listener switch, or relay
-mutation.
+Slice A itself included no vendor subclass, provider SDK, network call,
+credential lookup, live authentication, route policy integration, listener
+switch, or relay mutation.
 
-## 9. Gated delivery slices
+## 9. Slice B implementation
+
+Slice B adds external `ModelLineBudgetAdapter` subclasses for Anthropic, OpenAI,
+Google, and Mistral under `examples/model_line_budget_adapter/`. Each subclass
+accepts only an injected, bounded response retriever and normalizes sanitized
+response mappings. The package still contains no provider SDK, credential
+lookup, socket, subprocess, CLI entry point, routing policy, or relay mutation.
+
+The checked-in vendor fixtures cover success, throttle, malformed, and absent
+authentication for every subclass. Conformance tests require retrieval crashes,
+malformed values, missing applicability, and bounded refusals without a vendor
+quota/group identity to degrade to valid `unknown` evidence with no positive
+headroom.
+
+The mappings preserve the vendor rules in §4:
+
+- Anthropic response evidence may bind a documented model group while retaining
+  a null `provider_bucket_id`.
+- OpenAI API shared groups require both the documented model membership and a
+  provider-derived bucket id; subscription-product evidence stays unknown.
+- Google model-dimensioned cloud quota may bind exactly, while console-only data
+  emits an unknown diagnostic.
+- Mistral configured per-model limits plus Admin history emit a separate
+  forecast under `estimate`; reported remaining quota stays null, and a bare 429
+  remains unknown.
+
+`VENDOR_ADAPTER_REGISTRY` marks all four entries `enabled=false` and
+`retrieval=fixture_only`. Live retrieval and authentication remain reserved for
+the separately authorized Slice E pilot.
+
+## 10. Gated delivery slices
 
 - **A — implemented here:** RFC, schemas, fixtures, and base-class conformance;
   no live auth.
-- **B:** external fixture-backed vendor subclasses, disabled by default.
+- **B — implemented here:** external fixture-backed vendor subclasses, disabled
+  by default, with honest malformed/auth/throttle degradation.
 - **C:** pure policy state machine and dry-run route/audit plan; no switching.
 - **D:** opt-in listener integration at the safe invocation boundary, including
   hold precedence, halt/notify, reconstruction, and no-relay-mutation tests.
@@ -265,7 +297,7 @@ adapter crash/oversize/malformed output, active/corrupt usage hold, exact RFC 07
 argv, immutable decision record, reconstruction from durable artifacts, and
 proof that the relay bytes and ownership are unchanged.
 
-## 10. Rejected alternatives
+## 11. Rejected alternatives
 
 - **Amend RFC 075 in place:** rejected; its accepted Phase 1 evidence record
   should remain distinct from the selected Phase 2 behavior.

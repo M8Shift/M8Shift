@@ -1,0 +1,32 @@
+{
+  "success": {
+    "status": "success",
+    "surface": "response_headers",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "fresh_until": "2026-07-19T10:01:00Z",
+    "limit_requests": 1000,
+    "remaining_requests": 750,
+    "reset_at": "2026-07-19T10:02:00Z",
+    "shared_group": "gpt-example-shared",
+    "provider_bucket_id": "provider-group-gpt-example"
+  },
+  "throttle": {
+    "status": "throttle",
+    "surface": "response_headers",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "reset_at": "2026-07-19T10:02:00Z",
+    "shared_group": "gpt-example-shared",
+    "provider_bucket_id": "provider-group-gpt-example"
+  },
+  "malformed": {
+    "status": "success",
+    "captured_at": "2026-07-19T10:00:00Z",
+    "provider_bucket_id": "invented-without-mapping",
+    "limit_requests": 1000,
+    "remaining_requests": 800
+  },
+  "auth_absent": {
+    "status": "auth_absent",
+    "captured_at": "2026-07-19T10:00:00Z"
+  }
+}

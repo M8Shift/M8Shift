@@ -1,4 +1,4 @@
-"""Fixture-only model-line budget evidence contract from RFC 077 Slice A."""
+"""Fixture-safe model-line budget evidence adapters from RFC 077 Slices A/B."""
 
 from .base import (
     EVIDENCE_SCHEMA,
@@ -7,6 +7,15 @@ from .base import (
     ProbeTarget,
     RefusalObservation,
 )
+from .vendors import (
+    AnthropicModelLineBudgetAdapter,
+    FixtureBackedVendorAdapter,
+    GoogleModelLineBudgetAdapter,
+    MistralModelLineBudgetAdapter,
+    OpenAIModelLineBudgetAdapter,
+    VENDOR_ADAPTER_REGISTRY,
+    VendorAdapterRegistration,
+)
 
 __all__ = [
     "EVIDENCE_SCHEMA",
@@ -14,4 +23,11 @@ __all__ = [
     "ModelLineEvidence",
     "ProbeTarget",
     "RefusalObservation",
+    "AnthropicModelLineBudgetAdapter",
+    "FixtureBackedVendorAdapter",
+    "GoogleModelLineBudgetAdapter",
+    "MistralModelLineBudgetAdapter",
+    "OpenAIModelLineBudgetAdapter",
+    "VENDOR_ADAPTER_REGISTRY",
+    "VendorAdapterRegistration",
 ]
