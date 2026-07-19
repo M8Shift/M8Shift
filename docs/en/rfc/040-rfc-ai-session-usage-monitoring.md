@@ -1029,6 +1029,39 @@ exactly the guard `--apply` rules above. `--max-ticks N` bounds the loop
 mirroring the listener loop. The exit code is the final tick's guard code.
 A watch tick that observes an `ok` verdict **never** resumes anything.
 
+#### Managed watcher lifecycle (#214)
+
+`usage watch --agent AGENT` is a per-agent singleton. Its durable
+`usage-watchers/<agent>.json` record carries the lease id, pid, mode, interval,
+process-start identity when the host exposes one, whole-tick timeout,
+tick/success counters, consecutive unknown-read count, and last tick/success
+timestamps. Startup is serialized by a short `O_EXCL`
+registry transaction: a second live watcher is refused, while `--replace`
+sends SIGTERM to the registered watcher and publishes a new lease. A replaced
+watcher may not overwrite the adopted record from its `finally` path because
+every update is conditioned on pid plus lease id.
+
+Every tick invokes the existing snapshot path in a fresh subprocess group with
+a deadline (`--tick-timeout`, default `max(1, interval)`). An adapter or
+Keychain call can therefore fail one tick but cannot freeze the long-lived
+loop. Health requires both a fresh tick and successful adapter reads: three
+consecutive unknown reads are degraded even while the pid and tick timestamp
+remain fresh.
+
+The managed repair surface is:
+
+```bash
+python3 m8shift-runtime.py usage watch stop --agent AGENT
+python3 m8shift-runtime.py usage watch reconcile [--agent AGENT]
+```
+
+`stop` signals the registered pid and records `phase=stopped`. `reconcile`
+uses the durable registry alone, starts a dead/stopped watcher, keeps one
+healthy watcher, and recycles a stale-tick or degraded-read watcher only after
+a fresh bounded adapter probe succeeds. A fresh `ok` verdict with a residual
+hold produces `usage.hold_residual` and names `usage resume --agent AGENT` as
+the remedy; reconciliation never clears the hold or resumes automatically.
+
 **`usage wait`** — token-free local blocker for cooled-down runners: each
 tick re-reads the ledger verdict only. It releases with exit `0` when the
 verdict is `ok` **or** `unknown` (fail-open: unknown usage must not block

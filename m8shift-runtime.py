@@ -240,6 +240,10 @@ LISTENER_LOG_KEEP = 3
 LISTENER_REPEATED_NON_COMPLETION_N = 2
 USAGE_WATCH_SCHEMA = "m8shift.usage-watch.lifecycle.v1"
 USAGE_WATCHERS_DIR = os.path.join(RUNTIME_DIR, "usage-watchers")
+USAGE_WATCH_UNKNOWN_LIMIT = 3
+USAGE_WATCH_START_GRACE_S = 10.0
+USAGE_WATCH_STOP_GRACE_S = 3.0
+USAGE_WATCH_PROBE_TIMEOUT_S = 30.0
 ATTENTION_STALE_AFTER_SECONDS = 300
 # macOS TCC-protected user folders (heuristic, RFC 047): launchd services often
 # cannot read projects under these; paths are always derived from expanduser("~").
@@ -1577,20 +1581,228 @@ def usage_watch_path(agent):
     return os.path.join(USAGE_WATCHERS_DIR, "%s.json" % agent)
 
 
+def usage_watch_lock_path(agent):
+    return os.path.join(USAGE_WATCHERS_DIR, ".%s.lock" % agent)
+
+
 def read_usage_watch(agent):
     doc, err = read_json_diagnostic(usage_watch_path(agent), {})
     return (doc if isinstance(doc, dict) else {}), err
 
 
 def write_usage_watch(agent, *, mode, interval, started, phase,
-                      last_tick="", last_success=""):
+                      last_tick="", last_success="", pid=None, lease_id="",
+                      consecutive_unknown=0, total_ticks=0, successful_ticks=0,
+                      tick_timeout=USAGE_WATCH_PROBE_TIMEOUT_S,
+                      process_start_ref=""):
     os.makedirs(USAGE_WATCHERS_DIR, exist_ok=True)
+    actual_pid = os.getpid() if pid is None else pid
     doc = {"schema": USAGE_WATCH_SCHEMA, "kind": "usage_watch", "agent": agent,
-           "pid": os.getpid(), "mode": mode, "interval": interval,
+           "pid": actual_pid,
+           "process_start_ref": (process_start_ref
+                                 or fleet_process_start_ref(actual_pid)),
+           "lease_id": lease_id, "mode": mode, "interval": interval,
            "started": started, "last_tick": last_tick,
-           "last_success": last_success, "phase": phase}
+           "last_success": last_success, "phase": phase,
+           "tick_timeout": tick_timeout,
+           "consecutive_unknown": consecutive_unknown,
+           "total_ticks": total_ticks, "successful_ticks": successful_ticks,
+           "success_rate": (successful_ticks / total_ticks if total_ticks else None)}
     atomic_write_json(usage_watch_path(agent), doc)
     return doc
+
+
+def acquire_usage_watch_lock(agent):
+    """Serialize one agent's registry transaction with an O_EXCL token."""
+    os.makedirs(USAGE_WATCHERS_DIR, exist_ok=True)
+    path = usage_watch_lock_path(agent)
+    reject_symlinked_runtime_path(path, ValueError)
+    token = uuid.uuid4().hex
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            fd = os.open(path, flags, 0o600)
+            break
+        except FileExistsError:
+            lock, err = read_json_diagnostic(path, {})
+            owner = lock.get("pid") if not err else None
+            if not err and (not isinstance(owner, int) or not pid_alive(owner)):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise ValueError("usage watcher registry transaction is busy")
+            time.sleep(0.02)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"pid": os.getpid(), "token": token, "created_at": iso()}, fh,
+                  ensure_ascii=False, sort_keys=True)
+        fh.write("\n")
+    return token
+
+
+def release_usage_watch_lock(agent, token):
+    path = usage_watch_lock_path(agent)
+    reject_symlinked_runtime_path(path, ValueError)
+    doc, err = read_json_diagnostic(path, {})
+    if not err and doc.get("token") == token:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def usage_watch_health(watch, *, now_utc=None, pid_probe=pid_alive,
+                       unknown_limit=USAGE_WATCH_UNKNOWN_LIMIT):
+    """Pure lifecycle/read-health classifier used by start and reconcile."""
+    now_utc = now_utc or now()
+    if not isinstance(watch, dict) or watch.get("schema") != USAGE_WATCH_SCHEMA:
+        return {"status": "invalid", "finding": "registry is missing or malformed"}
+    phase = watch.get("phase")
+    pid = watch.get("pid")
+    alive = isinstance(pid, int) and not isinstance(pid, bool) and pid_probe(pid)
+    if phase == "stopped":
+        return {"status": "stopped", "finding": "watcher is intentionally stopped"}
+    if not alive:
+        return {"status": "dead", "finding": "registered watcher pid is dead"}
+    expected_start = watch.get("process_start_ref")
+    if isinstance(expected_start, str) and expected_start:
+        current_start = fleet_process_start_ref(pid)
+        if current_start and current_start != expected_start:
+            return {"status": "dead",
+                    "finding": "registered watcher pid was reused by another process"}
+        if not current_start:
+            return {"status": "invalid",
+                    "finding": "registered watcher process identity is unverifiable"}
+    interval = watch.get("interval")
+    interval = float(interval) if isinstance(interval, (int, float)) \
+        and not isinstance(interval, bool) and interval > 0 else 60.0
+    last_tick = parse_utc(watch.get("last_tick", ""))
+    started = parse_utc(watch.get("started", ""))
+    if not last_tick and phase == "starting" and started:
+        age = max(0.0, (now_utc - started).total_seconds())
+        if age <= USAGE_WATCH_START_GRACE_S:
+            return {"status": "healthy", "finding": "watcher is starting"}
+    stale_after = max(USAGE_WATCH_START_GRACE_S, interval * 2.0)
+    tick_age = ((now_utc - last_tick).total_seconds() if last_tick else None)
+    if tick_age is None or tick_age > stale_after:
+        return {"status": "stale", "finding": "watcher pid is alive but ticks are stale",
+                "tick_age_seconds": tick_age, "stale_after_seconds": stale_after}
+    unknown = watch.get("consecutive_unknown", 0)
+    if isinstance(unknown, int) and not isinstance(unknown, bool) \
+            and unknown >= unknown_limit:
+        return {"status": "degraded",
+                "finding": "%d consecutive adapter reads were unknown" % unknown,
+                "tick_age_seconds": tick_age}
+    return {"status": "healthy", "finding": "ticks and adapter reads are healthy",
+            "tick_age_seconds": tick_age}
+
+
+def usage_watch_start_decision(watch, *, replace=False, pid_probe=pid_alive):
+    health = usage_watch_health(watch, pid_probe=pid_probe)
+    if health["status"] in ("healthy", "stale", "degraded"):
+        if replace:
+            return {"allowed": True, "action": "replace", "health": health}
+        return {"allowed": False, "action": "refuse_live", "health": health}
+    return {"allowed": True, "action": "start", "health": health}
+
+
+def usage_watch_reconcile_decision(watch, *, probe_ok=False, now_utc=None,
+                                   pid_probe=pid_alive):
+    health = usage_watch_health(watch, now_utc=now_utc, pid_probe=pid_probe)
+    status = health["status"]
+    if status in ("dead", "stopped"):
+        return {"action": "start", "health": health}
+    if status in ("stale", "degraded"):
+        return {"action": "recycle" if probe_ok else "investigate", "health": health}
+    return {"action": "keep" if status == "healthy" else "investigate",
+            "health": health}
+
+
+def usage_watch_terminate(pid, process_start_ref=""):
+    """Signal one watcher group; lease replacement prevents stale final writes.
+
+    A foreground watch can become a zombie owned by its invoking shell/test parent;
+    signal-0 still reports that zombie until its parent reaps it, so successful
+    signal delivery (followed by a bounded KILL) is the portable stop boundary.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return True
+    if process_start_ref:
+        current_start = fleet_process_start_ref(pid)
+        if not current_start or current_start != process_start_ref:
+            return False
+    if os.name == "nt":  # pragma: no cover - Windows-only process control
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
+                text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0 or not listener_pid_alive(pid)
+    sent = _posix_signal_group_or_pid(pid, signal.SIGTERM)
+    deadline = time.monotonic() + USAGE_WATCH_STOP_GRACE_S
+    while time.monotonic() < deadline:
+        if not listener_pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    _posix_signal_group_or_pid(pid, signal.SIGKILL)
+    return sent
+
+
+def usage_watch_child_argv(agent, watch, lease_id):
+    argv = [sys.executable, SELF_PATH, "usage", "watch", "--agent", agent,
+            "--interval", str(watch.get("interval", USAGE_WATCH_INTERVAL_DEFAULT_S)),
+            "--tick-timeout", str(watch.get("tick_timeout",
+                                              USAGE_WATCH_PROBE_TIMEOUT_S)),
+            "--warn-threshold", str(watch.get("warn_threshold",
+                                                USAGE_WARN_THRESHOLD_DEFAULT)),
+            "--limit-threshold", str(watch.get("limit_threshold",
+                                                 USAGE_LIMIT_THRESHOLD_DEFAULT)),
+            "--stale-after-minutes", str(watch.get(
+                "stale_after_minutes", USAGE_STALE_AFTER_MINUTES_DEFAULT)),
+            "--managed-lease", lease_id]
+    if watch.get("mode") == "apply":
+        argv.append("--apply")
+    return argv
+
+
+def spawn_usage_watch(agent, watch):
+    """Spawn one detached watcher and publish its pid before releasing the lock."""
+    lease_id = uuid.uuid4().hex
+    os.makedirs(USAGE_WATCHERS_DIR, exist_ok=True)
+    log_path = os.path.join(USAGE_WATCHERS_DIR, "%s.log" % agent)
+    popen_kwargs = {"cwd": HERE, "stdin": subprocess.DEVNULL}
+    if os.name == "nt":  # pragma: no cover - Windows-only process control
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    else:
+        popen_kwargs["start_new_session"] = True
+    with open(log_path, "ab") as log_fh:
+        popen_kwargs["stdout"] = log_fh
+        popen_kwargs["stderr"] = log_fh
+        proc = subprocess.Popen(usage_watch_child_argv(agent, watch, lease_id),
+                                **popen_kwargs)
+    row = write_usage_watch(
+        agent, mode=watch.get("mode", "advisory"),
+        interval=watch.get("interval", USAGE_WATCH_INTERVAL_DEFAULT_S),
+        started=iso(), phase="starting", pid=proc.pid, lease_id=lease_id,
+        tick_timeout=watch.get("tick_timeout", USAGE_WATCH_PROBE_TIMEOUT_S),
+        process_start_ref=fleet_process_start_ref(proc.pid))
+    row.update({
+        "warn_threshold": watch.get("warn_threshold", USAGE_WARN_THRESHOLD_DEFAULT),
+        "limit_threshold": watch.get("limit_threshold", USAGE_LIMIT_THRESHOLD_DEFAULT),
+        "stale_after_minutes": watch.get("stale_after_minutes",
+                                            USAGE_STALE_AFTER_MINUTES_DEFAULT),
+    })
+    atomic_write_json(usage_watch_path(agent), row)
+    return row
 
 
 def runtime_attention(status, agent, stale_after_seconds=ATTENTION_STALE_AFTER_SECONDS,
@@ -10525,11 +10737,253 @@ def cmd_usage_guard(args):
     return print_usage_guard_result("usage guard", code, payload, args.json)
 
 
+def run_usage_watch_probe(argv, timeout):
+    """Run one fresh probe process with a whole-process-group deadline."""
+    result = run_consult_process(
+        argv, HERE, os.environ.copy(), timeout, USAGE_MAX_STDOUT_BYTES)
+    if result["timed_out"]:
+        return None, "probe timed out after %gs" % timeout
+    if result["truncated"]:
+        return None, "probe output exceeded the bounded capture"
+    try:
+        payload = json.loads(result["stdout"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return None, "probe returned malformed JSON: %s" % exc
+    if not isinstance(payload, dict):
+        return None, "probe returned a non-object JSON value"
+    return payload, ""
+
+
+def usage_watch_tick_probe(args, agent):
+    timeout = (args.tick_timeout if args.tick_timeout > 0
+               else max(1.0, float(args.interval)))
+    argv = [sys.executable, SELF_PATH, "usage", "snapshot", "--json",
+            "--warn-threshold", str(args.warn_threshold),
+            "--limit-threshold", str(args.limit_threshold)]
+    if agent:
+        argv.extend(["--agent", agent])
+    payload, error = run_usage_watch_probe(argv, timeout)
+    if error:
+        return False, [{"severity": "error", "check": "usage.watch_tick",
+                        "message": error}]
+    findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
+    success = bool(payload.get("ok") and payload.get("snapshots"))
+    if not success:
+        findings = list(findings) + [{
+            "severity": "warning", "check": "usage.watch_read_unknown",
+            "message": "fresh tick produced no successful adapter snapshot",
+        }]
+    return success, findings
+
+
+def usage_watch_adapter_probe(agent, timeout=USAGE_WATCH_PROBE_TIMEOUT_S):
+    argv = [sys.executable, SELF_PATH, "usage", "adapters", "check",
+            "--agent", agent, "--json"]
+    payload, error = run_usage_watch_probe(argv, timeout)
+    if error:
+        return False, error
+    probed = payload.get("probed") if isinstance(payload.get("probed"), list) else []
+    ok = bool(payload.get("ok") and probed and all(row.get("ok") for row in probed))
+    return ok, "fresh adapter probe succeeded" if ok else \
+        "fresh adapter probe did not produce a successful enabled adapter read"
+
+
+def update_owned_usage_watch(agent, lease_id, updates):
+    try:
+        token = acquire_usage_watch_lock(agent)
+    except ValueError:
+        return False
+    try:
+        watch, err = read_usage_watch(agent)
+        if err or watch.get("lease_id") != lease_id or watch.get("pid") != os.getpid():
+            return False
+        watch.update(updates)
+        atomic_write_json(usage_watch_path(agent), watch)
+        return True
+    finally:
+        release_usage_watch_lock(agent, token)
+
+
+def register_usage_watch(args, agent):
+    token = acquire_usage_watch_lock(agent)
+    try:
+        watch, err = read_usage_watch(agent)
+        if err:
+            raise ValueError("usage watcher registry is malformed: %s" % err)
+        managed = bool(args.managed_lease and watch.get("lease_id") == args.managed_lease
+                       and watch.get("pid") == os.getpid())
+        if managed:
+            lease_id = args.managed_lease
+            started = watch.get("started") or iso()
+        else:
+            decision = usage_watch_start_decision(watch, replace=args.replace)
+            if not decision["allowed"]:
+                raise ValueError(
+                    "a live watcher is already registered for %s (pid %s); "
+                    "use --replace to terminate it and adopt the lease" %
+                    (agent, watch.get("pid")))
+            if decision["action"] == "replace" and not usage_watch_terminate(
+                    watch.get("pid"), watch.get("process_start_ref", "")):
+                raise ValueError("registered watcher could not be stopped for replacement")
+            lease_id = uuid.uuid4().hex
+            started = iso()
+        row = write_usage_watch(
+            agent, mode="apply" if args.apply else "advisory",
+            interval=args.interval, started=started, phase="running",
+            lease_id=lease_id, tick_timeout=(args.tick_timeout if args.tick_timeout > 0
+                                             else max(1.0, args.interval)))
+        row.update({"warn_threshold": args.warn_threshold,
+                    "limit_threshold": args.limit_threshold,
+                    "stale_after_minutes": args.stale_after_minutes})
+        atomic_write_json(usage_watch_path(agent), row)
+        return lease_id
+    finally:
+        release_usage_watch_lock(agent, token)
+
+
+def cmd_usage_watch_stop(args, agent):
+    token = acquire_usage_watch_lock(agent)
+    try:
+        watch, err = read_usage_watch(agent)
+        if err:
+            print("m8shift-runtime: usage watcher registry is malformed: %s" % err,
+                  file=sys.stderr)
+            return USAGE_GUARD_EXIT_MALFORMED
+        pid = watch.get("pid")
+        was_alive = isinstance(pid, int) and pid_alive(pid)
+        stopped = not was_alive or usage_watch_terminate(
+            pid, watch.get("process_start_ref", ""))
+        if not stopped:
+            print("m8shift-runtime: registered watcher did not stop", file=sys.stderr)
+            return USAGE_GUARD_EXIT_ERROR
+        if not watch:
+            watch = {
+                "schema": USAGE_WATCH_SCHEMA, "kind": "usage_watch",
+                "agent": agent, "pid": None, "process_start_ref": "",
+                "lease_id": "",
+                "mode": "advisory", "interval": USAGE_WATCH_INTERVAL_DEFAULT_S,
+                "started": iso(), "last_tick": "", "last_success": "",
+                "phase": "stopped", "stopped_at": iso(),
+                "tick_timeout": USAGE_WATCH_PROBE_TIMEOUT_S,
+                "consecutive_unknown": 0, "total_ticks": 0,
+                "successful_ticks": 0, "success_rate": None,
+            }
+            atomic_write_json(usage_watch_path(agent), watch)
+        else:
+            watch.update({"phase": "stopped", "stopped_at": iso()})
+            atomic_write_json(usage_watch_path(agent), watch)
+    finally:
+        release_usage_watch_lock(agent, token)
+    payload = {"ok": True, "action": "stopped", "agent": agent,
+               "pid": pid, "was_alive": was_alive, "runtime_version": VERSION}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print("usage watch stop: %s stopped%s" %
+              (agent, " (already inactive)" if not was_alive else ""))
+    return USAGE_GUARD_EXIT_OK
+
+
+def usage_watch_registry_agents(agent_filter):
+    if agent_filter:
+        return [agent_filter]
+    try:
+        names = os.listdir(USAGE_WATCHERS_DIR)
+    except OSError:
+        return []
+    return sorted(name[:-5] for name in names
+                  if name.endswith(".json") and AGENT_RE.fullmatch(name[:-5]))
+
+
+def usage_watch_residual_hold_finding(agent, args):
+    hold, err = read_usage_hold(agent)
+    if err or not hold:
+        return None
+    report, _latest, _findings = usage_ledger_report(
+        agent, args.warn_threshold, args.limit_threshold, args.stale_after_minutes)
+    if usage_worst_verdict(report) != "ok":
+        return None
+    return {"severity": "warning", "check": "usage.hold_residual",
+            "message": ("%s has a residual hold after a fresh ok verdict; remedy: "
+                        "usage resume --agent %s" % (agent, agent))}
+
+
+def cmd_usage_watch_reconcile(args, agent_filter):
+    findings = []
+    results = []
+    for agent in usage_watch_registry_agents(agent_filter):
+        token = acquire_usage_watch_lock(agent)
+        try:
+            watch, err = read_usage_watch(agent)
+            if err:
+                findings.append({"severity": "error", "check": "usage.watch_registry",
+                                 "message": "%s: %s" % (agent, err)})
+                results.append({"agent": agent, "action": "investigate"})
+                continue
+            if not watch:
+                watch = {
+                    "schema": USAGE_WATCH_SCHEMA, "agent": agent,
+                    "mode": "advisory", "interval": USAGE_WATCH_INTERVAL_DEFAULT_S,
+                    "tick_timeout": USAGE_WATCH_PROBE_TIMEOUT_S,
+                    "phase": "stopped", "pid": None,
+                }
+            health = usage_watch_health(watch)
+            probe_ok = False
+            probe_note = ""
+            if health["status"] in ("stale", "degraded"):
+                probe_ok, probe_note = usage_watch_adapter_probe(agent)
+            decision = usage_watch_reconcile_decision(watch, probe_ok=probe_ok)
+            action = decision["action"]
+            if action == "recycle":
+                if not usage_watch_terminate(
+                        watch.get("pid"), watch.get("process_start_ref", "")):
+                    action = "investigate"
+                    probe_note = "stale/degraded watcher could not be terminated"
+                else:
+                    watch = spawn_usage_watch(agent, watch)
+                    action = "recycled"
+            elif action == "start":
+                watch = spawn_usage_watch(agent, watch)
+                action = "started"
+            elif action == "keep":
+                action = "kept"
+            if action == "investigate":
+                findings.append({"severity": "warning", "check": "usage.watch_health",
+                                 "message": "%s: %s; %s" %
+                                 (agent, health["finding"], probe_note or "probe unavailable")})
+            results.append({"agent": agent, "action": action,
+                            "health": health["status"], "pid": watch.get("pid")})
+        finally:
+            release_usage_watch_lock(agent, token)
+        residual = usage_watch_residual_hold_finding(agent, args)
+        if residual:
+            findings.append(residual)
+    payload = {"ok": not any(f["severity"] == "error" for f in findings),
+               "watchers": results, "findings": findings,
+               "runtime_version": VERSION}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        for row in results:
+            print("usage watch reconcile: %s %s (health=%s pid=%s)" %
+                  (row["agent"], row["action"], row["health"], row.get("pid") or "-"))
+        print_usage_findings(findings)
+    return USAGE_GUARD_EXIT_ERROR if not payload["ok"] else USAGE_GUARD_EXIT_OK
+
+
 def cmd_usage_watch(args):
     agent_filter, agent_err = usage_agent_filter(args.agent)
     if agent_err:
         print(f"m8shift-runtime: {agent_err}", file=sys.stderr)
         return USAGE_GUARD_EXIT_USAGE
+    action = args.watch_action or "run"
+    if action == "stop":
+        if not agent_filter:
+            print("m8shift-runtime: usage watch stop requires --agent", file=sys.stderr)
+            return USAGE_GUARD_EXIT_USAGE
+        return cmd_usage_watch_stop(args, agent_filter)
+    if action == "reconcile":
+        return cmd_usage_watch_reconcile(args, agent_filter)
     if args.apply and not agent_filter:
         print("m8shift-runtime: usage watch --apply requires --agent", file=sys.stderr)
         return USAGE_GUARD_EXIT_USAGE
@@ -10540,33 +10994,62 @@ def cmd_usage_watch(args):
     if args.max_ticks < 0:
         print("m8shift-runtime: --max-ticks must be >= 0", file=sys.stderr)
         return USAGE_GUARD_EXIT_USAGE
+    if args.tick_timeout < 0:
+        print("m8shift-runtime: --tick-timeout must be >= 0", file=sys.stderr)
+        return USAGE_GUARD_EXIT_USAGE
     ticks = 0
     started = iso()
     last_tick = ""
     last_success = ""
+    successful_ticks = 0
+    consecutive_unknown = 0
     mode = "apply" if args.apply else "advisory"
     lifecycle_agent = agent_filter or ""
+    lease_id = ""
     if lifecycle_agent:
-        write_usage_watch(lifecycle_agent, mode=mode, interval=args.interval,
-                          started=started, phase="running")
+        try:
+            lease_id = register_usage_watch(args, lifecycle_agent)
+        except ValueError as exc:
+            print("m8shift-runtime: %s" % exc, file=sys.stderr)
+            return USAGE_GUARD_EXIT_ERROR
+
+    def stop_signal(_signum, _frame):
+        raise SystemExit(0)
+
+    if lifecycle_agent:
+        for signame in ("SIGTERM", "SIGINT"):
+            signum = getattr(signal, signame, None)
+            if signum is not None:
+                signal.signal(signum, stop_signal)
     try:
         while True:
             ticks += 1
+            tick_success, snapshot_findings = usage_watch_tick_probe(args, agent_filter)
             last_tick = iso()
-            if lifecycle_agent:
-                write_usage_watch(lifecycle_agent, mode=mode, interval=args.interval,
-                                  started=started, phase="running",
-                                  last_tick=last_tick, last_success=last_success)
-            _results, snapshot_findings, had_error, _skipped, config_error = \
-                collect_usage_snapshots(agent_filter, args.warn_threshold,
-                                        args.limit_threshold, False)
-            if not had_error and not config_error:
+            if tick_success:
                 last_success = iso()
+                successful_ticks += 1
+                consecutive_unknown = 0
+            else:
+                consecutive_unknown += 1
             code, payload = usage_guard_evaluate(
                 args, agent_filter, apply_mode=args.apply,
                 snapshot_findings=snapshot_findings,
-                snapshot_error=(had_error or config_error))
+                snapshot_error=not tick_success)
             payload["tick"] = ticks
+            payload["watch_health"] = {
+                "successful_ticks": successful_ticks, "total_ticks": ticks,
+                "success_rate": successful_ticks / ticks,
+                "consecutive_unknown": consecutive_unknown,
+            }
+            if lifecycle_agent:
+                update_owned_usage_watch(lifecycle_agent, lease_id, {
+                    "phase": "running", "last_tick": last_tick,
+                    "last_success": last_success,
+                    "consecutive_unknown": consecutive_unknown,
+                    "total_ticks": ticks, "successful_ticks": successful_ticks,
+                    "success_rate": successful_ticks / ticks,
+                })
             # A watch tick that sees an ok verdict NEVER resumes anything (PR B
             # non-goal: no automatic resume; only `usage resume` may resume).
             print_usage_guard_result(f"usage watch tick {ticks}", code, payload, args.json)
@@ -10575,9 +11058,13 @@ def cmd_usage_watch(args):
             time.sleep(args.interval)
     finally:
         if lifecycle_agent:
-            write_usage_watch(lifecycle_agent, mode=mode, interval=args.interval,
-                              started=started, phase="stopped",
-                              last_tick=last_tick, last_success=last_success)
+            update_owned_usage_watch(lifecycle_agent, lease_id, {
+                "phase": "stopped", "stopped_at": iso(),
+                "last_tick": last_tick, "last_success": last_success,
+                "consecutive_unknown": consecutive_unknown,
+                "total_ticks": ticks, "successful_ticks": successful_ticks,
+                "success_rate": successful_ticks / ticks if ticks else None,
+            })
 
 
 def cmd_usage_wait(args):
@@ -11388,17 +11875,24 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
     ugd.set_defaults(fn=cmd_usage_guard)
     uwt = usage_sub.add_parser(
         "watch",
-        help="poll loop: re-snapshot enabled adapters each tick, then evaluate the guard "
-             "verdict (never resumes anything)")
+        help="managed singleton poll loop plus stop/reconcile lifecycle verbs (never "
+             "resumes anything)")
+    uwt.add_argument("watch_action", nargs="?", choices=("run", "stop", "reconcile"),
+                     default="run", help="managed action (default: run)")
     uwt.add_argument("--agent", default="",
-                     help="agent to snapshot and guard (required with --apply)")
+                     help="agent to snapshot and guard (required with --apply/stop)")
     uwt.add_argument("--interval", type=float, default=USAGE_WATCH_INTERVAL_DEFAULT_S,
                      help="seconds between ticks; fractional values allowed (default: 60)")
+    uwt.add_argument("--tick-timeout", type=float, default=0,
+                     help="whole fresh-probe deadline per tick (default: max(1, interval))")
     uwt.add_argument("--max-ticks", type=int, default=0,
                      help="bound the loop to N ticks (test seam; 0 = unbounded); exit code "
                           "is the final tick's guard code")
     uwt.add_argument("--apply", action="store_true",
                      help="apply the guard --apply rules on each tick (limit_hit only)")
+    uwt.add_argument("--replace", action="store_true",
+                     help="terminate an already-live registered watcher and adopt its lease")
+    uwt.add_argument("--managed-lease", default="", help=argparse.SUPPRESS)
     usage_threshold_flags(uwt)
     uwt.add_argument("--json", action="store_true",
                      help="emit one machine-readable JSON line per tick")
