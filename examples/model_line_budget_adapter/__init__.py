@@ -1,4 +1,4 @@
-"""Fixture-safe model-line budget evidence adapters from RFC 077 Slices A/B."""
+"""Fixture-safe model-line evidence and pure policy from RFC 077 Slices A-C."""
 
 from .base import (
     EVIDENCE_SCHEMA,
@@ -16,6 +16,22 @@ from .vendors import (
     VENDOR_ADAPTER_REGISTRY,
     VendorAdapterRegistration,
 )
+from .policy import (
+    DECISION_SCHEMA,
+    DryRunPlan,
+    DurableCheckpoint,
+    EvidenceRef,
+    InvocationBoundary,
+    ModelPin,
+    OperatorPolicy,
+    RouteDecision,
+    compile_dry_run_plan,
+    decide_route,
+    evidence_state,
+    immutable_decision_path,
+    reconstruct_boundary,
+    write_immutable_decision,
+)
 
 __all__ = [
     "EVIDENCE_SCHEMA",
@@ -30,4 +46,18 @@ __all__ = [
     "OpenAIModelLineBudgetAdapter",
     "VENDOR_ADAPTER_REGISTRY",
     "VendorAdapterRegistration",
+    "DECISION_SCHEMA",
+    "DryRunPlan",
+    "DurableCheckpoint",
+    "EvidenceRef",
+    "InvocationBoundary",
+    "ModelPin",
+    "OperatorPolicy",
+    "RouteDecision",
+    "compile_dry_run_plan",
+    "decide_route",
+    "evidence_state",
+    "immutable_decision_path",
+    "reconstruct_boundary",
+    "write_immutable_decision",
 ]
