@@ -1,8 +1,10 @@
 # RFC implementation audit — 2026-07
 
-Audit baseline: repository commit `421e935` (v3.64.0 plus RFC 077 Slice B),
-2026-07-19. This is a repository/code audit, not a claim about unexported forge
-issue bodies or operator infrastructure.
+Initial audit baseline: repository commit `421e935` (v3.64.0 plus RFC 077 Slice
+B), 2026-07-19. The RFC 077 inventory and gap register were then advanced by
+issue #212 Slice C; other rows retain the initial baseline. This is a
+repository/code audit, not a claim about unexported forge issue bodies or
+operator infrastructure.
 
 ## Method and status vocabulary
 
@@ -114,7 +116,7 @@ standardized turn validator is the older Stage-4 surface in
 | 074 | design-only | All proposed slices are separately unauthorized. Existing `stage4.v1` fields do not implement the 15-stage taxonomy, successor schema, consumers, or exchange export. |
 | 075 | design-only | The comparative vendor matrix is the authorized Phase-1 research output. It intentionally selects no base class, live adapter, policy, threshold, or re-verification mechanism. |
 | 076 | design-only | The incident-first/deterministic/re-entrant contract is currently review-enforced policy. §9 explicitly leaves templates/doctor findings for a later authorization. |
-| 077 | partial | Slice A schemas/base fixtures and Slice B disabled vendor subclasses ship; Slices C–E remain gated. |
+| 077 | partial | Slices A/B evidence surfaces and Slice C pure policy/dry-run audit ship; listener integration and live-vendor Slices D/E remain gated. |
 
 Inventory totals: **46 implemented, 10 partial, 15 design-only, 4
 superseded, and 2 abandoned**. All integers 001–077 are represented; 068 is an
@@ -258,21 +260,19 @@ shipped.
 
 ### RFC 077 — safe-boundary model-line routing
 
-Implemented: §8 Slice A schemas/base conformance and §9 Slice B fixture-only
-Anthropic/OpenAI/Google/Mistral subclasses. Evidence is
+Implemented: §8 Slice A schemas/base conformance, §9 Slice B fixture-only
+Anthropic/OpenAI/Google/Mistral subclasses, and §10 Slice C pure policy plus
+dry-run immutable decision/reconstruction helpers. Evidence is
 `examples/model_line_budget_adapter/base.py:ModelLineBudgetAdapter`, the four
-classes in `vendors.py`, the disabled `VENDOR_ADAPTER_REGISTRY`, and
-`tests/test_model_line_vendor_adapters.py`.
+classes in `vendors.py`, the disabled `VENDOR_ADAPTER_REGISTRY`, `policy.py`,
+and `tests/test_model_line_route_policy.py`.
 
-Missing, exactly as RFC 077 §10 gates it:
+Missing, exactly as RFC 077 §11 gates it:
 
-1. **Slice C:** pure decision-table state machine plus dry-run immutable
-   route/audit plan, including stale target, ordered fallback, oscillation cap,
-   active/corrupt usage hold, adapter-error, and partial-effect refusal cases.
-2. **Slice D:** opt-in listener integration only at the next safe invocation
+1. **Slice D:** opt-in listener integration only at the next safe invocation
    boundary, with hold precedence, halt/notify, durable reconstruction, exact
    RFC 070 argv, and byte-for-byte relay/ownership non-mutation tests.
-3. **Slice E:** one live-vendor pilot after separate operator authorization and
+2. **Slice E:** one live-vendor pilot after separate operator authorization and
    fresh contract verification. All four registry rows currently remain
    `enabled=false`, `retrieval=fixture_only`.
 
@@ -359,7 +359,6 @@ Voluntary design-only proposals above are excluded.
 
 | Priority | Gap | Why now / completion signal |
 |---:|---|---|
-| P0 | Specify and implement RFC 077 Slice C | A pure, fixture-complete state machine and immutable dry-run plan are prerequisites for any switch; no credentials or live calls needed. |
 | P0 | Resolve RFC 068 as a real RFC artifact | The current “rotation token” dependency has no auditable contract. Write/arbitrate it (or explicitly abandon/renumber it) before allowing dependent rotation/routing work to cite it. |
 | P0 | #212 vendor-contract re-verification gate | Slice E must not rely on a stale 2026-07 matrix. Define source-date/expiry/drift evidence and keep live enablement fail-closed. |
 | P0 | #222 HISTORY reachability and carrier-ref findings | Current full-history scrub can false-block delivery on unreachable commits retained by stale refs. Scope reachable history deliberately and name the refs that keep a hit alive. |

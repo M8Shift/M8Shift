@@ -1,8 +1,7 @@
 # RFC 077 — Safe-boundary model-line evidence and routing
 
-- **Status:** accepted design; Slices A/B schemas, fixture conformance, and
-  disabled fixture-backed vendor subclasses implemented; automatic routing
-  remains disabled
+- **Status:** accepted design; Slices A-C schemas, fixture adapters, pure policy,
+  and immutable dry-run audit implemented; listener routing remains disabled
 - **Date:** 2026-07-18
 - **Issue:** #212
 - **Scope:** same-provider model-line evidence, deterministic safe-boundary
@@ -278,13 +277,45 @@ The mappings preserve the vendor rules in §4:
 `retrieval=fixture_only`. Live retrieval and authentication remain reserved for
 the separately authorized Slice E pilot.
 
-## 10. Gated delivery slices
+## 10. Slice C implementation
+
+Slice C adds `examples/model_line_budget_adapter/policy.py`. Its state machine
+is a pure function of an active RFC 070 pin, normalized Slice A/B evidence, an
+explicit operator policy, a bounded invocation observation, usage-hold state,
+switch count, and injected time/checkpoint availability. It performs no file,
+process, network, credential, adapter, listener, or relay operation.
+
+The hold gate returns before evidence validation, preserving §5 composition.
+The remaining eight rules produce only `continue`, `observe_only`,
+`route_next_invocation`, or `clean_halt`, with stable reason codes. The default
+policy has automation disabled. Automation validation requires an ordered,
+non-empty fallback tuple; targets must match the active provider, mode, and auth
+scope; the default switch cap is one. Candidate order is preserved, unavailable
+or aggregate evidence is never promoted, and every route is explicitly for the
+checkpoint's next invocation with `replay=false`.
+
+`compile_dry_run_plan` compiles the requested and selected RFC 070 pins and the
+existing `m8shift.route-decision.v1` record without launching. The separate
+writer uses canonical JSON, a same-directory durable temporary file, and an
+exclusive hard link so an existing decision id cannot be overwritten. A
+blank-agent reconstruction helper verifies the attempt-plan and exact closed
+relay-turn hashes before returning the old/new pins, ordinals, policy, and
+reason. Hold rejection intentionally writes no model-line decision because §5
+stops before any adapter/evidence record exists; the authoritative usage-hold
+artifact remains the admission evidence.
+
+Slice C includes no provider argv execution, listener integration, live switch,
+notification, usage-hold mutation, or relay write. Those boundaries remain in
+separately reviewed Slices D/E.
+
+## 11. Gated delivery slices
 
 - **A — implemented here:** RFC, schemas, fixtures, and base-class conformance;
   no live auth.
 - **B — implemented here:** external fixture-backed vendor subclasses, disabled
   by default, with honest malformed/auth/throttle degradation.
-- **C:** pure policy state machine and dry-run route/audit plan; no switching.
+- **C — implemented here:** pure decision table, ordered RFC 070 pin plan,
+  create-exclusive audit record, and durable-boundary reconstruction; no switch.
 - **D:** opt-in listener integration at the safe invocation boundary, including
   hold precedence, halt/notify, reconstruction, and no-relay-mutation tests.
 - **E:** one live-vendor pilot only after separate operator authorization and
@@ -297,7 +328,7 @@ adapter crash/oversize/malformed output, active/corrupt usage hold, exact RFC 07
 argv, immutable decision record, reconstruction from durable artifacts, and
 proof that the relay bytes and ownership are unchanged.
 
-## 11. Rejected alternatives
+## 12. Rejected alternatives
 
 - **Amend RFC 075 in place:** rejected; its accepted Phase 1 evidence record
   should remain distinct from the selected Phase 2 behavior.

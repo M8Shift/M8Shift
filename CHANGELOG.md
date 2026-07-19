@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **RFC 077 Slice C — pure safe-boundary route policy (#212).** A fixture-side
+  eight-rule state machine now consumes normalized model-line facts and explicit
+  ordered RFC 070 pins without invoking an adapter or provider. Usage holds win
+  before evidence inspection; unknown/stale/aggregate targets never authorize a
+  route; partial output, tool effects, unsafe refusals, missing checkpoints, and
+  the default one-switch cap halt with stable causes. Dry-run plans apply only
+  to the next invocation and never replay. Canonical route-decision records are
+  create-exclusive, and the blank-agent helper verifies the attempt-plan and
+  closed-turn hashes before reconstructing the switch boundary. Listener
+  integration, live switching, credentials, and relay mutation remain absent.
+
 - **RFC 077 Slice B — disabled vendor evidence adapters (#212).** The external
   model-line example package now supplies fixture-backed Anthropic, OpenAI,
   Google, and Mistral subclasses behind an injected bounded retriever. All four
