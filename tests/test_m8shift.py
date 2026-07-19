@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -51,6 +52,242 @@ class TestPureFunctions(unittest.TestCase):
         runtime = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(runtime)
         self.assertEqual(runtime.LISTENER_PHASES, cowork.LISTENER_PHASES)
+
+    def test_usage_watch_incident_variants_detect_and_converge(self):
+        """#214 fixtures 1-4 use only a mock clock and mock pid evidence."""
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_watch_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        instant = dt.datetime(2026, 7, 19, 12, 0, 0, tzinfo=dt.timezone.utc)
+        base = {
+            "schema": runtime.USAGE_WATCH_SCHEMA,
+            "agent": "claude", "phase": "running", "pid": 4242,
+            "lease_id": "lease-a",
+            "interval": 60.0, "started": "2026-07-19T11:55:00Z",
+            "last_tick": "2026-07-19T11:59:30Z",
+            "consecutive_unknown": 0,
+        }
+
+        # 1. A silently dead registered pid is detected and converges by start.
+        dead = runtime.usage_watch_reconcile_decision(
+            base, now_utc=instant, pid_probe=lambda _pid: False)
+        self.assertEqual((dead["health"]["status"], dead["action"]),
+                         ("dead", "start"))
+        reused = dict(base, process_start_ref="process-start-a")
+        with mock.patch.object(runtime, "fleet_process_start_ref",
+                               return_value="process-start-b"):
+            reused_result = runtime.usage_watch_reconcile_decision(
+                reused, now_utc=instant, pid_probe=lambda _pid: True)
+        self.assertEqual((reused_result["health"]["status"],
+                          reused_result["action"]), ("dead", "start"))
+
+        # 2. A dual-epoch start is refused; --replace is the named convergence.
+        refused = runtime.usage_watch_start_decision(
+            base, replace=False, pid_probe=lambda _pid: True)
+        replaced = runtime.usage_watch_start_decision(
+            base, replace=True, pid_probe=lambda _pid: True)
+        kept = runtime.usage_watch_reconcile_decision(
+            base, now_utc=instant, pid_probe=lambda _pid: True)
+        self.assertEqual((refused["allowed"], refused["action"]),
+                         (False, "refuse_live"))
+        self.assertEqual((replaced["allowed"], replaced["action"]),
+                         (True, "replace"))
+        self.assertEqual(kept["action"], "keep")
+
+        # 3. A live pid with no fresh tick is HUNG; a fresh probe recycles it.
+        hung = dict(base, last_tick="2026-07-19T11:00:00Z")
+        hung_result = runtime.usage_watch_reconcile_decision(
+            hung, probe_ok=True, now_utc=instant, pid_probe=lambda _pid: True)
+        self.assertEqual((hung_result["health"]["status"], hung_result["action"]),
+                         ("stale", "recycle"))
+
+        # 4. Fresh ticks with repeated failed reads are degraded, not healthy.
+        denied = dict(base, consecutive_unknown=runtime.USAGE_WATCH_UNKNOWN_LIMIT)
+        denied_result = runtime.usage_watch_reconcile_decision(
+            denied, probe_ok=True, now_utc=instant, pid_probe=lambda _pid: True)
+        self.assertEqual((denied_result["health"]["status"], denied_result["action"]),
+                         ("degraded", "recycle"))
+
+        # A live pre-lease watcher is killed before a managed lease is adopted.
+        legacy = dict(base, lease_id="")
+        legacy_result = runtime.usage_watch_reconcile_decision(
+            legacy, now_utc=instant, pid_probe=lambda _pid: True)
+        self.assertEqual((legacy_result["health"]["status"],
+                          legacy_result["action"]), ("legacy", "recycle"))
+
+        # A transient identity-probe failure for a live pid cannot authorize a
+        # duplicate start, even when --replace was requested.
+        unverifiable = dict(base, lease_id="lease-a",
+                            process_start_ref="process-start-a")
+        with mock.patch.object(runtime, "fleet_process_start_ref", return_value=""):
+            invalid = runtime.usage_watch_start_decision(
+                unverifiable, replace=True, pid_probe=lambda _pid: True)
+        self.assertEqual((invalid["allowed"], invalid["action"]),
+                         (False, "investigate"))
+
+        # Operator stop intent survives reconciliation.
+        stopped = dict(base, phase="stopped", desired_state="stopped",
+                       lease_id="", pid=None)
+        stopped_result = runtime.usage_watch_reconcile_decision(stopped)
+        self.assertEqual(stopped_result["action"], "keep_stopped")
+
+    def test_usage_watch_legacy_identity_fails_closed_before_signal(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_identity_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        with mock.patch.object(runtime, "process_argv",
+                               return_value=["/bin/sleep", "60"]), \
+                mock.patch.object(runtime, "_posix_signal_group_or_pid") as send:
+            self.assertFalse(runtime.usage_watch_terminate(4242, ""))
+        send.assert_not_called()
+
+    def test_usage_watch_stale_lock_race_has_one_winner(self):
+        """Two stale breakers cannot both return ownership of different inodes."""
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_lock_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        with tempfile.TemporaryDirectory(prefix="m8shift-watch-lock-") as directory:
+            runtime.USAGE_WATCHERS_DIR = directory
+            lock_path = runtime.usage_watch_lock_path("claude")
+            with open(lock_path, "w", encoding="utf-8") as fh:
+                json.dump({"pid": 999999, "token": "stale"}, fh)
+
+            real_open, real_unlink = os.open, os.unlink
+            observed = 0
+            unlinks = 0
+            guard = threading.Lock()
+            both_observed = threading.Event()
+            fresh_created = threading.Event()
+            second_unlinked = threading.Event()
+
+            def racing_open(target, flags, *args, **kwargs):
+                nonlocal observed
+                try:
+                    fd = real_open(target, flags, *args, **kwargs)
+                except FileExistsError:
+                    if target == lock_path:
+                        with guard:
+                            observed += 1
+                            if observed == 2:
+                                both_observed.set()
+                        self.assertTrue(both_observed.wait(2))
+                    raise
+                if target == lock_path and observed >= 2 and not fresh_created.is_set():
+                    fresh_created.set()
+                    self.assertTrue(second_unlinked.wait(2))
+                return fd
+
+            def racing_unlink(target, *args, **kwargs):
+                nonlocal unlinks
+                if target != lock_path:
+                    return real_unlink(target, *args, **kwargs)
+                with guard:
+                    unlinks += 1
+                    ordinal = unlinks
+                if ordinal == 1:
+                    return real_unlink(target, *args, **kwargs)
+                if ordinal == 2:
+                    self.assertTrue(fresh_created.wait(2))
+                    try:
+                        return real_unlink(target, *args, **kwargs)
+                    finally:
+                        second_unlinked.set()
+                return real_unlink(target, *args, **kwargs)
+
+            successes, failures = [], []
+            release = threading.Event()
+
+            def contender():
+                try:
+                    token = runtime.acquire_usage_watch_lock("claude")
+                    successes.append(token)
+                    release.wait(3)
+                    runtime.release_usage_watch_lock("claude", token)
+                except ValueError as exc:
+                    failures.append(str(exc))
+
+            with mock.patch.object(runtime.os, "open", side_effect=racing_open), \
+                    mock.patch.object(runtime.os, "unlink", side_effect=racing_unlink), \
+                    mock.patch.object(runtime, "fleet_process_start_ref",
+                                      side_effect=lambda pid: "ref-%s" % pid):
+                threads = [threading.Thread(target=contender) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                deadline = time.monotonic() + 3
+                while not successes and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                for thread in threads:
+                    thread.join(timeout=2.5)
+                release.set()
+                for thread in threads:
+                    thread.join(timeout=1)
+            self.assertEqual((len(successes), len(failures)), (1, 1))
+
+    def test_usage_watch_lock_busy_is_reported_without_traceback(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_busy_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        stop_args = argparse.Namespace(json=True)
+        reconcile_args = argparse.Namespace(json=True, warn_threshold=0.8,
+                                             limit_threshold=1.0,
+                                             stale_after_minutes=30)
+        with mock.patch.object(runtime, "acquire_usage_watch_lock",
+                               side_effect=ValueError("transaction is busy")), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runtime.cmd_usage_watch_stop(stop_args, "claude"),
+                             runtime.USAGE_GUARD_EXIT_ERROR)
+            self.assertEqual(runtime.cmd_usage_watch_reconcile(
+                reconcile_args, "claude"), runtime.USAGE_GUARD_EXIT_ERROR)
+
+    def test_usage_watch_empty_adapter_set_is_not_a_failed_read(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_empty_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        payload = {"ok": True, "snapshots": [], "findings": [{
+            "severity": "warning", "check": "usage.no_adapter",
+            "message": "no enabled usage adapter matched",
+        }]}
+        args = argparse.Namespace(tick_timeout=1.0, interval=60,
+                                  warn_threshold=0.8, limit_threshold=1.0)
+        with mock.patch.object(runtime, "run_usage_watch_probe",
+                               return_value=(payload, "")):
+            success, findings = runtime.usage_watch_tick_probe(args, "claude")
+        self.assertTrue(success)
+        self.assertEqual(findings[0]["check"], "usage.no_adapter")
+
+    def test_usage_watch_whole_tick_probe_timeout_is_a_failed_tick(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_tick_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        timed_out = {"returncode": -9, "stdout": b"", "truncated": False,
+                     "timed_out": True}
+        with mock.patch.object(runtime, "run_consult_process", return_value=timed_out):
+            payload, error = runtime.run_usage_watch_probe(["probe"], 2.0)
+        self.assertIsNone(payload)
+        self.assertIn("timed out after 2s", error)
+
+    def test_usage_watch_reconcile_names_residual_hold_remedy(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_hold_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        args = argparse.Namespace(warn_threshold=0.8, limit_threshold=1.0,
+                                  stale_after_minutes=30)
+        report = [{"classification": "ok"}]
+        with mock.patch.object(runtime, "read_usage_hold",
+                               return_value=({"agent": "claude"}, None)), \
+                mock.patch.object(runtime, "usage_ledger_report",
+                                  return_value=(report, {}, [])):
+            finding = runtime.usage_watch_residual_hold_finding("claude", args)
+        self.assertEqual(finding["check"], "usage.hold_residual")
+        self.assertIn("usage resume --agent claude", finding["message"])
 
     def test_listener_snapshot_decision_table(self):
         instant = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
@@ -7265,6 +7502,93 @@ class TestRuntimeCompanion(CLIBase):
         self.assertTrue(doc["last_tick"])
         with open(relay, "rb") as fh:
             self.assertEqual(fh.read(), before)
+
+    def test_usage_watch_singleton_refuses_duplicate_and_stop_manages_registry(self):
+        self.init()
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift-runtime.py", "usage", "watch",
+             "--agent", "claude", "--interval", "5", "--json"],
+            cwd=self.d, env=self.clean_env(), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        path = os.path.join(self.d, ".m8shift", "runtime", "usage-watchers",
+                            "claude.json")
+        try:
+            deadline = time.monotonic() + 5
+            row = {}
+            while time.monotonic() < deadline:
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        row = json.load(fh)
+                except (OSError, json.JSONDecodeError):
+                    pass
+                if row.get("phase") == "running" and row.get("pid") == proc.pid:
+                    break
+                time.sleep(0.05)
+            self.assertEqual((row.get("phase"), row.get("pid")),
+                             ("running", proc.pid), row)
+
+            duplicate = self.rt("usage", "watch", "--agent", "claude",
+                                "--max-ticks", "1", "--json")
+            self.assertEqual(duplicate.returncode, 30,
+                             duplicate.stdout + duplicate.stderr)
+            self.assertIn("live watcher is already registered", duplicate.stderr)
+
+            stopped = self.rt("usage", "watch", "stop", "--agent", "claude",
+                              "--json")
+            runtime = self.load_runtime()
+            identity_visible = bool(row.get("process_start_ref")
+                                    or runtime.usage_watch_process_matches(proc.pid))
+            if identity_visible:
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr + repr(row))
+                proc.communicate(timeout=5)
+            else:
+                # Sandboxed macOS may deny both ps identity probes. Fail closed,
+                # then prove an already-dead watcher can still be marked stopped.
+                self.assertEqual(stopped.returncode, 30,
+                                 stopped.stdout + stopped.stderr + repr(row))
+                proc.kill()
+                proc.communicate(timeout=5)
+                stopped = self.rt("usage", "watch", "stop", "--agent", "claude",
+                                  "--json")
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr + repr(row))
+            with open(path, encoding="utf-8") as fh:
+                row = json.load(fh)
+            self.assertEqual(row["phase"], "stopped")
+            self.assertEqual(row["desired_state"], "stopped")
+
+            reconciled = self.rt("usage", "watch", "reconcile", "--agent",
+                                 "claude", "--json")
+            self.assertEqual(reconciled.returncode, 0,
+                             reconciled.stdout + reconciled.stderr)
+            watcher = json.loads(reconciled.stdout)["watchers"][0]
+            self.assertEqual(watcher["action"], "stopped")
+            self.assertIsNone(watcher["pid"])
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+    def test_usage_watch_reconcile_quarantines_malformed_registry(self):
+        self.init()
+        directory = os.path.join(self.d, ".m8shift", "runtime", "usage-watchers")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "claude.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{broken")
+        result = self.rt("usage", "watch", "reconcile", "--agent", "claude",
+                         "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["watchers"][0]["action"], "quarantined")
+        with open(path, encoding="utf-8") as fh:
+            row = json.load(fh)
+        self.assertEqual((row["phase"], row["desired_state"]),
+                         ("stopped", "stopped"))
+        quarantines = [name for name in os.listdir(directory)
+                       if name.startswith("claude.json.malformed-")]
+        self.assertEqual(len(quarantines), 1)
 
     def test_notify_only_listener_reports_notification_without_invocation(self):
         self.init()
