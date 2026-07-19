@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Bounded advisory provider consultations (#225).** `m8shift-runtime.py
+  consult` compiles a separate shell-free provider argv and refuses launch
+  without adapter-produced `sandbox=read_only`, physical-root cwd,
+  literal-prompt, and exact argv-evidence attestations. Timeout and output caps
+  bound the whole process group. One terminal `m8shift.consult.exchange.v1`
+  record goes to the dedicated `consults.jsonl` side-ledger with a redacted
+  brief, argv/response digests, closed classification, and response-sink
+  reference; provider response bodies never enter durable logs. Optional saved
+  responses are non-overwriting, kit-relative private artifacts under
+  `.m8shift/runtime/`. Doctor distinguishes an empty provider registry from the
+  compound half-provisioned registry-plus-runner condition without granting the
+  companion any relay authority.
+
 ## v3.64.0 — 2026-07-18
 
 - **Executable bootstrap incident and compatibility gate (#208, #216).** The

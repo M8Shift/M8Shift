@@ -8196,6 +8196,8 @@ class TestRuntimeCompanion(CLIBase):
         self.assertIn(".m8shift/runtime/presence.json", created)
         self.assertIn(".m8shift/runtime/notify.config.json", created)
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl")))
+        self.assertTrue(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "consults.jsonl")))
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "runtime", "inbox")))
         self.assertTrue(os.path.exists(os.path.join(self.d, ".m8shift", "roles", "implementer.md")))
 
@@ -8324,6 +8326,210 @@ class TestRuntimeCompanion(CLIBase):
             and "gemini" in finding["message"]
             for finding in payload["findings"]
         ), payload)
+
+    def test_compile_consult_argv_requires_structured_read_only_evidence(self):
+        runtime = self.load_runtime()
+        root = os.path.realpath(self.d)
+        row = {
+            "name": "peer", "provider": "placeholder-provider", "mode": "local",
+            "anchor": "AGENTS.md", "model": "UNSET",
+            "argv": ["placeholder-cli", "$M8SHIFT_PROMPT"],
+            "capabilities": ["review"], "requires_env": [], "env_allowlist": [],
+            "permissions": "read-only",
+            "consult": {
+                "argv": ["placeholder-cli", "--sandbox", "read-only",
+                         "$M8SHIFT_PROMPT"],
+                "attestation": {
+                    "sandbox": "read_only", "sandbox_argv": ["--sandbox", "read-only"],
+                    "cwd": "$M8SHIFT_ROOT", "prompt": "literal",
+                },
+            },
+        }
+        compiled = runtime.compile_consult_argv(row, "review this", root, "consult-1")
+        self.assertEqual(compiled["argv"], [
+            "placeholder-cli", "--sandbox", "read-only", "review this",
+        ])
+        self.assertEqual(compiled["attestation"]["sandbox"], "read_only")
+        self.assertEqual(compiled["attestation"]["cwd"], root)
+        self.assertEqual(compiled["argv"].count("review this"), 1)
+
+        bad = json.loads(json.dumps(row))
+        bad["consult"]["attestation"]["sandbox"] = "workspace_write"
+        with self.assertRaisesRegex(ValueError, "read_only"):
+            runtime.compile_consult_argv(bad, "review this", root, "consult-2")
+        missing_evidence = json.loads(json.dumps(row))
+        missing_evidence["consult"]["argv"].remove("read-only")
+        with self.assertRaisesRegex(ValueError, "sandbox evidence"):
+            runtime.compile_consult_argv(
+                missing_evidence, "review this", root, "consult-3")
+        embedded = json.loads(json.dumps(row))
+        embedded["consult"]["argv"][-1] = "prompt=$M8SHIFT_PROMPT"
+        with self.assertRaisesRegex(ValueError, "literal"):
+            runtime.compile_consult_argv(embedded, "review this", root, "consult-4")
+
+    def test_consult_records_redacted_digest_only_exchange_and_private_sink(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        provider = os.path.join(self.d, "placeholder-provider.py")
+        with open(provider, "w", encoding="utf-8") as fh:
+            fh.write("import sys\nsys.stdout.write('private-response:' + sys.argv[-1])\n")
+        registry = {
+            "schema": "m8shift.providers.v1", "examples": [],
+            "agents": [{
+                "name": "peer", "provider": "placeholder-provider", "mode": "local",
+                "anchor": "AGENTS.md", "model": "UNSET",
+                "argv": [sys.executable, provider, "$M8SHIFT_PROMPT"],
+                "capabilities": ["review"], "requires_env": [],
+                "env_allowlist": ["PATH"], "permissions": "read-only",
+                "consult": {
+                    "argv": [sys.executable, provider, "--sandbox=read_only",
+                             "$M8SHIFT_PROMPT"],
+                    "attestation": {
+                        "sandbox": "read_only",
+                        "sandbox_argv": ["--sandbox=read_only"],
+                        "cwd": "$M8SHIFT_ROOT", "prompt": "literal",
+                    },
+                },
+            }],
+        }
+        with open(os.path.join(self.d, ".m8shift", "providers.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        brief = os.path.join(self.d, "brief.txt")
+        with open(brief, "w", encoding="utf-8") as fh:
+            fh.write("Review ForeignProject token=secret-value-12345678")
+        denylist = os.path.join(self.d, "denylist.txt")
+        with open(denylist, "w", encoding="utf-8") as fh:
+            fh.write("ForeignProject\n")
+        before = self.md()
+        sink = ".m8shift/runtime/consult-responses/peer.txt"
+        result = self.rt_env(
+            {"M8SHIFT_DENYLIST": denylist},
+            "consult", "--from", "codex", "--to", "peer",
+            "--brief-file", brief, "--save-response", sink,
+            "--timeout", "5", "--max-output-bytes", "4096",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.md(), before, "consult must never mutate relay state")
+        response_path = os.path.join(self.d, *sink.split("/"))
+        with open(response_path, "rb") as fh:
+            response = fh.read()
+        ledger_path = os.path.join(self.d, ".m8shift", "runtime", "consults.jsonl")
+        with open(ledger_path, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["schema"], "m8shift.consult.exchange.v1")
+        self.assertEqual(row["classification"], "completed")
+        self.assertEqual(row["authority"], "advisory")
+        self.assertEqual(row["sandbox"], "read_only")
+        self.assertTrue(row["cwd_attested"])
+        self.assertTrue(row["prompt_attested"])
+        self.assertEqual(row["response_sink"], sink)
+        self.assertTrue(row["response_saved"])
+        self.assertEqual(row["response_sha256"], hashlib.sha256(response).hexdigest())
+        self.assertEqual(row["response_bytes"], len(response))
+        durable = json.dumps(row, ensure_ascii=False)
+        self.assertNotIn("ForeignProject", durable)
+        self.assertNotIn("secret-value-12345678", durable)
+        self.assertNotIn("private-response", durable)
+        self.assertNotIn("argv", row)
+        self.assertIn("[redacted]", row["brief_redacted"].lower())
+        self.assertIn("[REDACTED]", row["brief_redacted"])
+
+    def test_consult_fail_closed_refusal_never_launches_and_paths_stay_runtime_relative(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        marker = os.path.join(self.d, "provider-launched")
+        provider = os.path.join(self.d, "refusing-provider.py")
+        with open(provider, "w", encoding="utf-8") as fh:
+            fh.write("import pathlib, sys\npathlib.Path(sys.argv[1]).write_text('bad')\n")
+        registry = {
+            "schema": "m8shift.providers.v1", "examples": [],
+            "agents": [{
+                "name": "peer", "provider": "placeholder-provider", "mode": "local",
+                "anchor": "AGENTS.md", "model": "UNSET",
+                "argv": [sys.executable, provider, marker, "$M8SHIFT_PROMPT"],
+                "capabilities": ["review"], "requires_env": [], "env_allowlist": [],
+                "permissions": "read-only",
+                "consult": {
+                    "argv": [sys.executable, provider, marker,
+                             "--sandbox=workspace_write", "$M8SHIFT_PROMPT"],
+                    "attestation": {
+                        "sandbox": "workspace_write",
+                        "sandbox_argv": ["--sandbox=workspace_write"],
+                        "cwd": "$M8SHIFT_ROOT", "prompt": "literal",
+                    },
+                },
+            }],
+        }
+        with open(os.path.join(self.d, ".m8shift", "providers.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        brief = os.path.join(self.d, "brief.txt")
+        with open(brief, "w", encoding="utf-8") as fh:
+            fh.write("review")
+        outside = os.path.join(self.d, "outside.txt")
+        result = self.rt(
+            "consult", "--from", "codex", "--to", "peer",
+            "--brief-file", brief, "--save-response", outside,
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(marker))
+        self.assertFalse(os.path.exists(outside))
+        ledger = os.path.join(self.d, ".m8shift", "runtime", "consults.jsonl")
+        with open(ledger, encoding="utf-8") as fh:
+            row = json.loads(next(line for line in fh if line.strip()))
+        self.assertEqual(row["classification"], "launch_refused")
+        self.assertEqual(row["compiled_argv_sha256"], "")
+        self.assertEqual(row["response_sink"], "invalid")
+        self.assertNotIn(self.d, json.dumps(row))
+
+    def test_consult_classification_enum_timeout_provider_failure_and_invalid_output(self):
+        runtime = self.load_runtime()
+        self.assertEqual(runtime.CONSULT_CLASSIFICATIONS, {
+            "completed", "timed_out", "launch_refused", "provider_failed",
+            "invalid_output",
+        })
+        root = os.path.realpath(self.d)
+        timeout = runtime.run_consult_process(
+            [sys.executable, "-c", "import time; print('partial'); time.sleep(2)"],
+            root, {}, 1, 1024,
+        )
+        self.assertTrue(timeout["timed_out"])
+        failed = runtime.run_consult_process(
+            [sys.executable, "-c", "raise SystemExit(7)"], root, {}, 5, 1024,
+        )
+        self.assertEqual(failed["returncode"], 7)
+        empty = runtime.run_consult_process(
+            [sys.executable, "-c", "pass"], root, {}, 5, 1024,
+        )
+        self.assertEqual(empty["stdout"], b"")
+        bounded = runtime.run_consult_process(
+            [sys.executable, "-c", "print('x' * 5000)"], root, {}, 5, 64,
+        )
+        self.assertEqual(len(bounded["stdout"]), 64)
+        self.assertTrue(bounded["truncated"])
+
+    def test_doctor_graduates_empty_registry_and_missing_compatible_runner(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        registry_path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(registry_path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.providers.v1", "agents": [],
+                       "examples": []}, fh)
+        first = json.loads(self.rt("doctor", "--json").stdout)
+        first_checks = {finding["check"] for finding in first["findings"]}
+        self.assertIn("providers.registry_empty", first_checks)
+        self.assertIn("consult.kit_incomplete", first_checks)
+        examples = os.path.join(self.d, "examples")
+        os.makedirs(examples, exist_ok=True)
+        shutil.copy(os.path.join(REPO, "examples", "headless_runner.py"),
+                    os.path.join(examples, "headless_runner.py"))
+        second = json.loads(self.rt("doctor", "--json").stdout)
+        second_checks = {finding["check"] for finding in second["findings"]}
+        self.assertIn("providers.registry_empty", second_checks)
+        self.assertNotIn("consult.kit_incomplete", second_checks)
 
     def test_provider_platform_argv_selection_and_validation(self):
         self.init()
