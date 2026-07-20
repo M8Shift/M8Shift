@@ -118,7 +118,10 @@ setup as autonomous.
 
 Usage values carry the core snapshot's `fresh|stale|unknown` verdict. Stale
 remaining ratios remain visible only with an explicit `STALE` token in every
-layout and colour mode; unknown age never renders as a live percentage. The ATTENTION
+layout and colour mode. If the snapshot is stale and its recorded reset has
+already passed, the stronger `WINDOW ROLLED — data predates reset` state removes
+the obsolete ratio entirely: that percentage belongs to a provider window that
+no longer exists. Unknown age never renders as a live percentage. The ATTENTION
 verdict separately shows `covered`, `human_resume_needed`, or `stranded` and
 does not grant claim or invocation authority.
 
@@ -180,6 +183,9 @@ activity row:
 - **unknown** is unclassified wall time whose transition evidence is missing,
   malformed, unsupported, or ambiguous. It is always retained when accounting
   is partial.
+
+The strip captions its accounting window with `since session start DATE`, so a
+terminal capture cannot be mistaken for a rolling recent-time view.
 
 The accounting invariant is `wall = effective + non-work + unknown`. Coverage
 is `(wall - unknown) / wall`. An exact record has 100% coverage and omits
