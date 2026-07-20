@@ -335,6 +335,7 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         print("scrub-check: ERROR each --ref requires one corresponding --range",
               file=err)
         return 2
+    validated_range_refs = []
     if range_refs:
         for refname in range_refs:
             try:
@@ -342,8 +343,15 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
             except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
                 checked = None
             if checked is None or checked.returncode != 0:
-                print("scrub-check: ERROR invalid --ref %r" % refname, file=err)
-                return 2
+                # --ref is attribution metadata, never scan authority.  A
+                # malformed label must not turn a real range scan into the
+                # hooks' rc>=2 fail-open path.
+                print("scrub-check: WARNING invalid --ref label ignored; "
+                      "scanning continues with the derived range carrier",
+                      file=err)
+                validated_range_refs.append(None)
+            else:
+                validated_range_refs.append(refname)
     # Range mode: tip-scan each distinct pushed tip, history-scan each range.
     # Default direct mode is HEAD-only; --all is the explicit repository audit.
     tip_revs = []
@@ -354,7 +362,7 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         tip_revs = ["HEAD"]
     history_runs = []
     for index, (_rev, range_args) in enumerate(specs):
-        refname = range_refs[index] if range_refs else None
+        refname = validated_range_refs[index] if validated_range_refs else None
         history_runs.append((range_args, range_carrier(refname, range_args)))
     if not history_runs:
         history_runs = [(None, None if args.all else "ref HEAD")]

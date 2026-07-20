@@ -81,7 +81,7 @@ fi
 ranges=""
 stdin_lines=0
 if [ ! -t 0 ]; then
-	while read -r _local_ref local_sha _remote_ref remote_sha; do
+	while read -r _local_ref local_sha remote_ref remote_sha; do
 		[ -n "${local_sha:-}" ] || continue
 		stdin_lines=$((stdin_lines + 1))
 		case "${local_sha}" in
@@ -89,18 +89,18 @@ if [ ! -t 0 ]; then
 		*) continue ;;                   # all zeros: a DELETION — nothing leaves
 		esac
 		case "${remote_sha:-}" in
-		"" ) ranges="${ranges} --range ${local_sha} --ref ${_local_ref}" ;;
+		"" ) ranges="${ranges} --range ${local_sha} --ref ${remote_ref}" ;;
 		*[!0]*)
 			# Known remote base -> scan exactly the new commits. If the base
 			# object is absent locally (stale tracking), the bare-sha form
 			# over-scans (--not --remotes) instead of erroring out.
 			if git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
-				ranges="${ranges} --range ${remote_sha}..${local_sha} --ref ${_local_ref}"
+				ranges="${ranges} --range ${remote_sha}..${local_sha} --ref ${remote_ref}"
 			else
-				ranges="${ranges} --range ${local_sha} --ref ${_local_ref}"
+				ranges="${ranges} --range ${local_sha} --ref ${remote_ref}"
 			fi
 			;;
-		*) ranges="${ranges} --range ${local_sha} --ref ${_local_ref}" ;;   # new branch/tag
+		*) ranges="${ranges} --range ${local_sha} --ref ${remote_ref}" ;;   # new branch/tag
 		esac
 	done
 fi

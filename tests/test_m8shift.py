@@ -16873,6 +16873,18 @@ class TestRFC052ScrubCheck(CLIBase):
         r = self._scrub("--range", "deadbeef", "--refs-pull", denylist=dl)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
+    def test_invalid_ref_label_never_skips_a_real_range_scan(self):
+        # --ref labels findings; it does not authorize the scan. A one-level
+        # local ref such as HEAD must degrade to the range carrier, never rc 2
+        # (which pre-push intentionally treats as a fail-open scanner error).
+        self._commit("docs/a.md", "fresh %s here\n" % self.TERM)
+        sha = self._sha()
+        result = self._scrub("--range", sha, "--ref", "HEAD",
+                             denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("WARNING invalid --ref label ignored", result.stderr)
+        self.assertIn("HISTORY hit", result.stdout)
+
     def test_history_oracle_add_modify_remove_swap_and_multi_term_attribution(self):
         """Gate 1: freeze today's per-term pickaxe behavior before optimizing.
 
@@ -17085,7 +17097,10 @@ class TestRFC052ScrubCheck(CLIBase):
         r = hook("refs/heads/gone %s refs/heads/gone %s\n" % (zeros, base))
         self.assertEqual(r.returncode, 0, r.stderr)      # deletion: skipped
         self._commit("docs/new2.md", "with %s inside\n" % self.TERM)
-        r = hook("refs/heads/main %s refs/heads/main %s\n" % (self._sha(), base))
+        # Real porcelain form from `git push origin HEAD:main`: the local ref
+        # is one-level HEAD while the destination is canonical. The hook must
+        # attribute with the destination and still block the leaking range.
+        r = hook("HEAD %s refs/heads/main %s\n" % (self._sha(), base))
         self.assertEqual(r.returncode, 1, r.stderr)      # introduced -> blocked
         self.assertIn("via branch main", r.stderr)
         self.assertNotIn(self.TERM, r.stdout + r.stderr)
