@@ -6,6 +6,9 @@ import tempfile
 import textwrap
 import unittest
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import m8shift as core  # noqa: E402
+
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "m8shift-headroom.py")
@@ -43,7 +46,7 @@ class TestM8ShiftHeadroomWrapper(unittest.TestCase):
     def test_version_surface(self):
         result = subprocess.run([sys.executable, SCRIPT, "--version"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("m8shift-headroom.py 3.64.0", result.stdout)
+        self.assertIn("m8shift-headroom.py %s" % core.VERSION, result.stdout)
 
     def test_wrapper_uses_offline_env_socket_block_and_non_user_messages(self):
         env = self._fake_headroom(

@@ -141,7 +141,7 @@ def scaffold_write_gate(confirm_script_dir=False, script_dir=None, command="init
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "3.64.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "3.65.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
