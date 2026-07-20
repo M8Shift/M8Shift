@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Reachability-scoped scrub history (#222).** The pre-push hook now labels
+  every range with its pushed branch/tag and HISTORY findings name their carrier
+  ref. Local side branches, worktree reflogs, and unreachable objects are never
+  part of a clean pushed range. Full repository inspection is explicit through
+  `scrub-check.py --all`; its findings distinguish live branches, worktree
+  reflogs, and unreachable objects, with local reap guidance for
+  unreachable-only residue instead of generic history-rewrite advice.
 - **Reset-honest usage and self-anchored TIME (#218).** A stale usage snapshot
   whose recorded reset is already past now renders `WINDOW ROLLED — data
   predates reset` and removes the obsolete percentage instead of merely dimming

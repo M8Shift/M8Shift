@@ -62,7 +62,7 @@ jobs:
           trap 'rm -f "$RUNNER_TEMP/denylist.txt"' EXIT   # cleanup even on failure
           printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"
           python scripts/scrub-check.py \
-            --denylist "$RUNNER_TEMP/denylist.txt" --refs-pull
+            --denylist "$RUNNER_TEMP/denylist.txt" --all --refs-pull
 
   test:
     name: Test (py${{ matrix.python }})

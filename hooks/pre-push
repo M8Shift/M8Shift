@@ -18,9 +18,9 @@
 #      <remote sha>` line per ref on stdin, and each becomes a `--range`
 #      (remote..local; a bare local sha when the remote side is new or unknown;
 #      deletions are skipped — nothing leaves). Raw git, never a lossy optimizer.
-#      Scanning only the pushed ranges keeps the hook fast — a full-history walk
-#      per push trains a `--no-verify` reflex that rots the gate. The full walk
-#      remains available (CI, audits): run scrub-check.py without --range.
+#      Scanning only the pushed ranges keeps the hook fast and prevents local
+#      side refs/reflogs/unreachable objects from blocking clean publication.
+#      The full walk remains explicit (CI, audits): run scrub-check.py --all.
 #      rc 1 = hit, rc >= 2 = scanner error (fail open).
 #
 # Install (per clone, hooks are not version-controlled by Git):
@@ -76,12 +76,12 @@ fi
 # --- 3. denylist scrub over the pushed ranges (E1) --------------------------------
 # Git's pre-push stdin: one `<local ref> <local sha> <remote ref> <remote sha>`
 # line per ref being pushed. Only read it when stdin is NOT a terminal (a manual
-# `sh hooks/pre-push` run from a shell has no ref lines — fall back to the full
-# tip+history scan rather than hang on a read).
+# `sh hooks/pre-push` run from a shell has no ref lines — fall back to the
+# direct HEAD scan rather than hang on a read).
 ranges=""
 stdin_lines=0
 if [ ! -t 0 ]; then
-	while read -r _local_ref local_sha _remote_ref remote_sha; do
+	while read -r _local_ref local_sha remote_ref remote_sha; do
 		[ -n "${local_sha:-}" ] || continue
 		stdin_lines=$((stdin_lines + 1))
 		case "${local_sha}" in
@@ -89,18 +89,18 @@ if [ ! -t 0 ]; then
 		*) continue ;;                   # all zeros: a DELETION — nothing leaves
 		esac
 		case "${remote_sha:-}" in
-		"" ) ranges="${ranges} --range ${local_sha}" ;;
+		"" ) ranges="${ranges} --range ${local_sha} --ref ${remote_ref}" ;;
 		*[!0]*)
 			# Known remote base -> scan exactly the new commits. If the base
 			# object is absent locally (stale tracking), the bare-sha form
 			# over-scans (--not --remotes) instead of erroring out.
 			if git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
-				ranges="${ranges} --range ${remote_sha}..${local_sha}"
+				ranges="${ranges} --range ${remote_sha}..${local_sha} --ref ${remote_ref}"
 			else
-				ranges="${ranges} --range ${local_sha}"
+				ranges="${ranges} --range ${local_sha} --ref ${remote_ref}"
 			fi
 			;;
-		*) ranges="${ranges} --range ${local_sha}" ;;   # new branch/tag
+		*) ranges="${ranges} --range ${local_sha} --ref ${remote_ref}" ;;   # new branch/tag
 		esac
 	done
 fi

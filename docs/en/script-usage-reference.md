@@ -198,13 +198,19 @@ python3 scripts/m8shift-self-update.py \
 
 ### `scripts/scrub-check.py`
 
-The read-only scanner checks Git tip and history against a confidential denylist.
-Use `--repo DIR`, `--denylist FILE`, `--no-history`, `--refs-pull`, repeatable
-`--range A..B|SHA`, `--max-commits N`, and local-only `--verbose`.
+The read-only scanner checks Git tip and reachable history against a confidential
+denylist. Direct invocation defaults to HEAD. Pre-push uses repeatable
+`--range A..B|SHA` plus the corresponding `--ref REF`, so only commits published
+by those ref updates can gate the push and every HISTORY hit names its carrier.
+Use explicit `--all` for a repository audit across refs, worktree reflogs, and
+bounded unreachable commits; unreachable-only results include the local
+worktree/reflog/GC reap sequence. Other options are `--repo DIR`, `--denylist
+FILE`, `--no-history`, `--refs-pull` (with `--all`), `--max-commits N`, and
+local-only `--verbose`.
 
 ```bash
 python3 scripts/scrub-check.py --repo . \
-  --denylist ~/.config/m8shift/denylist.txt
+  --denylist ~/.config/m8shift/denylist.txt --all
 ```
 
 ### Benchmarks and documentation generator

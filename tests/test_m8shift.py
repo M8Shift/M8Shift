@@ -16680,14 +16680,16 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("HEAD", tip)
         self.assertIn("--", tip)
         self.assertLess(tip.index("HEAD"), tip.index("--"))
-        hist = mod.history_cmd(rule, 100, refs_pull=True)
+        hist = mod.history_cmd(rule, 100, refs_pull=True, all_refs=True)
         self.assertIn("--all", hist)
+        self.assertIn("--reflog", hist)
         self.assertIn("--glob=refs/pull", hist)
         self.assertIn("--pickaxe-regex", hist)
         self.assertIn("-i", hist)
         self.assertLess(hist.index("--all"), hist.index("--"))
-        self.assertNotIn("--glob=refs/pull",
-                         mod.history_cmd(rule, 100, refs_pull=False))
+        direct = mod.history_cmd(rule, 100, refs_pull=False)
+        self.assertIn("HEAD", direct)
+        self.assertNotIn("--all", direct)
 
     def test_parser_drift_scrub_check_matches_core(self):
         # The script duplicates the core denylist parser (self-contained by
@@ -16871,6 +16873,18 @@ class TestRFC052ScrubCheck(CLIBase):
         r = self._scrub("--range", "deadbeef", "--refs-pull", denylist=dl)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
+    def test_invalid_ref_label_never_skips_a_real_range_scan(self):
+        # --ref labels findings; it does not authorize the scan. A one-level
+        # local ref such as HEAD must degrade to the range carrier, never rc 2
+        # (which pre-push intentionally treats as a fail-open scanner error).
+        self._commit("docs/a.md", "fresh %s here\n" % self.TERM)
+        sha = self._sha()
+        result = self._scrub("--range", sha, "--ref", "HEAD",
+                             denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("WARNING invalid --ref label ignored", result.stderr)
+        self.assertIn("HISTORY hit", result.stdout)
+
     def test_history_oracle_add_modify_remove_swap_and_multi_term_attribution(self):
         """Gate 1: freeze today's per-term pickaxe behavior before optimizing.
 
@@ -16957,7 +16971,83 @@ class TestRFC052ScrubCheck(CLIBase):
         for line in history:
             self.assertRegex(
                 line,
-                r"^HISTORY hit: commit [0-9a-f]{12} \[denylist:[0-9a-f]{10}\]$")
+                r"^HISTORY hit: commit [0-9a-f]{12} via pushed ref "
+                r"[0-9a-f]{12}\.\.[0-9a-f]{12} \[denylist:[0-9a-f]{10}\]$")
+
+    def test_all_audit_names_branch_worktree_reflog_and_unreachable_carriers(self):
+        branch_term = "SyntheticBranchCarrier"
+        reflog_term = "SyntheticWorktreeCarrier"
+        unreachable_term = "SyntheticUnreachableCarrier"
+        self._commit("base.txt", "clean\n", "base")
+        main_branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=self.d,
+            check=True, capture_output=True, text=True).stdout.strip()
+        main_sha = self._sha()
+
+        subprocess.run(["git", "checkout", "-q", "-b", "audit-side"],
+                       cwd=self.d, check=True)
+        self._commit("side.txt", branch_term + "\n", "side carrier")
+        subprocess.run(["git", "checkout", "-q", main_branch],
+                       cwd=self.d, check=True)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "audit-dangling"],
+                       cwd=self.d, check=True)
+        self._commit("dangling.txt", unreachable_term + "\n", "dangling carrier")
+        dangling_sha = self._sha()
+        subprocess.run(["git", "checkout", "-q", main_branch],
+                       cwd=self.d, check=True)
+        subprocess.run(["git", "branch", "-D", "audit-dangling"],
+                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "reflog", "expire", "--expire=now", "--all"],
+                       cwd=self.d, check=True)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "audit-worktree"],
+                       cwd=self.d, check=True)
+        self._commit("worktree.txt", reflog_term + "\n", "worktree carrier")
+        worktree_sha = self._sha()
+        subprocess.run(["git", "checkout", "-q", main_branch],
+                       cwd=self.d, check=True)
+        subprocess.run(["git", "branch", "-D", "audit-worktree"],
+                       cwd=self.d, check=True, capture_output=True)
+        worktree = os.path.join(self.home, "audit-fixture-worktree")
+        subprocess.run(["git", "worktree", "add", "-q", "--detach",
+                        worktree, worktree_sha], cwd=self.d, check=True)
+        subprocess.run(["git", "checkout", "-q", "--detach", main_sha],
+                       cwd=worktree, check=True)
+
+        dl = self._deny("%s\n%s\n%s\n" %
+                        (branch_term, reflog_term, unreachable_term))
+        result = self._scrub("--all", denylist=dl)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("via branch audit-side", result.stdout)
+        self.assertIn("worktree audit-fixture-worktree reflog", result.stdout)
+        self.assertIn("via unreachable object", result.stdout)
+        self.assertIn(dangling_sha[:12], result.stdout)
+        for term in (branch_term, reflog_term, unreachable_term):
+            self.assertNotIn(term, result.stdout + result.stderr)
+
+    def test_all_unreachable_only_names_local_reap_sequence(self):
+        term = "SyntheticUnreachableOnly"
+        self._commit("base.txt", "clean\n", "base")
+        main_branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=self.d,
+            check=True, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "checkout", "-q", "-b", "audit-dangling"],
+                       cwd=self.d, check=True)
+        self._commit("dangling.txt", term + "\n", "unreachable only")
+        subprocess.run(["git", "checkout", "-q", main_branch],
+                       cwd=self.d, check=True)
+        subprocess.run(["git", "branch", "-D", "audit-dangling"],
+                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "reflog", "expire", "--expire=now", "--all"],
+                       cwd=self.d, check=True)
+
+        result = self._scrub("--all", denylist=self._deny(term + "\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unreachable-only", result.stdout)
+        self.assertIn("git worktree prune", result.stdout)
+        self.assertIn("git reflog expire --expire=now --all", result.stdout)
+        self.assertIn("git gc --prune=now", result.stdout)
 
     def test_pre_push_hook_scans_pushed_range_and_skips_deletions(self):
         # E2 wiring: the hook turns git's stdin ref-update lines into --range
@@ -16967,6 +17057,23 @@ class TestRFC052ScrubCheck(CLIBase):
         self._commit("docs/old.md", "ancient %s leak\n" % self.TERM)
         self._rm_commit("docs/old.md")
         base = self._sha()
+        main_branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=self.d,
+            check=True, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "checkout", "-q", "-b", "local-side"],
+                       cwd=self.d, check=True)
+        self._commit("docs/side.md", "lateral %s leak\n" % self.TERM)
+        subprocess.run(["git", "checkout", "-q", main_branch],
+                       cwd=self.d, check=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "local-dangling"],
+                       cwd=self.d, check=True)
+        self._commit("docs/dangling.md", "unreachable %s leak\n" % self.TERM)
+        subprocess.run(["git", "checkout", "-q", main_branch],
+                       cwd=self.d, check=True)
+        subprocess.run(["git", "branch", "-D", "local-dangling"],
+                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "reflog", "expire", "--expire=now", "--all"],
+                       cwd=self.d, check=True)
         self._commit("docs/new.md", "clean\n")
         tip = self._sha()
         os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
@@ -16990,8 +17097,12 @@ class TestRFC052ScrubCheck(CLIBase):
         r = hook("refs/heads/gone %s refs/heads/gone %s\n" % (zeros, base))
         self.assertEqual(r.returncode, 0, r.stderr)      # deletion: skipped
         self._commit("docs/new2.md", "with %s inside\n" % self.TERM)
-        r = hook("refs/heads/main %s refs/heads/main %s\n" % (self._sha(), base))
+        # Real porcelain form from `git push origin HEAD:main`: the local ref
+        # is one-level HEAD while the destination is canonical. The hook must
+        # attribute with the destination and still block the leaking range.
+        r = hook("HEAD %s refs/heads/main %s\n" % (self._sha(), base))
         self.assertEqual(r.returncode, 1, r.stderr)      # introduced -> blocked
+        self.assertIn("via branch main", r.stderr)
         self.assertNotIn(self.TERM, r.stdout + r.stderr)
 
 
