@@ -1,8 +1,9 @@
 # RFC 077 model-line evidence adapter example
 
 This external example package contains the fixture-safe implementation boundary
-for RFC 077 Slices A through C. It is not imported by the passive relay core or
-the runtime companion.
+for RFC 077 Slices A through D. It is never imported by the passive relay core;
+the runtime companion imports only the Slice D boundary controller immediately
+before a managed provider launch.
 
 `base.py` owns the normalized evidence dataclasses and strict serialization.
 `vendors.py` adds Anthropic, OpenAI, Google, and Mistral subclasses that accept a
@@ -16,8 +17,10 @@ attempt-plan and closed relay-turn hashes from the named durable checkpoint.
 
 All entries in `VENDOR_ADAPTER_REGISTRY` are `enabled=False` and
 `retrieval="fixture_only"`. There is no provider SDK, credential lookup, socket,
-subprocess, CLI entry point, live switch, listener integration, or relay mutation
-in this package. The policy never invokes an adapter: a valid or corrupt usage
+adapter subprocess, live vendor switch, or relay mutation in this package.
+`listener.py` accepts only an explicit disabled, fixture-only policy; writes the
+attempt/evidence/decision checkpoint; and returns a next-invocation plan to the
+runtime. The policy never invokes an adapter: a valid or corrupt usage
 hold stops evaluation before evidence is inspected. Supplying live retrieval or
 enabling an entry for provider traffic belongs to RFC 077 Slice E and requires
 separate operator authorization.

@@ -1,7 +1,8 @@
 # RFC 077 — Safe-boundary model-line evidence and routing
 
-- **Status:** accepted design; Slices A-C schemas, fixture adapters, pure policy,
-  and immutable dry-run audit implemented; listener routing remains disabled
+- **Status:** accepted design; Slices A-D schemas, fixture adapters, pure policy,
+  immutable audit, and fixture-only listener boundary integration implemented;
+  live vendor routing remains disabled
 - **Date:** 2026-07-18
 - **Issue:** #212
 - **Scope:** same-provider model-line evidence, deterministic safe-boundary
@@ -308,7 +309,30 @@ Slice C includes no provider argv execution, listener integration, live switch,
 notification, usage-hold mutation, or relay write. Those boundaries remain in
 separately reviewed Slices D/E.
 
-## 11. Gated delivery slices
+## 11. Slice D implementation
+
+Slice D wires the Slice C state machine into `run_listener_loop` only after the
+existing per-agent usage-hold gate and only for a non-`WORKING_*` wake. Before
+provider argv compilation it writes the named immutable attempt checkpoint at
+`.m8shift/runtime/fleet/attempts/<run-id>.json`, hashes the exact last closed
+relay turn, persists fixture evidence plus an immutable decision, and verifies
+that the relay bytes did not change. A route updates only the next invocation's
+in-memory model pin and compiles it through the existing RFC 070 provider argv
+compiler. A clean halt uses the listener's existing halted state and `blocked`
+notification event.
+
+The optional operator document is
+`.m8shift/model-line-routing/<agent>.json`, schema
+`m8shift.listener.model-line-policy.v1`. Absence is observe-only. Automation
+requires both `auto_at_safe_boundary=true` and an ordered fallback list. Slice D
+accepts only relative fixture paths confined beneath the project and requires
+the adapter declaration to remain `enabled=false` and
+`retrieval=fixture_only`; vendor retrieval and credentials are still absent.
+An old listener generation is rejected before checkpoint or decision writes.
+Own-`WORKING_*` stuck retries bypass the controller and keep their existing
+resume-only pin because they are not a safe boundary.
+
+## 12. Gated delivery slices
 
 - **A — implemented here:** RFC, schemas, fixtures, and base-class conformance;
   no live auth.
@@ -316,8 +340,9 @@ separately reviewed Slices D/E.
   by default, with honest malformed/auth/throttle degradation.
 - **C — implemented here:** pure decision table, ordered RFC 070 pin plan,
   create-exclusive audit record, and durable-boundary reconstruction; no switch.
-- **D:** opt-in listener integration at the safe invocation boundary, including
-  hold precedence, halt/notify, reconstruction, and no-relay-mutation tests.
+- **D — implemented here:** opt-in listener integration at the safe invocation
+  boundary, including hold precedence, halt/notify, reconstruction, exact RFC
+  070 argv, generation safety, and no-relay-mutation tests.
 - **E:** one live-vendor pilot only after separate operator authorization and
   contract re-verification. All other vendors stay degraded/disabled until their
   evidence qualifies.
@@ -328,7 +353,7 @@ adapter crash/oversize/malformed output, active/corrupt usage hold, exact RFC 07
 argv, immutable decision record, reconstruction from durable artifacts, and
 proof that the relay bytes and ownership are unchanged.
 
-## 12. Rejected alternatives
+## 13. Rejected alternatives
 
 - **Amend RFC 075 in place:** rejected; its accepted Phase 1 evidence record
   should remain distinct from the selected Phase 2 behavior.

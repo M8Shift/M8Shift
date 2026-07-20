@@ -1,4 +1,4 @@
-"""Fixture-safe model-line evidence and pure policy from RFC 077 Slices A-C."""
+"""Fixture-safe model-line evidence and routing from RFC 077 Slices A-D."""
 
 from .base import (
     EVIDENCE_SCHEMA,

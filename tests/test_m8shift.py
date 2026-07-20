@@ -1119,6 +1119,8 @@ class TestInit(CLIBase):
         self.init("--profile", "headless", "--companion-source", REPO)
         runner = os.path.join(self.d, "examples", "headless_runner.py")
         self.assertTrue(os.path.isfile(runner))
+        for relative in cowork.RUNNER_SUPPORT_FILES:
+            self.assertTrue(os.path.isfile(os.path.join(self.d, relative)), relative)
         handshake = subprocess.run(
             [sys.executable, runner, "--handshake"],
             cwd=self.d, capture_output=True, text=True, timeout=10)

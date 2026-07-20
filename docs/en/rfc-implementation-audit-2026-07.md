@@ -116,7 +116,7 @@ standardized turn validator is the older Stage-4 surface in
 | 074 | design-only | All proposed slices are separately unauthorized. Existing `stage4.v1` fields do not implement the 15-stage taxonomy, successor schema, consumers, or exchange export. |
 | 075 | design-only | The comparative vendor matrix is the authorized Phase-1 research output. It intentionally selects no base class, live adapter, policy, threshold, or re-verification mechanism. |
 | 076 | design-only | The incident-first/deterministic/re-entrant contract is currently review-enforced policy. §9 explicitly leaves templates/doctor findings for a later authorization. |
-| 077 | partial | Slices A/B evidence surfaces and Slice C pure policy/dry-run audit ship; listener integration and live-vendor Slices D/E remain gated. |
+| 077 | partial | Slices A/B evidence, Slice C policy/audit, and Slice D fixture-only listener boundary ship; live-vendor Slice E remains gated. |
 
 Inventory totals: **46 implemented, 10 partial, 15 design-only, 4
 superseded, and 2 abandoned**. All integers 001–077 are represented; 068 is an
@@ -261,18 +261,17 @@ shipped.
 ### RFC 077 — safe-boundary model-line routing
 
 Implemented: §8 Slice A schemas/base conformance, §9 Slice B fixture-only
-Anthropic/OpenAI/Google/Mistral subclasses, and §10 Slice C pure policy plus
-dry-run immutable decision/reconstruction helpers. Evidence is
+Anthropic/OpenAI/Google/Mistral subclasses, §10 Slice C pure policy plus dry-run
+immutable decision/reconstruction helpers, and §11 Slice D fixture-only listener
+integration. Evidence is
 `examples/model_line_budget_adapter/base.py:ModelLineBudgetAdapter`, the four
 classes in `vendors.py`, the disabled `VENDOR_ADAPTER_REGISTRY`, `policy.py`,
-and `tests/test_model_line_route_policy.py`.
+`listener.py`, `tests/test_model_line_route_policy.py`, and
+`tests/test_model_line_listener_boundary.py`.
 
-Missing, exactly as RFC 077 §11 gates it:
+Missing, exactly as RFC 077 §12 gates it:
 
-1. **Slice D:** opt-in listener integration only at the next safe invocation
-   boundary, with hold precedence, halt/notify, durable reconstruction, exact
-   RFC 070 argv, and byte-for-byte relay/ownership non-mutation tests.
-2. **Slice E:** one live-vendor pilot after separate operator authorization and
+1. **Slice E:** one live-vendor pilot after separate operator authorization and
    fresh contract verification. All four registry rows currently remain
    `enabled=false`, `retrieval=fixture_only`.
 
@@ -362,7 +361,6 @@ Voluntary design-only proposals above are excluded.
 | P0 | Resolve RFC 068 as a real RFC artifact | The current “rotation token” dependency has no auditable contract. Write/arbitrate it (or explicitly abandon/renumber it) before allowing dependent rotation/routing work to cite it. |
 | P0 | #212 vendor-contract re-verification gate | Slice E must not rely on a stale 2026-07 matrix. Define source-date/expiry/drift evidence and keep live enablement fail-closed. |
 | P0 | #222 HISTORY reachability and carrier-ref findings | Current full-history scrub can false-block delivery on unreachable commits retained by stale refs. Scope reachable history deliberately and name the refs that keep a hit alive. |
-| P1 | RFC 077 Slice D | Only after Slice C: integrate at the safe listener boundary with hold precedence, reconstruction, exact argv, halt/notify, and relay-byte invariance. |
 | P1 | #229 gateway side ledger/top visibility | A delivery in flight is currently visible only in prose; add the accepted digest-only event schema and advisory dashboard consumer without granting pen authority. |
 | P1 | #218 TIME explanation/window roll | Make legacy unknown time and rolled-window semantics intelligible without changing RFC 064 accounting or implying productivity. |
 | P1 | #214 watcher lifecycle contract | First export the issue's four variants and HUNG semantics into an RFC/spec amendment; then implement uniform lifecycle evidence and tests. Exact scope is currently unknown locally. |
