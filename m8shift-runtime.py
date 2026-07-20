@@ -8563,6 +8563,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 time.sleep(poll)
                 continue
             hold, hold_error = read_usage_hold(agent)
+            usage_hold_state = ("corrupt" if hold_error else
+                                "active" if hold else "clear")
             if hold or hold_error:
                 if not usage_throttled:
                     detail = (f"malformed target hold ({hold_error})"
@@ -8609,14 +8611,23 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                             completed_invocations=listener_completed_invocations(agent),
                             switches_completed=listener_route_switches(
                                 lk.get("session", ""), agent),
+                            managed_provider=profile["provider_row"].get("provider"),
+                            usage_hold=usage_hold_state,
                             generation=generation,
                             process_pid=os.getpid(),
                         )
                 except (ImportError, OSError, ValueError) as exc:
                     phase = "halted"
-                    reason = "model_line_boundary_invalid"
-                    say(f"{agent}: safe-boundary routing failed closed "
-                        f"({type(exc).__name__}; {reason}) — HALTED before provider launch.")
+                    clean_reason = getattr(exc, "reason_code", "")
+                    reason = ("model_line_%s" % clean_reason if clean_reason
+                              else "model_line_boundary_invalid")
+                    if clean_reason:
+                        say(f"{agent}: safe-boundary policy requested clean halt "
+                            f"({clean_reason}) — HALTED before provider launch.")
+                    else:
+                        say(f"{agent}: safe-boundary routing failed closed "
+                            f"({type(exc).__name__}; {reason}) — HALTED before "
+                            "provider launch.")
                     save()
                     notify_halt(state, lk.get("holder", ""))
                     continue

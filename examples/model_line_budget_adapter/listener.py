@@ -25,6 +25,7 @@ from .policy import (
     InvocationBoundary,
     ModelPin,
     OperatorPolicy,
+    RouteDecision,
     compile_dry_run_plan,
     decide_route,
     immutable_decision_path,
@@ -44,6 +45,14 @@ TURN_RE = re.compile(
 
 class BoundaryIntegrationError(ValueError):
     """Fail-closed listener-boundary validation error."""
+
+
+class BoundaryCleanHalt(BoundaryIntegrationError):
+    """A stable, expected halt before any provider launch or route record."""
+
+    def __init__(self, reason_code: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True)
@@ -154,13 +163,11 @@ def _pin(value: Mapping[str, Any], *, model: Optional[str] = None) -> ModelPin:
 def load_fixture_policy(root: str, agent: str, active_model: str) -> Tuple[
     ModelPin, OperatorPolicy, Mapping[str, str], str, str
 ]:
-    """Load explicit fixture-only policy, or the safe observe-only default."""
+    """Load one explicit fixture-only operator policy."""
 
     path = os.path.join(root, POLICY_RELATIVE_DIR, "%s.json" % agent)
     if not os.path.exists(path):
-        active = ModelPin("unconfigured", "subscription_cli", agent, active_model)
-        active.validate()
-        return active, OperatorPolicy("observe-only-default"), {}, "listener-none", "1"
+        raise BoundaryIntegrationError("listener policy is absent")
     doc = _read_json(path)
     required = {
         "schema", "policy_id", "active", "fallbacks", "auto_at_safe_boundary",
@@ -288,16 +295,21 @@ def perform_listener_boundary(
     run_id: str,
     completed_invocations: int,
     switches_completed: int = 0,
+    managed_provider: Optional[str] = None,
+    usage_hold: str = "clear",
     boundary: InvocationBoundary = InvocationBoundary(),
     generation: str = "",
     process_pid: Optional[int] = None,
-) -> ListenerBoundaryResult:
+) -> Optional[ListenerBoundaryResult]:
     """Persist checkpoint + decision and return the next-invocation route plan."""
 
     _safe_component(agent, "agent")
     _safe_component(run_id, "run_id")
     if not isinstance(completed_invocations, int) or completed_invocations < 0:
         raise BoundaryIntegrationError("completed_invocations must be non-negative")
+    policy_path = os.path.join(root, POLICY_RELATIVE_DIR, "%s.json" % agent)
+    if not os.path.exists(policy_path):
+        return None
     pid = process_pid if process_pid is not None else os.getpid()
     if not _generation_is_current(runtime_dir, agent, generation, pid):
         raise BoundaryIntegrationError("listener generation is stale")
@@ -306,6 +318,19 @@ def perform_listener_boundary(
         root, agent, active_model
     )
     recorded_at = _iso_now()
+    if usage_hold != "clear":
+        hold_decision = decide_route(
+            active_pin=active,
+            active_evidence=None,
+            target_evidence={},
+            policy=policy,
+            now=recorded_at,
+            boundary=boundary,
+            usage_hold=usage_hold,
+            switches_completed=switches_completed,
+            checkpoint_present=False,
+        )
+        raise BoundaryCleanHalt(hold_decision.reason_code)
     attempt = {
         "schema": ATTEMPT_SCHEMA,
         "run_id": run_id,
@@ -336,17 +361,24 @@ def perform_listener_boundary(
         model: evidence for model, evidence in evidence_by_model.items()
         if model != active.model
     }
-    decision = decide_route(
-        active_pin=active,
-        active_evidence=active_evidence,
-        target_evidence=target_evidence,
-        policy=policy,
-        now=recorded_at,
-        boundary=boundary,
-        usage_hold="clear",
-        switches_completed=switches_completed,
-        checkpoint_present=True,
-    )
+    if managed_provider is not None and active.provider != managed_provider:
+        decision = RouteDecision(
+            action="clean_halt",
+            reason_code="route_provider_mismatch",
+            active_state="not_observed",
+        )
+    else:
+        decision = decide_route(
+            active_pin=active,
+            active_evidence=active_evidence,
+            target_evidence=target_evidence,
+            policy=policy,
+            now=recorded_at,
+            boundary=boundary,
+            usage_hold=usage_hold,
+            switches_completed=switches_completed,
+            checkpoint_present=True,
+        )
     session = _safe_component(fields.get("session", ""), "relay session")
     evidence_refs = []
     evidence_dir = os.path.join(

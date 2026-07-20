@@ -324,11 +324,14 @@ notification event.
 The optional operator document is
 `.m8shift/model-line-routing/<agent>.json`, schema
 `m8shift.listener.model-line-policy.v1`. Absence is observe-only. Automation
-requires both `auto_at_safe_boundary=true` and an ordered fallback list. Slice D
-accepts only relative fixture paths confined beneath the project and requires
-the adapter declaration to remain `enabled=false` and
+is a true runtime no-op: no attempt, evidence, or decision sidecar is written.
+Automation requires both `auto_at_safe_boundary=true` and an ordered fallback
+list. Slice D accepts only relative fixture paths confined beneath the project
+and requires the adapter declaration to remain `enabled=false` and
 `retrieval=fixture_only`; vendor retrieval and credentials are still absent.
-An old listener generation is rejected before checkpoint or decision writes.
+An active policy provider that differs from the managed provider clean-halts
+with `route_provider_mismatch` before launch. An old listener generation is
+rejected before checkpoint or decision writes.
 Own-`WORKING_*` stuck retries bypass the controller and keep their existing
 resume-only pin because they are not a safe boundary.
 

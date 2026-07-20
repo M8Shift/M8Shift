@@ -20,10 +20,12 @@ All entries in `VENDOR_ADAPTER_REGISTRY` are `enabled=False` and
 adapter subprocess, live vendor switch, or relay mutation in this package.
 `listener.py` accepts only an explicit disabled, fixture-only policy; writes the
 attempt/evidence/decision checkpoint; and returns a next-invocation plan to the
-runtime. The policy never invokes an adapter: a valid or corrupt usage
-hold stops evaluation before evidence is inspected. Supplying live retrieval or
-enabling an entry for provider traffic belongs to RFC 077 Slice E and requires
-separate operator authorization.
+runtime. Without that opt-in document the boundary is a true no-op and writes no
+sidecars. The policy never invokes an adapter: a valid or corrupt usage hold
+stops evaluation before evidence is inspected. A policy whose active provider
+disagrees with the managed provider clean-halts before provider launch.
+Supplying live retrieval or enabling an entry for provider traffic belongs to
+RFC 077 Slice E and requires separate operator authorization.
 
 The vendor mappings deliberately preserve uncertainty:
 

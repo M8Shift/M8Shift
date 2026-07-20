@@ -10,10 +10,10 @@ from unittest import mock
 from examples.model_line_budget_adapter import (
     InvocationBoundary,
     ModelPin,
-    reconstruct_boundary,
 )
 from examples.model_line_budget_adapter.listener import (
     LISTENER_POLICY_SCHEMA,
+    BoundaryCleanHalt,
     BoundaryIntegrationError,
     perform_listener_boundary,
 )
@@ -66,7 +66,8 @@ class TestRFC077ListenerSafeBoundary(unittest.TestCase):
             "adapter": {"name": "fixture-matrix", "version": "1"},
         }
 
-    def configure(self, active, target, *, auto=True, target_applicability="exact_model"):
+    def configure(self, active, target, *, auto=True, target_applicability="exact_model",
+                  active_provider="example-provider"):
         fixtures = self.root / "fixtures"
         fixtures.mkdir(exist_ok=True)
         (fixtures / "active.json").write_text(
@@ -83,7 +84,7 @@ class TestRFC077ListenerSafeBoundary(unittest.TestCase):
             "schema": LISTENER_POLICY_SCHEMA,
             "policy_id": "fixture-policy",
             "active": {
-                "provider": "example-provider", "mode": "api",
+                "provider": active_provider, "mode": "api",
                 "auth_scope": "scope-1",
             },
             "fallbacks": [{
@@ -115,18 +116,74 @@ class TestRFC077ListenerSafeBoundary(unittest.TestCase):
         values.update(overrides)
         return perform_listener_boundary(**values)
 
-    def test_default_is_observe_only_and_relay_bytes_are_invariant(self):
+    def test_absent_policy_is_a_true_no_op_and_relay_bytes_are_invariant(self):
         before = self.relay.read_bytes()
         result = self.perform("run-default")
-        self.assertEqual(result.plan.action, "observe_only")
+        self.assertIsNone(result)
         self.assertEqual(self.relay.read_bytes(), before)
-        decision = result.plan.record
-        reconstructed = reconstruct_boundary(
-            decision, result.attempt_bytes, result.relay_turn_bytes
+        self.assertFalse(self.runtime.exists())
+
+    def test_managed_provider_mismatch_is_a_stable_clean_halt(self):
+        self.configure(0.0, 0.8, active_provider="other-provider")
+        result = self.perform(
+            "run-provider-mismatch", managed_provider="example-provider"
         )
-        self.assertEqual(reconstructed["next_invocation"], 4)
-        self.assertEqual(reconstructed["requested_model"], "model-a")
-        self.assertTrue(Path(result.attempt_path).exists())
+        self.assertEqual(result.plan.action, "clean_halt")
+        self.assertEqual(result.plan.reason_code, "route_provider_mismatch")
+        self.assertIsNone(result.selected_pin)
+
+    def test_listener_provider_mismatch_clean_halts_without_popen(self):
+        self.configure(0.0, 0.8, active_provider="other-provider")
+        runtime = self.load_runtime()
+        profile = {
+            "argv": ["provider", "prompt"], "cwd": str(self.root),
+            "env_allowlist": [], "start_on_idle": False, "agent_model": "model-a",
+            "provider_row": {
+                "name": "codex", "provider": "example-provider", "mode": "headless",
+                "model": "model-a", "argv": ["provider", "$M8SHIFT_PROMPT"],
+            },
+        }
+
+        def boundary(**values):
+            return self.perform(
+                values["run_id"],
+                managed_provider=values["managed_provider"],
+                usage_hold=values["usage_hold"],
+            )
+
+        with mock.patch.object(runtime, "read_listener_state", return_value={}), \
+                mock.patch.object(runtime, "write_listener_state") as save, \
+                mock.patch.object(runtime, "remove_own_listener_pid"), \
+                mock.patch.object(runtime, "read_relay_lock_fields", return_value={
+                    "state": "AWAITING_CODEX", "holder": "codex", "session": "session-1",
+                }), \
+                mock.patch.object(runtime, "read_usage_hold", return_value=(None, "")), \
+                mock.patch.object(runtime, "listener_completed_invocations", return_value=3), \
+                mock.patch.object(runtime, "listener_route_switches", return_value=0), \
+                mock.patch.object(runtime, "emit_notification_nonfatal"), \
+                mock.patch.object(runtime.time, "sleep"), \
+                mock.patch(
+                    "examples.model_line_budget_adapter.listener.perform_listener_boundary",
+                    side_effect=boundary,
+                ), \
+                mock.patch.object(runtime.subprocess, "Popen") as popen:
+            rc = runtime.run_listener_loop(
+                "codex", profile, "runner.py", poll=0, max_ticks=2,
+                max_retries=1, max_backoff=1,
+            )
+        self.assertEqual(rc, 0)
+        popen.assert_not_called()
+        self.assertIn(
+            "model_line_route_provider_mismatch",
+            [call.kwargs.get("reason") for call in save.call_args_list],
+        )
+
+    def test_usage_hold_reaches_policy_admission_without_sidecar_writes(self):
+        self.configure(0.0, 0.8)
+        with self.assertRaisesRegex(BoundaryCleanHalt, "agent_usage_hold_active"):
+            self.perform("run-held", usage_hold="active")
+        self.assertFalse((self.runtime / "fleet" / "attempts").exists())
+        self.assertFalse((self.runtime / "model-line-routing").exists())
 
     def test_fixture_matrix_consumes_all_eight_policy_outcomes_at_boundary(self):
         cases = (
@@ -156,6 +213,7 @@ class TestRFC077ListenerSafeBoundary(unittest.TestCase):
                 self.assertEqual(result.plan.action, action)
 
     def test_generation_guard_precedes_checkpoint_or_decision_writes(self):
+        self.configure(0.0, 0.8)
         listeners = self.runtime / "listeners"
         listeners.mkdir(parents=True)
         (listeners / "codex.pid").write_text(
