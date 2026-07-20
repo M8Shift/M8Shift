@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Reachability-scoped scrub history (#222).** The pre-push hook now labels
+  every range with its pushed branch/tag and HISTORY findings name their carrier
+  ref. Local side branches, worktree reflogs, and unreachable objects are never
+  part of a clean pushed range. Full repository inspection is explicit through
+  `scrub-check.py --all`; its findings distinguish live branches, worktree
+  reflogs, and unreachable objects, with local reap guidance for
+  unreachable-only residue instead of generic history-rewrite advice.
+
 ## v3.65.0 — 2026-07-20
 
 - **RFC 077 Slice C — pure safe-boundary route policy (#212).** A fixture-side

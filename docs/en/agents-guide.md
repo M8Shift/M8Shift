@@ -292,8 +292,10 @@ releasable at all times.
   project names in committed content or history of public mirrors. Tooling (RFC 052):
   `./m8shift.py doctor --hygiene-only --lint` lints tracked publishable files (real home
   paths + the operator's out-of-repo confidential denylist, redacted output);
-  `python3 scripts/scrub-check.py` scans git tip AND history for denylisted identifiers
-  via raw git (never a lossy optimizer); `hooks/pre-push` runs both advisorily —
+  `python3 scripts/scrub-check.py` scans HEAD tip and reachable history for
+  denylisted identifiers via raw git (never a lossy optimizer); `--all` explicitly
+  adds refs, worktree reflogs, and unreachable objects. `hooks/pre-push` scans only
+  the ref-update ranges Git provides, advisorily —
   set `M8SHIFT_SCRUB_ENFORCE=1` to block on findings.
 - **Signed-off collaboration.** Commit messages include the agreed
   `Co-Authored-By:` trailer.
