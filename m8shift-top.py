@@ -242,12 +242,14 @@ def _paint_wordmark(plain, enabled):
     return left + wordmark + right
 
 
-def _usage_cell(usage, label, short, utc=False):
+def _usage_cell(usage, label, short, utc=False, current=None):
     """Render one usage window without ever presenting uncertain data as live.
 
     Freshness is computed by the core from the shared 1800-second boundary.  Top
     only renders that verdict: stale values remain diagnostic but carry a
-    mandatory ``STALE`` token; missing/unparseable age is ``unknown``.  An
+    mandatory ``STALE`` token; missing/unparseable age is ``unknown``.  Once a
+    stale snapshot's recorded reset has passed, its ratios belong to a previous
+    window and are removed behind an explicit ``WINDOW ROLLED`` warning.  An
     explicitly absent provider window remains ``n/a`` in every freshness state.
     """
     usage = usage if isinstance(usage, dict) else {}
@@ -262,9 +264,22 @@ def _usage_cell(usage, label, short, utc=False):
     model = row.get("model") if isinstance(row.get("model"), str) else ""
     model = clean(model, 18) if model else ""
     freshness = usage.get("freshness")
+    reset = _stamp(row.get("resets_at"))
+    now = current or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    window_rolled = (freshness == "stale" and valid_ratio and reset is not None
+                     and reset <= now)
     if row.get("not_provided") is True:
         value = "%s left n/a" % short
         shown_ratio = None
+    elif window_rolled:
+        # A percentage from a reset window that no longer exists is not merely
+        # old diagnostic data.  Remove it entirely and lead with the stronger
+        # state so truncation cannot leave a plausible live ratio.
+        value = "WINDOW ROLLED — data predates reset; %s left n/a" % short
+        shown_ratio = None
+        freshness = "rolled"
     elif freshness not in ("fresh", "stale"):
         value = "%s left n/a" % short
         shown_ratio = None
@@ -280,8 +295,7 @@ def _usage_cell(usage, label, short, utc=False):
         # truncate at the right edge, so a visible ratio can never outlive its
         # mandatory stale marker even with adversarially long identities/models.
         value = "STALE " + value
-    reset = _stamp(row.get("resets_at"))
-    if reset is not None:
+    if reset is not None and freshness != "rolled":
         value += " reset " + _display_time(reset, utc, "%a %m-%d %H:%M")
     return value, shown_ratio, freshness
 
@@ -422,7 +436,7 @@ def _time_duration(seconds):
     return "%dh%02d" % divmod(minutes, 60)
 
 
-def _time_strip(accounting, width):
+def _time_strip(accounting, width, session_started_at=None, utc=False):
     """Return a priority-preserving TIME strip and its semantic segments."""
     accounting = accounting if isinstance(accounting, dict) else {}
     effective = "effective* %s" % _time_duration(
@@ -436,11 +450,25 @@ def _time_strip(accounting, width):
         _time_duration(accounting.get("paused_seconds")),
         _time_duration(accounting.get("idle_seconds")),
     )
+    session_start = _display_time(session_started_at, utc, "%Y-%m-%d")
+    caption = ("since session start %s" % session_start
+               if session_start is not None else "since session start unknown")
     required = " · ".join(part for part in (effective, non_work, unknown) if part)
     detailed = "TIME  " + " · ".join(
-        part for part in (effective, non_work + detail, unknown) if part)
-    plain = detailed if len(detailed) <= width else "TIME  %s" % required
-    if len(plain) > width:
+        part for part in (effective, non_work + detail, unknown, caption) if part)
+    required = "TIME  %s · %s" % (required, caption)
+    short_start = session_start[5:] if session_start is not None else "unknown"
+    required_short = "TIME  %s · since session %s" % (
+        " · ".join(part for part in (effective, non_work, unknown) if part),
+        short_start,
+    )
+    if len(detailed) <= width:
+        plain = detailed
+    elif len(required) <= width:
+        plain = required
+    elif len(required_short) <= width:
+        plain = required_short
+    else:
         effective = "e* %s" % _time_duration(
             accounting.get("effective_work_seconds"))
         non_work = "nw %s" % _time_duration(accounting.get("non_work_seconds"))
@@ -452,6 +480,7 @@ def _time_strip(accounting, width):
         )
         if unknown:
             compact += " · %s" % unknown
+        compact += " · since session %s" % (session_start or "unknown")
         plain = compact
     if len(plain) > width:
         effective = "e%s" % _time_duration(
@@ -789,7 +818,8 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         usage = agent.get("usage") or {}
         bits, ratios, freshnesses = [], [], []
         for label in ("weekly", "session_5h"):
-            bit, ratio, freshness = _usage_cell(usage, label, label, utc)
+            bit, ratio, freshness = _usage_cell(
+                usage, label, label, utc, current)
             bits.append(bit)
             ratios.append(ratio)
             freshnesses.append(freshness)
@@ -800,7 +830,9 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         agent_plain = paint(agent_plain, marker.strip(), amber)
         agent_plain = paint(agent_plain, "●", dot_style(state))
         for bit, ratio, freshness in zip(bits, ratios, freshnesses):
-            agent_plain = paint(agent_plain, bit, red if freshness == "stale" else usage_style(ratio))
+            agent_plain = paint(
+                agent_plain, bit,
+                red if freshness in ("stale", "rolled") else usage_style(ratio))
         lines.append("│" + agent_plain + "│")
     lines.append(row("* model/effort self-declared (unverified; may be stale)", dim))
     ledger = snapshot.get("ledger") or {}
@@ -868,7 +900,8 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     if capacity is not None:
         lines.extend(row("") for _ in range(capacity - len(visible)))
     time_plain, effective_seg, non_work_seg, unknown_seg = _time_strip(
-        snapshot.get("time_accounting"), inner)
+        snapshot.get("time_accounting"), inner,
+        snapshot.get("session_started_at"), utc)
     time_row = "│" + time_plain + "│"
     time_row = paint(time_row, effective_seg, cyan)
     time_row = paint(time_row, non_work_seg, cyan)
@@ -995,7 +1028,8 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         usage = agent.get("usage") or {}
         ratios, bits, freshnesses = [], [], []
         for short, label in (("weekly", "weekly"), ("5h", "session_5h")):
-            bit, ratio, freshness = _usage_cell(usage, label, short, utc)
+            bit, ratio, freshness = _usage_cell(
+                usage, label, short, utc, current)
             ratios.append(ratio)
             bits.append(bit)
             freshnesses.append(freshness)
@@ -1009,8 +1043,12 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
             (0, 1, 1, 0, 2, 2),
         )
         arow = paint(arow, "●", dot_style(astate))
-        arow = paint(arow, bits[0], red if freshnesses[0] == "stale" else usage_style(ratios[0]))
-        arow = paint(arow, bits[1], red if freshnesses[1] == "stale" else usage_style(ratios[1]))
+        arow = paint(
+            arow, bits[0],
+            red if freshnesses[0] in ("stale", "rolled") else usage_style(ratios[0]))
+        arow = paint(
+            arow, bits[1],
+            red if freshnesses[1] in ("stale", "rolled") else usage_style(ratios[1]))
         lines.append("│" + arow + "│")
     lines.append(content([("        * model/effort self-declared (unverified; may be stale)", 0)]))
 
@@ -1110,7 +1148,8 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     if capacity is not None:
         lines.extend(blank for _ in range(capacity - len(visible)))
     time_plain, effective_seg, non_work_seg, unknown_seg = _time_strip(
-        snapshot.get("time_accounting"), inner)
+        snapshot.get("time_accounting"), inner,
+        snapshot.get("session_started_at"), utc)
     time_row = "│" + time_plain + "│"
     time_row = paint(time_row, effective_seg, cyan)
     time_row = paint(time_row, non_work_seg, cyan)

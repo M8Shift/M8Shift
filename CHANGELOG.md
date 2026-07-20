@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Reset-honest usage and self-anchored TIME (#218).** A stale usage snapshot
+  whose recorded reset is already past now renders `WINDOW ROLLED — data
+  predates reset` and removes the obsolete percentage instead of merely dimming
+  it. Remaining percentages keep the directional `left` label ahead of the
+  value under truncation. TIME retains the partial-history `unknown` bucket and
+  captions its accounting window from session start. During mixed-version
+  fleet upgrades, older consumed-percent surfaces and current left-percent
+  surfaces may remain side by side until every installed kit is upgraded.
+
 ## v3.65.0 — 2026-07-20
 
 - **RFC 077 Slice C — pure safe-boundary route policy (#212).** A fixture-side
