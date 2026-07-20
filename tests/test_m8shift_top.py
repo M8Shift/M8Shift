@@ -29,6 +29,7 @@ def load_top():
 def fixture():
     return {
         "project": "demo", "m8shift_version": "v0.0.0-fixture", "session": "session-1",
+        "session_started_at": "2026-07-13T00:00:00Z",
         "holder": "codex", "state": "WORKING_CODEX", "turn": 7,
         "since": "2026-07-13T00:00:00Z", "expires": "2026-07-13T00:30:00Z",
         "pen": {"heartbeat": "2026-07-13T00:10:00Z"},
@@ -410,6 +411,38 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                     self.assertNotIn("27% S│", plain)
                     self.assertTrue(all(len(line) == width for line in plain.splitlines()))
 
+    def test_stale_window_roll_removes_ratios_at_mocked_reset_boundary(self):
+        top = load_top()
+        usage = {
+            "freshness": "stale", "stale": True,
+            "windows": {"weekly": {
+                "used_ratio": .73, "resets_at": "2026-07-13T00:20:00Z",
+            }},
+        }
+        before = datetime(2026, 7, 13, 0, 19, 59, tzinfo=timezone.utc)
+        at_reset = datetime(2026, 7, 13, 0, 20, tzinfo=timezone.utc)
+        value, ratio, freshness = top._usage_cell(
+            usage, "weekly", "weekly", True, before)
+        self.assertEqual((ratio, freshness), (.73, "stale"))
+        self.assertIn("STALE weekly left 27%", value)
+
+        value, ratio, freshness = top._usage_cell(
+            usage, "weekly", "weekly", True, at_reset)
+        self.assertEqual((ratio, freshness), (None, "rolled"))
+        self.assertIn("WINDOW ROLLED — data predates reset", value)
+        self.assertIn("weekly left n/a", value)
+        self.assertNotIn("27%", value)
+
+        data = fixture()
+        data["agents"][0]["usage"] = usage
+        for width in (72, 80, 96, 100, 120, 160):
+            with self.subTest(width=width), \
+                    mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                plain = self._plain(top.render(data, width, at_reset, utc=True))
+                self.assertNotIn("27%", plain)
+                self.assertIn("WINDOW ROLLED", plain)
+                self.assertTrue(all(len(line) == width for line in plain.splitlines()))
+
     def test_unknown_freshness_hides_ratio_but_preserves_not_provided(self):
         top = load_top()
         data = fixture()
@@ -716,6 +749,9 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertIn("effective* 5h18", lines[time_rows[0]])
             self.assertIn("non-work 9h41", lines[time_rows[0]])
             self.assertIn("unknown 3h07", lines[time_rows[0]])
+            self.assertIn("since session", lines[time_rows[0]])
+            self.assertIn("2026-07-13" if width >= 120 else "07-13",
+                          lines[time_rows[0]])
             self.assertIn("q quit", lines[time_rows[0] + 1])
             self.assertEqual(len(lines), 30)
             self.assertTrue(all(len(line) == width for line in lines))
@@ -779,7 +815,7 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
                 time.tzset()
         self.assertEqual(
             hashlib.sha256(output.encode("utf-8")).hexdigest(),
-            "1b6a457d8c060080ee8b450d50f3273b201296a97a6bb09c17a9381c319617ee",
+            "199eb4c12536a0f66ef1371b41745f90ee30bb10cb84badc7bd1e4c5f5f0a006",
         )
 
     def test_listener_attention_tokens_share_semantic_paint_and_show_cause(self):
