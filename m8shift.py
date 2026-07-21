@@ -8210,6 +8210,66 @@ def _skills_findings():
 
 
 RFC_FILE_RE = re.compile(r"\A([0-9]{3})-rfc-[a-z0-9-]+\.md\Z")
+AGENT_EXCHANGE_PROTOCOL_REL = os.path.join("docs", "en", "AGENT-EXCHANGE-PROTOCOL.md")
+AGENT_EXCHANGE_RFC_REL = os.path.join(
+    "docs", "en", "rfc", "074-rfc-standardized-inter-agent-exchange.md")
+AGENT_EXCHANGE_LOCKSTEP_RE = re.compile(
+    r"<!-- m8shift-exchange-lockstep: "
+    r"protocol=([0-9a-f]{64}); stanza=([0-9a-f]{64}); "
+    r"pack=([0-9a-f]{64}); rfc074=([0-9a-f]{64}) -->")
+
+
+def _agent_exchange_protocol_digests(root=None):
+    """Return the canonical inputs to the tool-neutral protocol lockstep marker."""
+    root = os.path.abspath(root or os.path.dirname(COWORK))
+    rfc_path = os.path.join(root, AGENT_EXCHANGE_RFC_REL)
+    with open(rfc_path, encoding="utf-8") as fh:
+        rfc074 = fh.read()
+    sources = (
+        ("protocol", PROTOCOL["en"]),
+        ("stanza", STANZA["en"]),
+        ("pack", AGENT_PACK["en"]),
+        ("rfc074", rfc074),
+    )
+    return {
+        name: hashlib.sha256(value.encode("utf-8")).hexdigest()
+        for name, value in sources
+    }
+
+
+def _agent_exchange_protocol_findings(root=None):
+    """Warn when the human tool-neutral contract drifts from its normative inputs."""
+    root = os.path.abspath(root or os.path.dirname(COWORK))
+    doc_path = os.path.join(root, AGENT_EXCHANGE_PROTOCOL_REL)
+    if not os.path.exists(doc_path):
+        return []  # Installed projects do not carry the source documentation set.
+    try:
+        with open(doc_path, encoding="utf-8") as fh:
+            text = fh.read()
+        expected = _agent_exchange_protocol_digests(root)
+    except (OSError, UnicodeError):
+        return [doctor_finding(
+            "docs.agent_exchange_protocol_drift", "warning",
+            "The tool-neutral agent exchange guide or RFC 074 cannot be read.",
+            AGENT_EXCHANGE_PROTOCOL_REL,
+            "restore both files and refresh the lockstep marker")]
+    match = AGENT_EXCHANGE_LOCKSTEP_RE.search(text)
+    if match is None:
+        return [doctor_finding(
+            "docs.agent_exchange_protocol_drift", "warning",
+            "The tool-neutral agent exchange guide has no valid lockstep marker.",
+            AGENT_EXCHANGE_PROTOCOL_REL,
+            "refresh the marker after reviewing protocol, floor, pack, and RFC 074 changes")]
+    recorded = dict(zip(("protocol", "stanza", "pack", "rfc074"), match.groups()))
+    drifted = [name for name in recorded if recorded[name] != expected[name]]
+    if not drifted:
+        return []
+    return [doctor_finding(
+        "docs.agent_exchange_protocol_drift", "warning",
+        "The tool-neutral agent exchange guide is stale relative to: %s." %
+        ", ".join(drifted),
+        AGENT_EXCHANGE_PROTOCOL_REL,
+        "review the changed contract and refresh this guide plus its lockstep marker")]
 
 
 def _rfc_index_links(text, prefix):
@@ -8391,6 +8451,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
         # it runs with or without a relay (advisory, fail-open, bounded).
         out.extend(_skills_findings())
         out.extend(_rfc_governance_findings())
+        out.extend(_agent_exchange_protocol_findings())
         out.extend(_delivery_git_findings())
         return out
     try:
@@ -8748,6 +8809,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
     # skills/ directory exists; bounded, fail-open, never gates --lint).
     findings.extend(_skills_findings())
     findings.extend(_rfc_governance_findings())
+    findings.extend(_agent_exchange_protocol_findings())
     findings.extend(_delivery_git_findings())
     return findings
 

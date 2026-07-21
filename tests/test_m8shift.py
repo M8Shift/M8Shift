@@ -2011,6 +2011,48 @@ class TestRFC058Governance(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class TestAgentExchangeProtocol(unittest.TestCase):
+    DOC = "docs/en/AGENT-EXCHANGE-PROTOCOL.md"
+    RFC = "docs/en/rfc/074-rfc-standardized-inter-agent-exchange.md"
+
+    def test_repository_lockstep_is_clean(self):
+        self.assertEqual(cowork._agent_exchange_protocol_findings(REPO), [])
+
+    def test_normative_body_is_tool_neutral_and_covers_the_floor(self):
+        with open(os.path.join(REPO, self.DOC), encoding="utf-8") as fh:
+            body = fh.read().split("## Appendix A.", 1)[0]
+        self.assertNotIn("m8shift.py", body)
+        for needle in (
+            "Acquire on pickup",
+            "End listening only at `DONE`",
+            "adversarial verification",
+            "base` plus optional `stacked_on",
+            "blank-agent reconstruction",
+            "untrusted data",
+            "Versioned exchange envelope",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, body)
+
+    def test_rfc_change_without_guide_refresh_reports_drift(self):
+        root = tempfile.mkdtemp(prefix="m8shift-exchange-doc-")
+        try:
+            for rel in (self.DOC, self.RFC):
+                target = os.path.join(root, rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copyfile(os.path.join(REPO, rel), target)
+            self.assertEqual(cowork._agent_exchange_protocol_findings(root), [])
+            with open(os.path.join(root, self.RFC), "a", encoding="utf-8") as fh:
+                fh.write("\nProtocol evolution.\n")
+            findings = cowork._agent_exchange_protocol_findings(root)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(
+                findings[0]["check"], "docs.agent_exchange_protocol_drift")
+            self.assertIn("rfc074", findings[0]["message"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 @unittest.skipUnless(shutil.which("git"), "git not available")
 class TestRFC065DeliveryAdvisories(unittest.TestCase):
     def setUp(self):

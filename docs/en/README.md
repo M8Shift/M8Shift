@@ -22,6 +22,7 @@ M8Shift is **free and open source**, released under the
 |----------|---------|
 | [protocol.md](protocol.md) | Shared relay protocol — operational core (first read; states, rules, work loop). |
 | [protocol-reference.md](protocol-reference.md) | On-demand reference: mental model, full command reference, project adoption. |
+| [AGENT-EXCHANGE-PROTOCOL.md](AGENT-EXCHANGE-PROTOCOL.md) | Tool-neutral rules for safe, durable, and re-entrant inter-agent exchange. |
 | [m8shift-command-reference.md](m8shift-command-reference.md) | Site-ready, plain-language reference for every `m8shift.py` command, parameter, and invocation shape. |
 | [script-usage-reference.md](script-usage-reference.md) | Site-ready invocation, parameters, examples, and required-argument behavior for every shipped command-line script. |
 | [specification.md](specification.md) | Full functional and non-functional specification. |
