@@ -2033,8 +2033,10 @@ class TestAgentExchangeProtocol(unittest.TestCase):
 
     def test_normative_body_is_tool_neutral_and_covers_the_floor(self):
         with open(os.path.join(REPO, self.DOC), encoding="utf-8") as fh:
-            body = fh.read().split("## Appendix A.", 1)[0]
+            text = fh.read()
+            body = text.split("## Appendix A.", 1)[0]
         self.assertNotIn("m8shift.py", body)
+        self.assertNotRegex(text, r"RFC [0-9]{3}")
         for needle in (
             "Acquire on pickup",
             "End listening only at `DONE`",
@@ -2049,6 +2051,9 @@ class TestAgentExchangeProtocol(unittest.TestCase):
             "Two-phase stale recovery",
             "Whole-shift exchange profile",
             "Conformance profile",
+            "Usage hold admission record",
+            "Bootstrap and shift opening",
+            "every rule 0-12",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, body)

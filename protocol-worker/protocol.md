@@ -5,10 +5,12 @@ agents that coordinate work through a durable exchange surface. It specifies
 authority, states, transitions, locks, waits, arbitration, delivery, recovery,
 portable envelopes, and conformance tests.
 
-The key words MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are to be
-interpreted as described by RFC 2119. An implementation
-MAY use different names, storage formats, or commands only when it documents an
-exact semantic mapping and passes the conformance profile in section 13.
+The key words are normative: MUST and REQUIRED mean an absolute requirement;
+MUST NOT means an absolute prohibition; SHOULD and SHOULD NOT mean that a
+deviation is permitted only when its consequences are understood and recorded;
+and MAY means an optional choice. An implementation MAY use different names,
+storage formats, or commands only when it documents an exact semantic mapping
+and passes the conformance profile in section 13.
 
 The normative body ends before Appendix A. Product-specific commands and file
 formats appear only in the appendix.
@@ -25,9 +27,12 @@ formats appear only in the appendix.
   roster, session identifier, last closed turn, transition time, and lease
   deadline when one exists.
 - A routing mutation MUST be serialized under the mutex and committed atomically.
-- Dashboards, notifications, heartbeats, usage records, route decisions,
-  workspaces, and exports MUST remain derived or advisory. They MUST NOT become
-  a second routing authority.
+- Dashboards, notifications, heartbeats, usage snapshots and ledgers, route
+  decisions, workspaces, and exports MUST remain derived or advisory. They MUST
+  NOT become a second routing authority. A usage hold is the sole exception:
+  it is an explicit operator- or host-set invocation-admission veto defined in
+  section 2.3, not a derived usage record, and it cannot grant, transfer,
+  revoke, or close routing ownership.
 - A closed journal entry MUST be immutable. A correction MUST be a later entry
   that references the corrected entry.
 - Restart and recovery MUST use durable authority and journal records, never
@@ -52,6 +57,7 @@ incompatible ownership. Immutable history makes decisions reconstructible.
 | safe boundary | A point after a durable checkpoint and before a new external invocation, with no partial stream or uncommitted effect in flight. |
 | gateway | The single named writer for one durable-store delivery lane. |
 | side-ledger | Append-only evidence that observes actions without controlling routing. |
+| usage hold | A bounded, per-agent, first-class admission veto set explicitly by the operator or an authorized host guard; it blocks new invocations without becoming routing ownership. |
 
 ### 1.3 Authority hierarchy and untrusted input
 
@@ -104,7 +110,57 @@ top-level state. It MUST be set only by the holder or a typed first-party host
 event, MUST NOT be inferred from prose, and MUST clear on explicit continuation
 or terminal routing action. A reason or marker is not liveness.
 
-### 2.3 Complete top-level transition table
+### 2.3 Usage hold admission record
+
+A usage ledger or snapshot is advisory evidence and MUST NOT set policy merely
+because it reports a threshold. A usage hold is a separate, first-class
+admission record created only by an explicit operator action or an authorized,
+typed host guard applying a configured policy. It is scoped to exactly one
+rostered agent and MUST NOT change the top-level state, holder, awaited agent,
+turn, lease, or another agent's admission.
+
+The record MUST be bounded, atomically placed, and contain exactly mapped
+equivalents of: schema and version, target agent, placement time, earliest
+revalidation time, bounded reason, authorized source, policy identifier or
+digest, and a digest or bounded reference to the evidence that triggered it.
+The revalidation time is not an ownership lease and its arrival does not clear
+the hold: it is the earliest time at which an authorized clearer may evaluate
+fresh evidence. Missing, malformed, mismatched, unauthorised, or unreadable
+hold data MUST fail closed for the named lane only and MUST leave peer lanes
+and current routing ownership unchanged.
+
+A valid hold MUST block a new invocation, acquisition, or automatic reroute for
+its target before any provider probe or route decision. It MUST NOT revoke an
+already-held working lease: the holder may reach a safe boundary, checkpoint,
+refresh if otherwise permitted, and transfer or pause normally, but its next
+invocation is gated. No fallback target, elapsed revalidation time, advisory
+ledger update, or stale route decision may shorten, supersede, or clear a hold.
+
+Clearing MUST be an explicit operator or authorized-host operation. For a hold
+derived from measured usage, clearing additionally requires a fresh, target-
+bound result that satisfies the configured resume policy. Clear failure leaves
+the hold byte-identical; success removes only that target's record and appends
+an immutable audit event. The routing record is changed only if a separate,
+authorized resume transition is required for an existing pause.
+
+### 2.4 Bootstrap and shift opening
+
+Absence of an authority record is `UNINITIALIZED`, not a sixth open state. Only
+an authorized operator or host MAY bootstrap a shift. Bootstrap MUST execute
+under the routing mutex, verify that no open authority record already exists,
+validate a bounded roster of at least two unique agent identities, mint a new
+opaque session identifier, create the journal genesis record, and atomically
+publish `IDLE` with no holder, no awaited agent, turn zero, a transition time,
+and no lease deadline.
+
+A failed bootstrap MUST leave the system uninitialized; it MUST NOT expose a
+partial roster, journal, or authority record. Repeating bootstrap against the
+same open shift MUST return that shift without mutation or refuse. Opening work
+after `DONE` MUST create a distinct session and genesis record under the mutex;
+it MUST NOT rewrite or reopen the completed shift. Dispatch and acquisition are
+legal only after bootstrap has established `IDLE`.
+
+### 2.5 Complete top-level transition table
 
 This matrix is total over the canonical state and event sets. `same` means no
 authority change. `refuse` means fail atomically with no mutation. Where a cell
@@ -118,7 +174,7 @@ contains a guard, failure of that guard means `refuse`.
 | `PAUSED` | refuse | refuse | refuse | refuse | refuse | refuse | same; request recorded for operator | same; idempotent reason update only by authority | `IDLE` or `AWAITING_target`; authorized and preserved continuation restored | `DONE`; explicit closure authority | refuse | `AWAITING_soloer`; only authorized bounded episode | same; listening continues |
 | `DONE` | refuse | refuse | refuse | refuse | refuse | refuse | refuse | refuse | refuse | same; idempotent close | refuse | refuse | same; terminal observation only |
 
-### 2.4 Lease-event transition table
+### 2.6 Lease-event transition table
 
 | Lease sub-state | periodic heartbeat | refresh | ordinary takeover | authorized live override | holder terminal action |
 |---|---|---|---|---|---|
@@ -389,7 +445,7 @@ decision MUST produce an immutable reason-coded record.
 
 | Priority | Rule | Result |
 |---:|---|---|
-| 0 | Host policy, explicit operator scope, or a valid per-agent usage hold forbids invocation. | Halt; do not probe, reroute, clear a hold, or mutate ownership. |
+| 0 | Host policy, explicit operator scope, or a valid per-agent usage hold forbids invocation. | Halt; do not probe, reroute, clear a hold, or mutate ownership. A current holder may only finish its bounded safe-boundary path under section 2.3. |
 | 1 | The routing mutex shows a valid holder or alive-expired holder. | Holder wins; requests wait, ordinary takeover is forbidden. |
 | 2 | Project/session binding, roster, policy version, or target identity is ambiguous. | Fail closed; require reconciliation or operator decision. |
 | 3 | No durable checkpoint exists at a safe boundary. | Keep current route or clean halt; never switch mid-stream. |
@@ -652,7 +708,7 @@ actually resident.
 | external effect ambiguous | do not replay; require reconciliation |
 | scrub failure | prohibit external transmission |
 | checkpoint failure during rotation | preserve routing; report recovery path; do not auto-pause |
-| listener or frontend crash | reconstruct from durable records; never infer successful invocation |
+| resident invoker or client process crash | reconstruct from durable records; never infer successful invocation |
 
 ## 13. Conformance profile
 
@@ -691,6 +747,8 @@ documented reproducible procedure. SHOULD failures require a recorded rationale.
 | C28 | Session rotation | checkpoint/resume packet is bounded, scrubbed, operator-confirmed, and non-authoritative |
 | C29 | Completion guard | blockers, debt, pending review, or gateway pending reject completion |
 | C30 | Blank-agent and twice-run recovery | reconstruction succeeds and second execution duplicates no effect |
+| C31 | Bootstrap and shift opening | concurrent openers produce one session, one genesis record, and `IDLE`; partial writes and reopen of `DONE` are refused |
+| C32 | Ordered arbitration | every rule 0-12 produces its specified result; pairwise conflicts prove the lower number wins, including 0 over 8, 1 over 9, 4 over 12, and 11 over 12 |
 
 Conformance evidence MUST identify implementation version, platform, test command
 or procedure, result, timestamp, and raw artifact reference. A partial profile
@@ -723,25 +781,13 @@ M8Shift maps the model as follows:
 The reference turn and shift identifiers are `m8shift.exchange.turn/1` and
 `m8shift.exchange/1`. They map exactly to the neutral profiles in section 10.
 
-Design and implementation lineage:
-
-- Pen ownership and liveness: RFC 005 and RFC 049.
-- Isolated work and serialized integration: RFC 008 and RFC 015.
-- Cooperative requests and pause/resume: RFC 016 and RFC 021.
-- Tamper evidence and decisions: RFC 030 and RFC 031.
-- Wake-up and persistent listening: RFC 035, RFC 047, and RFC 062.
-- Routing, budgets, and safe boundaries: RFC 039, RFC 043, RFC 075, and RFC 077.
-- Adoption and compartmentalization: RFC 048, RFC 052, and RFC 053.
-- Session rotation and operator wait: RFC 054 and RFC 055.
-- Ticketed gateway delivery and solo advance: RFC 065 and RFC 066.
-- Portable exchange and re-entrant discipline: RFC 074 and RFC 076.
-
 ### Maintenance lockstep
 
 The marker near the top stores SHA-256 digests of the canonical English protocol
-template, anchor safety floor, generated agent-pack template, and RFC 074. The
-read-only doctor finding `docs.agent_exchange_protocol_drift` and repository
-tests report drift whenever an input changes without review and marker refresh.
+template, anchor safety floor, generated agent-pack template, and portable
+exchange envelope schema. The read-only doctor finding
+`docs.agent_exchange_protocol_drift` and repository tests report drift whenever
+an input changes without review and marker refresh.
 
 The public Worker embeds this file byte-for-byte. Its Markdown, HTML, and worker
 module MUST be regenerated from the canonical document. The generator check,
