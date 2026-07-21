@@ -244,6 +244,13 @@ RUNNER_REGISTRY = {
     "watch-status": os.path.join("scripts", "watch-status.sh"),
     "headless-runner": os.path.join("examples", "headless_runner.py"),
 }
+RUNNER_SUPPORT_FILES = (
+    os.path.join("examples", "model_line_budget_adapter", "__init__.py"),
+    os.path.join("examples", "model_line_budget_adapter", "base.py"),
+    os.path.join("examples", "model_line_budget_adapter", "policy.py"),
+    os.path.join("examples", "model_line_budget_adapter", "vendors.py"),
+    os.path.join("examples", "model_line_budget_adapter", "listener.py"),
+)
 _RUNNER_VERSION_RE = re.compile(r'^M8SHIFT_RUNNER_VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
 
 # --- RFC 048 (#19): source-driven local update --------------------------------
@@ -2980,9 +2987,44 @@ def plan_headless_runner(args, companion_plan):
             return None, errors
         else:
             action = "replace"
+    support = []
+    for support_rel in RUNNER_SUPPORT_FILES:
+        support_link = os.path.join(source_dir, support_rel)
+        if not os.path.lexists(support_link):
+            continue  # older verified kits remain installable without Slice D
+        support_source = os.path.realpath(support_link)
+        if (os.path.islink(support_link) or not os.path.isfile(support_source)
+                or not _physically_under(source_dir, support_source)):
+            errors.append("runner support source %s is invalid" % support_rel)
+            continue
+        support_dest = os.path.join(HERE, support_rel)
+        if os.path.islink(support_dest) or (
+                os.path.lexists(support_dest) and not os.path.isfile(support_dest)):
+            errors.append("runner support destination %s is not a regular file" % support_rel)
+            continue
+        support_sha = _sha256_file(support_source)
+        support_action = "copy"
+        if os.path.realpath(support_dest) == support_source:
+            support_action = "same"
+        elif os.path.isfile(support_dest):
+            if _sha256_file(support_dest) == support_sha:
+                support_action = "uptodate"
+            elif not getattr(args, "force_companions", False):
+                errors.append("runner support %s differs from the verified kit; "
+                              "refused without --force-companions" % support_rel)
+                continue
+            else:
+                support_action = "replace"
+        support.append({
+            "rel": support_rel, "source": support_source, "dest": support_dest,
+            "sha256": support_sha, "mode": stat.S_IMODE(os.stat(support_source).st_mode),
+            "action": support_action,
+        })
+    if errors:
+        return None, errors
     return {"name": "headless-runner", "rel": rel, "source": source,
             "dest": dest, "version": version, "sha256": source_sha,
-            "mode": source_mode, "action": action}, errors
+            "mode": source_mode, "action": action, "support": support}, errors
 
 
 def apply_headless_runner(plan):
@@ -3018,6 +3060,36 @@ def apply_headless_runner(plan):
                     pass
         if errors:
             return lines, errors
+    for item in plan.get("support", []):
+        if item["action"] in ("same", "uptodate"):
+            continue
+        os.makedirs(os.path.dirname(item["dest"]), exist_ok=True)
+        temporary = os.path.join(
+            os.path.dirname(item["dest"]),
+            ".m8shift-runner-support-%s.tmp" % uuid.uuid4().hex,
+        )
+        try:
+            with open(item["source"], "rb") as source_fh, open(temporary, "wb") as dest_fh:
+                dest_fh.write(source_fh.read())
+                dest_fh.flush()
+                os.fsync(dest_fh.fileno())
+            if _sha256_file(temporary) != item["sha256"]:
+                raise OSError("verified runner support checksum changed during copy")
+            os.chmod(temporary, item["mode"])
+            os.replace(temporary, item["dest"])
+            temporary = None
+        except OSError as exc:
+            errors.append(item["rel"])
+            lines.append("runner support install failed for %s (%s)" % (
+                item["rel"], type(exc).__name__))
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+    if errors:
+        return lines, errors
     entry = _kit_runner_entry(
         plan["name"], plan["rel"], plan["version"], plan["sha256"],
         "verified-kit")

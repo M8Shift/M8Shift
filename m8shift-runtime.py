@@ -7863,7 +7863,7 @@ def listener_profile_findings(doc, agent):
 def normalize_listener_profile(doc, source):
     cwd = doc.get("cwd", ".") or "."
     cwd_abs = cwd if os.path.isabs(cwd) else os.path.abspath(os.path.join(HERE, cwd))
-    return {
+    profile = {
         "schema": LISTENER_PROFILE_SCHEMA,
         "agent": doc.get("agent", ""),
         "argv": list(doc.get("argv") or []),
@@ -7873,6 +7873,12 @@ def normalize_listener_profile(doc, source):
         "agent_model": doc.get("agent_model", "") or "",
         "source": source,
     }
+    # Runtime-only source material for RFC 077 Slice D.  It is never serialized
+    # into listener state or plans; routed argv still goes through the single
+    # RFC 070 compiler instead of editing already-rendered flags.
+    if isinstance(doc.get("provider_row"), dict):
+        profile["provider_row"] = dict(doc["provider_row"])
+    return profile
 
 
 def load_listener_profile(args, agent):
@@ -7924,6 +7930,7 @@ def load_listener_profile(args, agent):
             "env_allowlist": row.get("env_allowlist") or [],
             "start_on_idle": False,
             "agent_model": row.get("model", ""),
+            "provider_row": dict(row),
         }
         source = os.path.relpath(PROVIDERS, HERE)
     problems = listener_profile_findings(doc, agent)
@@ -8050,7 +8057,8 @@ def require_runner_handshake(runner_path):
     return result
 
 
-def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=False):
+def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=False,
+                         selected_pin=None):
     """One bounded runner turn as an explicit argv array (never a shell string).
 
     The listener supervises the RUNNER; the runner supervises the provider and is
@@ -8061,12 +8069,24 @@ def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=Fal
     the provider it already holds the pen — finish and append, do not claim.
     """
     prompt_template = LISTENER_RESUME_PROMPT if resume_working else LISTENER_TURN_PROMPT
-    provider_argv = render_argv_template(
-        profile["argv"],
-        agent=agent,
-        prompt=prompt_template.format(agent=agent, agent_upper=agent.upper()),
-        run_id=run_id,
-    )
+    prompt = prompt_template.format(agent=agent, agent_upper=agent.upper())
+    agent_model = profile.get("agent_model", "")
+    if selected_pin is not None:
+        row = profile.get("provider_row")
+        if not isinstance(row, dict):
+            raise ValueError("model-line routing requires a managed provider profile")
+        if selected_pin.provider != row.get("provider"):
+            raise ValueError("routed model pin changes the managed provider")
+        row = dict(row)
+        row["model"] = selected_pin.model
+        row["profile"] = selected_pin.profile
+        row["effort"] = selected_pin.effort
+        provider_argv = provider_launch_argv(row, prompt, run_id)
+        agent_model = selected_pin.model
+    else:
+        provider_argv = render_argv_template(
+            profile["argv"], agent=agent, prompt=prompt, run_id=run_id,
+        )
     argv = [
         sys.executable, runner_path, agent, "--once",
         "--m8shift", RELAY_PATH,
@@ -8079,8 +8099,8 @@ def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=Fal
         argv += ["--env-allowlist", ",".join(profile["env_allowlist"])]
     if profile["start_on_idle"]:
         argv.append("--start-on-idle")
-    if profile.get("agent_model"):
-        argv += ["--agent-model", profile["agent_model"]]
+    if agent_model:
+        argv += ["--agent-model", agent_model]
     if resume_working:
         argv.append("--resume-working")
     argv += ["--cmd", *provider_argv]
@@ -8296,6 +8316,37 @@ def listener_run_classification(run_id):
     return ""
 
 
+def listener_completed_invocations(agent):
+    """Count durable completed managed invocations for the checkpoint ordinal."""
+    rows, err = read_jsonl_diagnostic(RUNS)
+    if err:
+        return 0
+    return sum(
+        1 for row in rows
+        if row.get("event") == "run.ended" and row.get("agent") == agent
+    )
+
+
+def listener_route_switches(session, agent):
+    """Recover the highest immutable switch ordinal for this session/lane."""
+    if not isinstance(session, str) or not SESSION_RE.fullmatch(session):
+        return 0
+    directory = os.path.join(
+        RUNTIME_DIR, "model-line-routing", session, "decisions")
+    try:
+        names = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+    except OSError:
+        return 0
+    highest = 0
+    for name in names:
+        row, err = read_json_diagnostic(os.path.join(directory, name), {})
+        ordinal = row.get("switch_ordinal") if not err and isinstance(row, dict) else None
+        if (row.get("agent") == agent and isinstance(ordinal, int)
+                and not isinstance(ordinal, bool) and ordinal >= 0):
+            highest = max(highest, ordinal)
+    return highest
+
+
 def build_listener_plan(agent, profile, runner_path, args, backend, fallback_reason=""):
     paths = listener_paths(agent)
     max_retries = args.max_retries
@@ -8426,6 +8477,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
         say(f"{agent}: persisted halted phase found ({reason or 'max retries reached'}) — "
             "supervising without launches; clear it with `listener start --restart`.")
     usage_throttled = False
+    active_pin_override = None
 
     def save():
         write_listener_state(agent, phase=phase, consecutive_failures=fails,
@@ -8511,6 +8563,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 time.sleep(poll)
                 continue
             hold, hold_error = read_usage_hold(agent)
+            usage_hold_state = ("corrupt" if hold_error else
+                                "active" if hold else "clear")
             if hold or hold_error:
                 if not usage_throttled:
                     detail = (f"malformed target hold ({hold_error})"
@@ -8529,8 +8583,74 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 usage_throttled = False
             run_id = new_listener_run_id(agent)
             resume = wake == "stuck_retry"
-            argv = listener_runner_argv(agent, profile, runner_path, run_id,
-                                        resume_working=resume)
+            if not resume:
+                # RFC 077 Slice D: the hold gate above has priority zero.  Only
+                # now, while the relay is non-WORKING and before provider argv is
+                # compiled, persist the durable attempt checkpoint and consume
+                # the fixture-only policy.  The controller verifies relay-byte
+                # invariance and never invokes an adapter or the core.
+                boundary_result = None
+                boundary_module = os.path.join(
+                    HERE, "examples", "model_line_budget_adapter", "listener.py")
+                try:
+                    if (os.path.isfile(boundary_module)
+                            and isinstance(profile.get("provider_row"), dict)):
+                        from examples.model_line_budget_adapter.listener import (
+                            perform_listener_boundary,
+                        )
+                        boundary_result = perform_listener_boundary(
+                            root=HERE,
+                            relay_path=RELAY_PATH,
+                            runtime_dir=RUNTIME_DIR,
+                            agent=agent,
+                            active_model=(active_pin_override.model
+                                          if active_pin_override is not None
+                                          else profile.get("agent_model")
+                                          or "unconfigured-model"),
+                            run_id=run_id,
+                            completed_invocations=listener_completed_invocations(agent),
+                            switches_completed=listener_route_switches(
+                                lk.get("session", ""), agent),
+                            managed_provider=profile["provider_row"].get("provider"),
+                            usage_hold=usage_hold_state,
+                            generation=generation,
+                            process_pid=os.getpid(),
+                        )
+                except (ImportError, OSError, ValueError) as exc:
+                    phase = "halted"
+                    clean_reason = getattr(exc, "reason_code", "")
+                    reason = ("model_line_%s" % clean_reason if clean_reason
+                              else "model_line_boundary_invalid")
+                    if clean_reason:
+                        say(f"{agent}: safe-boundary policy requested clean halt "
+                            f"({clean_reason}) — HALTED before provider launch.")
+                    else:
+                        say(f"{agent}: safe-boundary routing failed closed "
+                            f"({type(exc).__name__}; {reason}) — HALTED before "
+                            "provider launch.")
+                    save()
+                    notify_halt(state, lk.get("holder", ""))
+                    continue
+                if (boundary_result is not None
+                        and boundary_result.plan.action == "clean_halt"):
+                    phase = "halted"
+                    reason = "model_line_%s" % boundary_result.plan.reason_code
+                    say(f"{agent}: safe-boundary policy requested clean halt "
+                        f"({boundary_result.plan.reason_code}) — HALTED before provider launch.")
+                    save()
+                    notify_halt(state, lk.get("holder", ""))
+                    continue
+                if (boundary_result is not None
+                        and boundary_result.plan.action == "route_next_invocation"):
+                    active_pin_override = boundary_result.selected_pin
+                    say(f"{agent}: safe-boundary policy selected an operator-declared "
+                        f"RFC 070 pin for invocation "
+                        f"{boundary_result.plan.applies_to_invocation}.")
+            argv = listener_runner_argv(
+                agent, profile, runner_path, run_id,
+                resume_working=resume,
+                selected_pin=(None if resume else active_pin_override),
+            )
             say(f"{agent}: state={state} ({wake}) → launching one runner turn"
                 f"{' (resume-working)' if resume else ''}, run {run_id}.")
             try:

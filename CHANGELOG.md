@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **RFC 077 Slice D — fixture-only listener safe boundary (#212).** The managed
+  listener now consults the Slice C policy after the per-agent usage-hold gate,
+  after an immutable attempt checkpoint, and before RFC 070 provider argv
+  compilation. Default observe-only decisions and opt-in route/halt decisions
+  receive immutable fixture evidence and decision records without changing a
+  relay byte. Clean halts reuse the existing blocked notification; stale
+  listener generations fail before writes. Vendor adapters remain disabled and
+  fixture-only, so the separately authorized live pilot is still Slice E.
+
 - **Reachability-scoped scrub history (#222).** The pre-push hook now labels
   every range with its pushed branch/tag and HISTORY findings name their carrier
   ref. Local side branches, worktree reflogs, and unreachable objects are never
