@@ -17203,12 +17203,16 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("via branch main", r.stderr)
         self.assertNotIn(self.TERM, r.stdout + r.stderr)
 
-    def test_pre_push_blocks_annotated_tag_message_under_enforce(self):
+    def test_pre_push_blocks_nested_annotated_tag_message_under_enforce(self):
         self._commit("release.txt", "clean release tree\n", "base")
         subprocess.run(["git", "remote", "add", "public", self.d],
                        cwd=self.d, check=True, capture_output=True)
-        subprocess.run(["git", "tag", "-a", "v1.0", "-m",
+        subprocess.run(["git", "tag", "-a", "v1.0-inner", "-m",
                         "release for %s" % self.TERM], cwd=self.d, check=True)
+        inner_sha = self._sha("refs/tags/v1.0-inner")
+        subprocess.run(["git", "tag", "-a", "v1.0", "-m",
+                        "clean public release", "refs/tags/v1.0-inner"],
+                       cwd=self.d, check=True, capture_output=True)
         tag_sha = self._sha("refs/tags/v1.0")
         os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
         shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
@@ -17223,7 +17227,8 @@ class TestRFC052ScrubCheck(CLIBase):
             cwd=self.d, capture_output=True, text=True, env=env,
             input="refs/tags/v1.0 %s refs/tags/v1.0 %s\n" % (tag_sha, zeros))
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("TAG hit: tag v1.0", result.stderr)
+        self.assertIn("TAG hit: tag v1.0 object %s" % inner_sha[:12],
+                      result.stderr)
         self.assertIn("push blocked", result.stderr)
         self.assertNotIn(self.TERM, result.stdout + result.stderr)
 

@@ -75,6 +75,9 @@ Covers foreign proper nouns the path lint can't know (a private project name lik
   from tag objects; bare-SHA exclusions are limited to the target remote's
   tracking refs; and pre-push scrub execution errors now fail closed. Findings
   remain advisory by default, preserving E2's false-positive policy.
+- **Nested-tag fast-follow (#246):** tag-object collection recursively peels
+  tag-of-tag chains and scans every intermediate message under the outer pushed
+  carrier; any read, parse, or peel failure remains fail-closed.
 - ⚠️ History over `refs/pull/*` can be slow → bound it; keep advisory (never a de-facto daemon).
 
 ### A1–A5 — Agent operating-model guidance

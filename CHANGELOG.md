@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Recursive annotated-tag leak closure (#246).** Publish-boundary scrub now
+  peels tag-of-tag chains and scans every intermediate annotated-tag message
+  carried by the pushed ref. Any object read, malformed target header, or peel
+  failure is a scanner error, so a partially inspected tag chain cannot pass as
+  clean.
+
 - **Visible reviewer handoffs and wait health (#239).** Activity rows now use a
   sanitized `ask` summary when a reviewer handoff has no `done` text, so an
   assignment or verdict no longer looks like an empty turn. During peer work,
