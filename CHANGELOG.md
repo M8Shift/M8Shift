@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Fail-closed publish-boundary leak coverage (#240).** Pre-push now inspects
+  annotated tag messages, which tree grep and commit pickaxe never read, and a
+  new-branch bare-SHA walk excludes only commits already reachable from the
+  target remote's tracking refs. This prevents an unrelated/private remote from
+  hiding add-then-remove history headed to a public mirror. Scrub execution
+  errors block the push instead of being mistaken for a clean scan.
+
 - **RFC 077 Slice D — fixture-only listener safe boundary (#212).** The managed
   listener now consults the Slice C policy after the per-agent usage-hold gate,
   after an immutable attempt checkpoint, and before RFC 070 provider argv

@@ -20,10 +20,13 @@ a "clean" through a lossy path is unverified by definition):
 
 Range mode (`--range`, repeatable — the pre-push hook path): scan only what a
 push is about to publish. `--range A..B` scans the B tree plus A..B history; a
-bare `--range SHA` (new ref) scans that tree plus `SHA --not --remotes`. The hook
-also supplies the corresponding `--ref`, so every history finding names its
-carrier branch/tag. Local side branches, worktree reflogs, and unreachable
-objects are outside this publish scope and can never block a clean pushed range.
+bare `--range SHA` (new ref) scans that tree plus history not already reachable
+from the target remote's tracking refs. The hook also supplies the target
+`--remote` and corresponding `--ref`, so every history finding names its carrier
+branch/tag. Annotated tag objects are scanned directly as well: tree/history
+walks do not inspect their messages. Local side branches, worktree reflogs, and
+unreachable objects are outside this publish scope and can never block a clean
+pushed range.
 
 The default direct scan is HEAD tip + HEAD history. `--all` is the explicit
 repository-audit mode: it adds every ref, reflog, and bounded unreachable commit,
@@ -34,8 +37,8 @@ Output is REDACTED by default: file:line / commit hash + a hashed term label,
 never the term or the matched content. `--verbose` shows terms locally only.
 
 Exit codes: 0 clean (or empty denylist = no-op), 1 at least one hit, 2 error
-(not a repo, git missing/failed). The shipped hooks treat 1 as advisory unless
-M8SHIFT_SCRUB_ENFORCE=1, and treat 2 as fail-open (printed, never blocking).
+(not a repo, git missing/failed). The shipped pre-push hook treats 1 as advisory
+unless M8SHIFT_SCRUB_ENFORCE=1, and always blocks on 2 (scan errors fail closed).
 """
 
 import argparse
@@ -58,6 +61,7 @@ SCRUB_MAX_WORKERS = 8
 # hostile/typoed value from ever reaching the git argv as an option.
 RANGE_RX = re.compile(r"^[0-9a-fA-F]{4,64}(\.\.[0-9a-fA-F]{4,64})?$")
 OBJECT_RX = re.compile(r"^[0-9a-fA-F]{40,64}$")
+REMOTE_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 
 
 def label_of(term):
@@ -151,12 +155,12 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     return cmd
 
 
-def parse_ranges(values):
+def parse_ranges(values, remote=None):
     """-> (specs, error). specs = [(tip_rev, range_args)] per --range value:
     `A..B` scans tree(B) + commits A..B; a bare SHA (new branch — no remote
-    base) scans tree(SHA) + `SHA --not --remotes` (commits not already on any
-    remote-tracking ref; with no remotes at all this over-scans, never
-    under-scans). Invalid shapes are a hard error (rc 2 — hooks fail open)."""
+    base) scans tree(SHA) + commits not already on the TARGET remote's tracking
+    refs. With no target remote it excludes nothing (over-scan, never
+    under-scan). Invalid shapes are a hard error (rc 2)."""
     specs = []
     for value in values or []:
         value = value.strip()
@@ -166,8 +170,37 @@ def parse_ranges(values):
             base, _, tip = value.partition("..")
             specs.append((tip, [value]))
         else:
-            specs.append((value, [value, "--not", "--remotes"]))
+            history = [value]
+            if remote:
+                history += ["--not", "--remotes=%s" % remote]
+            specs.append((value, history))
     return specs, None
+
+
+def validate_remote(value, repo, run):
+    """Validate a target remote before composing `--remotes=<name>`.
+
+    The remote is scan authority: accepting an invented name would make the
+    exclusion set empty and only over-scan, but a malformed name could still
+    produce surprising revision parsing. Require both a safe ref component and
+    an actually configured remote. Returns `(name, error)`.
+    """
+    if not value:
+        return None, None
+    if not REMOTE_RX.match(value) or ".." in value or "//" in value or \
+            value.endswith("/"):
+        return None, "invalid --remote %r" % value
+    checked = run(["git", "check-ref-format",
+                   "refs/remotes/%s/probe" % value], repo)
+    if checked.returncode != 0:
+        return None, "invalid --remote %r" % value
+    remotes = run(["git", "remote"], repo)
+    if remotes.returncode != 0:
+        return None, "git remote rc=%d: %s" % (
+            remotes.returncode, (remotes.stderr or "").strip()[:200])
+    if value not in remotes.stdout.splitlines():
+        return None, "unknown --remote %r" % value
+    return value, None
 
 
 def redact(text, rules):
@@ -210,6 +243,57 @@ def range_carrier(refname, range_args):
     else:
         spec = spec[:12]
     return "pushed ref " + spec
+
+
+def tag_body(raw):
+    """Return only an annotated tag's message/signature body, not headers."""
+    _headers, separator, body = raw.partition("\n\n")
+    if not separator:
+        raise RuntimeError("annotated tag object has no message separator")
+    return body
+
+
+def tag_candidates_for_tips(tip_revs, carriers, repo, run):
+    """Return pushed/direct tips whose object itself is an annotated tag."""
+    candidates = []
+    for index, rev in enumerate(tip_revs):
+        result = run(["git", "cat-file", "-t", rev], repo)
+        if result.returncode != 0:
+            raise RuntimeError("git cat-file -t rc=%d: %s" % (
+                result.returncode, (result.stderr or "").strip()[:200]))
+        if result.stdout.strip() == "tag":
+            carrier = carriers[index] if index < len(carriers) else \
+                "pushed ref " + rev[:12]
+            candidates.append((rev, carrier))
+    return list(dict.fromkeys(candidates))
+
+
+def tag_candidates_for_all(repo, run):
+    """Return every live ref whose target object is an annotated tag."""
+    result = run(["git", "for-each-ref",
+                  "--format=%(objectname)%09%(objecttype)%09%(refname)"], repo)
+    if result.returncode != 0:
+        raise RuntimeError("git for-each-ref rc=%d: %s" % (
+            result.returncode, (result.stderr or "").strip()[:200]))
+    candidates = []
+    for line in result.stdout.splitlines():
+        sha, sep, rest = line.partition("\t")
+        obj_type, sep2, refname = rest.partition("\t")
+        if sep and sep2 and OBJECT_RX.match(sha) and obj_type == "tag" and refname:
+            candidates.append((sha, ref_carrier(refname)))
+    return list(dict.fromkeys(candidates))
+
+
+def tag_message_matches(body, term, mode, allows):
+    """Match one rule against tag-message lines with the normal allow policy."""
+    word_rx = (re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
+               if mode == "word" else None)
+    for line in body.splitlines():
+        matched = word_rx.search(line) if word_rx is not None else \
+            term.lower() in line.lower()
+        if matched and not any(a in line.lower() for a in allows):
+            return True
+    return False
 
 
 def discover_unreachable(repo, run, limit):
@@ -303,8 +387,11 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                          "forges — a hit there needs delete/recreate, see RFC 052)")
     ap.add_argument("--range", action="append", dest="ranges", metavar="A..B|SHA",
                     help="scan only this pushed range (repeatable; hex A..B, or a "
-                         "bare sha for a new branch = sha --not --remotes). The "
+                         "bare sha for a new branch). The "
                          "pre-push hook fast path; incompatible with --refs-pull")
+    ap.add_argument("--remote", default=None, metavar="REMOTE",
+                    help="target Git remote for bare-sha range exclusions; only "
+                         "that remote's tracking refs are considered published")
     ap.add_argument("--ref", action="append", dest="range_refs", metavar="REF",
                     help="carrier ref corresponding to the preceding --range "
                          "(repeatable; used by the pre-push hook)")
@@ -315,7 +402,16 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                          "output is redacted so it can be pasted safely)")
     args = ap.parse_args(argv)
 
-    specs, range_err = parse_ranges(args.ranges)
+    try:
+        remote, remote_err = validate_remote(args.remote, args.repo, run)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+        print("scrub-check: ERROR validating --remote (%s)" %
+              exc.__class__.__name__, file=err)
+        return 2
+    if remote_err:
+        print("scrub-check: ERROR %s" % remote_err, file=err)
+        return 2
+    specs, range_err = parse_ranges(args.ranges, remote=remote)
     if range_err:
         print("scrub-check: ERROR %s" % range_err, file=err)
         return 2
@@ -344,8 +440,8 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                 checked = None
             if checked is None or checked.returncode != 0:
                 # --ref is attribution metadata, never scan authority.  A
-                # malformed label must not turn a real range scan into the
-                # hooks' rc>=2 fail-open path.
+                # malformed label must not turn a real range scan into a
+                # blocking scanner error when the range itself remains valid.
                 print("scrub-check: WARNING invalid --ref label ignored; "
                       "scanning continues with the derived range carrier",
                       file=err)
@@ -355,11 +451,15 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # Range mode: tip-scan each distinct pushed tip, history-scan each range.
     # Default direct mode is HEAD-only; --all is the explicit repository audit.
     tip_revs = []
-    for rev, _ra in specs:
+    tip_carriers = []
+    for index, (rev, range_args) in enumerate(specs):
         if rev not in tip_revs:
+            refname = validated_range_refs[index] if validated_range_refs else None
             tip_revs.append(rev)
+            tip_carriers.append(range_carrier(refname, range_args))
     if not tip_revs:
         tip_revs = ["HEAD"]
+        tip_carriers = ["ref HEAD"]
     history_runs = []
     for index, (_rev, range_args) in enumerate(specs):
         refname = validated_range_refs[index] if validated_range_refs else None
@@ -372,6 +472,30 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         print("scrub-check: %s" % note, file=out)
     if not rules:
         return 0
+
+    try:
+        tag_candidates = tag_candidates_for_all(args.repo, run) if args.all else \
+            tag_candidates_for_tips(tip_revs, tip_carriers, args.repo, run)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+            RuntimeError) as exc:
+        print("scrub-check: ERROR preparing annotated tags (%s)" % exc,
+              file=err)
+        return 2
+
+    tag_bodies = {}
+    try:
+        for tag_sha, _carrier in tag_candidates:
+            if tag_sha in tag_bodies:
+                continue
+            result = run(["git", "cat-file", "tag", tag_sha], args.repo)
+            if result.returncode != 0:
+                raise RuntimeError("git cat-file tag rc=%d: %s" % (
+                    result.returncode, (result.stderr or "").strip()[:200]))
+            tag_bodies[tag_sha] = tag_body(result.stdout)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+            RuntimeError) as exc:
+        print("scrub-check: ERROR reading annotated tag (%s)" % exc, file=err)
+        return 2
 
     unreachable = []
     reflog_entries = []
@@ -405,6 +529,16 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     for rule_index, rule in enumerate(rules):
         label, term, mode = rule
         shown = "%s term=%r" % (label, term) if args.verbose else label
+        # ANNOTATED TAG — neither git grep (commit tree) nor pickaxe history
+        # reads the tag object's message. Scan the body directly and name the
+        # pushed/live carrier without ever echoing matched content by default.
+        for tag_sha, carrier in tag_candidates:
+            if not tag_message_matches(tag_bodies[tag_sha], term, mode, allows):
+                continue
+            hits += 1
+            carrier_text = carrier if args.verbose else redact(carrier, rules)
+            print("TAG hit: %s object %s [%s]" %
+                  (carrier_text, tag_sha[:12], shown), file=out)
         # TIP — revision(s) before `--`; rc 0 = match, 1 = clean, >1 = error.
         for tip_rev in tip_revs:
             try:
