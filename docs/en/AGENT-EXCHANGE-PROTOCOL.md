@@ -145,7 +145,7 @@ authorized resume transition is required for an existing pause.
 
 ### 2.4 Bootstrap and shift opening
 
-Absence of an authority record is `UNINITIALIZED`, not a sixth open state. Only
+Absence of an authority record is `UNINITIALIZED`, not a sixth top-level state. Only
 an authorized operator or host MAY bootstrap a shift. Bootstrap MUST execute
 under the routing mutex, verify that no open authority record already exists,
 validate a bounded roster of at least two unique agent identities, mint a new
