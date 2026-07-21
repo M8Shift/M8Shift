@@ -62,6 +62,32 @@ def test_parallel_scrub_worker_failure_is_ordered_and_fail_closed(tmp_path):
     assert "scrub-check: clean" not in out.getvalue()
 
 
+def test_nested_tag_peel_failure_is_fail_closed(tmp_path):
+    scrub = load_module("scrub_tag_peel_contract",
+                        ROOT / "scripts" / "scrub-check.py")
+    denylist = tmp_path / "denylist.txt"
+    denylist.write_text("private-name\n", encoding="utf-8")
+    outer, inner = "a" * 40, "b" * 40
+
+    def run(cmd, repo):
+        if cmd == ["git", "cat-file", "-t", outer]:
+            return SimpleNamespace(returncode=0, stdout="tag\n", stderr="")
+        if cmd == ["git", "cat-file", "tag", outer]:
+            raw = ("object %s\ntype tag\ntag outer\n"
+                   "tagger A <a@b> 0 +0000\n\nclean\n") % inner
+            return SimpleNamespace(returncode=0, stdout=raw, stderr="")
+        if cmd == ["git", "cat-file", "-t", inner]:
+            return SimpleNamespace(returncode=128, stdout="", stderr="missing")
+        raise AssertionError("unexpected git argv: %r" % (cmd,))
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = scrub.main(["--repo", str(ROOT), "--denylist", str(denylist),
+                     "--range", outer], out, err, run)
+    assert rc == 2
+    assert "ERROR preparing annotated tags" in err.getvalue()
+    assert "scrub-check: clean" not in out.getvalue()
+
+
 def test_ci_dependency_installs_are_hash_closed():
     workflows = list((ROOT / ".github" / "workflows").glob("*.yml"))
     installs = []

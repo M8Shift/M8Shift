@@ -245,42 +245,79 @@ def range_carrier(refname, range_args):
     return "pushed ref " + spec
 
 
-def tag_body(raw):
-    """Return only an annotated tag's message/signature body, not headers."""
-    _headers, separator, body = raw.partition("\n\n")
+def parse_tag_object(raw):
+    """Return an annotated tag's target object and message/signature body."""
+    headers, separator, body = raw.partition("\n\n")
     if not separator:
         raise RuntimeError("annotated tag object has no message separator")
-    return body
+    first = headers.splitlines()[0] if headers else ""
+    prefix = "object "
+    target = first[len(prefix):].strip() if first.startswith(prefix) else ""
+    if not OBJECT_RX.match(target):
+        raise RuntimeError("annotated tag object has invalid target header")
+    return target, body
 
 
-def tag_candidates_for_tips(tip_revs, carriers, repo, run):
-    """Return pushed/direct tips whose object itself is an annotated tag."""
+def tag_chain_candidates(rev, carrier, repo, run):
+    """Return every annotated tag object from ``rev`` through recursive peel.
+
+    Git permits an annotated tag to target another annotated tag.  Each tag
+    object in that chain is published with the outer ref, so every intermediate
+    message must be scanned.  Any read, parse, or type failure is a scanner
+    error: a partially peeled chain must never be reported clean.
+    """
     candidates = []
-    for index, rev in enumerate(tip_revs):
-        result = run(["git", "cat-file", "-t", rev], repo)
+    seen = set()
+    current = rev
+    while True:
+        result = run(["git", "cat-file", "-t", current], repo)
         if result.returncode != 0:
             raise RuntimeError("git cat-file -t rc=%d: %s" % (
                 result.returncode, (result.stderr or "").strip()[:200]))
-        if result.stdout.strip() == "tag":
-            carrier = carriers[index] if index < len(carriers) else \
-                "pushed ref " + rev[:12]
-            candidates.append((rev, carrier))
+        obj_type = result.stdout.strip()
+        if obj_type in ("blob", "commit", "tree"):
+            break
+        if obj_type != "tag":
+            raise RuntimeError("git cat-file -t returned invalid object type")
+        if current in seen:
+            raise RuntimeError("annotated tag chain contains a cycle")
+        seen.add(current)
+        candidates.append((current, carrier))
+        tag_result = run(["git", "cat-file", "tag", current], repo)
+        if tag_result.returncode != 0:
+            raise RuntimeError("git cat-file tag rc=%d: %s" % (
+                tag_result.returncode,
+                (tag_result.stderr or "").strip()[:200]))
+        current, _body = parse_tag_object(tag_result.stdout)
+    return candidates
+
+
+def tag_candidates_for_tips(tip_revs, carriers, repo, run):
+    """Return all tag objects recursively published by pushed/direct tips."""
+    candidates = []
+    for index, rev in enumerate(tip_revs):
+        carrier = carriers[index] if index < len(carriers) else \
+            "pushed ref " + rev[:12]
+        candidates.extend(tag_chain_candidates(rev, carrier, repo, run))
     return list(dict.fromkeys(candidates))
 
 
 def tag_candidates_for_all(repo, run):
-    """Return every live ref whose target object is an annotated tag."""
+    """Return every tag object recursively published by every live tag ref."""
     result = run(["git", "for-each-ref",
                   "--format=%(objectname)%09%(objecttype)%09%(refname)"], repo)
     if result.returncode != 0:
         raise RuntimeError("git for-each-ref rc=%d: %s" % (
             result.returncode, (result.stderr or "").strip()[:200]))
-    candidates = []
+    roots = []
     for line in result.stdout.splitlines():
         sha, sep, rest = line.partition("\t")
         obj_type, sep2, refname = rest.partition("\t")
         if sep and sep2 and OBJECT_RX.match(sha) and obj_type == "tag" and refname:
-            candidates.append((sha, ref_carrier(refname)))
+            roots.append((sha, ref_carrier(refname)))
+    candidates = []
+    for sha, carrier in roots:
+        candidates.extend(tag_chain_candidates(sha, carrier, repo, run))
     return list(dict.fromkeys(candidates))
 
 
@@ -491,7 +528,7 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
             if result.returncode != 0:
                 raise RuntimeError("git cat-file tag rc=%d: %s" % (
                     result.returncode, (result.stderr or "").strip()[:200]))
-            tag_bodies[tag_sha] = tag_body(result.stdout)
+            _target, tag_bodies[tag_sha] = parse_tag_object(result.stdout)
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
             RuntimeError) as exc:
         print("scrub-check: ERROR reading annotated tag (%s)" % exc, file=err)
