@@ -44,6 +44,12 @@ M8Shift is **free and open source**, released under the
 | [multi-agent-scratch-validation.md](multi-agent-scratch-validation.md) | Scratch evidence for N-agent routing, pinned listeners, concurrent Codex limits, degree-2 worktrees, and safe roster expansion. |
 | [rtk-shell-output-policy.md](rtk-shell-output-policy.md) | Usage policy for the optional RTK shell-output adapter: recommended modes, forbidden diff mode, self-declared RTK visibility, and `rtk discover` audit guidance. |
 
+## Operator runbooks
+
+| Document | Purpose |
+|----------|---------|
+| [runbooks/token-rotation.md](runbooks/token-rotation.md) | Re-entrant, zero-downtime forge token rotation with environment-only credential transport. |
+
 ## Design decisions
 
 | Document | Purpose |
@@ -124,6 +130,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [065-rfc-ticketed-committed-pushed-delivery.md](rfc/065-rfc-ticketed-committed-pushed-delivery.md) | Accepted delivery discipline: one structured forge ticket and committed, pushed history for every intentional change, with advisory offline reminders and a named role-based gateway. |
 | [066-rfc-asymmetric-solo-advance.md](rfc/066-rfc-asymmetric-solo-advance.md) | Accepted design for policy-authorized bounded solo progress and deferred reconciliation; implementation remains phased and explicitly deferred. |
 | [067-rfc-detached-vendor-neutral-cli-orchestration.md](rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | Accepted design for detached, vendor-neutral CLI agent orchestration: all 16 recommended decisions are resolved; implementation remains phased and explicitly deferred. |
+| [068-rfc-forge-token-rotation.md](rfc/068-rfc-forge-token-rotation.md) | Draft operator-gated contract for least-privilege, zero-downtime forge token rotation across helpers, CI, and managed runners. |
 | [069-rfc-top-incremental-status-fold.md](rfc/069-rfc-top-incremental-status-fold.md) | Implemented top-owned in-memory incremental status fold with a byte-equivalent full oracle, bounded O(delta) refreshes, and mandatory full fallback on invalidation. |
 | [070-rfc-provider-pinned-model-launch.md](rfc/070-rfc-provider-pinned-model-launch.md) | Implemented fail-closed per-agent model pins for managed Codex/Claude provider launches, with immutable runner-plan propagation and RFC 056's unverified provenance boundary preserved. |
 | [071-rfc-live-roster-add.md](rfc/071-rfc-live-roster-add.md) | Implemented holder-only live roster addition that changes only the LOCK `agents:` value, preserves the work window and journals byte-for-byte, and leaves anchor bootstrap explicit. |
