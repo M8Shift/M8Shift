@@ -3,8 +3,8 @@
 # leaves the machine.
 #
 # ADVISORY and LOCAL by default: findings are printed, the push proceeds. Set
-# M8SHIFT_SCRUB_ENFORCE=1 to BLOCK the push on findings. Scanner ERRORS always
-# fail open (printed, never blocking) — a broken scanner must not freeze pushes.
+# M8SHIFT_SCRUB_ENFORCE=1 to BLOCK the push on findings. Scrub scanner ERRORS
+# fail closed: inability to inspect publish-bound objects is not a clean result.
 # `git push --no-verify` bypasses this hook entirely, by design (git semantics).
 #
 # What runs:
@@ -17,11 +17,13 @@
 #      PUBLISHES: git feeds the hook one `<local ref> <local sha> <remote ref>
 #      <remote sha>` line per ref on stdin, and each becomes a `--range`
 #      (remote..local; a bare local sha when the remote side is new or unknown;
-#      deletions are skipped — nothing leaves). Raw git, never a lossy optimizer.
+#      deletions are skipped — nothing leaves). Bare-sha history exclusions are
+#      limited to tracking refs of the TARGET remote, and annotated tag messages
+#      are read from their tag objects. Raw git, never a lossy optimizer.
 #      Scanning only the pushed ranges keeps the hook fast and prevents local
 #      side refs/reflogs/unreachable objects from blocking clean publication.
 #      The full walk remains explicit (CI, audits): run scrub-check.py --all.
-#      rc 1 = hit, rc >= 2 = scanner error (fail open).
+#      rc 1 = hit, rc >= 2 = scanner error (fail closed).
 #
 # Install (per clone, hooks are not version-controlled by Git):
 #   git config core.hooksPath hooks
@@ -30,6 +32,14 @@
 set -eu
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '.')"
+
+# Git supplies the target remote name (or URL) as argv[1]. Only pass a configured
+# name to scrub-check; URL pushes have no trustworthy remote-tracking namespace
+# and therefore conservatively exclude nothing.
+target_remote=""
+if [ "${#}" -ge 1 ] && git remote get-url -- "${1}" >/dev/null 2>&1; then
+	target_remote="${1}"
+fi
 
 # Resolve the m8shift.py program (soft: everything here is advisory-by-default).
 m8shift=""
@@ -93,7 +103,7 @@ if [ ! -t 0 ]; then
 		*[!0]*)
 			# Known remote base -> scan exactly the new commits. If the base
 			# object is absent locally (stale tracking), the bare-sha form
-			# over-scans (--not --remotes) instead of erroring out.
+			# over-scans relative to target-remote tracking instead of erroring.
 			if git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
 				ranges="${ranges} --range ${remote_sha}..${local_sha} --ref ${remote_ref}"
 			else
@@ -113,11 +123,16 @@ if [ -f "${scrub}" ]; then
 	else
 		scrub_rc=0
 		# shellcheck disable=SC2086 # intentional word-splitting: hex-only rev specs
-		python3 "${scrub}" --repo "${repo_root}" ${ranges} >&2 || scrub_rc=$?
+		if [ -n "${target_remote}" ]; then
+			python3 "${scrub}" --repo "${repo_root}" --remote "${target_remote}" ${ranges} >&2 || scrub_rc=$?
+		else
+			python3 "${scrub}" --repo "${repo_root}" ${ranges} >&2 || scrub_rc=$?
+		fi
 		if [ "${scrub_rc}" -eq 1 ]; then
 			block=1
 		elif [ "${scrub_rc}" -ge 2 ]; then
-			printf '%s\n' "m8shift pre-push: scrub-check failed (rc ${scrub_rc}) — continuing without it." >&2
+			printf '%s\n' "m8shift pre-push: scrub-check failed (rc ${scrub_rc}) — push blocked (scan errors fail closed)." >&2
+			exit 1
 		fi
 	fi
 fi

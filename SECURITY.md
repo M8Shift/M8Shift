@@ -105,8 +105,10 @@ is before it ever leaves the machine. The repo ships `hooks/pre-commit` and
 `hooks/pre-push`, which run the same `doctor --hygiene-only --lint` locally —
 and, at push time, `scripts/scrub-check.py` over **each pushed range** (the
 commits this push actually publishes, derived from git's stdin ref updates;
-deletion-only pushes skip the scan). The full-history walk stays a CI/audit
-tool (`scrub-check.py` without `--range`), not a per-push tax. Install with:
+new-ref history is compared only with the target remote's tracking refs;
+annotated tag messages are inspected directly; deletion-only pushes skip the
+scan). The full-history walk stays a CI/audit tool (`scrub-check.py --all`), not
+a per-push tax. Install with:
 
     git config core.hooksPath hooks
 
@@ -118,6 +120,8 @@ written*, so nothing reaches history to purge. The confidential denylist is
 never committed: point `M8SHIFT_DENYLIST` at a private file (default
 `~/.config/m8shift/denylist.txt`, one term per line). Matches are reported as
 hashed labels — never the term, never the matched line.
+An inability to execute the publish-boundary scrub is different from an
+advisory finding: scrub errors fail closed and block the push.
 
 Independently of that advisory scrub policy, pre-commit refreshes
 `checksums.sha256` whenever a listed file is staged. It hashes the Git index blob,

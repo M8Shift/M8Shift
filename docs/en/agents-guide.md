@@ -294,9 +294,10 @@ releasable at all times.
   paths + the operator's out-of-repo confidential denylist, redacted output);
   `python3 scripts/scrub-check.py` scans HEAD tip and reachable history for
   denylisted identifiers via raw git (never a lossy optimizer); `--all` explicitly
-  adds refs, worktree reflogs, and unreachable objects. `hooks/pre-push` scans only
-  the ref-update ranges Git provides, advisorily —
-  set `M8SHIFT_SCRUB_ENFORCE=1` to block on findings.
+  adds refs, annotated tag messages, worktree reflogs, and unreachable objects.
+  `hooks/pre-push` scans only the ref-update ranges Git provides, scopes
+  new-branch exclusions to the target remote, and blocks on scan errors;
+  findings remain advisory unless `M8SHIFT_SCRUB_ENFORCE=1` is set.
 - **Signed-off collaboration.** Commit messages include the agreed
   `Co-Authored-By:` trailer.
 - **Dogfooding provenance — model *and* engine, on every commit.** Each commit

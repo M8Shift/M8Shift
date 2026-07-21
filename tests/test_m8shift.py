@@ -16734,6 +16734,13 @@ class TestRFC052ScrubCheck(CLIBase):
         direct = mod.history_cmd(rule, 100, refs_pull=False)
         self.assertIn("HEAD", direct)
         self.assertNotIn("--all", direct)
+        bare, error = mod.parse_ranges(["a" * 40], remote="public")
+        self.assertIsNone(error)
+        self.assertEqual(bare[0][1],
+                         ["a" * 40, "--not", "--remotes=public"])
+        conservative, error = mod.parse_ranges(["b" * 40])
+        self.assertIsNone(error)
+        self.assertEqual(conservative[0][1], ["b" * 40])
 
     def test_parser_drift_scrub_check_matches_core(self):
         # The script duplicates the core denylist parser (self-contained by
@@ -16890,21 +16897,55 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("HISTORY hit", r.stdout)
         self.assertNotIn(self.TERM, r.stdout + r.stderr)   # still redacted
 
-    def test_range_bare_sha_scans_new_branch_against_remotes(self):
-        # New branch (all-zero remote sha): bare --range SHA scans
-        # `SHA --not --remotes` — commits already on a remote-tracking ref
-        # (the old leak below) are NOT rescanned; genuinely new ones are.
-        self._commit("docs/old.md", "ancient %s leak\n" % self.TERM)
-        self._rm_commit("docs/old.md")
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/main",
-                        self._sha()], cwd=self.d, capture_output=True)
-        self._commit("docs/feat.md", "clean feature\n")
+    def test_range_bare_sha_excludes_only_target_remote_history(self):
+        # New branch to `public`: commits already tracked by the unrelated
+        # private `origin` remote are still publication-bound. The old global
+        # `--not --remotes` silently dropped this add-then-remove leak.
+        for remote in ("origin", "public"):
+            subprocess.run(["git", "remote", "add", remote, self.d],
+                           cwd=self.d, check=True, capture_output=True)
+        self._commit("base.txt", "clean\n", "base")
+        base = self._sha()
+        subprocess.run(["git", "update-ref", "refs/remotes/public/main", base],
+                       cwd=self.d, check=True, capture_output=True)
+        self._commit("docs/transient.md", "temporary %s leak\n" % self.TERM)
+        self._rm_commit("docs/transient.md")
+        tip = self._sha()
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/feature", tip],
+                       cwd=self.d, check=True, capture_output=True)
         dl = self._deny(self.TERM + "\n")
-        r = self._scrub("--range", self._sha(), denylist=dl)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self._commit("docs/feat2.md", "with %s inside\n" % self.TERM)
-        r = self._scrub("--range", self._sha(), denylist=dl)
+        r = self._scrub("--range", tip, "--remote", "public", denylist=dl)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("TIP hit", r.stdout)             # history-only carrier
+        self.assertIn("HISTORY hit", r.stdout)
+
+        # Clean new-branch history remains non-blocking under the same scope.
+        subprocess.run(["git", "checkout", "-q", "-b", "clean-feature", base],
+                       cwd=self.d, check=True)
+        self._commit("docs/clean.md", "clean feature\n")
+        clean_tip = self._sha()
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/clean-feature",
+                        clean_tip], cwd=self.d, check=True, capture_output=True)
+        clean = self._scrub("--range", clean_tip, "--remote", "public",
+                            denylist=dl)
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+
+    def test_annotated_tag_message_scanned_in_range_and_all(self):
+        self._commit("release.txt", "clean release tree\n", "base")
+        subprocess.run(["git", "tag", "-a", "v1.0", "-m",
+                        "release for %s" % self.TERM], cwd=self.d, check=True)
+        tag_sha = self._sha("refs/tags/v1.0")
+        dl = self._deny(self.TERM + "\n")
+        ranged = self._scrub("--range", tag_sha, "--ref", "refs/tags/v1.0",
+                             denylist=dl)
+        self.assertEqual(ranged.returncode, 1, ranged.stdout + ranged.stderr)
+        self.assertIn("TAG hit: tag v1.0 object %s" % tag_sha[:12], ranged.stdout)
+        self.assertNotIn(self.TERM, ranged.stdout + ranged.stderr)
+
+        audited = self._scrub("--all", denylist=dl)
+        self.assertEqual(audited.returncode, 1, audited.stdout + audited.stderr)
+        self.assertIn("TAG hit: tag v1.0 object %s" % tag_sha[:12], audited.stdout)
+        self.assertNotIn(self.TERM, audited.stdout + audited.stderr)
 
     def test_range_invalid_or_refs_pull_mix_is_scanner_error(self):
         # A non-hex value must never reach the git argv (option injection),
@@ -17148,6 +17189,89 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertEqual(r.returncode, 1, r.stderr)      # introduced -> blocked
         self.assertIn("via branch main", r.stderr)
         self.assertNotIn(self.TERM, r.stdout + r.stderr)
+
+    def test_pre_push_blocks_annotated_tag_message_under_enforce(self):
+        self._commit("release.txt", "clean release tree\n", "base")
+        subprocess.run(["git", "remote", "add", "public", self.d],
+                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "tag", "-a", "v1.0", "-m",
+                        "release for %s" % self.TERM], cwd=self.d, check=True)
+        tag_sha = self._sha("refs/tags/v1.0")
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(self.d, "scripts", "scrub-check.py"))
+        env = dict(os.environ, HOME=self.home,
+                   M8SHIFT_DENYLIST=self._deny(self.TERM + "\n"),
+                   M8SHIFT_SCRUB_ENFORCE="1")
+        env.pop("M8SHIFT_AGENT", None)
+        zeros = "0" * 40
+        result = subprocess.run(
+            ["sh", os.path.join(REPO, "hooks", "pre-push"), "public", self.d],
+            cwd=self.d, capture_output=True, text=True, env=env,
+            input="refs/tags/v1.0 %s refs/tags/v1.0 %s\n" % (tag_sha, zeros))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("TAG hit: tag v1.0", result.stderr)
+        self.assertIn("push blocked", result.stderr)
+        self.assertNotIn(self.TERM, result.stdout + result.stderr)
+
+    def test_pre_push_new_branch_uses_only_target_remote_tracking(self):
+        for remote in ("origin", "public"):
+            subprocess.run(["git", "remote", "add", remote, self.d],
+                           cwd=self.d, check=True, capture_output=True)
+        self._commit("base.txt", "clean\n", "base")
+        base = self._sha()
+        subprocess.run(["git", "update-ref", "refs/remotes/public/main", base],
+                       cwd=self.d, check=True, capture_output=True)
+        self._commit("transient.txt", "temporary %s leak\n" % self.TERM)
+        self._rm_commit("transient.txt")
+        tip = self._sha()
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/feature", tip],
+                       cwd=self.d, check=True, capture_output=True)
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(self.d, "scripts", "scrub-check.py"))
+        env = dict(os.environ, HOME=self.home,
+                   M8SHIFT_DENYLIST=self._deny(self.TERM + "\n"),
+                   M8SHIFT_SCRUB_ENFORCE="1")
+        env.pop("M8SHIFT_AGENT", None)
+        zeros = "0" * 40
+
+        def hook(local_ref, local_sha):
+            return subprocess.run(
+                ["sh", os.path.join(REPO, "hooks", "pre-push"),
+                 "public", self.d], cwd=self.d, capture_output=True, text=True,
+                env=env, input="%s %s %s %s\n" %
+                (local_ref, local_sha, local_ref, zeros))
+
+        leaking = hook("refs/heads/feature", tip)
+        self.assertEqual(leaking.returncode, 1, leaking.stderr)
+        self.assertIn("HISTORY hit", leaking.stderr)
+        self.assertNotIn("TIP hit", leaking.stderr)
+        self.assertNotIn(self.TERM, leaking.stdout + leaking.stderr)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "clean-feature", base],
+                       cwd=self.d, check=True)
+        self._commit("clean.txt", "clean feature\n")
+        clean_tip = self._sha()
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/clean-feature",
+                        clean_tip], cwd=self.d, check=True, capture_output=True)
+        clean = hook("refs/heads/clean-feature", clean_tip)
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+
+    def test_pre_push_scrub_error_fails_closed(self):
+        self._commit("clean.txt", "clean\n", "base")
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        broken = os.path.join(self.d, "scripts", "scrub-check.py")
+        with open(broken, "w", encoding="utf-8") as fh:
+            fh.write("import sys\nsys.exit(2)\n")
+        env = dict(os.environ, HOME=self.home)
+        env.pop("M8SHIFT_AGENT", None)
+        env.pop("M8SHIFT_DENYLIST", None)
+        result = subprocess.run(
+            ["sh", os.path.join(REPO, "hooks", "pre-push")], cwd=self.d,
+            capture_output=True, text=True, env=env, input="")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("scan errors fail closed", result.stderr)
 
 
 class TestRFC052AnchorMode(CLIBase):
