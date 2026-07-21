@@ -2043,6 +2043,12 @@ class TestAgentExchangeProtocol(unittest.TestCase):
             "blank-agent reconstruction",
             "untrusted data",
             "Versioned exchange envelope",
+            "Complete top-level transition table",
+            "Ordered arbitration rules",
+            "Laws of conforming exchange",
+            "Two-phase stale recovery",
+            "Whole-shift exchange profile",
+            "Conformance profile",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, body)
