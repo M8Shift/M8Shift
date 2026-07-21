@@ -434,6 +434,19 @@ class TestPureFunctions(unittest.TestCase):
                 if isinstance(value, str):
                     self.assertLessEqual(len(value), cowork.STATUS_SNAPSHOT_TEXT_MAX)
 
+    def test_status_activity_uses_ask_when_handoff_has_no_done_summary(self):
+        turns = [
+            {"n": 1, "agent": "claude",
+             "fields": {"done": "", "ask": "assigned #218+#222"}},
+            {"n": 2, "agent": "claude",
+             "fields": {"done": "REVISE: F1 HIGH", "ask": "fix it"}},
+            {"n": 3, "agent": "claude",
+             "fields": {"done": "—", "ask": "—"}},
+        ]
+        actual = cowork._status_activity(turns)
+        self.assertEqual([event["summary"] for event in actual],
+                         ["→ assigned #218+#222", "REVISE: F1 HIGH", ""])
+
     def test_every_cli_parser_has_summary_help(self):
         """Every command remains discoverable in the top-level/subcommand help."""
         with open(SCRIPT, encoding="utf-8") as f:

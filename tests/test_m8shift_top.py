@@ -105,6 +105,28 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
             self.assertIn("02:05 ago", output)
             self.assertTrue(all(len(line) == width for line in output.splitlines()))
 
+    def test_gateway_line_distinguishes_healthy_review_wait_from_stale(self):
+        top = load_top()
+        healthy = fixture()
+        healthy["agents"].append({"id": "claude", "role_state": "idle",
+                                   "usage": {"windows": {}}})
+        healthy["attention"] = {"claude": {
+            "lifecycle": "ALIVE", "producer_coverage": "invoker",
+            "relay_attention": "not_applicable",
+        }}
+        output = self._plain(top.render(healthy, 160, self.NOW))
+        for token in ("GATEWAY", "reviewer claude LISTENING", "HEALTHY WAIT",
+                      "codex WORKING", "lease alive"):
+            self.assertIn(token, output)
+
+        stale = copy.deepcopy(healthy)
+        stale["expires"] = "2026-07-12T23:59:00Z"
+        stale["attention"]["claude"].update(
+            lifecycle="DEAD", producer_coverage="absent")
+        output = self._plain(top.render(stale, 160, self.NOW))
+        for token in ("reviewer claude DEAD", "UNHEALTHY WAIT", "lease stale"):
+            self.assertIn(token, output)
+
     def test_gateway_outcome_colours_are_exact_tokens(self):
         top = load_top()
         colours = {

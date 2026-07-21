@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Visible reviewer handoffs and wait health (#239).** Activity rows now use a
+  sanitized `ask` summary when a reviewer handoff has no `done` text, so an
+  assignment or verdict no longer looks like an empty turn. During peer work,
+  TOP also derives a read-only `GATEWAY` wait signal from the active lease and
+  existing listener evidence, distinguishing a resident healthy reviewer from
+  a dead listener or stale pen without mutating the relay.
+
 - **Fail-closed publish-boundary leak coverage (#240).** Pre-push now inspects
   annotated tag messages, which tree grep and commit pickaxe never read, and a
   new-branch bare-SHA walk excludes only commits already reachable from the

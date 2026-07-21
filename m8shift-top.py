@@ -417,6 +417,60 @@ def _gateway_display(gateway):
     return "%s %s · %s · %s" % (action, outcome, actor, age)
 
 
+def _review_wait_candidate(snapshot):
+    """Return the first non-holder lane while a peer owns a working lease."""
+    state = snapshot.get("state")
+    if not isinstance(state, str) or not state.startswith("WORKING_"):
+        return None
+    holder = snapshot.get("holder")
+    holder_key = holder.lower() if isinstance(holder, str) else ""
+    candidates = []
+    holder_present = False
+    for agent in snapshot.get("agents") or []:
+        agent_id = agent.get("id") if isinstance(agent, dict) else None
+        if isinstance(agent_id, str):
+            if agent_id.lower() == holder_key:
+                holder_present = True
+            else:
+                candidates.append(agent_id)
+    # A coherent core snapshot always includes the holder in the roster.  Fail
+    # closed on malformed/mixed-version inputs instead of labelling an arbitrary
+    # lane as the reviewer.
+    if not holder_present:
+        return None
+    attention = snapshot.get("attention")
+    if isinstance(attention, dict):
+        for agent_id in attention:
+            if (isinstance(agent_id, str) and agent_id.lower() != holder_key
+                    and agent_id not in candidates):
+                candidates.append(agent_id)
+    return candidates[0] if candidates else None
+
+
+def _review_wait_display(snapshot, current):
+    """Explain healthy reviewer waiting without inventing runtime liveness."""
+    reviewer = _review_wait_candidate(snapshot)
+    if reviewer is None:
+        return ""
+    current = current or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    expiry = _stamp(snapshot.get("expires"))
+    lease = ("unknown" if expiry is None else
+             "alive" if current < expiry else "stale")
+    attention = snapshot.get("attention")
+    row = attention.get(reviewer) if isinstance(attention, dict) else None
+    row = row if isinstance(row, dict) else {}
+    lifecycle = row.get("lifecycle")
+    coverage = row.get("producer_coverage")
+    listening = lifecycle == "ALIVE" and coverage == "invoker"
+    signal = "LISTENING" if listening else clean(lifecycle or "UNKNOWN", 24)
+    health = "HEALTHY WAIT" if listening and lease == "alive" else "UNHEALTHY WAIT"
+    return "reviewer %s %s · %s · %s WORKING · lease %s" % (
+        clean(reviewer, 18), signal, health,
+        clean(snapshot.get("holder"), 18), lease)
+
+
 def _paint_exact_token(plain, token, style, enabled):
     """Colour one complete status token without matching it inside another word."""
     if not enabled or not token:
@@ -499,8 +553,10 @@ def _activity_capacity(snapshot, width, height):
         return None
     agent_rows = len(snapshot.get("agents") or [])
     # RFC 064's permanent global TIME strip consumes one physical row.
+    has_gateway_row = (isinstance(snapshot.get("gateway"), dict)
+                       or _review_wait_candidate(snapshot) is not None)
     fixed_rows = ((14 if max(24, width) >= 100 else 17) + agent_rows
-                  + (1 if isinstance(snapshot.get("gateway"), dict) else 0))
+                  + (1 if has_gateway_row else 0))
     return max(0, height - fixed_rows)
 
 
@@ -862,7 +918,10 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         green if lg[3] == "armed" else amber if lg[3] == "disarmed" else dim,
         colored)
     lines += [sep, listen_row, ledger_row]
-    gateway_payload = _gateway_display(snapshot.get("gateway"))
+    gateway_event = _gateway_display(snapshot.get("gateway"))
+    review_wait = _review_wait_display(snapshot, current)
+    gateway_payload = review_wait + ((" · last " + gateway_event)
+                                     if review_wait and gateway_event else gateway_event)
     if gateway_payload:
         gateway_row = row("GATEWAY  " + gateway_payload)
         outcome = (snapshot.get("gateway") or {}).get("outcome")
@@ -871,6 +930,11 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
         if outcome_style:
             gateway_row = _paint_exact_token(
                 gateway_row, outcome, outcome_style, colored)
+        for token, style in (("LISTENING", green), ("HEALTHY WAIT", green),
+                             ("UNHEALTHY WAIT", red), ("DEAD", red),
+                             ("UNKNOWN", red), ("lease stale", red)):
+            gateway_row = _paint_exact_token(
+                gateway_row, token, style, colored)
         lines.append(gateway_row)
     last = snapshot.get("last_turn") or {}
     last_model = _model_effort(last)
@@ -1083,7 +1147,10 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         ledger_line, ledger_segments[3], lg[3],
         green if lg[3] == "armed" else amber if lg[3] == "disarmed" else dim,
         colored)
-    gateway_payload = _gateway_display(snapshot.get("gateway"))
+    gateway_event = _gateway_display(snapshot.get("gateway"))
+    review_wait = _review_wait_display(snapshot, current)
+    gateway_payload = review_wait + ((" · last " + gateway_event)
+                                     if review_wait and gateway_event else gateway_event)
     gateway_line = None
     if gateway_payload:
         gateway_line = "│" + adaptive_cells(
@@ -1094,6 +1161,11 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
         if outcome_style:
             gateway_line = _paint_exact_token(
                 gateway_line, outcome, outcome_style, colored)
+        for token, style in (("LISTENING", green), ("HEALTHY WAIT", green),
+                             ("UNHEALTHY WAIT", red), ("DEAD", red),
+                             ("UNKNOWN", red), ("lease stale", red)):
+            gateway_line = _paint_exact_token(
+                gateway_line, token, style, colored)
     last_model = _model_effort(last)
     turn_payload = "#%s %s/%s → %s  %s" % (
         _value(last.get("n")), _value(last.get("agent")), last_model,

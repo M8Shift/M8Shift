@@ -9984,6 +9984,13 @@ def _status_activity(turns, limit=STATUS_ACTIVITY_DEFAULT_LIMIT):
         turn_number = turn.get("n")
         if not isinstance(turn_number, int) or isinstance(turn_number, bool):
             turn_number = None
+        done = _status_snapshot_text(fields.get("done"))
+        ask = _status_snapshot_text(fields.get("ask"))
+        if done in ("-", "—"):
+            done = ""
+        if ask in ("-", "—"):
+            ask = ""
+        summary = done or (_status_snapshot_text("→ " + ask) if ask else "")
         out.append({
             "turn": turn_number,
             "ts": _status_snapshot_text(fields.get("at")) or None,
@@ -9993,7 +10000,7 @@ def _status_activity(turns, limit=STATUS_ACTIVITY_DEFAULT_LIMIT):
             "model_source": "self_declared" if fields.get("model") else None,
             "effort": _status_snapshot_text(fields.get("effort")) or None,
             "effort_source": "self_declared" if fields.get("effort") else None,
-            "summary": _status_snapshot_text(fields.get("done")),
+            "summary": summary,
         })
     return out
 
