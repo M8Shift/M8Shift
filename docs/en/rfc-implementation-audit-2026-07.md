@@ -2,7 +2,8 @@
 
 Initial audit baseline: repository commit `421e935` (v3.64.0 plus RFC 077 Slice
 B), 2026-07-19. The RFC 077 inventory and gap register were then advanced by
-issue #212 Slice C; other rows retain the initial baseline. This is a
+issue #212 Slices C-D, and the RFC 068 row by its design artifact; other rows
+retain the initial baseline. This is a
 repository/code audit, not a claim about unexported forge issue bodies or
 operator infrastructure.
 
@@ -107,7 +108,7 @@ standardized turn validator is the older Stage-4 surface in
 | 065 | implemented | The generated discipline and `TestRFC065DeliveryAdvisories` implement ticket/commit/push/gateway-pending policy and offline reminders. Ticket #229 adds observability not promised by RFC 065. |
 | 066 | design-only | The solo-episode state, reconciliation ledger, eligibility/bounds, return detection, and command sketch in §§5–10 are absent and explicitly separately gated. |
 | 067 | partial | RFCs 072/073 implement much of Phases 1–2 and one Phase-4 provider, but the accepted orchestration program is not complete. |
-| 068 | design-only | **No RFC 068 file exists in the index or tree.** The only local record says rotation-token design remains operator-gated; there is no text precise enough to audit or implement. |
+| 068 | design-only | `068-rfc-forge-token-rotation.md` and its operator runbook now define a least-privilege, overlapping-generation cutover contract. Every live credential action remains operator-only. |
 | 069 | implemented | EF-44 plus incremental-fold oracle/invalidation tests implement byte-equivalent O(delta) dashboard refresh. |
 | 070 | implemented | Provider/model pins and immutable runner-plan propagation are covered by EF-40/42 and exact argv tests; unsupported native resume correctly fails closed. |
 | 071 | implemented | `m8shift.py:cmd_roster_add` implements holder-only, byte-preserving live roster addition; templated enrollment is explicitly outside this RFC. |
@@ -358,7 +359,7 @@ Voluntary design-only proposals above are excluded.
 
 | Priority | Gap | Why now / completion signal |
 |---:|---|---|
-| P0 | Resolve RFC 068 as a real RFC artifact | The current “rotation token” dependency has no auditable contract. Write/arbitrate it (or explicitly abandon/renumber it) before allowing dependent rotation/routing work to cite it. |
+| P0 | Execute/arbitrate RFC 068's operator gate | The auditable rotation contract now exists; live token creation, propagation, revocation, and any dependent #77/#165 activation still require the operator runbook and separate authorization. |
 | P0 | #212 vendor-contract re-verification gate | Slice E must not rely on a stale 2026-07 matrix. Define source-date/expiry/drift evidence and keep live enablement fail-closed. |
 | P0 | #222 HISTORY reachability and carrier-ref findings | Current full-history scrub can false-block delivery on unreachable commits retained by stale refs. Scope reachable history deliberately and name the refs that keep a hit alive. |
 | P1 | #229 gateway side ledger/top visibility | A delivery in flight is currently visible only in prose; add the accepted digest-only event schema and advisory dashboard consumer without granting pen authority. |
