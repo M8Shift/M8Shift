@@ -28,6 +28,12 @@ walks do not inspect their messages. Local side branches, worktree reflogs, and
 unreachable objects are outside this publish scope and can never block a clean
 pushed range.
 
+Commit messages are scanned once across the same bounded history scope, so a
+range finding names the pushed carrier. `--objects` is a separate release-audit
+mode: it scans every local blob/tree plus full commit/tag objects, including
+identity headers, side refs, and unreachable objects. It is never run
+automatically by the pre-push hook.
+
 The default direct scan is HEAD tip + HEAD history. `--all` is the explicit
 repository-audit mode: it adds every ref, reflog, and bounded unreachable commit,
 and labels each history hit with carrier refs, worktree reflogs, or an unreachable
@@ -48,6 +54,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import threading
 
 DENYLIST_ENV = "M8SHIFT_DENYLIST"
 DENYLIST_DEFAULT = os.path.join("~", ".config", "m8shift", "denylist.txt")
@@ -57,6 +65,8 @@ DENYLIST_MIN_LEN = 3
 GIT_TIMEOUT_S = 60
 HISTORY_MAX_COMMITS = 5000
 SCRUB_MAX_WORKERS = 8
+OBJECT_MAX_BYTES = 256 * 1024 * 1024
+OBJECT_GIT_TIMEOUT_S = 300
 # Hex-only rev specs: `A..B` or a bare SHA. Rejecting anything else keeps a
 # hostile/typoed value from ever reaching the git argv as an option.
 RANGE_RX = re.compile(r"^[0-9a-fA-F]{4,64}(\.\.[0-9a-fA-F]{4,64})?$")
@@ -105,14 +115,35 @@ def load_denylist(path_override=None, env=None):
     path = os.path.expanduser(explicit or DENYLIST_DEFAULT)
     if not os.path.isfile(path):
         if explicit:
-            return [], [], "denylist missing at the explicit path — nothing scanned"
+            raise RuntimeError(
+                "explicit denylist path is missing or not a regular file")
         return [], [], "no denylist configured — no-op"
     try:
         with open(path, "rb") as fh:
-            raw = fh.read(DENYLIST_MAX_BYTES)
+            raw = fh.read(DENYLIST_MAX_BYTES + 1)
     except OSError as exc:
+        if explicit:
+            raise RuntimeError(
+                "explicit denylist is unreadable (%s)" %
+                exc.__class__.__name__)
         return [], [], "denylist unreadable (%s) — nothing scanned" % exc.__class__.__name__
-    rules, allows, skipped = parse_denylist_text(raw.decode("utf-8", "replace"))
+    if len(raw) > DENYLIST_MAX_BYTES:
+        raise RuntimeError(
+            "denylist exceeds %d-byte scan bound" % DENYLIST_MAX_BYTES)
+    text = raw.decode("utf-8", "replace")
+    rules, allows, skipped = parse_denylist_text(text)
+    eligible = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("allow:"):
+            continue
+        if line.startswith("word:"):
+            line = line.partition(":")[2].strip()
+        if len(line) >= DENYLIST_MIN_LEN:
+            eligible += 1
+    if eligible > DENYLIST_MAX_TERMS:
+        raise RuntimeError(
+            "denylist exceeds %d-term scan bound" % DENYLIST_MAX_TERMS)
     note = ""
     if skipped:
         note = "%d term(s) shorter than %d chars ignored" % (skipped, DENYLIST_MIN_LEN)
@@ -333,6 +364,148 @@ def tag_message_matches(body, term, mode, allows):
     return False
 
 
+def compile_content_matcher(rules):
+    """Compile denylist rules for a single pass over decoded object text."""
+    literal_trie = {}
+    word_parts = []
+    for index, (_label, term, mode) in enumerate(rules):
+        if mode == "word":
+            word_parts.append(
+                "(?P<r%d>\\b%s\\b)" % (index, re.escape(term)))
+            continue
+        node = literal_trie
+        for char in term.lower():
+            node = node.setdefault(char, {})
+        node.setdefault(None, []).append(index)
+    word_rx = re.compile("|".join(word_parts), re.IGNORECASE) \
+        if word_parts else None
+    return literal_trie, word_rx
+
+
+def content_match_indexes(text, matcher, allows):
+    """Return rule indexes matching text, applying line-scoped allows."""
+    literal_trie, word_rx = matcher
+    matched = set()
+    for line in text.splitlines():
+        lowered = line.lower()
+        if any(allowed in lowered for allowed in allows):
+            continue
+        for start in range(len(lowered)):
+            node = literal_trie
+            offset = start
+            while offset < len(lowered) and lowered[offset] in node:
+                node = node[lowered[offset]]
+                matched.update(node.get(None, ()))
+                offset += 1
+        if word_rx is not None:
+            for found in word_rx.finditer(line):
+                matched.add(int(found.lastgroup[1:]))
+    return matched
+
+
+def scan_all_object_content(rules, allows, repo):
+    """Scan every object in the local Git object database.
+
+    This explicit release-audit mode covers full commit and annotated-tag
+    objects (including identity and mergetag headers), trees and blobs, including
+    unreachable objects. Findings are sorted after Git's intentionally unordered
+    traversal so output remains deterministic. Oversized or malformed objects
+    fail closed.
+    """
+    cmd = ["git", "cat-file", "--batch-all-objects", "--unordered", "--batch"]
+    findings = []
+    object_count = 0
+    matcher = compile_content_matcher(rules)
+    with tempfile.TemporaryFile() as stderr_file:
+        proc = subprocess.Popen(
+            cmd, cwd=repo, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=stderr_file)
+        timed_out = threading.Event()
+
+        def stop_at_deadline():
+            timed_out.set()
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+        timer = threading.Timer(OBJECT_GIT_TIMEOUT_S, stop_at_deadline)
+        timer.daemon = True
+        timer.start()
+        try:
+            while True:
+                header = proc.stdout.readline()
+                if not header:
+                    if timed_out.is_set():
+                        raise RuntimeError(
+                            "git cat-file exceeded %ds timeout" %
+                            OBJECT_GIT_TIMEOUT_S)
+                    break
+                parts = header.rstrip(b"\n").split()
+                if len(parts) != 3:
+                    raise RuntimeError("malformed git cat-file object header")
+                sha_raw, type_raw, size_raw = parts
+                try:
+                    sha = sha_raw.decode("ascii")
+                    obj_type = type_raw.decode("ascii")
+                    size = int(size_raw)
+                except (UnicodeError, ValueError):
+                    raise RuntimeError("invalid git cat-file object header")
+                if (not OBJECT_RX.match(sha) or
+                        obj_type not in ("blob", "commit", "tag", "tree") or
+                        size < 0):
+                    raise RuntimeError("invalid git cat-file object metadata")
+                if size > OBJECT_MAX_BYTES:
+                    raise RuntimeError(
+                        "object %s exceeds %d-byte scan bound" %
+                        (sha[:12], OBJECT_MAX_BYTES))
+                body = bytearray()
+                remaining = size
+                while remaining:
+                    chunk = proc.stdout.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        if timed_out.is_set():
+                            raise RuntimeError(
+                                "git cat-file exceeded %ds timeout" %
+                                OBJECT_GIT_TIMEOUT_S)
+                        raise RuntimeError("truncated git cat-file object body")
+                    body.extend(chunk)
+                    remaining -= len(chunk)
+                if proc.stdout.read(1) != b"\n":
+                    if timed_out.is_set():
+                        raise RuntimeError(
+                            "git cat-file exceeded %ds timeout" %
+                            OBJECT_GIT_TIMEOUT_S)
+                    raise RuntimeError("malformed git cat-file object terminator")
+                object_count += 1
+                text = bytes(body).decode("utf-8", "replace")
+                for index in content_match_indexes(text, matcher, allows):
+                    label, term, _mode = rules[index]
+                    findings.append((sha, obj_type, label, term))
+            returncode = proc.wait()
+            stderr_file.seek(0)
+            stderr_text = stderr_file.read(200).decode("utf-8", "replace")
+            if timed_out.is_set():
+                raise RuntimeError(
+                    "git cat-file exceeded %ds timeout" %
+                    OBJECT_GIT_TIMEOUT_S)
+            if returncode != 0:
+                raise RuntimeError(
+                    "git cat-file rc=%d: %s" %
+                    (returncode, stderr_text.strip()))
+        except BaseException:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            raise
+        finally:
+            timer.cancel()
+            if proc.stdout is not None:
+                proc.stdout.close()
+    findings.sort(key=lambda row: (row[0], row[1], row[2]))
+    return findings, object_count
+
+
 def discover_unreachable(repo, run, limit):
     """Return bounded unreachable commit roots for explicit --all audits."""
     result = run(["git", "fsck", "--unreachable", "--no-reflogs",
@@ -390,6 +563,56 @@ def history_carriers(sha, repo, run, reflog_entries, unreachable):
     return list(dict.fromkeys(carriers))[:12]
 
 
+def commit_message_cmd(max_commits, refs_pull, range_args=None,
+                       all_refs=False, extra_revs=None):
+    """Build one bounded commit-message walk for a publish/audit scope."""
+    if range_args:
+        cmd = ["git", "log"] + list(range_args)
+    elif all_refs:
+        cmd = ["git", "log", "--all", "--reflog"]
+        cmd.extend(extra_revs or [])
+        if refs_pull:
+            cmd.append("--glob=refs/pull")
+    else:
+        cmd = ["git", "log", "HEAD"]
+    cmd.append("--format=%H%x00%B%x00")
+    if not range_args:
+        cmd += ["-n", str(max_commits + 1)]
+    cmd.append("--")
+    return cmd
+
+
+def scan_commit_messages(rules, allows, history_runs, args, run,
+                         extra_revs=None):
+    """Scan commit messages once per bounded history scope."""
+    matcher = compile_content_matcher(rules)
+    findings = []
+    for range_args, carrier in history_runs:
+        result = run(commit_message_cmd(
+            args.max_commits, args.refs_pull, range_args=range_args,
+            all_refs=args.all, extra_revs=extra_revs), args.repo)
+        if result.returncode != 0:
+            raise RuntimeError("git log messages rc=%d: %s" % (
+                result.returncode, (result.stderr or "").strip()[:200]))
+        fields = result.stdout.split("\0")
+        if fields and not fields[-1].strip():
+            fields.pop()
+        if len(fields) % 2:
+            raise RuntimeError("git log returned malformed message records")
+        if not range_args and len(fields) // 2 > args.max_commits:
+            raise RuntimeError(
+                "commit-message walk exceeds %d-commit scan bound" %
+                args.max_commits)
+        for offset in range(0, len(fields), 2):
+            sha = fields[offset].strip()
+            body = fields[offset + 1]
+            if not OBJECT_RX.match(sha):
+                raise RuntimeError("git log returned invalid commit id")
+            for index in content_match_indexes(body, matcher, allows):
+                findings.append((index, sha, carrier))
+    return findings
+
+
 def run_history(rule, history_runs, args, run, extra_revs=None):
     """Run one rule's unchanged pickaxe walks; return results in range order."""
     results = []
@@ -419,6 +642,9 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     ap.add_argument("--all", action="store_true",
                     help="explicit full-repository audit: all refs, reflogs, "
                          "and bounded unreachable commits")
+    ap.add_argument("--objects", action="store_true",
+                    help="explicit release audit of every local blob/tree and "
+                         "commit/tag message body")
     ap.add_argument("--refs-pull", action="store_true",
                     help="also walk refs/pull/* history (slow; immutable on some "
                          "forges — a hit there needs delete/recreate, see RFC 052)")
@@ -454,6 +680,12 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         return 2
     if specs and args.all:
         print("scrub-check: ERROR --range and --all are mutually exclusive",
+              file=err)
+        return 2
+    if args.objects and (
+            specs or args.all or args.refs_pull or args.no_history or
+            args.remote or args.range_refs):
+        print("scrub-check: ERROR --objects is a standalone scan mode",
               file=err)
         return 2
     if specs and args.refs_pull:
@@ -504,10 +736,36 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     if not history_runs:
         history_runs = [(None, None if args.all else "ref HEAD")]
 
-    rules, allows, note = load_denylist(args.denylist)
+    try:
+        rules, allows, note = load_denylist(args.denylist)
+    except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+        print("scrub-check: ERROR loading denylist (%s)" % exc, file=err)
+        return 2
     if note:
         print("scrub-check: %s" % note, file=out)
     if not rules:
+        return 0
+
+    if args.objects:
+        try:
+            object_hits, object_count = scan_all_object_content(
+                rules, allows, args.repo)
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+                RuntimeError) as exc:
+            print("scrub-check: ERROR scanning Git objects (%s)" % exc,
+                  file=err)
+            return 2
+        for sha, obj_type, label, term in object_hits:
+            shown = "%s term=%r" % (label, term) if args.verbose else label
+            print("OBJECT hit: %s %s [%s]" %
+                  (obj_type, sha[:12], shown), file=out)
+        if object_hits:
+            print("scrub-check: %d object-content hit(s); remove/rewrite every "
+                  "matching object before publication." % len(object_hits),
+                  file=out)
+            return 1
+        print("scrub-check: clean (%d term(s), %d Git object(s) checked)." %
+              (len(rules), object_count), file=out)
         return 0
 
     try:
@@ -549,6 +807,18 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # Start the independent pickaxe walks early, but consume futures strictly in
     # denylist order below.  This changes scheduling only: argv, interpretation,
     # and byte ordering remain identical to the sequential implementation.
+    message_hits = {}
+    if not args.no_history:
+        try:
+            for rule_index, sha, carrier in scan_commit_messages(
+                    rules, allows, history_runs, args, run, unreachable):
+                message_hits.setdefault(rule_index, []).append((sha, carrier))
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+                RuntimeError) as exc:
+            print("scrub-check: ERROR scanning commit messages (%s)" % exc,
+                  file=err)
+            return 2
+
     history_futures = {}
     history_pool = None
     if not args.no_history:
@@ -576,6 +846,30 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
             carrier_text = carrier if args.verbose else redact(carrier, rules)
             print("TAG hit: %s object %s [%s]" %
                   (carrier_text, tag_sha[:12], shown), file=out)
+        for sha, scoped_carrier in message_hits.get(rule_index, ()):
+            hits += 1
+            try:
+                if scoped_carrier is not None:
+                    carriers = [scoped_carrier]
+                else:
+                    if sha not in carrier_cache:
+                        carrier_cache[sha] = history_carriers(
+                            sha, args.repo, run, reflog_entries, unreachable)
+                    carriers = carrier_cache[sha]
+            except (OSError, subprocess.SubprocessError, UnicodeError,
+                    ValueError, RuntimeError) as exc:
+                if history_pool is not None:
+                    history_pool.shutdown(wait=False)
+                print("scrub-check: ERROR resolving message carrier (%s)" % exc,
+                      file=err)
+                return 2
+            history_kinds.extend(carriers)
+            carrier_text = ", ".join(carriers)
+            if not args.verbose:
+                carrier_text = redact(carrier_text, rules)
+            print("MESSAGE hit: commit %s via %s [%s]" %
+                  (sha[:12], carrier_text, shown), file=out)
+
         # TIP — revision(s) before `--`; rc 0 = match, 1 = clean, >1 = error.
         for tip_rev in tip_revs:
             try:
@@ -685,5 +979,15 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     return 0
 
 
+def entrypoint(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
+    """Map every otherwise-uncaught scanner exception to fail-closed rc 2."""
+    try:
+        return main(argv, out=out, err=err, run=run)
+    except Exception as exc:
+        print("scrub-check: ERROR unhandled scanner failure (%s)" %
+              exc.__class__.__name__, file=err)
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entrypoint())

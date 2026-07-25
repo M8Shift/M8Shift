@@ -286,6 +286,14 @@ releasable at all times.
 
 ## 5. Repository hygiene (holds for every new commit; never rewrite older history)
 
+- **Release/tag anti-leak gate.** Before every release or tag, refresh the
+  private denylist with any newly emerged cross-project identifiers, then run
+  `python3 scripts/scrub-check.py --objects`. This raw all-object pass is
+  explicit (never part of every pre-push): it checks commit/tag message bodies
+  without identity headers, plus tree names and blob bytes. It complements the
+  carrier-naming range/history gate; treat a finding or scanner error as a
+  failed release audit.
+
 - **Scrubbed identity.** Commits are authored as the project's public identity, not a
   personal/forge identity.
 - **No leaked traces.** No internal host/forge addresses, local user paths, or legacy

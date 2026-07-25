@@ -514,6 +514,9 @@ an old decision.
 
 ### 8.1 Compartmentalization
 
+- Source publication uses the bounded carrier-naming range scan, including
+  commit and annotated-tag messages. A database-wide `--objects` scan is an
+  explicit release audit, not an automatic per-push blocker.
 - Project isolation is deny-by-default. Another project's identity, real path,
   adopter-specific version, literal session output, runtime id, credential, or
   confidential term MUST NOT enter the current journal, source, example, ticket,

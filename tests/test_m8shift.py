@@ -16841,6 +16841,202 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("docs/w.md", r.stdout)
         self.assertNotIn("docs/sub.md", r.stdout)
 
+    def test_object_authority_blocks_commit_message_only_and_clean_passes(self):
+        self._commit("docs/clean.md", "clean content\n",
+                     "release %s marker" % self.TERM)
+        sha = self._sha()
+        denylist = self._deny(self.TERM + "\n")
+
+        blocked = self._scrub("--objects", denylist=denylist)
+        self.assertEqual(blocked.returncode, 1,
+                         blocked.stdout + blocked.stderr)
+        self.assertIn("OBJECT hit: commit %s" % sha[:12], blocked.stdout)
+        self.assertNotIn(self.TERM, blocked.stdout + blocked.stderr)
+        subprocess.run(["git", "gc", "--prune=now"], cwd=self.d, check=True,
+                       capture_output=True)
+        repeated = self._scrub("--objects", denylist=denylist)
+        self.assertEqual(repeated.stdout, blocked.stdout)
+        self.assertEqual(repeated.stderr, blocked.stderr)
+
+        audited = self._scrub("--all", denylist=denylist)
+        self.assertEqual(audited.returncode, 1,
+                         audited.stdout + audited.stderr)
+        self.assertIn("MESSAGE hit: commit %s via " % sha[:12],
+                      audited.stdout, audited.stdout + audited.stderr)
+
+        clean = self._scrub(
+            "--objects",
+            denylist=self._deny("DifferentSyntheticSecret\n"))
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+        self.assertIn("Git object(s) checked", clean.stdout)
+
+        outside = tempfile.mkdtemp(prefix="m8-object-nonrepo-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        failed = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "scrub-check.py"),
+             "--repo", outside, "--objects", "--denylist", denylist],
+            capture_output=True, text=True)
+        self.assertEqual(failed.returncode, 2, failed.stdout + failed.stderr)
+        self.assertIn("ERROR scanning Git objects", failed.stderr)
+
+    def test_object_authority_covers_blob_tree_commit_and_tag_bodies(self):
+        terms = {
+            "blob": "SyntheticBlobSecret",
+            "tree": "SyntheticTreeSecret",
+            "commit": "SyntheticCommitSecret",
+            "tag": "SyntheticTagSecret",
+        }
+        self._commit(
+            "docs/%s.txt" % terms["tree"],
+            terms["blob"] + "\n",
+            terms["commit"])
+        subprocess.run(
+            ["git", "tag", "-a", "object-fixture", "-m", terms["tag"]],
+            cwd=self.d, check=True, capture_output=True)
+        result = self._scrub(
+            "--objects",
+            denylist=self._deny("\n".join(terms.values()) + "\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for obj_type in ("blob", "tree", "commit", "tag"):
+            self.assertIn("OBJECT hit: %s " % obj_type, result.stdout)
+        for term in terms.values():
+            self.assertNotIn(term, result.stdout + result.stderr)
+
+    def test_object_audit_scans_commit_identity_headers_once(self):
+        term = "SyntheticHeaderSecret"
+        subprocess.run(
+            ["git", "commit", "--allow-empty",
+             "--author", "%s <header@example.invalid>" % term,
+             "-m", "%s body" % term],
+            cwd=self.d, check=True, capture_output=True)
+        sha = self._sha()
+        result = self._scrub(
+            "--objects",
+            denylist=self._deny(term + "\n"))
+        self.assertEqual(result.returncode, 1,
+                         result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.count("OBJECT hit: commit %s" % sha[:12]), 1,
+            result.stdout)
+
+    def test_object_audit_word_mode_covers_message_and_tree_path(self):
+        term = "Zebrafish"
+        self._commit("docs/%s.txt" % term, term + "es only\n",
+                     "release %s marker" % term)
+        result = self._scrub(
+            "--objects", denylist=self._deny("word:%s\n" % term))
+        self.assertEqual(result.returncode, 1,
+                         result.stdout + result.stderr)
+        self.assertIn("OBJECT hit: commit ", result.stdout)
+        self.assertIn("OBJECT hit: tree ", result.stdout)
+        self.assertNotIn("OBJECT hit: blob ", result.stdout)
+
+    def test_explicit_denylist_errors_and_limits_fail_closed(self):
+        missing = self._scrub(
+            "--objects", denylist=os.path.join(self.home, "missing.txt"))
+        self.assertEqual(missing.returncode, 2,
+                         missing.stdout + missing.stderr)
+        self.assertIn("ERROR loading denylist", missing.stderr)
+
+        not_regular = self._scrub("--objects", denylist=self.home)
+        self.assertEqual(not_regular.returncode, 2,
+                         not_regular.stdout + not_regular.stderr)
+
+        oversized = self._scrub(
+            "--objects",
+            denylist=self._deny(
+                "x" * (self._scrub_mod().DENYLIST_MAX_BYTES + 1)))
+        self.assertEqual(oversized.returncode, 2,
+                         oversized.stdout + oversized.stderr)
+        self.assertIn("byte scan bound", oversized.stderr)
+
+        terms = "\n".join(
+            "SyntheticBoundTerm%03d" % index
+            for index in range(self._scrub_mod().DENYLIST_MAX_TERMS + 1))
+        too_many = self._scrub(
+            "--objects", denylist=self._deny(terms + "\n"))
+        self.assertEqual(too_many.returncode, 2,
+                         too_many.stdout + too_many.stderr)
+        self.assertIn("term scan bound", too_many.stderr)
+
+        module = self._scrub_mod()
+        path = self._deny("SyntheticUnreadableSecret\n")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("builtins.open", side_effect=PermissionError):
+            unreadable_rc = module.entrypoint(
+                ["--repo", self.d, "--objects", "--denylist", path],
+                out=out, err=err)
+        self.assertEqual(unreadable_rc, 2, out.getvalue() + err.getvalue())
+        self.assertIn("explicit denylist is unreadable", err.getvalue())
+
+    def test_entrypoint_maps_unhandled_exception_to_error(self):
+        module = self._scrub_mod()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(module, "main",
+                               side_effect=re.error("synthetic")):
+            rc = module.entrypoint(out=out, err=err)
+        self.assertEqual(rc, 2)
+        self.assertIn("ERROR unhandled scanner failure", err.getvalue())
+
+    def test_pre_push_range_blocks_commit_message_only(self):
+        self._commit("docs/clean.md", "clean content\n",
+                     "release %s marker" % self.TERM)
+        tip = self._sha()
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(self.d, "scripts", "scrub-check.py"))
+        env = dict(os.environ)
+        env.update(
+            HOME=self.home,
+            M8SHIFT_DENYLIST=self._deny(self.TERM + "\n"),
+            M8SHIFT_SCRUB_ENFORCE="1")
+        env.pop("M8SHIFT_AGENT", None)
+        zeros = "0" * 40
+        result = subprocess.run(
+            ["sh", os.path.join(REPO, "hooks", "pre-push")],
+            cwd=self.d, capture_output=True, text=True, env=env,
+            input="refs/heads/main %s refs/heads/main %s\n" % (tip, zeros))
+        self.assertEqual(result.returncode, 1,
+                         result.stdout + result.stderr)
+        self.assertIn("MESSAGE hit: commit %s via branch main" % tip[:12],
+                      result.stderr)
+        self.assertNotIn(self.TERM, result.stdout + result.stderr)
+
+    def test_range_message_walk_is_unbounded_and_argv_is_terminated(self):
+        module = self._scrub_mod()
+        range_cmd = module.commit_message_cmd(
+            1, False, range_args=["a" * 40 + ".." + "b" * 40])
+        self.assertEqual(range_cmd[-1], "--")
+        self.assertNotIn("-n", range_cmd)
+        direct_cmd = module.commit_message_cmd(1, False)
+        self.assertEqual(direct_cmd[-1], "--")
+        self.assertEqual(direct_cmd[-3:-1], ["-n", "2"])
+
+        self._commit("base.txt", "clean\n", "base")
+        base = self._sha()
+        self._commit("one.txt", "clean\n", self.TERM)
+        carrier = self._sha()
+        self._commit("two.txt", "clean\n", "two")
+        self._commit("three.txt", "clean\n", "three")
+        result = self._scrub(
+            "--range", "%s..%s" % (base, self._sha()),
+            "--max-commits", "1", denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(result.returncode, 1,
+                         result.stdout + result.stderr)
+        self.assertIn("MESSAGE hit: commit %s" % carrier[:12],
+                      result.stdout)
+
+    def test_audit_message_walk_bound_fails_closed(self):
+        for index in range(3):
+            self._commit("%d.txt" % index, "clean\n", "commit-%d" % index)
+        result = self._scrub(
+            "--all", "--max-commits", "2",
+            denylist=self._deny("DifferentSyntheticSecret\n"))
+        self.assertEqual(result.returncode, 2,
+                         result.stdout + result.stderr)
+        self.assertIn("commit-message walk exceeds 2-commit scan bound",
+                      result.stderr)
+
     def test_parallel_scan_output_is_deterministic_across_runs(self):
         # The history walks run in a bounded thread pool; results must be emitted
         # in denylist order so output is byte-identical every run (a concurrency
@@ -17444,6 +17640,16 @@ class TestRFC052ScrubCheck(CLIBase):
             capture_output=True, text=True, env=env, input="")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("scan errors fail closed", result.stderr)
+
+        with open(broken, "w", encoding="utf-8") as fh:
+            fh.write("def truncated(:\n")
+        syntax_error = subprocess.run(
+            ["sh", os.path.join(REPO, "hooks", "pre-push")], cwd=self.d,
+            capture_output=True, text=True, env=env, input="")
+        self.assertEqual(syntax_error.returncode, 1, syntax_error.stderr)
+        self.assertIn("scanner could not start (SyntaxError)",
+                      syntax_error.stderr)
+        self.assertIn("scan errors fail closed", syntax_error.stderr)
 
 
 class TestRFC052AnchorMode(CLIBase):

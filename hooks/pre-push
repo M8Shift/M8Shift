@@ -122,11 +122,30 @@ if [ -f "${scrub}" ]; then
 		printf '%s\n' "m8shift pre-push: deletion-only push — scrub skipped (nothing published)." >&2
 	else
 		scrub_rc=0
+		run_scrub() {
+			python3 -c '
+import runpy
+import sys
+try:
+    scanner = sys.argv[1]
+    sys.argv = sys.argv[1:]
+    runpy.run_path(scanner, run_name="__main__")
+except SystemExit as exc:
+    if isinstance(exc.code, int):
+        sys.exit(exc.code)
+    print("scrub-check: ERROR invalid scanner exit", file=sys.stderr)
+    sys.exit(2)
+except BaseException as exc:
+    print("scrub-check: ERROR scanner could not start (%s)" %
+          exc.__class__.__name__, file=sys.stderr)
+    sys.exit(2)
+' "${scrub}" "$@"
+		}
 		# shellcheck disable=SC2086 # intentional word-splitting: hex-only rev specs
 		if [ -n "${target_remote}" ]; then
-			python3 "${scrub}" --repo "${repo_root}" --remote "${target_remote}" ${ranges} >&2 || scrub_rc=$?
+			run_scrub --repo "${repo_root}" --remote "${target_remote}" ${ranges} >&2 || scrub_rc=$?
 		else
-			python3 "${scrub}" --repo "${repo_root}" ${ranges} >&2 || scrub_rc=$?
+			run_scrub --repo "${repo_root}" ${ranges} >&2 || scrub_rc=$?
 		fi
 		if [ "${scrub_rc}" -eq 1 ]; then
 			block=1

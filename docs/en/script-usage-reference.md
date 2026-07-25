@@ -207,7 +207,8 @@ as already published. Annotated tag messages are scanned from their tag objects.
 Use explicit `--all` for a repository audit across refs, worktree reflogs, and
 bounded unreachable commits; unreachable-only results include the local
 worktree/reflog/GC reap sequence. Other options are `--repo DIR`, `--denylist
-FILE`, `--no-history`, `--refs-pull` (with `--all`), `--remote REMOTE`,
+FILE`, `--no-history`, `--refs-pull` (with `--all`), standalone `--objects`
+(all local blobs, trees, and full commit/tag objects), `--remote REMOTE`,
 `--max-commits N`, and local-only `--verbose`.
 
 ```bash

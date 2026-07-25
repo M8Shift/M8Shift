@@ -80,6 +80,15 @@ Covers foreign proper nouns the path lint can't know (a private project name lik
   carrier; any read, parse, or peel failure remains fail-closed.
 - ⚠️ History over `refs/pull/*` can be slow → bound it; keep advisory (never a de-facto daemon).
 
+- **Message/object coverage (#251):** the normal `--range` and `--all` history
+  passes scan commit messages once per bounded walk and report the carrier;
+  annotated-tag messages retain their direct carrier scan. `--objects` remains
+  an explicit database-wide release audit, never a per-push gate: it checks
+  blobs and tree names plus commit/tag message bodies while excluding author,
+  committer, and tagger identity headers. Output is sorted after the unordered
+  traversal and redacted by default; malformed, unreadable, timed-out, or
+  oversized object data fails the explicit audit.
+
 ### A1–A5 — Agent operating-model guidance
 
 In `docs/en/agents-guide.md`, `CONTRIBUTING.md`, and the generated agent-pack (not runtime code):
