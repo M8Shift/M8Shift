@@ -289,9 +289,10 @@ releasable at all times.
 - **Release/tag anti-leak gate.** Before every release or tag, refresh the
   private denylist with any newly emerged cross-project identifiers, then run
   `python3 scripts/scrub-check.py --objects`. This raw all-object pass is
-  authoritative for commit messages, tag messages, tree names, and blob bytes;
-  it complements the structured tip/history scan and fails closed on unreadable
-  object data.
+  explicit (never part of every pre-push): it checks commit/tag message bodies
+  without identity headers, plus tree names and blob bytes. It complements the
+  carrier-naming range/history gate; treat a finding or scanner error as a
+  failed release audit.
 
 - **Scrubbed identity.** Commits are authored as the project's public identity, not a
   personal/forge identity.

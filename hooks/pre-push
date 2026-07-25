@@ -8,8 +8,6 @@
 # `git push --no-verify` bypasses this hook entirely, by design (git semantics).
 #
 # What runs:
-# The scrub stage first runs `--objects` over every raw Git object body, then
-# keeps the structured pushed-range pass for targeted carrier diagnostics.
 #   1. `m8shift.py doctor --hygiene-only --lint` — the RFC 052 C1+C3 data-hygiene
 #      lint (real home paths + operator-confidential denylist, redacted output).
 #   2. `checksums.sha256` (if present) — verifies that shipped artifacts still
@@ -119,21 +117,6 @@ fi
 
 scrub="${repo_root}/scripts/scrub-check.py"
 if [ -f "${scrub}" ]; then
-	if ! { [ "${stdin_lines}" -gt 0 ] && [ -z "${ranges}" ]; }; then
-		object_rc=0
-		python3 "${scrub}" --repo "${repo_root}" --objects >&2 || object_rc=$?
-		if [ "${object_rc}" -eq 1 ]; then
-			if [ "${M8SHIFT_SCRUB_ENFORCE:-0}" = "1" ]; then
-				block=1
-			else
-				printf '%s\n' "m8shift pre-push: full-object scrub finding is ADVISORY (set M8SHIFT_SCRUB_ENFORCE=1 to block)." >&2
-			fi
-		elif [ "${object_rc}" -gt 1 ]; then
-			printf '%s\n' "m8shift pre-push: full-object scrub ERROR (rc ${object_rc}) — blocking push (fail closed)." >&2
-			block=1
-		fi
-	fi
-
 	if [ "${stdin_lines}" -gt 0 ] && [ -z "${ranges}" ]; then
 		# Every pushed ref was a deletion: nothing new leaves the machine.
 		printf '%s\n' "m8shift pre-push: deletion-only push — scrub skipped (nothing published)." >&2

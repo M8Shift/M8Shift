@@ -100,12 +100,14 @@ This repository runs, on every push/PR and on a schedule:
 
 ## Local pre-commit / pre-push gate
 
-The publish-boundary authority is `scripts/scrub-check.py --objects`: it scans
-the raw body of every local Git object, including commit and annotated-tag
-messages, tree names, and blobs. The pre-push hook runs this authority pass
-before its structured per-range scan, whose targeted carrier diagnostics remain
-useful for remediation. Under enforcement, an object finding or scanner error
-blocks publication.
+The pre-push scrub is range-scoped: it scans the pushed trees and file history,
+plus commit and annotated-tag messages, while naming the pushed carrier that
+must be repaired. This preserves the clean-push guarantee: unrelated local,
+reflog-only, and unreachable objects cannot block a publication.
+
+Before a release/tag audit, `scripts/scrub-check.py --objects` is the explicit
+database-wide backstop. It scans blobs and tree names plus commit/tag message
+bodies (not identity headers); findings and scanner errors must stop that audit.
 
 CI is the backstop, but the cheapest place to stop a compartmentalization leak
 is before it ever leaves the machine. The repo ships `hooks/pre-commit` and

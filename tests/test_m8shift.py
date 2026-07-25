@@ -16856,6 +16856,12 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertEqual(repeated.stdout, blocked.stdout)
         self.assertEqual(repeated.stderr, blocked.stderr)
 
+        audited = self._scrub("--all", denylist=denylist)
+        self.assertEqual(audited.returncode, 1,
+                         audited.stdout + audited.stderr)
+        self.assertIn("MESSAGE hit: commit %s via " % sha[:12],
+                      audited.stdout, audited.stdout + audited.stderr)
+
         clean = self._scrub(
             "--objects",
             denylist=self._deny("DifferentSyntheticSecret\n"))
@@ -16894,7 +16900,19 @@ class TestRFC052ScrubCheck(CLIBase):
         for term in terms.values():
             self.assertNotIn(term, result.stdout + result.stderr)
 
-    def test_pre_push_object_authority_blocks_commit_message_only(self):
+    def test_object_audit_skips_commit_identity_headers(self):
+        subprocess.run(
+            ["git", "commit", "--allow-empty",
+             "--author", "SyntheticHeaderSecret <header@example.invalid>",
+             "-m", "clean message"],
+            cwd=self.d, check=True, capture_output=True)
+        result = self._scrub(
+            "--objects",
+            denylist=self._deny("SyntheticHeaderSecret\n"))
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr)
+
+    def test_pre_push_range_blocks_commit_message_only(self):
         self._commit("docs/clean.md", "clean content\n",
                      "release %s marker" % self.TERM)
         tip = self._sha()
@@ -16914,7 +16932,8 @@ class TestRFC052ScrubCheck(CLIBase):
             input="refs/heads/main %s refs/heads/main %s\n" % (tip, zeros))
         self.assertEqual(result.returncode, 1,
                          result.stdout + result.stderr)
-        self.assertIn("OBJECT hit: commit %s" % tip[:12], result.stderr)
+        self.assertIn("MESSAGE hit: commit %s via branch main" % tip[:12],
+                      result.stderr)
         self.assertNotIn(self.TERM, result.stdout + result.stderr)
 
     def test_parallel_scan_output_is_deterministic_across_runs(self):
@@ -17420,8 +17439,7 @@ class TestRFC052ScrubCheck(CLIBase):
 
         zeros = "0" * 40
         r = hook("refs/heads/main %s refs/heads/main %s\n" % (tip, base))
-        self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("OBJECT hit:", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)      # old leak not in range
         self.assertIn("pushed range", r.stderr)
         r = hook("refs/heads/gone %s refs/heads/gone %s\n" % (zeros, base))
         self.assertEqual(r.returncode, 0, r.stderr)      # deletion: skipped
@@ -17505,8 +17523,7 @@ class TestRFC052ScrubCheck(CLIBase):
         subprocess.run(["git", "update-ref", "refs/remotes/origin/clean-feature",
                         clean_tip], cwd=self.d, check=True, capture_output=True)
         clean = hook("refs/heads/clean-feature", clean_tip)
-        self.assertEqual(clean.returncode, 1, clean.stderr)
-        self.assertIn("OBJECT hit:", clean.stderr)
+        self.assertEqual(clean.returncode, 0, clean.stderr)
 
     def test_pre_push_scrub_error_fails_closed(self):
         self._commit("clean.txt", "clean\n", "base")
