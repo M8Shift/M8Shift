@@ -65,7 +65,110 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
 VERSION = "3.65.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
-HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _take_project_root_option(argv):
+    """Consume the runtime-global --project-root option wherever it appears.
+
+    Listener ``--cmd`` owns every following token, so provider argv is never
+    inspected.  Consuming here is intentional: relay-owned paths are bound
+    before the target ``m8shift.py`` module is imported.
+    """
+    values = []
+    cleaned = [argv[0]]
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token in ("--", "--cmd"):
+            cleaned.extend(argv[i:])
+            break
+        if token == "--project-root":
+            if i + 1 >= len(argv):
+                raise SystemExit("m8shift-runtime: --project-root requires a directory")
+            values.append(argv[i + 1])
+            i += 2
+            continue
+        if token.startswith("--project-root="):
+            values.append(token.split("=", 1)[1])
+            i += 1
+            continue
+        cleaned.append(token)
+        i += 1
+    if len(values) > 1:
+        raise SystemExit("m8shift-runtime: --project-root may be specified only once")
+    argv[:] = cleaned
+    return values[0].strip() if values else ""
+
+
+def _canonical_root(raw):
+    return os.path.realpath(os.path.abspath(os.path.expanduser(raw)))
+
+
+def _relay_root_at_or_above(start):
+    candidate = _canonical_root(start)
+    while True:
+        if (os.path.isfile(os.path.join(candidate, "M8SHIFT.md"))
+                and os.path.isfile(os.path.join(candidate, "m8shift.py"))):
+            return candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            return ""
+        candidate = parent
+
+
+def _resolve_project_root():
+    cli_raw = _take_project_root_option(sys.argv)
+    env_defined = "M8SHIFT_ROOT" in os.environ
+    env_raw = (os.environ.get("M8SHIFT_ROOT") or "").strip()
+    if env_defined and not env_raw:
+        raise SystemExit(
+            "m8shift-runtime: M8SHIFT_ROOT is defined but empty; "
+            "unset it or provide an initialized relay root")
+
+    cli_root = _canonical_root(cli_raw) if cli_raw else ""
+    env_root = _canonical_root(env_raw) if env_raw else ""
+    if cli_root and env_root and cli_root != env_root:
+        raise SystemExit(
+            "m8shift-runtime: mixed relay roots refused before launch: "
+            f"--project-root={cli_root!r} differs from "
+            f"M8SHIFT_ROOT={env_root!r}")
+
+    if cli_root:
+        root, provenance = cli_root, "cli"
+    elif env_root:
+        root, provenance = env_root, "env"
+    else:
+        cwd_root = _canonical_root(os.getcwd())
+        discovered = cwd_root if (
+            os.path.isfile(os.path.join(cwd_root, "M8SHIFT.md"))
+            and os.path.isfile(os.path.join(cwd_root, "m8shift.py"))
+        ) else ""
+        if discovered:
+            root, provenance = discovered, "discovery"
+        else:
+            root = _canonical_root(SCRIPT_DIR)
+            provenance = "script_location"
+
+    if not os.path.isdir(root):
+        raise SystemExit(
+            f"m8shift-runtime: selected project root is not a directory: {root}")
+    required = ("m8shift.py",) if provenance == "script_location" else (
+        "M8SHIFT.md", "m8shift.py")
+    missing = [
+        name for name in required
+        if not os.path.isfile(os.path.join(root, name))
+    ]
+    if missing:
+        source = "--project-root" if cli_root else (
+            "M8SHIFT_ROOT" if env_defined else provenance)
+        raise SystemExit(
+            f"m8shift-runtime: {source} does not name an initialized relay "
+            f"root ({root}); missing {', '.join(missing)}")
+    return root, provenance, cli_raw
+
+
+HERE, ROOT_PROVENANCE, PROJECT_ROOT_INPUT = _resolve_project_root()
 CORE_PATH = os.path.join(HERE, "m8shift.py")
 WORKTREE_PATH = os.path.join(HERE, "m8shift-worktree.py")
 RUNTIME_DIR = os.path.join(HERE, ".m8shift", "runtime")
@@ -1890,7 +1993,7 @@ def usage_watch_child_argv(agent, watch, lease_id):
                                                  USAGE_LIMIT_THRESHOLD_DEFAULT)),
             "--stale-after-minutes", str(watch.get(
                 "stale_after_minutes", USAGE_STALE_AFTER_MINUTES_DEFAULT)),
-            "--managed-lease", lease_id]
+        "--managed-lease", lease_id]
     if watch.get("mode") == "apply":
         argv.append("--apply")
     return argv
@@ -4206,7 +4309,7 @@ def fleet_supervisor_child_argv(args, backend):
     argv = [sys.executable, SELF_PATH, "fleet", "supervise",
             "--spec", os.path.abspath(args.spec), "--backend", backend,
             "--poll-interval", str(args.poll_interval),
-            "--grace", str(args.grace), "--service-payload"]
+        "--grace", str(args.grace), "--service-payload"]
     if args.runner:
         argv += ["--runner", os.path.abspath(args.runner)]
     if args.max_ticks:
@@ -7126,7 +7229,71 @@ def listener_paths(agent):
     return {
         "pid": os.path.join(LISTENERS_DIR, f"{agent}.pid"),
         "state": os.path.join(LISTENERS_DIR, f"{agent}.json"),
+        "plan": os.path.join(LISTENERS_DIR, f"{agent}.plan.json"),
         "log": os.path.join(LISTENER_LOGS_DIR, f"{agent}-listener.log"),
+    }
+
+
+def _path_is_within(path, root):
+    try:
+        return os.path.commonpath(
+            (_canonical_root(path), _canonical_root(root))) == _canonical_root(root)
+    except (OSError, ValueError):
+        return False
+
+
+def _path_relay_root(path):
+    start = path if os.path.isdir(path) else os.path.dirname(path)
+    return _relay_root_at_or_above(start)
+
+
+def listener_root_metadata(profile, runner_path):
+    """Return authoritative root provenance or fail before runtime writes."""
+    profile_path = profile.get("_profile_path") or RELAY_PATH
+    profile_root = _path_relay_root(profile_path)
+    protocol_root = _path_relay_root(RELAY_PATH)
+    runtime_root = _path_relay_root(RUNTIME_DIR)
+    core_root = _path_relay_root(CORE_PATH)
+    runner_root = _path_relay_root(runner_path)
+    checks = {
+        "profile": profile_root,
+        "provider cwd": _path_relay_root(profile["cwd"]),
+        "protocol": protocol_root,
+        "runtime": runtime_root,
+        "core": core_root,
+        "runner": runner_root,
+    }
+    for role, observed in checks.items():
+        if observed != HERE:
+            shown = observed or _canonical_root(
+                profile["cwd"] if role == "provider cwd" else
+                profile_path if role == "profile" else
+                runner_path if role == "runner" else "")
+            raise SystemExit(
+                "m8shift-runtime: mixed relay roots refused before launch: "
+                f"{role} resolves to {shown!r}, selected project root is "
+                f"{HERE!r}; use --project-root or M8SHIFT_ROOT and install "
+                "the versioned companions in that relay")
+    for role, path in (
+            ("profile", profile_path),
+            ("provider cwd", profile["cwd"]),
+            ("runner", runner_path),
+            ("protocol", RELAY_PATH),
+            ("runtime", RUNTIME_DIR),
+            ("core", CORE_PATH)):
+        if not _path_is_within(path, HERE):
+            raise SystemExit(
+                "m8shift-runtime: mixed relay roots refused before launch: "
+                f"{role} path {os.path.realpath(path)!r} escapes selected "
+                f"project root {HERE!r}")
+    return {
+        "project_root": HERE,
+        "root_provenance": ROOT_PROVENANCE,
+        "profile_root": profile_root,
+        "protocol_root": protocol_root,
+        "runtime_root": runtime_root,
+        "runner_root": runner_root,
+        "roots_consistent": True,
     }
 
 
@@ -7310,7 +7477,8 @@ def listener_child_argv(args, agent, runner_path, *, service_payload=False):
     started by an OS service manager (owns its log/pid files itself).
     """
     argv = [
-        sys.executable, SELF_PATH, "listener", "start",
+        sys.executable, SELF_PATH, "--project-root", HERE,
+        "listener", "start",
         "--agent", agent, "--foreground", "--backend", "local",
         "--poll-interval", str(args.poll_interval),
         "--max-retries", str(args.max_retries),
@@ -7860,7 +8028,7 @@ def listener_profile_findings(doc, agent):
     return problems
 
 
-def normalize_listener_profile(doc, source):
+def normalize_listener_profile(doc, source, profile_path=""):
     cwd = doc.get("cwd", ".") or "."
     cwd_abs = cwd if os.path.isabs(cwd) else os.path.abspath(os.path.join(HERE, cwd))
     profile = {
@@ -7872,6 +8040,7 @@ def normalize_listener_profile(doc, source):
         "start_on_idle": bool(doc.get("start_on_idle", False)),
         "agent_model": doc.get("agent_model", "") or "",
         "source": source,
+        "_profile_path": profile_path or RELAY_PATH,
     }
     # Runtime-only source material for RFC 077 Slice D.  It is never serialized
     # into listener state or plans; routed argv still goes through the single
@@ -7937,7 +8106,8 @@ def load_listener_profile(args, agent):
     if problems:
         sys.exit(f"m8shift-runtime: invalid listener profile ({source}):\n  - "
                  + "\n  - ".join(problems))
-    return normalize_listener_profile(doc, source)
+    return normalize_listener_profile(
+        doc, source, path if args.cmd_file else PROVIDERS)
 
 
 def new_listener_run_id(agent):
@@ -8349,6 +8519,7 @@ def listener_route_switches(session, agent):
 
 def build_listener_plan(agent, profile, runner_path, args, backend, fallback_reason=""):
     paths = listener_paths(agent)
+    roots = listener_root_metadata(profile, runner_path)
     max_retries = args.max_retries
     plan = {
         "schema": LISTENER_PLAN_SCHEMA,
@@ -8378,6 +8549,7 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
         "log_file": os.path.relpath(paths["log"], HERE),
         "runtime_version": VERSION,
     }
+    plan.update(roots)
     if backend in LISTENER_SERVICE_BACKENDS and not args.foreground:
         # Dry-run inspection of the WOULD-BE service install: rendered definition
         # plus the exact bounded argv steps — nothing is written or bootstrapped.
@@ -8751,6 +8923,8 @@ def cmd_listener_start(args):
     facts = listener_backend_probe()
     backend, fallback_reason = select_listener_backend(args.backend, facts)
     profile = load_listener_profile(args, agent)
+    runner_path = os.path.abspath(args.runner) if args.runner else DEFAULT_RUNNER_PATH
+    listener_root_metadata(profile, runner_path)
     if profile["start_on_idle"]:
         # RFC 047 at-most-one-starter: refusing here (not just warning) keeps two
         # IDLE starters from ever racing the first turn. Doctor also reports the
@@ -8761,7 +8935,6 @@ def cmd_listener_start(args):
                      f"{agent!r} requests start_on_idle=true but "
                      f"{', '.join(repr(a) for a in others)} is already configured as the "
                      "starter — leave only one starter profile")
-    runner_path = os.path.abspath(args.runner) if args.runner else DEFAULT_RUNNER_PATH
     if args.dry_run:
         # Validation-only: do not execute even the runner handshake. The plan
         # records that omission and writes NO pid, state, log, or service file.
@@ -8773,6 +8946,13 @@ def cmd_listener_start(args):
     # notify-only. It runs before pid repair, service installation, state
     # creation, or any listener/provider launch.
     require_runner_handshake(runner_path)
+    persisted_plan = build_listener_plan(
+        agent, profile, runner_path, args, backend, fallback_reason)
+    persisted_plan["runner_handshake"] = {
+        "status": "compatible",
+        "reason": "validated_before_install",
+    }
+    write_json_atomic(listener_paths(agent)["plan"], persisted_plan)
     if fallback_reason:
         # RFC 047: the fallback must be VISIBLE — never silently downgrade.
         print(f"backend {args.backend} → local: {fallback_reason}")
@@ -8909,6 +9089,9 @@ def cmd_listener_status(args):
     can_invoke_agent = row["coverage"] == "invoker"
     can_notify = row["coverage"] == "notifier"
     last_successful_run = doc.get("last_successful_run", "")
+    plan_doc, plan_err = read_json_diagnostic(paths["plan"], {})
+    if plan_err or not isinstance(plan_doc, dict):
+        plan_doc = {}
     payload = {
         "agent": agent,
         "status": status_label,
@@ -8940,6 +9123,14 @@ def cmd_listener_status(args):
         "pid_file": os.path.relpath(paths["pid"], HERE),
         "state_file": os.path.relpath(paths["state"], HERE),
         "log_file": os.path.relpath(paths["log"], HERE),
+        "plan_file": os.path.relpath(paths["plan"], HERE),
+        "project_root": plan_doc.get("project_root", HERE),
+        "root_provenance": plan_doc.get("root_provenance", ROOT_PROVENANCE),
+        "profile_root": plan_doc.get("profile_root", ""),
+        "protocol_root": plan_doc.get("protocol_root", HERE),
+        "runtime_root": plan_doc.get("runtime_root", HERE),
+        "runner_root": plan_doc.get("runner_root", ""),
+        "roots_consistent": plan_doc.get("roots_consistent", False),
         "runtime_version": VERSION,
     }
     if args.json:
@@ -8947,6 +9138,10 @@ def cmd_listener_status(args):
         return 0
     where = f" (pid {pid}, process {'resident' if alive else 'gone'})" if exists else ""
     print(f"listener {agent}: {status_label}{where}")
+    print(
+        f"  root: {payload['project_root']} "
+        f"(provenance={payload['root_provenance']}, "
+        f"consistent={str(payload['roots_consistent']).lower()})")
     print(f"  capability: can_invoke_agent={str(can_invoke_agent).lower()} "
           f"can_notify={str(can_notify).lower()} "
           f"survives_parent_exit={str(survives_parent_exit).lower()} "
@@ -11004,7 +11199,7 @@ def usage_watch_tick_probe(args, agent):
                else max(1.0, float(args.interval)))
     argv = [sys.executable, SELF_PATH, "usage", "snapshot", "--json",
             "--warn-threshold", str(args.warn_threshold),
-            "--limit-threshold", str(args.limit_threshold)]
+        "--limit-threshold", str(args.limit_threshold)]
     if agent:
         argv.extend(["--agent", agent])
     payload, error = run_usage_watch_probe(argv, timeout)
@@ -11030,7 +11225,7 @@ def usage_watch_tick_probe(args, agent):
 
 def usage_watch_adapter_probe(agent, timeout=USAGE_WATCH_PROBE_TIMEOUT_S):
     argv = [sys.executable, SELF_PATH, "usage", "adapters", "check",
-            "--agent", agent, "--json"]
+        "--agent", agent, "--json"]
     payload, error = run_usage_watch_probe(argv, timeout)
     if error:
         return False, error
@@ -11684,6 +11879,10 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"m8shift-runtime.py {VERSION}",
                    help="show the runtime companion version and exit")
+    p.add_argument(
+        "--project-root", default=PROJECT_ROOT_INPUT, metavar="DIR",
+        help="authoritative initialized relay root; must agree with a defined "
+             "M8SHIFT_ROOT")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     ri = sub.add_parser("init", help="scaffold optional local runtime companion files")

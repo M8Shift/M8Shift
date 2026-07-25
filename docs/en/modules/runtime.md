@@ -258,6 +258,39 @@ python3 m8shift-runtime.py listener start --agent codex \
   --cmd-file .m8shift/providers/codex.json --dry-run
 ```
 
+### Bind an externally invoked runtime to one relay root
+
+`m8shift-runtime.py` accepts a runtime-global `--project-root DIR`. A defined
+`M8SHIFT_ROOT` has the same authoritative meaning. If both are present they
+must canonicalize to the same initialized relay. The listener refuses mixed
+profile, provider working-directory, protocol, core, runner, or runtime roots
+before it starts a runner or writes listener sidecars.
+
+The dry-run plan, persisted
+`.m8shift/runtime/listeners/<agent>.plan.json`, and `listener status --json`
+expose `project_root`, `root_provenance` (`cli`, `env`, `discovery`, or
+`script_location`), `profile_root`, `protocol_root`, `runtime_root`,
+`runner_root`, and `roots_consistent`.
+
+Use the version-locked companion installer from the target relay instead of
+hand-copying an external runtime:
+
+```bash
+# Run in the initialized target relay. The installer verifies source versions,
+# manifest digests, executable permissions, and relay/companion schema.
+./m8shift.py init --profile headless --with-runtime \
+  --companion-source /path/to/verified-m8shift-kit
+
+# Final target-bound, write-free proof before starting a provider.
+./m8shift-runtime.py --project-root "$PWD" listener start --agent codex \
+  --cmd-file "$PWD/.m8shift/providers/codex.json" --dry-run
+```
+
+The final plan must report `roots_consistent: true` and the intended canonical
+`project_root`. Dry-run does not create a LOCK, ledger, PID, listener state,
+plan sidecar, or log in either the selected root or the runtime script's source
+checkout.
+
 ```bash
 # mutates-local-state — supervise one headless lane (detached local backend),
 # inspect it, then stop it (process group + any installed service definition)
