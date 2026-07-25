@@ -61,6 +61,14 @@ import threading
 import time
 import uuid
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python 3.8 keeps classification fail-closed
+    try:
+        from backports.zoneinfo import ZoneInfo
+    except ImportError:
+        ZoneInfo = None
+
 
 class HelpfulArgumentParser(argparse.ArgumentParser):
     """Print command help plus a valid required-argument shape on errors."""
@@ -100,7 +108,7 @@ HANDSHAKE_CAPABILITIES = (
 HANDSHAKE_OPTIONS = (
     "--agent-model", "--cmd", "--cwd", "--env-allowlist",
     "--m8shift", "--m8shift-py", "--once", "--resume-working",
-    "--run-id", "--runtime-dir", "--start-on-idle",
+    "--provider", "--run-id", "--runtime-dir", "--start-on-idle",
 )
 TEE_CAPTURE_LIMIT = 64 * 1024
 ENVIRONMENT_SIGNATURES = {
@@ -138,6 +146,26 @@ SUCCESS_STATUSES = ("completed", "advanced", "not_required")
 FAILURE_STATUSES = ("non_completion", "stuck_working", "invalid_relay")
 NEUTRAL_STATUSES = ("external_transition", "suspended")
 TERMINAL_FAILURE_STATUSES = ("environment_blocked", "approval_required")
+PROVIDER_RATE_LIMIT_STATUSES = (
+    "provider_rate_limited",
+    "provider_rate_limited_reset_unknown",
+)
+PROVIDER_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
+OPENAI_CODEX_LIMIT_RE = re.compile(
+    r"^\s*(?:error:\s*)?you(?:'|\N{RIGHT SINGLE QUOTATION MARK})ve hit your "
+    r"(?P<scope>weekly|5[- ]hour|session)\s+(?:usage\s+)?limit[.!]?\s+"
+    r"(?:(?:try again|resets?)\s+(?:at|on)?\s*)"
+    r"(?P<reset>[^\r\n]+?)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+PROVIDER_RESET_FORMATS = (
+    "%b %d, %Y, %I:%M %p",
+    "%b %d, %Y %I:%M %p",
+    "%B %d, %Y, %I:%M %p",
+    "%B %d, %Y %I:%M %p",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+)
 
 
 def runner_handshake():
@@ -223,8 +251,9 @@ class BoundedTTYTee:
             if any(needle in text for needle in needles))
         tail_text = captured_tail.decode("utf-8", errors="replace")
         turn_ends = list(TURN_END_RE.finditer(tail_text))
-        final_text = (tail_text[turn_ends[-1].end():]
-                      if turn_ends else tail_text).lower()
+        final_output = (tail_text[turn_ends[-1].end():]
+                        if turn_ends else tail_text)
+        final_text = final_output.lower()
         final_signature_ids = sorted(
             signature_id for signature_id, needles in ENVIRONMENT_SIGNATURES.items()
             if any(needle in final_text for needle in needles))
@@ -234,7 +263,113 @@ class BoundedTTYTee:
             "streams": counts,
             "signature_ids": signature_ids,
             "final_signature_ids": final_signature_ids,
+            # Ephemeral only: the caller classifies this bounded tail and never
+            # copies it into a plan, event, listener state, notification, or log.
+            "_final_text": final_output,
         }
+
+
+def _provider_reset_datetime(raw):
+    """Normalize one provider-owned reset instant with an actual timezone.
+
+    IANA zones are resolved through the system tz database. Explicit numeric
+    offsets are accepted as provider data. A timezone abbreviation or a naive
+    timestamp is intentionally rejected instead of inventing an offset.
+    """
+    value = str(raw or "").strip().rstrip(".").strip()
+    value = value[1:-1].strip() if value.startswith("(") and value.endswith(")") else value
+    zone_name = ""
+    zone = None
+    zone_match = re.search(r"(?:\s+\()?([A-Za-z]+/[A-Za-z0-9_+.-]+)\)?$", value)
+    if zone_match:
+        zone_name = zone_match.group(1)
+        value = value[:zone_match.start()].rstrip()
+        if ZoneInfo is None:
+            return None, ""
+        try:
+            zone = ZoneInfo(zone_name)
+        except (KeyError, ValueError):
+            return None, ""
+    else:
+        iso_match = re.search(r"(Z|[+-]\d{2}:\d{2})$", value)
+        if iso_match:
+            zone_name = iso_match.group(1)
+            try:
+                parsed = dt.datetime.fromisoformat(
+                    value[:-1] + "+00:00" if value.endswith("Z") else value)
+            except ValueError:
+                return None, ""
+            return parsed.astimezone(dt.timezone.utc), zone_name
+        return None, ""
+    parsed = None
+    for fmt in PROVIDER_RESET_FORMATS:
+        try:
+            parsed = dt.datetime.strptime(value, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return None, ""
+    aware = parsed.replace(tzinfo=zone)
+    # Reject DST gaps: a non-existent local wall time does not round-trip.
+    if aware.astimezone(dt.timezone.utc).astimezone(zone).replace(tzinfo=None) != parsed:
+        return None, ""
+    return aware.astimezone(dt.timezone.utc), zone_name
+
+
+def classify_provider_terminal_output(provider, output_tail, returncode,
+                                      relay_advanced, observed_at=None):
+    """Transitional strict provider grammar for one terminal output tail.
+
+    The provider adapter boundary will ultimately own these signatures. Until
+    the runner can call that boundary without gaining routing authority, keep
+    this grammar provider-keyed, final-output-only, bounded, and fail-closed.
+    """
+    if provider != "openai-codex" or returncode in (None, 0) or relay_advanced:
+        return None
+    text = str(output_tail or "")
+    # A provider-owned terminal line is the complete final output. Prompt
+    # quotes/prefixes and arbitrary surrounding transcript therefore cannot
+    # become a hold signal.
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
+    match = OPENAI_CODEX_LIMIT_RE.fullmatch(lines[0])
+    if not match:
+        return None
+    scope = match.group("scope").lower().replace("-", "_").replace(" ", "_")
+    scope = "session_5h" if scope in {"5_hour", "session"} else scope
+    reset, timezone_name = _provider_reset_datetime(match.group("reset"))
+    metadata = {
+        "provider": provider,
+        "scope": scope,
+        "resets_at": None,
+        "timezone": "",
+        "evidence_id": "openai_codex_usage_limit_v1",
+        "returncode": int(returncode),
+    }
+    if reset is None:
+        return {
+            "status": "provider_rate_limited_reset_unknown",
+            "reason": "provider_rate_limited_reset_unknown",
+            "metadata": metadata,
+        }
+    metadata["resets_at"] = reset.strftime("%Y-%m-%dT%H:%M:%SZ")
+    metadata["timezone"] = timezone_name
+    current = observed_at or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=dt.timezone.utc)
+    if reset <= current.astimezone(dt.timezone.utc):
+        return {
+            "status": "provider_rate_limited_reset_unknown",
+            "reason": "provider_rate_limited_reset_unknown",
+            "metadata": metadata,
+        }
+    return {
+        "status": "provider_rate_limited",
+        "reason": "provider_usage_limit",
+        "metadata": metadata,
+    }
 
 
 def probe_directory_writable(path):
@@ -489,6 +624,9 @@ def validate_run_plan(plan):
     agent_model = plan.get("agent_model", "")
     if not isinstance(agent_model, str) or (agent_model and not MODEL_ID_RE.fullmatch(agent_model)):
         raise SystemExit("run plan agent_model must be a valid 1-128 character model id")
+    provider = plan.get("provider", "")
+    if not isinstance(provider, str) or (provider and not PROVIDER_RE.fullmatch(provider)):
+        raise SystemExit("run plan provider must be a safe provider id")
     resolve_argv(plan["argv"])
     expected = plan["expected_transition"]
     if not isinstance(expected, dict) or expected.get("type") not in {"core_state_advanced", "none"}:
@@ -544,6 +682,7 @@ def make_run_plan(args, run_id, me, lk, resumed=False):
         "run_id": run_id,
         "agent": me,
         "agent_model": getattr(args, "agent_model", "") or "",
+        "provider": getattr(args, "provider", "") or "",
         "argv": argv,
         "cwd": cwd,
         "prompt_hash": prompt_hash_for_argv(argv),
@@ -764,6 +903,8 @@ def validate_args(args):
                          "launch for an already-held WORKING lock, not a polling mode)")
     if args.agent_model and not MODEL_ID_RE.fullmatch(args.agent_model):
         raise SystemExit("invalid agent model: expected a 1-128 character safe model id")
+    if args.provider and not PROVIDER_RE.fullmatch(args.provider):
+        raise SystemExit("invalid provider: expected [a-z][a-z0-9-]*")
 
 
 def stop_child(proc, grace):
@@ -903,6 +1044,8 @@ def main():
                    help="comma-separated host env vars copied to the child; M8SHIFT_* vars are always added")
     p.add_argument("--agent-model", default="",
                    help="validated provider model pin exported as M8SHIFT_AGENT_MODEL")
+    p.add_argument("--provider", default="",
+                   help="validated provider adapter id for terminal-output classification")
     p.add_argument("--expected-transition", choices=("core_state_advanced", "none"),
                    default="core_state_advanced",
                    help="post-run relay transition expectation; default requires core state progress")
@@ -1025,6 +1168,9 @@ def main():
         verification = verify_post_run(plan, after, post_text)
         status = verification["status"]
         reason = verification.get("reason", "")
+        terminal = classify_provider_terminal_output(
+            plan.get("provider", ""), output_summary.get("_final_text", ""),
+            proc.returncode, verification.get("ok", False))
         if status in FAILURE_STATUSES and confirmed_environment_block(
                 pre_environment, post_environment):
             status = "environment_blocked"
@@ -1057,6 +1203,24 @@ def main():
                     "hint": ("Add only the relay commands from "
                              ".m8shift/PROVIDER-PERMISSIONS.md to the provider's "
                              "documented headless permission allowlist, then restart."),
+                },
+            })
+        elif status in FAILURE_STATUSES and terminal is not None:
+            status = terminal["status"]
+            reason = terminal["reason"]
+            verification = dict(verification)
+            verification.update({
+                "ok": False,
+                "status": status,
+                "reason": reason,
+                "provider_terminal": terminal["metadata"],
+                "finding": {
+                    "severity": "error",
+                    "check": f"headless.{status}",
+                    "message": status,
+                    "hint": ("listener will apply the scoped usage hold"
+                             if status == "provider_rate_limited" else
+                             "operator must verify the reset before restarting"),
                 },
             })
         post_snapshot = verification["actual"]
@@ -1108,11 +1272,16 @@ def main():
                 return 3 if status == "external_transition" else 4
             time.sleep(args.interval)
             continue
-        elif status in FAILURE_STATUSES + TERMINAL_FAILURE_STATUSES:
+        elif status in FAILURE_STATUSES + TERMINAL_FAILURE_STATUSES + \
+                PROVIDER_RATE_LIMIT_STATUSES:
             # non_completion / stuck_working / invalid_relay are run failures even
             # when the provider exited rc 0 — never force-recovered, only retried.
-            fails += 1
-            log(f"run classified {status}: {reason} ({fails}/{args.max_retries}).")
+            rate_limited = status in PROVIDER_RATE_LIMIT_STATUSES
+            if not rate_limited:
+                fails += 1
+                log(f"run classified {status}: {reason} ({fails}/{args.max_retries}).")
+            else:
+                log(f"run classified {status}: {reason} (retry counter unchanged).")
             if status == "non_completion":
                 append_run_event(args, "run.non_completion", run_id, me,
                                  pre=pre_snapshot, post=post_snapshot, reason=reason)
@@ -1124,7 +1293,10 @@ def main():
                              ledger_ok=ledger_ok,
                              success=False,
                              reason=reason,
+                             provider_terminal=verification.get("provider_terminal"),
                              runtime_findings=findings, **output_fields)
+            if rate_limited:
+                return 1
         elif success:
             fails = 0  # completed / advanced / not_required — authored, real progress.
             append_run_event(args, "run.ended", run_id, me, status=status,

@@ -1621,6 +1621,30 @@ def agent_usage_hold(agent):
     return (None, validation) if validation else (doc, None)
 
 
+def status_usage_holds(lk):
+    """Return normalized per-agent admission holds for status/top surfaces."""
+    rows = {}
+    for agent in active_agents(lk):
+        hold, error = agent_usage_hold(agent)
+        if error:
+            rows[agent] = {
+                "state": "corrupt",
+                "cause": "usage_hold_malformed",
+                "resets_at": None,
+            }
+        elif hold:
+            binding = hold.get("binding_window")
+            rows[agent] = {
+                "state": "active",
+                "cause": hold.get("reason", "usage_hold"),
+                "resets_at": hold.get("resets_at"),
+                "scope": (binding.get("kind", "")
+                          if isinstance(binding, dict) else ""),
+                "source": hold.get("source", ""),
+            }
+    return rows
+
+
 def usage_throttle_message(agent, error=None):
     if error:
         return ("refused: usage hold for '%s' is malformed (%s); this agent lane "
@@ -10414,6 +10438,15 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
     if accounting is not None and not brief:
         _print_time_accounting(accounting)
     _print_usage_block(lk)   # RFC 051: after the LOCK block; absent when no usable snapshot
+    for agent, hold in status_usage_holds(lk).items():
+        if hold["state"] == "corrupt":
+            print(f"  usage hold {agent}: MALFORMED — lane fails closed")
+        else:
+            print("  usage hold %s: %s until %s%s" % (
+                agent,
+                hold.get("cause") or "active",
+                display_time(hold.get("resets_at")),
+                (" scope=" + hold["scope"]) if hold.get("scope") else ""))
 
 
 def _status_signature(lk, stale, last, for_agent=""):
@@ -10430,6 +10463,7 @@ def _status_signature(lk, stale, last, for_agent=""):
         "stale": bool(stale),
         "last_turn": last or {},
         "usage": _usage_signature(lk),   # RFC 051: reprint on a usage-line delta (--changes-only)
+        "usage_holds": status_usage_holds(lk),
         "attention": {agent: {
             "relay_attention": row.get("relay_attention"),
             "producer_coverage": row.get("producer_coverage"),
@@ -10493,6 +10527,9 @@ def status_json_payload_v1(lk, parsed_turns, observed, activity_limit,
     usage = _usage_json(lk)
     if usage is not None:
         out["usage"] = usage
+    usage_holds = status_usage_holds(lk)
+    if usage_holds:
+        out["usage_holds"] = usage_holds
     snapshot_last = parsed_turns[-1] if parsed_turns else None
     out["snapshot"] = status_snapshot_v1(
         lk, snapshot_last, session_info, parsed_turns, activity_limit,

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Scoped provider rate-limit holds (#258).** The headless runner now
+  corroborates a provider-owned final usage-limit line with a non-zero exit and
+  no relay progress, normalizes only provider/scope/reset/timezone/evidence
+  metadata, and never persists the transcript. A valid future reset creates a
+  per-agent usage hold without consuming retries; the resident listener keeps
+  peer lanes running and clears that typed hold after the reset plus a small
+  clock margin. An unknown reset halts after one invocation for operator
+  review. Core status, runtime status, and TOP surface the hold cause and date.
+
 - **Recursive annotated-tag leak closure (#246).** Publish-boundary scrub now
   peels tag-of-tag chains and scans every intermediate annotated-tag message
   carried by the pushed ref. Any object read, malformed target header, or peel

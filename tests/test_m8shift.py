@@ -5285,6 +5285,73 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(ended["output_signature_ids"], ["approval_required"])
         self.assertEqual(ended["output_final_signature_ids"], ["approval_required"])
 
+    def test_provider_weekly_limit_is_normalized_without_persisting_output(self):
+        self.awaiting_me()
+        message = ("You've hit your weekly usage limit. Try again at "
+                   "Dec 31, 2099, 2:44 PM Europe/Paris.")
+        r = self.runner_once(
+            "import sys\nprint(%r, file=sys.stderr)\nsys.exit(7)\n" % message,
+            "--provider", "openai-codex")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "provider_rate_limited")
+        self.assertEqual(ended["verification_status"],
+                         "provider_rate_limited")
+        self.assertEqual(ended["provider_terminal"], {
+            "provider": "openai-codex",
+            "scope": "weekly",
+            "resets_at": "2099-12-31T13:44:00Z",
+            "timezone": "Europe/Paris",
+            "evidence_id": "openai_codex_usage_limit_v1",
+            "returncode": 7,
+        })
+        self.assertNotIn(message, json.dumps(self.rows()))
+
+    def test_provider_limit_requires_nonzero_exit_and_no_relay_progress(self):
+        message = ("You've hit your weekly usage limit. Try again at "
+                   "Dec 31, 2099, 2:44 PM Europe/Paris.")
+        self.awaiting_me()
+        ok = self.runner_once("print(%r)\n" % message,
+                              "--provider", "openai-codex")
+        self.assertEqual(ok.returncode, 1, ok.stdout + ok.stderr)
+        self.assertEqual(self.ended()["status"], "non_completion")
+
+        advanced = self.runner_once(
+            "import subprocess, sys\n"
+            "m = [sys.executable, 'm8shift.py']\n"
+            "subprocess.check_call(m + ['claim', 'claude'])\n"
+            "subprocess.check_call(m + ['append', 'claude', '--to', 'codex', "
+            "'--ask', 'review', '--done', 'complete'])\n"
+            "print(%r, file=sys.stderr)\n"
+            "sys.exit(7)\n" % message,
+            "--provider", "openai-codex")
+        self.assertEqual(advanced.returncode, 1, advanced.stdout + advanced.stderr)
+        self.assertEqual(self.ended()["status"], "failed_partial")
+
+    def test_quoted_or_unparseable_provider_limit_never_creates_known_hold_signal(self):
+        self.awaiting_me()
+        quoted = self.runner_once(
+            "import sys\n"
+            "print('user prompt: \"You\\'ve hit your weekly usage limit. "
+            "Try again at Dec 31, 2099, 2:44 PM Europe/Paris.\"', file=sys.stderr)\n"
+            "sys.exit(7)\n",
+            "--provider", "openai-codex")
+        self.assertEqual(quoted.returncode, 1, quoted.stdout + quoted.stderr)
+        self.assertEqual(self.ended()["status"], "non_completion")
+
+        unknown = self.runner_once(
+            "import sys\n"
+            "print(\"You've hit your weekly usage limit. Try again at tomorrow CEST.\", "
+            "file=sys.stderr)\n"
+            "sys.exit(7)\n",
+            "--provider", "openai-codex")
+        self.assertEqual(unknown.returncode, 1, unknown.stdout + unknown.stderr)
+        self.assertEqual(
+            self.ended()["status"],
+            "provider_rate_limited_reset_unknown")
+        self.assertIsNone(
+            self.ended()["provider_terminal"]["resets_at"])
+
     def test_t3_advanced_when_provider_appends_to_peer(self):
         # RFC 047 test 3: an authored newer turn is success even though the relay is open.
         self.awaiting_me()
@@ -6074,6 +6141,125 @@ with open(%r, 'a', encoding='utf-8') as fh:
                          "approval_required:provider_permission_allowlist")
         self.assertEqual(len(self.launches()), 1)
         self.assertIn("PROVIDER-PERMISSIONS.md", result.stdout)
+
+    def test_provider_rate_limit_places_scoped_hold_without_consuming_retries(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-launches.txt")
+        message = ("You've hit your weekly usage limit. Try again at "
+                   "Dec 31, 2099, 2:44 PM Europe/Paris.")
+        code = (
+            "import sys\n"
+            "with open(%r, 'a', encoding='utf-8') as fh: fh.write('launch\\n')\n"
+            "print(%r, file=sys.stderr)\n"
+            "sys.exit(7)\n"
+        ) % (marker, message)
+        profile = self.profile_path(
+            argv=[sys.executable, "-c", code], cwd=self.d,
+            env_allowlist=[], provider="openai-codex")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "2",
+            "--poll-interval", "0.01", "--max-retries", "3",
+            "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "polling")
+        self.assertEqual(state["last_classification"],
+                         "provider_rate_limited")
+        self.assertEqual(state["consecutive_failures"], 0)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(len(fh.readlines()), 1)
+        hold_path = os.path.join(
+            self.d, ".m8shift", "runtime", "usage-holds", "claude.json")
+        with open(hold_path, encoding="utf-8") as fh:
+            hold = json.load(fh)
+        self.assertEqual(hold["agent"], "claude")
+        self.assertEqual(hold["binding_window"]["kind"], "weekly")
+        self.assertEqual(hold["resets_at"], "2099-12-31T13:44:00Z")
+        self.assertIn("clock margin", result.stdout)
+        core_status = self.cw("status", "--json")
+        self.assertEqual(core_status.returncode, 0, core_status.stderr)
+        self.assertEqual(
+            json.loads(core_status.stdout)["usage_holds"]["claude"]["cause"],
+            "provider_rate_limited:openai-codex:"
+            "openai_codex_usage_limit_v1")
+        runtime_status = self.rt("status-runtime", "claude", "--json")
+        self.assertEqual(runtime_status.returncode, 0, runtime_status.stderr)
+        self.assertEqual(
+            json.loads(runtime_status.stdout)["runtime"]["claude"]
+            ["usage_hold"]["resets_at"],
+            "2099-12-31T13:44:00Z")
+        import importlib.util
+        top_path = os.path.join(REPO, "m8shift-top.py")
+        spec = importlib.util.spec_from_file_location("m8shift_top_258", top_path)
+        top = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(top)
+        self.assertIn(
+            "USAGE HOLD claude",
+            top._usage_hold_display(json.loads(core_status.stdout)))
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as fh:
+            self.assertNotIn(message, fh.read())
+
+    def test_provider_rate_limit_unknown_reset_halts_once_without_retry_debit(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-launches.txt")
+        code = (
+            "import sys\n"
+            "with open(%r, 'a', encoding='utf-8') as fh: fh.write('launch\\n')\n"
+            "print(\"You've hit your weekly usage limit. Try again at tomorrow CEST.\", "
+            "file=sys.stderr)\n"
+            "sys.exit(7)\n"
+        ) % marker
+        profile = self.profile_path(
+            argv=[sys.executable, "-c", code], cwd=self.d,
+            env_allowlist=[], provider="openai-codex")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "2",
+            "--poll-interval", "0.01", "--max-retries", "3",
+            "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "halted")
+        self.assertEqual(state["last_classification"],
+                         "provider_rate_limited_reset_unknown")
+        self.assertEqual(state["consecutive_failures"], 0)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(len(fh.readlines()), 1)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "usage-holds", "claude.json")))
+
+    def test_expired_provider_hold_auto_reopens_after_clock_margin(self):
+        self.awaiting_me()
+        hold_path = self.seed_usage_hold()
+        reset = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
+        with open(hold_path, encoding="utf-8") as fh:
+            hold = json.load(fh)
+        hold.update({
+            "resets_at": reset,
+            "reason": "provider_rate_limited:openai-codex:"
+                      "openai_codex_usage_limit_v1",
+            "snapshot_ref": ".m8shift/runtime/runs.jsonl#test/evidence",
+            "binding_window": {"kind": "weekly", "resets_at": reset},
+        })
+        with open(hold_path, "w", encoding="utf-8") as fh:
+            json.dump(hold, fh)
+        runner = self.stub_runner(rc=0, take_turn=True)
+        result = self.rt(
+            "listener", "start", "--agent", "claude",
+            "--cmd-file", self.profile_path(), "--runner", runner,
+            "--foreground", "--max-ticks", "1", "--poll-interval", "0.01")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(hold_path))
+        self.assertEqual(len(self.launches()), 1)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        with open(os.path.join(
+                self.d, ".m8shift", "runtime", "usage.jsonl"),
+                encoding="utf-8") as fh:
+            events = [json.loads(line)["type"] for line in fh if line.strip()]
+        self.assertIn("usage.hold.auto_released", events)
 
     def test_runner_timeout_classification_is_retryable_and_not_overwritten(self):
         self.awaiting_me()

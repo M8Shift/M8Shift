@@ -321,6 +321,7 @@ LISTENER_CLASSIFICATIONS = {
     "failed_missing_ledger", "timeout", "run_failure",
     "infrastructure_failure", "runner_crash", "runner_refused_argv",
     "environment_blocked", "approval_required",
+    "provider_rate_limited", "provider_rate_limited_reset_unknown",
 }
 LISTENER_BACKENDS = ("auto", "local", "launchd", "systemd", "windows")
 LISTENER_SERVICE_BACKENDS = ("launchd", "systemd", "windows")
@@ -376,6 +377,7 @@ APPROVAL_REQUIRED_NOTIFICATION = (
     ".m8shift/PROVIDER-PERMISSIONS.md to this provider's documented headless "
     "permission allowlist, verify one bounded turn, then restart the listener."
 )
+PROVIDER_RATE_LIMIT_MARGIN_S = 30
 LISTENER_TURN_PROMPT = (
     "Apply M8SHIFT.protocol.md: you are {agent}; take exactly one relay turn "
     "(claim, work, append) and then exit."
@@ -6619,6 +6621,10 @@ def runtime_summary(agent=""):
             for name in os.listdir(INBOX_DIR):
                 if name.endswith(".jsonl"):
                     discovered.add(name[:-6])
+        if os.path.isdir(USAGE_HOLDS_DIR):
+            for name in os.listdir(USAGE_HOLDS_DIR):
+                if name.endswith(".json"):
+                    discovered.add(name[:-5])
         agents = sorted(ag for ag in discovered if AGENT_RE.fullmatch(ag))
     out = {}
     for ag in agents:
@@ -6633,12 +6639,23 @@ def runtime_summary(agent=""):
             finding = no_progress_finding(ag, pres)
             if finding:
                 findings.append(finding)
+        usage_hold, usage_hold_error = read_usage_hold(ag)
         out[ag] = {
             "presence": pres,
             "presence_stale": isinstance(pres, dict) and not fresh_presence(pres, pres.get("stale_after_seconds", 300)),
             "inbox_count": len(inbox),
             "last_progress": last_progress,
             "last_run_event": last_run_event,
+            "usage_hold": ({
+                "state": "corrupt",
+                "cause": "usage_hold_malformed",
+                "resets_at": None,
+            } if usage_hold_error else {
+                "state": "active",
+                "cause": usage_hold.get("reason", "usage_hold"),
+                "resets_at": usage_hold.get("resets_at"),
+                "scope": (usage_hold.get("binding_window") or {}).get("kind", ""),
+            } if usage_hold else None),
         }
     return out, findings
 
@@ -6701,6 +6718,12 @@ def cmd_status_runtime(args):
         if not args.brief and data.get("last_run_event"):
             row = data["last_run_event"]
             print(f"  last run: {row.get('event', row.get('type', '-'))} {row.get('run_id', '')} ({row.get('ts', '-')})")
+        if data.get("usage_hold"):
+            hold = data["usage_hold"]
+            print("  usage hold: %s cause=%s until=%s%s" % (
+                hold.get("state"), hold.get("cause"),
+                hold.get("resets_at") or "-",
+                (" scope=" + hold["scope"]) if hold.get("scope") else ""))
     return 0
 
 
@@ -8025,6 +8048,10 @@ def listener_profile_findings(doc, agent):
     agent_model = doc.get("agent_model", "")
     if not isinstance(agent_model, str) or (agent_model and not MODEL_ID_RE.fullmatch(agent_model)):
         problems.append("agent_model must be a valid 1-128 character model id")
+    provider = doc.get("provider", "")
+    if (provider and (not isinstance(provider, str)
+                      or not PROVIDER_TOKEN_RE.fullmatch(provider))):
+        problems.append("provider must be a valid provider adapter id")
     return problems
 
 
@@ -8039,6 +8066,8 @@ def normalize_listener_profile(doc, source, profile_path=""):
         "env_allowlist": list(doc.get("env_allowlist") or []),
         "start_on_idle": bool(doc.get("start_on_idle", False)),
         "agent_model": doc.get("agent_model", "") or "",
+        "provider": (doc.get("provider", "")
+                     or (doc.get("provider_row") or {}).get("provider", "")),
         "source": source,
         "_profile_path": profile_path or RELAY_PATH,
     }
@@ -8099,6 +8128,7 @@ def load_listener_profile(args, agent):
             "env_allowlist": row.get("env_allowlist") or [],
             "start_on_idle": False,
             "agent_model": row.get("model", ""),
+            "provider": row.get("provider", ""),
             "provider_row": dict(row),
         }
         source = os.path.relpath(PROVIDERS, HERE)
@@ -8271,6 +8301,8 @@ def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=Fal
         argv.append("--start-on-idle")
     if agent_model:
         argv += ["--agent-model", agent_model]
+    if profile.get("provider"):
+        argv += ["--provider", profile["provider"]]
     if resume_working:
         argv.append("--resume-working")
     argv += ["--cmd", *provider_argv]
@@ -8484,6 +8516,47 @@ def listener_run_classification(run_id):
             status = row.get("status") or row.get("verification_status") or ""
             return status if status in LISTENER_CLASSIFICATIONS else ""
     return ""
+
+
+def listener_run_provider_terminal(run_id):
+    """Return normalized provider terminal metadata from one immutable run row."""
+    rows, err = read_jsonl_diagnostic(RUNS)
+    if err:
+        return None
+    for row in reversed(rows):
+        if row.get("run_id") == run_id and row.get("event") == "run.ended":
+            terminal = row.get("provider_terminal")
+            return dict(terminal) if isinstance(terminal, dict) else None
+    return None
+
+
+def validate_provider_rate_limit_terminal(terminal, provider):
+    """Validate the runner's normalized, transcript-free rate-limit evidence."""
+    required = {
+        "provider", "scope", "resets_at", "timezone", "evidence_id", "returncode",
+    }
+    if not isinstance(terminal, dict) or set(terminal) != required:
+        return None, "provider terminal metadata has invalid fields"
+    if terminal.get("provider") != provider or not PROVIDER_TOKEN_RE.fullmatch(
+            terminal.get("provider", "")):
+        return None, "provider terminal metadata does not match the listener profile"
+    if terminal.get("scope") not in {"weekly", "session_5h"}:
+        return None, "provider terminal scope is unsupported"
+    if terminal.get("evidence_id") != "openai_codex_usage_limit_v1":
+        return None, "provider terminal evidence id is unsupported"
+    if (not isinstance(terminal.get("returncode"), int)
+            or isinstance(terminal.get("returncode"), bool)
+            or terminal["returncode"] == 0):
+        return None, "provider terminal returncode is invalid"
+    if not isinstance(terminal.get("timezone"), str) or not terminal["timezone"]:
+        return None, "provider terminal timezone is missing"
+    reset = parse_utc(terminal.get("resets_at", ""))
+    if reset is None or reset <= now():
+        return None, "provider terminal reset is invalid or not in the future"
+    return {
+        "kind": terminal["scope"],
+        "resets_at": terminal["resets_at"],
+    }, None
 
 
 def listener_completed_invocations(agent):
@@ -8735,6 +8808,28 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 time.sleep(poll)
                 continue
             hold, hold_error = read_usage_hold(agent)
+            if (hold and not hold_error
+                    and str(hold.get("reason", "")).startswith(
+                        "provider_rate_limited:")):
+                reset = parse_utc(hold.get("resets_at", ""))
+                if (reset is not None
+                        and now() >= reset + dt.timedelta(
+                            seconds=PROVIDER_RATE_LIMIT_MARGIN_S)):
+                    cleared, clear_error = clear_usage_hold(agent)
+                    if clear_error:
+                        hold_error = clear_error
+                    elif cleared:
+                        append_usage_action_event(
+                            "usage.hold.auto_released", agent, {
+                                "reason": "provider_reset_elapsed",
+                                "resets_at": hold.get("resets_at"),
+                                "clock_margin_seconds":
+                                    PROVIDER_RATE_LIMIT_MARGIN_S,
+                            })
+                        say(f"{agent}: provider usage hold cleared after reset "
+                            f"plus {PROVIDER_RATE_LIMIT_MARGIN_S}s clock margin; "
+                            "listener launch gate re-opened.")
+                        hold = None
             usage_hold_state = ("corrupt" if hold_error else
                                 "active" if hold else "clear")
             if hold or hold_error:
@@ -8841,6 +8936,61 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             ledger_classification = listener_run_classification(run_id)
             last_classification = (ledger_classification
                                    or LISTENER_RUNNER_EXITS.get(rc, "runner_crash"))
+            if last_classification == "provider_rate_limited":
+                terminal = listener_run_provider_terminal(run_id)
+                binding, terminal_error = validate_provider_rate_limit_terminal(
+                    terminal, profile.get("provider", ""))
+                if terminal_error:
+                    phase = "halted"
+                    reason = "provider_rate_limited_reset_unknown"
+                    say(f"{agent}: provider rate-limit evidence failed closed "
+                        f"({terminal_error}); HALTED after one invocation.")
+                    save()
+                    notify_halt(
+                        state, lk.get("holder", ""),
+                        "provider rate limit reset is unknown; operator action is required")
+                    continue
+                _placed, hold_row, hold_error = post_usage_hold(
+                    agent,
+                    binding,
+                    "provider_rate_limited:%s:%s" % (
+                        terminal["provider"], terminal["evidence_id"]),
+                    ".m8shift/runtime/runs.jsonl#%s/%s" % (
+                        run_id, terminal["evidence_id"]),
+                )
+                if hold_error or hold_row is None:
+                    phase = "halted"
+                    reason = "provider_rate_limited_hold_failed"
+                    say(f"{agent}: provider rate-limit hold could not be applied "
+                        f"({hold_error or 'no hold record'}); HALTED after one invocation.")
+                    save()
+                    notify_halt(
+                        state, lk.get("holder", ""),
+                        "provider rate-limit hold failed; operator action is required")
+                    continue
+                phase = "polling"
+                reason = "provider_rate_limited:%s" % hold_row["resets_at"]
+                save()
+                message = (
+                    f"{agent}: provider rate limited ({terminal['scope']}); "
+                    f"usage hold active until {hold_row['resets_at']} plus "
+                    f"{PROVIDER_RATE_LIMIT_MARGIN_S}s clock margin; retries unchanged.")
+                say(message)
+                emit_notification_nonfatal(
+                    agent, "blocked", message,
+                    state=state, holder=lk.get("holder", ""))
+                time.sleep(poll)
+                continue
+            if last_classification == "provider_rate_limited_reset_unknown":
+                phase = "halted"
+                reason = "provider_rate_limited_reset_unknown"
+                say(f"{agent}: provider rate limited but its reset could not be "
+                    "normalized; HALTED after one invocation without consuming retries.")
+                save()
+                notify_halt(
+                    state, lk.get("holder", ""),
+                    "provider rate limit reset is unknown; operator action is required")
+                continue
             if ((rc == 2 and not ledger_classification)
                     or last_classification in {"environment_blocked",
                                                "approval_required"}):

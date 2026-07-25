@@ -313,6 +313,24 @@ def _attention_display(snapshot):
     return ""
 
 
+def _usage_hold_display(snapshot, utc=False):
+    rows = (snapshot.get("usage_holds")
+            if isinstance(snapshot.get("usage_holds"), dict) else {})
+    for agent, row in rows.items():
+        if not isinstance(row, dict):
+            continue
+        if row.get("state") == "corrupt":
+            return "USAGE HOLD %s MALFORMED" % clean(agent, 18)
+        if row.get("state") != "active":
+            continue
+        reset = _display_time(
+            row.get("resets_at"), utc, "%Y-%m-%d %H:%M %Z") or "unknown"
+        cause = clean(row.get("cause") or "active", 44)
+        return "USAGE HOLD %s %s until %s" % (
+            clean(agent, 18), cause, reset)
+    return ""
+
+
 def _stamp(value):
     if not value or value == "-":
         return None
@@ -894,8 +912,11 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     ledger = snapshot.get("ledger") or {}
     listeners = snapshot.get("listeners")
     attention = _attention_display(snapshot)
+    usage_hold = _usage_hold_display(snapshot, utc)
     listen_row = row("LISTENERS  %s%s" % (
-        _value(listeners), ("  " + attention) if attention else ""))
+        _value(listeners),
+        ("  " + usage_hold) if usage_hold else
+        ("  " + attention) if attention else ""))
     listen_row = paint(listen_row, "ALIVE", green)
     listen_row = paint(listen_row, "HALTED (resident)", red)
     listen_row = paint(listen_row, "UNKNOWN", red)
@@ -1120,7 +1141,10 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
     last = snapshot.get("last_turn") or {}
     listen_val = _value(snapshot.get("listeners"))
     attention = _attention_display(snapshot)
-    listen_payload = listen_val + (("   " + attention) if attention else "")
+    usage_hold = _usage_hold_display(snapshot, utc)
+    listen_payload = listen_val + (
+        ("   " + usage_hold) if usage_hold else
+        ("   " + attention) if attention else "")
     listen_line = "│" + adaptive_cells(
         ("  LISTEN", listen_payload), (0, 10), (10, 108), (0, 1)) + "│"
     listen_line = paint(listen_line, "ALIVE", green)
