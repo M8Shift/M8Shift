@@ -30,9 +30,9 @@ pushed range.
 
 Commit messages are scanned once across the same bounded history scope, so a
 range finding names the pushed carrier. `--objects` is a separate release-audit
-mode: it scans every local blob/tree plus commit/tag message bodies (not identity
-headers), including side and unreachable objects. It is never run automatically
-by the pre-push hook.
+mode: it scans every local blob/tree plus full commit/tag objects, including
+identity headers, side refs, and unreachable objects. It is never run
+automatically by the pre-push hook.
 
 The default direct scan is HEAD tip + HEAD history. `--all` is the explicit
 repository-audit mode: it adds every ref, reflog, and bounded unreachable commit,
@@ -115,14 +115,35 @@ def load_denylist(path_override=None, env=None):
     path = os.path.expanduser(explicit or DENYLIST_DEFAULT)
     if not os.path.isfile(path):
         if explicit:
-            return [], [], "denylist missing at the explicit path — nothing scanned"
+            raise RuntimeError(
+                "explicit denylist path is missing or not a regular file")
         return [], [], "no denylist configured — no-op"
     try:
         with open(path, "rb") as fh:
-            raw = fh.read(DENYLIST_MAX_BYTES)
+            raw = fh.read(DENYLIST_MAX_BYTES + 1)
     except OSError as exc:
+        if explicit:
+            raise RuntimeError(
+                "explicit denylist is unreadable (%s)" %
+                exc.__class__.__name__)
         return [], [], "denylist unreadable (%s) — nothing scanned" % exc.__class__.__name__
-    rules, allows, skipped = parse_denylist_text(raw.decode("utf-8", "replace"))
+    if len(raw) > DENYLIST_MAX_BYTES:
+        raise RuntimeError(
+            "denylist exceeds %d-byte scan bound" % DENYLIST_MAX_BYTES)
+    text = raw.decode("utf-8", "replace")
+    rules, allows, skipped = parse_denylist_text(text)
+    eligible = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("allow:"):
+            continue
+        if line.startswith("word:"):
+            line = line.partition(":")[2].strip()
+        if len(line) >= DENYLIST_MIN_LEN:
+            eligible += 1
+    if eligible > DENYLIST_MAX_TERMS:
+        raise RuntimeError(
+            "denylist exceeds %d-term scan bound" % DENYLIST_MAX_TERMS)
     note = ""
     if skipped:
         note = "%d term(s) shorter than %d chars ignored" % (skipped, DENYLIST_MIN_LEN)
@@ -383,13 +404,13 @@ def content_match_indexes(text, matcher, allows):
 
 
 def scan_all_object_content(rules, allows, repo):
-    """Scan the raw body of every object in the local Git object database.
+    """Scan every object in the local Git object database.
 
-    ``git log -S`` sees file-content deltas, not commit messages. The batch
-    object stream is therefore the publish-boundary authority: it covers
-    commits, annotated tags, trees and blobs, including unreachable objects.
-    Findings are sorted after Git's intentionally unordered traversal so output
-    remains deterministic. Oversized or malformed objects fail closed.
+    This explicit release-audit mode covers full commit and annotated-tag
+    objects (including identity and mergetag headers), trees and blobs, including
+    unreachable objects. Findings are sorted after Git's intentionally unordered
+    traversal so output remains deterministic. Oversized or malformed objects
+    fail closed.
     """
     cmd = ["git", "cat-file", "--batch-all-objects", "--unordered", "--batch"]
     findings = []
@@ -458,10 +479,6 @@ def scan_all_object_content(rules, allows, repo):
                     raise RuntimeError("malformed git cat-file object terminator")
                 object_count += 1
                 text = bytes(body).decode("utf-8", "replace")
-                if obj_type in ("commit", "tag"):
-                    _headers, separator, text = text.partition("\n\n")
-                    if not separator:
-                        text = ""
                 for index in content_match_indexes(text, matcher, allows):
                     label, term, _mode = rules[index]
                     findings.append((sha, obj_type, label, term))
@@ -558,7 +575,10 @@ def commit_message_cmd(max_commits, refs_pull, range_args=None,
             cmd.append("--glob=refs/pull")
     else:
         cmd = ["git", "log", "HEAD"]
-    cmd += ["--format=%H%x00%B%x00", "-n", str(max_commits)]
+    cmd.append("--format=%H%x00%B%x00")
+    if not range_args:
+        cmd += ["-n", str(max_commits + 1)]
+    cmd.append("--")
     return cmd
 
 
@@ -579,6 +599,10 @@ def scan_commit_messages(rules, allows, history_runs, args, run,
             fields.pop()
         if len(fields) % 2:
             raise RuntimeError("git log returned malformed message records")
+        if not range_args and len(fields) // 2 > args.max_commits:
+            raise RuntimeError(
+                "commit-message walk exceeds %d-commit scan bound" %
+                args.max_commits)
         for offset in range(0, len(fields), 2):
             sha = fields[offset].strip()
             body = fields[offset + 1]
@@ -712,7 +736,11 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     if not history_runs:
         history_runs = [(None, None if args.all else "ref HEAD")]
 
-    rules, allows, note = load_denylist(args.denylist)
+    try:
+        rules, allows, note = load_denylist(args.denylist)
+    except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+        print("scrub-check: ERROR loading denylist (%s)" % exc, file=err)
+        return 2
     if note:
         print("scrub-check: %s" % note, file=out)
     if not rules:
@@ -951,5 +979,15 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     return 0
 
 
+def entrypoint(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
+    """Map every otherwise-uncaught scanner exception to fail-closed rc 2."""
+    try:
+        return main(argv, out=out, err=err, run=run)
+    except Exception as exc:
+        print("scrub-check: ERROR unhandled scanner failure (%s)" %
+              exc.__class__.__name__, file=err)
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entrypoint())

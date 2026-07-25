@@ -30,6 +30,8 @@ def test_parallel_scrub_worker_failure_is_ordered_and_fail_closed(tmp_path):
     def run(cmd, repo):
         if cmd[:3] == ["git", "cat-file", "-t"]:
             return SimpleNamespace(returncode=0, stdout="commit\n", stderr="")
+        if "--format=%H%x00%B%x00" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         term = cmd[cmd.index("-e") + 1] if "grep" in cmd else cmd[cmd.index("-S") + 1]
         if "log" in cmd:
             releases[term].wait(2)
@@ -51,6 +53,8 @@ def test_parallel_scrub_worker_failure_is_ordered_and_fail_closed(tmp_path):
     def nonzero(cmd, repo):
         if cmd[:3] == ["git", "cat-file", "-t"]:
             return SimpleNamespace(returncode=0, stdout="commit\n", stderr="")
+        if "--format=%H%x00%B%x00" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "log" in cmd:
             return SimpleNamespace(returncode=128, stdout="", stderr="bad history")
         return SimpleNamespace(returncode=1, stdout="", stderr="")
