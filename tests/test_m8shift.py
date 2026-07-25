@@ -5504,6 +5504,9 @@ class ListenerCLIBase(CLIBase):
     RUNNER = os.path.join(REPO, "examples", "headless_runner.py")
 
     def setUp(self):
+        inherited_root = os.environ.pop("M8SHIFT_ROOT", None)
+        if inherited_root is not None:
+            self.addCleanup(os.environ.__setitem__, "M8SHIFT_ROOT", inherited_root)
         super().setUp()
         shutil.copy(self.RUNTIME, os.path.join(self.d, "m8shift-runtime.py"))
         default_runner = os.path.join(self.d, "examples", "headless_runner.py")
@@ -5511,6 +5514,12 @@ class ListenerCLIBase(CLIBase):
         shutil.copy(self.RUNNER, default_runner)
 
     def rt(self, *args, env=None, timeout=60):
+        args = list(args)
+        if "--runner" in args:
+            runner_i = args.index("--runner") + 1
+            if runner_i < len(args) and args[runner_i] == self.RUNNER:
+                args[runner_i] = os.path.join(
+                    self.d, "examples", "headless_runner.py")
         run_env = None
         if env:
             run_env = os.environ.copy()
@@ -5700,6 +5709,140 @@ class TestListenerCompatibilityIncident(ListenerCLIBase):
         if self.blocked_cwd and os.path.isdir(self.blocked_cwd):
             os.chmod(self.blocked_cwd, 0o755)
         super().tearDown()
+
+    def test_external_runtime_project_root_dry_run_is_canonical_and_write_free(self):
+        self.init()
+        profile = os.path.join(
+            self.d, self.profile_path(agent="codex", cwd=self.d))
+        root_alias = os.path.join(os.path.dirname(self.d), "Relay Root With Spaces")
+        os.symlink(self.d, root_alias)
+        self.addCleanup(lambda: os.path.lexists(root_alias) and os.unlink(root_alias))
+        external_kit = tempfile.mkdtemp(prefix="m8shift-external-kit-")
+        self.addCleanup(shutil.rmtree, external_kit, True)
+        shutil.copy(self.RUNTIME, os.path.join(external_kit, "m8shift-runtime.py"))
+        shutil.copy(SCRIPT, os.path.join(external_kit, "m8shift.py"))
+        external_runtime = os.path.join(external_kit, "m8shift-runtime.py")
+        runtime_dir = os.path.join(self.d, ".m8shift", "runtime")
+        before = sorted(
+            os.path.relpath(os.path.join(base, name), self.d)
+            for base, _dirs, names in os.walk(runtime_dir)
+            for name in names)
+        env = os.environ.copy()
+        env.pop("M8SHIFT_ROOT", None)
+        result = subprocess.run(
+            [
+                sys.executable, external_runtime, "listener", "start",
+                "--agent", "codex", "--cmd-file", profile,
+                "--runner", os.path.join(self.d, "examples", "headless_runner.py"),
+                "--project-root", root_alias, "--dry-run",
+            ],
+            cwd=REPO, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan = json.loads(result.stdout)["plan"]
+        self.assertEqual(plan["project_root"], os.path.realpath(self.d))
+        self.assertEqual(plan["root_provenance"], "cli")
+        self.assertEqual(plan["profile_root"], os.path.realpath(self.d))
+        self.assertEqual(plan["protocol_root"], os.path.realpath(self.d))
+        self.assertEqual(plan["runtime_root"], os.path.realpath(self.d))
+        self.assertEqual(plan["runner_root"], os.path.realpath(self.d))
+        self.assertTrue(plan["roots_consistent"])
+        self.assertFalse(os.path.exists(os.path.join(external_kit, "M8SHIFT.md")))
+        self.assertFalse(os.path.exists(os.path.join(external_kit, ".m8shift")))
+        after = sorted(
+            os.path.relpath(os.path.join(base, name), self.d)
+            for base, _dirs, names in os.walk(runtime_dir)
+            for name in names)
+        self.assertEqual(after, before)
+
+    def test_project_root_conflict_and_cross_root_profile_fail_before_sidecars(self):
+        self.init()
+        other = tempfile.mkdtemp(prefix="m8shift-other-root-")
+        self.addCleanup(shutil.rmtree, other, True)
+        shutil.copy(SCRIPT, os.path.join(other, "m8shift.py"))
+        initialized = subprocess.run(
+            [sys.executable, "m8shift.py", "init"],
+            cwd=other, capture_output=True, text=True)
+        self.assertEqual(
+            initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        profile = os.path.join(
+            self.d, self.profile_path(agent="codex", cwd=self.d))
+        plan_path = os.path.join(
+            self.d, ".m8shift", "runtime", "listeners", "codex.plan.json")
+        conflict = self.rt(
+            "listener", "start", "--agent", "codex", "--cmd-file", profile,
+            "--project-root", self.d, "--dry-run",
+            env={"M8SHIFT_ROOT": other})
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertIn("mixed relay roots refused before launch", conflict.stderr)
+        self.assertFalse(os.path.exists(plan_path))
+
+        foreign_profile = os.path.join(other, "listener-profile.json")
+        with open(profile, encoding="utf-8") as source:
+            profile_doc = json.load(source)
+        profile_doc["cwd"] = other
+        with open(foreign_profile, "w", encoding="utf-8") as target:
+            json.dump(profile_doc, target)
+        mixed = self.rt(
+            "listener", "start", "--agent", "codex",
+            "--cmd-file", foreign_profile, "--project-root", self.d,
+            "--dry-run")
+        self.assertNotEqual(mixed.returncode, 0)
+        self.assertIn("profile resolves to", mixed.stderr)
+        self.assertFalse(os.path.exists(plan_path))
+
+    def test_project_root_env_discovery_and_invalid_contract(self):
+        self.init()
+        profile = os.path.join(
+            self.d, self.profile_path(agent="codex", cwd=self.d))
+        runner = os.path.join(self.d, "examples", "headless_runner.py")
+        env_plan = self.rt(
+            "listener", "start", "--agent", "codex", "--cmd-file", profile,
+            "--runner", runner, "--dry-run",
+            env={"M8SHIFT_ROOT": self.d})
+        self.assertEqual(env_plan.returncode, 0, env_plan.stdout + env_plan.stderr)
+        self.assertEqual(
+            json.loads(env_plan.stdout)["plan"]["root_provenance"], "env")
+
+        discovery = self.rt(
+            "listener", "start", "--agent", "codex", "--cmd-file", profile,
+            "--runner", runner, "--dry-run")
+        self.assertEqual(
+            discovery.returncode, 0, discovery.stdout + discovery.stderr)
+        self.assertEqual(
+            json.loads(discovery.stdout)["plan"]["root_provenance"],
+            "discovery")
+
+        missing = os.path.join(self.d, "missing-relay")
+        invalid = self.rt(
+            "listener", "start", "--agent", "codex", "--cmd-file", profile,
+            "--runner", runner, "--dry-run",
+            env={"M8SHIFT_ROOT": missing})
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("selected project root is not a directory", invalid.stderr)
+        self.assertFalse(os.path.exists(missing))
+
+    def test_listener_persists_root_plan_and_status_exposes_provenance(self):
+        self.init()
+        result = self.rt(
+            "listener", "start", "--agent", "codex", "--notify-only",
+            "--foreground", "--max-ticks", "1", "--poll-interval", "0.01",
+            "--project-root", self.d)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan_path = os.path.join(
+            self.d, ".m8shift", "runtime", "listeners", "codex.plan.json")
+        with open(plan_path, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        self.assertEqual(plan["project_root"], os.path.realpath(self.d))
+        self.assertEqual(plan["root_provenance"], "cli")
+        self.assertTrue(plan["roots_consistent"])
+        status = self.rt(
+            "listener", "status", "--agent", "codex", "--json",
+            "--project-root", self.d)
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["project_root"], os.path.realpath(self.d))
+        self.assertEqual(payload["root_provenance"], "cli")
+        self.assertTrue(payload["roots_consistent"])
 
     def legacy_runner(self, provider_marker):
         """Write a deterministic pre-handshake runner that rejects new flags."""
@@ -17765,56 +17908,34 @@ class TestRFC052SessionBinding(CLIBase):
         self.assertFalse(os.path.exists(
             os.path.join(self.other, ".m8shift", "done.log")))   # foreign untouched
 
-    def test_runtime_predicate_both_sides_table_driven(self):
-        # Codex re-review round 3: gate ONLY invocations that actually write a
-        # sidecar — documented read-only modes are never refused, every
-        # conditional write intent is. Both sides of every conditional pinned.
+    def test_runtime_root_contract_env_authoritative_and_cli_conflict(self):
         shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
                     os.path.join(self.d, "m8shift-runtime.py"))
-        self._run("bind", "claude", "--candidate", "script", env_root=self.other)
         env = dict(os.environ)
         env["M8SHIFT_ROOT"] = self.other
 
         def rt(*argv):
-            return subprocess.run([sys.executable, "m8shift-runtime.py", *argv],
-                                  cwd=self.d, capture_output=True, text=True,
-                                  env=env)
+            return subprocess.run(
+                [sys.executable, "m8shift-runtime.py", *argv],
+                cwd=self.d, capture_output=True, text=True, env=env)
 
-        read_only = (("report", "run1"),
-                     ("retention", "apply", "--dry-run"),
-                     ("listener", "start", "--agent", "claude", "--dry-run"),
-                     ("notify", "config", "--show"),
-                     ("headroom",),
-                     ("doctor",),
-                     ("usage", "status"),
-                     ("usage", "guard"))
-        for argv in read_only:
-            r = rt(*argv)
-            self.assertNotIn("fails closed", r.stderr, argv)
-            self.assertIn("two candidate relays", r.stderr, argv)   # redacted warn
-            self.assertNotIn(self.other, r.stdout + r.stderr, argv)
-        mutating = (("init",),
-                    ("watch", "claude"),
-                    ("progress", "claude", "msg", "--run", "r1"),
-                    ("report", "run1", "--write"),
-                    ("retention", "apply"),
-                    ("listener", "start", "--agent", "claude"),
-                    ("notify", "config", "--enable", "stdout"),
-                    ("notify", "claude"),
-                    ("headroom", "--checkpoint"),
-                    ("providers", "init"),
-                    ("usage", "init"),
-                    ("usage", "snapshot"),
-                    ("usage", "watch"))
-        for argv in mutating:
-            r = rt(*argv)
-            self.assertNotEqual(r.returncode, 0, argv)
-            self.assertIn("fails closed", r.stderr, argv)
-            self.assertNotIn(self.other, r.stdout + r.stderr, argv)
-        # the gated report --write left no artifact behind
-        self.assertFalse(os.path.exists(
-            os.path.join(self.d, ".m8shift", "runs", "run1", "report.md")))
+        status = rt("listener", "status", "--agent", "claude", "--json")
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["project_root"], os.path.realpath(self.other))
+        self.assertEqual(payload["root_provenance"], "env")
 
+        changed = rt("notify", "config", "--enable", "stdout")
+        self.assertEqual(changed.returncode, 0, changed.stdout + changed.stderr)
+        rel = os.path.join(".m8shift", "runtime", "notify.config.json")
+        self.assertTrue(os.path.exists(os.path.join(self.other, rel)))
+        self.assertFalse(os.path.exists(os.path.join(self.d, rel)))
+
+        conflict = rt(
+            "--project-root", self.d,
+            "notify", "config", "--enable", "stdout")
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertIn("mixed relay roots refused before launch", conflict.stderr)
     def test_context_predicate_exact(self):
         # Codex re-review HIGH 5: pack/benchmark mutate only with --write/--output.
         shutil.copy(os.path.join(REPO, "m8shift-context.py"),
@@ -18497,32 +18618,33 @@ class TestRFC049PRBListenerProducer(CLIBase):
             self.assertNotEqual(r.returncode, 0, bad)
             self.assertIn("finite", r.stderr, bad)
 
-    def test_two_relay_listener_mutation_fails_closed(self):
-        # RFC 049 x RFC 052: a differing M8SHIFT_ROOT never lets the listener
-        # write liveness into the wrong project.
+    def test_external_runtime_env_root_is_honored_without_split_brain(self):
         other = tempfile.mkdtemp(prefix="m8-prb-other-")
         self.addCleanup(shutil.rmtree, other, True)
         shutil.copy(SCRIPT, os.path.join(other, "m8shift.py"))
-        r = subprocess.run([sys.executable, "m8shift.py", "init",
-                            "--agents", "claude,codex"],
-                           cwd=other, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        initialized = subprocess.run(
+            [sys.executable, "m8shift.py", "init", "--agents", "claude,codex"],
+            cwd=other, capture_output=True, text=True)
+        self.assertEqual(
+            initialized.returncode, 0,
+            initialized.stdout + initialized.stderr)
         env = dict(os.environ)
         env["M8SHIFT_ROOT"] = other
-        r = subprocess.run([sys.executable, "m8shift-runtime.py", "listener",
-                            "start", "--agent", "claude", "--dry-run"],
-                           cwd=self.d, capture_output=True, text=True, env=env)
-        # dry-run is read-only: allowed but the redacted warning surfaces
-        self.assertIn("two candidate relays", r.stderr)
-        r = subprocess.run([sys.executable, "m8shift-runtime.py", "listener",
-                            "start", "--agent", "claude", "--max-ticks", "1"],
-                           cwd=self.d, capture_output=True, text=True, env=env)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("fails closed", r.stderr)
+        runner = os.path.join(other, "examples", "headless_runner.py")
+        result = subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "start",
+             "--agent", "claude", "--notify-only", "--runner", runner,
+             "--dry-run"],
+            cwd=self.d, capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan = json.loads(result.stdout)["plan"]
+        self.assertEqual(plan["project_root"], os.path.realpath(other))
+        self.assertEqual(plan["root_provenance"], "env")
+        self.assertEqual(plan["runner_root"], os.path.realpath(other))
+        self.assertTrue(plan["roots_consistent"])
         for root in (self.d, other):
             self.assertFalse(os.path.exists(os.path.join(
-                root, ".m8shift", "holder-heartbeats", "claude.json")), root)
-
+                root, ".m8shift", "runtime", "listeners", "claude.plan.json")))
     def test_supervision_emits_real_protective_beat(self):
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"],
