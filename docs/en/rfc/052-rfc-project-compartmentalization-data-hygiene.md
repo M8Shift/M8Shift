@@ -80,6 +80,13 @@ Covers foreign proper nouns the path lint can't know (a private project name lik
   carrier; any read, parse, or peel failure remains fail-closed.
 - ⚠️ History over `refs/pull/*` can be slow → bound it; keep advisory (never a de-facto daemon).
 
+- **Object authority (#251):** `scrub-check.py --objects` consumes
+  `git cat-file --batch-all-objects --unordered --batch` and fixed-string checks
+  every raw object body: commit and tag messages, trees, and blobs. Output is
+  sorted after the unordered traversal, redacted by default, and any malformed,
+  unreadable, or oversized object fails closed. The pre-push hook runs this
+  authority pass before its faster structured pushed-range diagnostics.
+
 ### A1–A5 — Agent operating-model guidance
 
 In `docs/en/agents-guide.md`, `CONTRIBUTING.md`, and the generated agent-pack (not runtime code):

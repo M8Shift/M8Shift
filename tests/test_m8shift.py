@@ -16841,6 +16841,82 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("docs/w.md", r.stdout)
         self.assertNotIn("docs/sub.md", r.stdout)
 
+    def test_object_authority_blocks_commit_message_only_and_clean_passes(self):
+        self._commit("docs/clean.md", "clean content\n",
+                     "release %s marker" % self.TERM)
+        sha = self._sha()
+        denylist = self._deny(self.TERM + "\n")
+
+        blocked = self._scrub("--objects", denylist=denylist)
+        self.assertEqual(blocked.returncode, 1,
+                         blocked.stdout + blocked.stderr)
+        self.assertIn("OBJECT hit: commit %s" % sha[:12], blocked.stdout)
+        self.assertNotIn(self.TERM, blocked.stdout + blocked.stderr)
+        repeated = self._scrub("--objects", denylist=denylist)
+        self.assertEqual(repeated.stdout, blocked.stdout)
+        self.assertEqual(repeated.stderr, blocked.stderr)
+
+        clean = self._scrub(
+            "--objects",
+            denylist=self._deny("DifferentSyntheticSecret\n"))
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+        self.assertIn("Git object(s) checked", clean.stdout)
+
+        outside = tempfile.mkdtemp(prefix="m8-object-nonrepo-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        failed = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "scrub-check.py"),
+             "--repo", outside, "--objects", "--denylist", denylist],
+            capture_output=True, text=True)
+        self.assertEqual(failed.returncode, 2, failed.stdout + failed.stderr)
+        self.assertIn("ERROR scanning Git objects", failed.stderr)
+
+    def test_object_authority_covers_blob_tree_commit_and_tag_bodies(self):
+        terms = {
+            "blob": "SyntheticBlobSecret",
+            "tree": "SyntheticTreeSecret",
+            "commit": "SyntheticCommitSecret",
+            "tag": "SyntheticTagSecret",
+        }
+        self._commit(
+            "docs/%s.txt" % terms["tree"],
+            terms["blob"] + "\n",
+            terms["commit"])
+        subprocess.run(
+            ["git", "tag", "-a", "object-fixture", "-m", terms["tag"]],
+            cwd=self.d, check=True, capture_output=True)
+        result = self._scrub(
+            "--objects",
+            denylist=self._deny("\n".join(terms.values()) + "\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for obj_type in ("blob", "tree", "commit", "tag"):
+            self.assertIn("OBJECT hit: %s " % obj_type, result.stdout)
+        for term in terms.values():
+            self.assertNotIn(term, result.stdout + result.stderr)
+
+    def test_pre_push_object_authority_blocks_commit_message_only(self):
+        self._commit("docs/clean.md", "clean content\n",
+                     "release %s marker" % self.TERM)
+        tip = self._sha()
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(self.d, "scripts", "scrub-check.py"))
+        env = dict(os.environ)
+        env.update(
+            HOME=self.home,
+            M8SHIFT_DENYLIST=self._deny(self.TERM + "\n"),
+            M8SHIFT_SCRUB_ENFORCE="1")
+        env.pop("M8SHIFT_AGENT", None)
+        zeros = "0" * 40
+        result = subprocess.run(
+            ["sh", os.path.join(REPO, "hooks", "pre-push")],
+            cwd=self.d, capture_output=True, text=True, env=env,
+            input="refs/heads/main %s refs/heads/main %s\n" % (tip, zeros))
+        self.assertEqual(result.returncode, 1,
+                         result.stdout + result.stderr)
+        self.assertIn("OBJECT hit: commit %s" % tip[:12], result.stderr)
+        self.assertNotIn(self.TERM, result.stdout + result.stderr)
+
     def test_parallel_scan_output_is_deterministic_across_runs(self):
         # The history walks run in a bounded thread pool; results must be emitted
         # in denylist order so output is byte-identical every run (a concurrency
@@ -17344,7 +17420,8 @@ class TestRFC052ScrubCheck(CLIBase):
 
         zeros = "0" * 40
         r = hook("refs/heads/main %s refs/heads/main %s\n" % (tip, base))
-        self.assertEqual(r.returncode, 0, r.stderr)      # old leak not in range
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("OBJECT hit:", r.stderr)
         self.assertIn("pushed range", r.stderr)
         r = hook("refs/heads/gone %s refs/heads/gone %s\n" % (zeros, base))
         self.assertEqual(r.returncode, 0, r.stderr)      # deletion: skipped
@@ -17428,7 +17505,8 @@ class TestRFC052ScrubCheck(CLIBase):
         subprocess.run(["git", "update-ref", "refs/remotes/origin/clean-feature",
                         clean_tip], cwd=self.d, check=True, capture_output=True)
         clean = hook("refs/heads/clean-feature", clean_tip)
-        self.assertEqual(clean.returncode, 0, clean.stderr)
+        self.assertEqual(clean.returncode, 1, clean.stderr)
+        self.assertIn("OBJECT hit:", clean.stderr)
 
     def test_pre_push_scrub_error_fails_closed(self):
         self._commit("clean.txt", "clean\n", "base")
