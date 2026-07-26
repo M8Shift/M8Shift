@@ -1592,13 +1592,21 @@ def _validate_usage_hold(doc, agent, *, legacy=False):
     return None
 
 
-def agent_usage_hold(agent):
+def usage_hold_elapsed(hold, observed=None):
+    """True when a valid hold's explicit reset no longer gates admission."""
+    reset = parse_iso(hold.get("resets_at")) if isinstance(hold, dict) else None
+    return reset is not None and reset <= (observed or now())
+
+
+def agent_usage_hold(agent, *, include_elapsed=False):
     """Return (hold, error) for *agent* only.
 
     New per-agent records fail closed for their named lane.  A valid legacy
     singleton remains readable for upgrade recovery; malformed legacy data is
     ignored here because it cannot be safely attributed to any one target and
-    therefore must not freeze the whole roster.
+    therefore must not freeze the whole roster.  A valid record whose explicit
+    reset has elapsed is inert at admission; status callers may request it for
+    an honest ``elapsed`` display.
     """
     root = os.path.dirname(COWORK)
     path = os.path.join(root, USAGE_HOLDS_REL, "%s.json" % agent)
@@ -1610,7 +1618,10 @@ def agent_usage_hold(agent):
         if err:
             return None, err
         validation = _validate_usage_hold(doc, agent)
-        return (None, validation) if validation else (doc, None)
+        if validation:
+            return None, validation
+        return ((doc, None) if include_elapsed or not usage_hold_elapsed(doc)
+                else (None, None))
     legacy = os.path.join(root, USAGE_HOLD_LEGACY_REL)
     if not os.path.lexists(legacy) or _usage_hold_ancestor_error(legacy):
         return None, None
@@ -1618,14 +1629,17 @@ def agent_usage_hold(agent):
     if err or doc.get("agent") != agent:
         return None, None
     validation = _validate_usage_hold(doc, agent, legacy=True)
-    return (None, validation) if validation else (doc, None)
+    if validation:
+        return None, validation
+    return ((doc, None) if include_elapsed or not usage_hold_elapsed(doc)
+            else (None, None))
 
 
 def status_usage_holds(lk):
     """Return normalized per-agent admission holds for status/top surfaces."""
     rows = {}
     for agent in active_agents(lk):
-        hold, error = agent_usage_hold(agent)
+        hold, error = agent_usage_hold(agent, include_elapsed=True)
         if error:
             rows[agent] = {
                 "state": "corrupt",
@@ -1635,12 +1649,15 @@ def status_usage_holds(lk):
         elif hold:
             binding = hold.get("binding_window")
             rows[agent] = {
-                "state": "active",
-                "cause": hold.get("reason", "usage_hold"),
+                "state": ("elapsed" if usage_hold_elapsed(hold) else "active"),
+                "cause": _usage_sanitize(
+                    hold.get("reason"), cap=80, fallback="usage_hold"),
                 "resets_at": hold.get("resets_at"),
-                "scope": (binding.get("kind", "")
-                          if isinstance(binding, dict) else ""),
-                "source": hold.get("source", ""),
+                "scope": _usage_sanitize(
+                    binding.get("kind", "") if isinstance(binding, dict) else "",
+                    cap=24, fallback=""),
+                "source": _usage_sanitize(
+                    hold.get("source"), cap=24, fallback=""),
             }
     return rows
 
@@ -10441,6 +10458,13 @@ def _print_status_block(lk, stale, last, session_info=None, for_agent="", brief=
     for agent, hold in status_usage_holds(lk).items():
         if hold["state"] == "corrupt":
             print(f"  usage hold {agent}: MALFORMED — lane fails closed")
+        elif hold["state"] == "elapsed":
+            print("  usage hold %s: ELAPSED — no longer gates admission%s" % (
+                agent,
+                (" (was %s until %s)" % (
+                    hold.get("cause") or "active",
+                    display_time(hold.get("resets_at"))))
+                if hold.get("resets_at") else ""))
         else:
             print("  usage hold %s: %s until %s%s" % (
                 agent,

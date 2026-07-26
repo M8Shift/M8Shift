@@ -378,6 +378,9 @@ APPROVAL_REQUIRED_NOTIFICATION = (
     "permission allowlist, verify one bounded turn, then restart the listener."
 )
 PROVIDER_RATE_LIMIT_MARGIN_S = 30
+# Provider terminal output is untrusted admission input. Eight days covers a
+# weekly reset plus clock/timezone skew without allowing an arbitrary hold.
+PROVIDER_RATE_LIMIT_MAX_HORIZON_S = 8 * 24 * 60 * 60
 LISTENER_TURN_PROMPT = (
     "Apply M8SHIFT.protocol.md: you are {agent}; take exactly one relay turn "
     "(claim, work, append) and then exit."
@@ -419,6 +422,14 @@ FLEET_VERIFY_TIMEOUT_MAX_S = 900
 
 def now():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+
+def _runtime_display_sanitize(value, *, cap=40, fallback="unknown"):
+    """Bound one untrusted advisory field before it reaches runtime stdout."""
+    if not isinstance(value, str):
+        return fallback
+    cleaned = re.sub(r"[^A-Za-z0-9 _.:%()/+-]", "", value).strip()
+    return cleaned[:cap] if cleaned else fallback
 
 
 def iso(t=None):
@@ -6640,6 +6651,11 @@ def runtime_summary(agent=""):
             if finding:
                 findings.append(finding)
         usage_hold, usage_hold_error = read_usage_hold(ag)
+        usage_hold_elapsed = (
+            isinstance(usage_hold, dict)
+            and parse_utc(usage_hold.get("resets_at", "")) is not None
+            and parse_utc(usage_hold.get("resets_at", "")) <= now()
+        )
         out[ag] = {
             "presence": pres,
             "presence_stale": isinstance(pres, dict) and not fresh_presence(pres, pres.get("stale_after_seconds", 300)),
@@ -6651,10 +6667,13 @@ def runtime_summary(agent=""):
                 "cause": "usage_hold_malformed",
                 "resets_at": None,
             } if usage_hold_error else {
-                "state": "active",
-                "cause": usage_hold.get("reason", "usage_hold"),
+                "state": "elapsed" if usage_hold_elapsed else "active",
+                "cause": _runtime_display_sanitize(
+                    usage_hold.get("reason"), cap=80, fallback="usage_hold"),
                 "resets_at": usage_hold.get("resets_at"),
-                "scope": (usage_hold.get("binding_window") or {}).get("kind", ""),
+                "scope": _runtime_display_sanitize(
+                    (usage_hold.get("binding_window") or {}).get("kind", ""),
+                    cap=24, fallback=""),
             } if usage_hold else None),
         }
     return out, findings
@@ -8551,8 +8570,12 @@ def validate_provider_rate_limit_terminal(terminal, provider):
     if not isinstance(terminal.get("timezone"), str) or not terminal["timezone"]:
         return None, "provider terminal timezone is missing"
     reset = parse_utc(terminal.get("resets_at", ""))
-    if reset is None or reset <= now():
+    observed = now()
+    if reset is None or reset <= observed:
         return None, "provider terminal reset is invalid or not in the future"
+    if reset > observed + dt.timedelta(
+            seconds=PROVIDER_RATE_LIMIT_MAX_HORIZON_S):
+        return None, "provider_rate_limited_reset_over_horizon"
     return {
         "kind": terminal["scope"],
         "resets_at": terminal["resets_at"],
@@ -8808,10 +8831,15 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 time.sleep(poll)
                 continue
             hold, hold_error = read_usage_hold(agent)
+            gate_hold = hold
             if (hold and not hold_error
                     and str(hold.get("reason", "")).startswith(
                         "provider_rate_limited:")):
                 reset = parse_utc(hold.get("resets_at", ""))
+                if reset is not None and now() >= reset:
+                    # The sidecar may remain visible as elapsed until cleanup,
+                    # but its provider-owned deadline can no longer gate work.
+                    gate_hold = None
                 if (reset is not None
                         and now() >= reset + dt.timedelta(
                             seconds=PROVIDER_RATE_LIMIT_MARGIN_S)):
@@ -8826,17 +8854,21 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                                 "clock_margin_seconds":
                                     PROVIDER_RATE_LIMIT_MARGIN_S,
                             })
-                        say(f"{agent}: provider usage hold cleared after reset "
-                            f"plus {PROVIDER_RATE_LIMIT_MARGIN_S}s clock margin; "
-                            "listener launch gate re-opened.")
+                        say(f"{agent}: elapsed provider usage hold sidecar cleared "
+                            f"after the {PROVIDER_RATE_LIMIT_MARGIN_S}s cleanup margin.")
                         hold = None
+                        gate_hold = None
+            elif hold and not hold_error:
+                reset = parse_utc(hold.get("resets_at", ""))
+                if reset is not None and now() >= reset:
+                    gate_hold = None
             usage_hold_state = ("corrupt" if hold_error else
-                                "active" if hold else "clear")
-            if hold or hold_error:
+                                "active" if gate_hold else "clear")
+            if gate_hold or hold_error:
                 if not usage_throttled:
                     detail = (f"malformed target hold ({hold_error})"
                               if hold_error else
-                              f"active target hold until {hold.get('resets_at', '-')}")
+                              f"active target hold until {gate_hold.get('resets_at', '-')}")
                     say(f"{agent}: usage throttle blocks listener launch: {detail}; "
                         "peer listeners remain unaffected.")
                 usage_throttled = True
@@ -8942,13 +8974,20 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     terminal, profile.get("provider", ""))
                 if terminal_error:
                     phase = "halted"
-                    reason = "provider_rate_limited_reset_unknown"
+                    reason = (
+                        terminal_error
+                        if terminal_error == "provider_rate_limited_reset_over_horizon"
+                        else "provider_rate_limited_reset_unknown")
                     say(f"{agent}: provider rate-limit evidence failed closed "
                         f"({terminal_error}); HALTED after one invocation.")
                     save()
                     notify_halt(
                         state, lk.get("holder", ""),
-                        "provider rate limit reset is unknown; operator action is required")
+                        ("provider rate limit reset exceeds the 8-day safety "
+                         "horizon; operator action is required"
+                         if reason == "provider_rate_limited_reset_over_horizon"
+                         else "provider rate limit reset is unknown; "
+                              "operator action is required"))
                     continue
                 _placed, hold_row, hold_error = post_usage_hold(
                     agent,
@@ -8973,8 +9012,9 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 save()
                 message = (
                     f"{agent}: provider rate limited ({terminal['scope']}); "
-                    f"usage hold active until {hold_row['resets_at']} plus "
-                    f"{PROVIDER_RATE_LIMIT_MARGIN_S}s clock margin; retries unchanged.")
+                    f"usage hold active until {hold_row['resets_at']}; sidecar "
+                    f"cleanup uses a {PROVIDER_RATE_LIMIT_MARGIN_S}s clock margin; "
+                    "retries unchanged.")
                 say(message)
                 emit_notification_nonfatal(
                     agent, "blocked", message,

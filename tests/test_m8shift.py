@@ -53,6 +53,33 @@ class TestPureFunctions(unittest.TestCase):
         spec.loader.exec_module(runtime)
         self.assertEqual(runtime.LISTENER_PHASES, cowork.LISTENER_PHASES)
 
+    def test_provider_rate_limit_reset_horizon_is_bounded(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_provider_horizon_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        observed = dt.datetime(2026, 7, 26, 12, 0, 0, tzinfo=dt.timezone.utc)
+        terminal = {
+            "provider": "openai-codex",
+            "scope": "weekly",
+            "resets_at": "2026-08-03T12:00:00Z",
+            "timezone": "UTC",
+            "evidence_id": "openai_codex_usage_limit_v1",
+            "returncode": 7,
+        }
+        with mock.patch.object(runtime, "now", return_value=observed):
+            binding, error = runtime.validate_provider_rate_limit_terminal(
+                terminal, "openai-codex")
+            self.assertIsNone(error)
+            self.assertEqual(binding["resets_at"], terminal["resets_at"])
+            terminal["resets_at"] = "2026-08-03T12:00:01Z"
+            binding, error = runtime.validate_provider_rate_limit_terminal(
+                terminal, "openai-codex")
+        self.assertIsNone(binding)
+        self.assertEqual(
+            error, "provider_rate_limited_reset_over_horizon")
+
     def test_usage_watch_incident_variants_detect_and_converge(self):
         """#214 fixtures 1-4 use only a mock clock and mock pid evidence."""
         path = os.path.join(REPO, "m8shift-runtime.py")
@@ -6145,8 +6172,12 @@ with open(%r, 'a', encoding='utf-8') as fh:
     def test_provider_rate_limit_places_scoped_hold_without_consuming_retries(self):
         self.awaiting_me()
         marker = os.path.join(self.d, "provider-launches.txt")
+        reset = (dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+                 + dt.timedelta(hours=6))
+        reset_text = reset.strftime("%Y-%m-%d %H:%M:%S+00:00")
+        reset_iso = reset.strftime("%Y-%m-%dT%H:%M:%SZ")
         message = ("You've hit your weekly usage limit. Try again at "
-                   "Dec 31, 2099, 2:44 PM Europe/Paris.")
+                   f"{reset_text}.")
         code = (
             "import sys\n"
             "with open(%r, 'a', encoding='utf-8') as fh: fh.write('launch\\n')\n"
@@ -6175,7 +6206,7 @@ with open(%r, 'a', encoding='utf-8') as fh:
             hold = json.load(fh)
         self.assertEqual(hold["agent"], "claude")
         self.assertEqual(hold["binding_window"]["kind"], "weekly")
-        self.assertEqual(hold["resets_at"], "2099-12-31T13:44:00Z")
+        self.assertEqual(hold["resets_at"], reset_iso)
         self.assertIn("clock margin", result.stdout)
         core_status = self.cw("status", "--json")
         self.assertEqual(core_status.returncode, 0, core_status.stderr)
@@ -6188,7 +6219,7 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertEqual(
             json.loads(runtime_status.stdout)["runtime"]["claude"]
             ["usage_hold"]["resets_at"],
-            "2099-12-31T13:44:00Z")
+            reset_iso)
         import importlib.util
         top_path = os.path.join(REPO, "m8shift-top.py")
         spec = importlib.util.spec_from_file_location("m8shift_top_258", top_path)
@@ -6224,6 +6255,35 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertEqual(state["phase"], "halted")
         self.assertEqual(state["last_classification"],
                          "provider_rate_limited_reset_unknown")
+        self.assertEqual(state["consecutive_failures"], 0)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(len(fh.readlines()), 1)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "usage-holds", "claude.json")))
+
+    def test_provider_rate_limit_over_horizon_halts_with_named_cause(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-launches.txt")
+        code = (
+            "import sys\n"
+            "with open(%r, 'a', encoding='utf-8') as fh: fh.write('launch\\n')\n"
+            "print(\"You've hit your weekly usage limit. Try again at "
+            "Dec 31, 2099, 2:44 PM Europe/Paris.\", file=sys.stderr)\n"
+            "sys.exit(7)\n"
+        ) % marker
+        profile = self.profile_path(
+            argv=[sys.executable, "-c", code], cwd=self.d,
+            env_allowlist=[], provider="openai-codex")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "2",
+            "--poll-interval", "0.01", "--max-retries", "3",
+            "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "halted")
+        self.assertEqual(
+            state["reason"], "provider_rate_limited_reset_over_horizon")
         self.assertEqual(state["consecutive_failures"], 0)
         with open(marker, encoding="utf-8") as fh:
             self.assertEqual(len(fh.readlines()), 1)
@@ -13962,6 +14022,53 @@ class TestRFC040UsagePRB(CLIBase):
         self.assertIn("fails closed", claude.stderr)
         codex = self.cw("claim", "codex")
         self.assertEqual(codex.returncode, 0, codex.stdout + codex.stderr)
+
+    def test_elapsed_hold_is_inert_and_status_fields_are_sanitized(self):
+        self.place_hold_via_guard(self.iso_in(3600))
+        path = self.hold_path()
+        with open(path, encoding="utf-8") as fh:
+            hold = json.load(fh)
+        elapsed = self.iso_in(-60)
+        hold["resets_at"] = elapsed
+        hold["binding_window"]["resets_at"] = elapsed
+        hold["reason"] = "provider\nFORGED\x1b[31m" + ("x" * 200)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(hold, fh)
+
+        core_status = self.cw("status", "--json")
+        self.assertEqual(
+            core_status.returncode, 0, core_status.stdout + core_status.stderr)
+        snapshot = json.loads(core_status.stdout)
+        row = snapshot["usage_holds"]["claude"]
+        self.assertEqual(row["state"], "elapsed")
+        self.assertLessEqual(len(row["cause"]), 80)
+        self.assertNotRegex(row["cause"], r"[\r\n\x1b]")
+
+        text_status = self.cw("status")
+        self.assertEqual(
+            text_status.returncode, 0, text_status.stdout + text_status.stderr)
+        self.assertIn("ELAPSED", text_status.stdout)
+        self.assertNotIn("\nFORGED", text_status.stdout)
+
+        runtime_status = self.rt("status-runtime", "claude", "--json")
+        self.assertEqual(
+            runtime_status.returncode, 0,
+            runtime_status.stdout + runtime_status.stderr)
+        runtime_row = json.loads(
+            runtime_status.stdout)["runtime"]["claude"]["usage_hold"]
+        self.assertEqual(runtime_row["state"], "elapsed")
+        self.assertLessEqual(len(runtime_row["cause"]), 80)
+        self.assertNotRegex(runtime_row["cause"], r"[\r\n\x1b]")
+
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_top_elapsed_hold_test", os.path.join(REPO, "m8shift-top.py"))
+        top = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(top)
+        self.assertEqual(
+            top._usage_hold_display(snapshot), "USAGE HOLD claude ELAPSED")
+
+        claim = self.cw("claim", "claude")
+        self.assertEqual(claim.returncode, 0, claim.stdout + claim.stderr)
 
     @unittest.skipIf(not hasattr(os, "symlink"), "symlink support required")
     def test_symlinked_target_hold_fails_closed_without_external_write(self):

@@ -321,6 +321,8 @@ def _usage_hold_display(snapshot, utc=False):
             continue
         if row.get("state") == "corrupt":
             return "USAGE HOLD %s MALFORMED" % clean(agent, 18)
+        if row.get("state") == "elapsed":
+            return "USAGE HOLD %s ELAPSED" % clean(agent, 18)
         if row.get("state") != "active":
             continue
         reset = _display_time(
