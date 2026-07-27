@@ -10479,6 +10479,9 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
 
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        # Same reason as _fake_uname_and_cargo_env: the OS python3 on this PATH
+        # may predate the supported floor, and this case is about RTK opt-in.
+        env["PYTHON"] = sys.executable
         result = subprocess.run(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
@@ -10501,6 +10504,11 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         os.chmod(cargo, 0o755)
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        # The restricted PATH exposes the OS python3, which may predate the
+        # supported floor (macOS ships 3.9). These cases exercise the RTK
+        # fallback, not interpreter discovery, so pin the running interpreter —
+        # the sibling restricted-PATH test does the same.
+        env["PYTHON"] = sys.executable
         return env
 
     def test_rtk_cargo_fallback_requires_explicit_flag(self):
@@ -10857,8 +10865,11 @@ class TestInstallerPs1Parity(unittest.TestCase):
         # the sh side's telemetry-disable counterpart still exists (parity anchor)
         self.assertIn("rtk_disable_telemetry", self.sh)
 
-    def test_ps1_python_floor_is_3_8(self):
-        self.assertIn("sys.version_info >= (3, 8)", self.ps1)
+    def test_ps1_python_floor_matches_the_supported_floor(self):
+        # Parity pin: install.ps1, install.sh and the doctor floor must state the
+        # same minimum, so a floor move cannot land in one installer only.
+        self.assertIn("sys.version_info >= (3, 12)", self.ps1)
+        self.assertIn("Python 3.12+ is required", self.ps1)
 
     def test_ps1_sha256_pin_accepts_core_component_files(self):
         for name in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
