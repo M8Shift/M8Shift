@@ -10865,11 +10865,30 @@ class TestInstallerPs1Parity(unittest.TestCase):
         # the sh side's telemetry-disable counterpart still exists (parity anchor)
         self.assertIn("rtk_disable_telemetry", self.sh)
 
-    def test_ps1_python_floor_matches_the_supported_floor(self):
-        # Parity pin: install.ps1, install.sh and the doctor floor must state the
-        # same minimum, so a floor move cannot land in one installer only.
-        self.assertIn("sys.version_info >= (3, 12)", self.ps1)
-        self.assertIn("Python 3.12+ is required", self.ps1)
+    def test_python_floor_is_identical_across_every_enforcement_surface(self):
+        """The floor is ENFORCED in three places — the doctor report in m8shift.py
+        and the version checks in both installers. A floor move that lands in one
+        of them and not the others is exactly the failure this test exists to
+        catch: raising 3.8 -> 3.12 initially missed both installers, because the
+        inventory grep excluded shell scripts.
+
+        The minimum is derived from m8shift.py rather than hard-coded here, so the
+        next move needs one edit and any surface left behind fails."""
+        with open(os.path.join(REPO, "m8shift.py"), encoding="utf-8") as fh:
+            core = fh.read()
+        m = re.search(r'"floor": "(\d+)\.(\d+)"', core)
+        self.assertIsNotNone(m, "doctor floor not found in m8shift.py")
+        major, minor = int(m.group(1)), int(m.group(2))
+        comparison = "sys.version_info >= (%d, %d)" % (major, minor)
+        label = "Python %d.%d+" % (major, minor)
+
+        self.assertIn(comparison, core,
+                      "m8shift.py reports a floor it does not enforce")
+        for name, text in (("install.sh", self.sh), ("install.ps1", self.ps1)):
+            self.assertIn(comparison, text,
+                          "%s does not enforce the %s floor" % (name, label))
+            self.assertIn(label, text,
+                          "%s does not announce the %s floor" % (name, label))
 
     def test_ps1_sha256_pin_accepts_core_component_files(self):
         for name in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",
