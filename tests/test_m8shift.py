@@ -10479,6 +10479,9 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
 
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        # Same reason as _fake_uname_and_cargo_env: the OS python3 on this PATH
+        # may predate the supported floor, and this case is about RTK opt-in.
+        env["PYTHON"] = sys.executable
         result = subprocess.run(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
@@ -10501,6 +10504,11 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         os.chmod(cargo, 0o755)
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + os.pathsep.join(p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
+        # The restricted PATH exposes the OS python3, which may predate the
+        # supported floor (macOS ships 3.9). These cases exercise the RTK
+        # fallback, not interpreter discovery, so pin the running interpreter —
+        # the sibling restricted-PATH test does the same.
+        env["PYTHON"] = sys.executable
         return env
 
     def test_rtk_cargo_fallback_requires_explicit_flag(self):
@@ -10574,7 +10582,7 @@ TestInstallerUpgradeDelegate = _InstallerUpgradeDelegateTests
 # ───────────────────────── multi-OS core install (#24) ──────────────────────
 
 class TestInstallerMultiOSCore(unittest.TestCase):
-    """#24: the CORE install path needs only Python 3.8+, one downloader (Python
+    """#24: the CORE install path needs only Python 3.12+, one downloader (Python
     urllib is the floor), write permission in the target dir, and SHA-256 support
     (Python hashlib is the floor). Optional helpers (git, rtk, cargo, headroom)
     are detected up front, reported with a clear capability line, and NEVER fail
@@ -10857,8 +10865,30 @@ class TestInstallerPs1Parity(unittest.TestCase):
         # the sh side's telemetry-disable counterpart still exists (parity anchor)
         self.assertIn("rtk_disable_telemetry", self.sh)
 
-    def test_ps1_python_floor_is_3_8(self):
-        self.assertIn("sys.version_info >= (3, 8)", self.ps1)
+    def test_python_floor_is_identical_across_every_enforcement_surface(self):
+        """The floor is ENFORCED in three places — the doctor report in m8shift.py
+        and the version checks in both installers. A floor move that lands in one
+        of them and not the others is exactly the failure this test exists to
+        catch: raising 3.8 -> 3.12 initially missed both installers, because the
+        inventory grep excluded shell scripts.
+
+        The minimum is derived from m8shift.py rather than hard-coded here, so the
+        next move needs one edit and any surface left behind fails."""
+        with open(os.path.join(REPO, "m8shift.py"), encoding="utf-8") as fh:
+            core = fh.read()
+        m = re.search(r'"floor": "(\d+)\.(\d+)"', core)
+        self.assertIsNotNone(m, "doctor floor not found in m8shift.py")
+        major, minor = int(m.group(1)), int(m.group(2))
+        comparison = "sys.version_info >= (%d, %d)" % (major, minor)
+        label = "Python %d.%d+" % (major, minor)
+
+        self.assertIn(comparison, core,
+                      "m8shift.py reports a floor it does not enforce")
+        for name, text in (("install.sh", self.sh), ("install.ps1", self.ps1)):
+            self.assertIn(comparison, text,
+                          "%s does not enforce the %s floor" % (name, label))
+            self.assertIn(label, text,
+                          "%s does not announce the %s floor" % (name, label))
 
     def test_ps1_sha256_pin_accepts_core_component_files(self):
         for name in ("m8shift.py", "m8shift-worktree.py", "m8shift-runtime.py",

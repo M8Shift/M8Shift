@@ -5,7 +5,7 @@ for normal use — clone, copy `m8shift.py` into a repo, run it. Keep it that wa
 
 ## Ground rules
 
-- **Stdlib only.** No third-party dependencies, ever. The tool must run on a bare Python 3.8+.
+- **Stdlib only.** No third-party dependencies, ever. The tool must run on a bare Python 3.12+.
 - **One file.** `m8shift.py` stays self-contained and runnable as-is.
 - **English is the source of truth.** The committed `m8shift.py` is **English-only**: it is the
   canonical source for every message key and every template. Other languages live as *packs*

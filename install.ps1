@@ -8,7 +8,7 @@
 #
 # This script installs M8Shift into the current project directory by downloading the
 # standalone CLI files, verifying them against checksums.sha256 by default, then
-# running `m8shift.py init`. Core install requires only Python 3.8+, Invoke-WebRequest,
+# running `m8shift.py init`. Core install requires only Python 3.12+, Invoke-WebRequest,
 # write permission in the target directory, and Get-FileHash (SHA-256). It does not
 # modify PATH, does not create a daemon, and needs no package manager. It is kept in
 # lockstep with install.sh for the core components (m8shift.py, worktree, runtime,
@@ -109,7 +109,7 @@ function Show-Prerequisites {
     @"
 
 Prerequisites:
-  core install: Python 3.8+ (stdlib only; python.org, winget install Python.Python.3.12,
+  core install: Python 3.12+ (stdlib only; python.org, winget install Python.Python.3.12,
     or the Microsoft Store), write permission in the target directory,
     Invoke-WebRequest for downloads, and Get-FileHash for the default SHA-256
     verification (both ship with Windows PowerShell 5.1+ and PowerShell 7+).
@@ -272,12 +272,12 @@ function Resolve-Python {
             continue
         }
         $prefix = @($candidate.Prefix)
-        & $candidate.Exe @prefix -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)" *> $null
+        & $candidate.Exe @prefix -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)" *> $null
         if ($LASTEXITCODE -eq 0) {
             return $candidate
         }
     }
-    Fail "Python 3.8+ is required (install from python.org or winget install Python.Python.3.12)"
+    Fail "Python 3.12+ is required (install from python.org or winget install Python.Python.3.12)"
 }
 
 function Invoke-Python([hashtable]$Python, [string[]]$Arguments, [string]$WorkingDirectory) {

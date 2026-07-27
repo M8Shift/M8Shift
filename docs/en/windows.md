@@ -1,12 +1,12 @@
 # How-to — Run M8Shift on Windows
 
-M8Shift is **pure Python 3.8+ standard library** — there is **nothing to `pip
+M8Shift is **pure Python 3.12+ standard library** — there is **nothing to `pip
 install`**. It runs on Windows three ways: WSL (closest to Linux/macOS), Git Bash, or
 native PowerShell/cmd.
 
 ## Prerequisites
 
-- **Python 3.8+** — install from [python.org](https://www.python.org/downloads/)
+- **Python 3.12+** — install from [python.org](https://www.python.org/downloads/)
   (tick *"Add python.exe to PATH"*), or `winget install Python.Python.3.12`, or the
   Microsoft Store. Verify: `python --version` (or `py --version`).
 - **No Python package dependencies** — M8Shift itself is stdlib-only.

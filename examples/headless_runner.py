@@ -61,13 +61,7 @@ import threading
 import time
 import uuid
 
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:  # pragma: no cover - Python 3.8 keeps classification fail-closed
-    try:
-        from backports.zoneinfo import ZoneInfo
-    except ImportError:
-        ZoneInfo = None
+from zoneinfo import ZoneInfo  # stdlib since 3.9; the floor is 3.12
 
 
 class HelpfulArgumentParser(argparse.ArgumentParser):
@@ -284,8 +278,6 @@ def _provider_reset_datetime(raw):
     if zone_match:
         zone_name = zone_match.group(1)
         value = value[:zone_match.start()].rstrip()
-        if ZoneInfo is None:
-            return None, ""
         try:
             zone = ZoneInfo(zone_name)
         except (KeyError, ValueError):

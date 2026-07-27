@@ -74,7 +74,7 @@ the human maintainer remains the arbiter. See [philosophy.md](philosophy.md).
 ### 1.4 Constraints
 
 - **A single state file**, readable by eye and by `grep`, versionable in clear text.
-- **Zero dependencies**: Python 3.8+ stdlib only; no installation.
+- **Zero dependencies**: Python 3.12+ stdlib only; no installation.
 - **Portable**: any project, any FS, paths with spaces/accents.
 - **N agents, one core writer** by design (`init --agents a,b,c…`); true parallel
   authoring is opt-in through isolated worktrees, not through the core relay.
@@ -491,7 +491,7 @@ remains a passive single-file relay. The implementation contract is tracked in
 
 | Item | Choice |
 |------|--------|
-| Language | Python **3.8+** |
+| Language | Python **3.12+** |
 | Dependencies | **No Python dependencies** (stdlib: `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`); Git optional, to preserve a case rename in the index |
 | Distribution | **a single file** `m8shift.py` (embedded templates) |
 | Tests | stdlib `unittest` — `tests/test_m8shift.py`, `tests/test_worktree.py` |
