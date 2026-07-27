@@ -10,7 +10,7 @@ _Different agents. Different roles. One coordinated workflow._
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#tests)
-[![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#install)
+[![python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](#install)
 [![single file](https://img.shields.io/badge/single%20file-m8shift.py-orange.svg)](m8shift.py)
 [![no API key](https://img.shields.io/badge/API%20key-not%20required-success.svg)](#runs-anywhere--no-api-key)
 [![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](docs/en/specification.md#11-developing-m8shift-with-m8shift-dogfooding)
@@ -84,7 +84,7 @@ Native Windows PowerShell:
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex
 ```
 
-Core prerequisites (both installers): **Python 3.8+** (stdlib only), write
+Core prerequisites (both installers): **Python 3.12+** (stdlib only), write
 permission in the target directory, one downloader (`curl`, `wget`, or Python
 `urllib` for `install.sh`; `Invoke-WebRequest` for `install.ps1`), and SHA-256
 support for the default verification (`sha256sum`, `shasum`, or Python `hashlib`;
@@ -100,7 +100,7 @@ the only path).
 These installers download `m8shift.py` plus `m8shift-worktree.py`,
 `m8shift-runtime.py`, and `m8shift-context.py` into the current directory, verify
 the files against `checksums.sha256`, then run `m8shift.py init --agents
-claude,codex` through the detected Python 3.8+ interpreter. Both print the
+claude,codex` through the detected Python 3.12+ interpreter. Both print the
 prerequisites plus one capability line per optional helper (`available` /
 `unavailable` / `skipped` / `installed`) before any helper setup; an absent or
 unsupported helper degrades with a clear message and never blocks the core
@@ -135,7 +135,7 @@ python3 m8shift-aliases.py --write --shell git-bash
 ```
 
 Use `--rc PATH` for a nonstandard startup file. This helper needs only the same
-Python 3.8+ prerequisite as M8Shift; it changes no PATH setting and installs no
+Python 3.12+ prerequisite as M8Shift; it changes no PATH setting and installs no
 package. Restart the shell or `source` the rc path printed after a write.
 
 For a pinned release, fetch the installer from the tag and use the same ref for the

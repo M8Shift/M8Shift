@@ -6576,8 +6576,8 @@ def _install_report():
                      else "absent"),
     }
     return {
-        "python": {"version": "%d.%d.%d" % sys.version_info[:3], "floor": "3.8",
-                   "ok": sys.version_info >= (3, 8)},
+        "python": {"version": "%d.%d.%d" % sys.version_info[:3], "floor": "3.12",
+                   "ok": sys.version_info >= (3, 12)},
         "core": {"script": "m8shift.py", "present": core_present,
                  "version": (_parse_script_version(core_path) if core_present else None),
                  "engine_version": VERSION},
@@ -6600,8 +6600,8 @@ def _install_doctor_findings(report):
     if not report["python"]["ok"]:
         out.append(doctor_finding(
             "install.python_floor", "warning",
-            "Python %s is below the supported floor 3.8." % report["python"]["version"],
-            "", "install Python 3.8+ and run m8shift.py through that interpreter"))
+            "Python %s is below the supported floor 3.12." % report["python"]["version"],
+            "", "install Python 3.12+ and run m8shift.py through that interpreter"))
     if not report["core"]["present"]:
         out.append(doctor_finding(
             "install.core_missing", "warning",

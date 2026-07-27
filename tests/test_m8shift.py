@@ -10574,7 +10574,7 @@ TestInstallerUpgradeDelegate = _InstallerUpgradeDelegateTests
 # ───────────────────────── multi-OS core install (#24) ──────────────────────
 
 class TestInstallerMultiOSCore(unittest.TestCase):
-    """#24: the CORE install path needs only Python 3.8+, one downloader (Python
+    """#24: the CORE install path needs only Python 3.12+, one downloader (Python
     urllib is the floor), write permission in the target dir, and SHA-256 support
     (Python hashlib is the floor). Optional helpers (git, rtk, cargo, headroom)
     are detected up front, reported with a clear capability line, and NEVER fail

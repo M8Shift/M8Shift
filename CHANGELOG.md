@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **BREAKING — the supported Python floor moves from 3.8 to 3.12 (#252).**
+  `GHSA-6w46-j5rx-g56g` / CVE-2025-71176 (CWE-379, predictable `/tmp/pytest-of-{user}`
+  paths) affects every pytest below 9.0.3 and **has no 8.x backport**, while pytest 9
+  requires Python 3.10+. Remediation and the old floor were therefore mutually
+  exclusive; the floor moved rather than the vulnerability being carried
+  indefinitely. The CI matrix is now `["3.12", "3.13"]`, the runner is pinned to
+  `pytest==9.1.1` with `pygments==2.20.0` added to the hash-pinned closure, and
+  both matrix legs still run the *same* pytest — no environment marker selects a
+  version. Two consequences worth noting: at floor 3.12 the
+  `python_version < "3.11"` conditionals are dead, so `exceptiongroup` and `tomli`
+  were **removed** from the requirements rather than left as decoration; and the
+  `backports.zoneinfo` fallback in the headless runner — a non-stdlib import that
+  existed only for 3.8, contrary to the stdlib-only charter — is gone along with
+  the `if ZoneInfo is None` branch it fed, which is now provably unreachable.
+  Both installers enforce the new floor (`install.sh`, `install.ps1`), and
+  `doctor` reports it. Dated records — RFCs, past release notes, the Stage-2
+  rationale — deliberately keep their 3.8 statements: they were true when written.
+
 - **Scoped provider rate-limit holds (#258).** The headless runner now
   corroborates a provider-owned final usage-limit line with a non-zero exit and
   no relay progress, normalizes only provider/scope/reset/timezone/evidence

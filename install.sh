@@ -11,7 +11,7 @@
 #
 # This script installs M8Shift into the current project directory by downloading the
 # standalone CLI files, then runs `m8shift.py init`. Core install requires only
-# Python 3.8+, one downloader (curl/wget/Python urllib), write permission in the
+# Python 3.12+, one downloader (curl/wget/Python urllib), write permission in the
 # target directory, and SHA-256 support. It does not use sudo, does not modify PATH,
 # does not create a daemon, and needs no package manager. Optional helpers (git for
 # worktree features, RTK, Headroom) are advisory: absent or unsupported ones degrade
@@ -296,7 +296,7 @@ rtk_host_asset() {
 print_prerequisites() {
   cat <<EOF
 Prerequisites:
-  core install: Python 3.8+ (stdlib only), write permission in the target directory,
+  core install: Python 3.12+ (stdlib only), write permission in the target directory,
     one downloader (curl, wget, or Python urllib), and SHA-256 support (sha256sum,
     shasum, or Python hashlib) for the default verification.
   shell: bash — macOS standard Terminal, Linux, WSL, or Git Bash on Windows; native
@@ -504,16 +504,16 @@ PYTHON_STATUS=""
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   PYTHON_OK=0
   PYTHON_STATUS="MISSING (required)"
-elif ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+elif ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
   PYTHON_OK=0
-  PYTHON_STATUS="TOO OLD — 3.8+ required (reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))"
+  PYTHON_STATUS="TOO OLD — 3.12+ required (reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))"
 else
   PYTHON_STATUS="ok ($("$PYTHON_BIN" --version 2>&1 || printf unknown))"
 fi
 if [ "$DRY_RUN" -ne 1 ] && [ "$PYTHON_OK" -ne 1 ]; then
   case "$PYTHON_STATUS" in
     MISSING*) die "$PYTHON_BIN is required" ;;
-    *) die "Python 3.8+ is required ($PYTHON_BIN reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))" ;;
+    *) die "Python 3.12+ is required ($PYTHON_BIN reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))" ;;
   esac
 fi
 validate_ref

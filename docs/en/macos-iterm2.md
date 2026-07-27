@@ -13,7 +13,7 @@ shortcuts, or other iTerm2 profile settings.
 - macOS with [iTerm2](https://iterm2.com/) installed;
 - an M8Shift checkout that contains `m8shift-top.py` and has already been
   initialized;
-- Python 3.8 or newer.
+- Python 3.12 or newer.
 
 ## Import and select the colour preset
 
