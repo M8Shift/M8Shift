@@ -47,9 +47,28 @@ it is applied to ledger evidence and skipped on rendered values.
 
 ## 2. The rule
 
-> A value carrying a validity deadline MUST be evaluated against `now()` at the
-> point of use, and no surface may render it without an explicit freshness
-> state.
+> Once its validity deadline has passed, a value MUST NOT influence a live
+> decision, and MUST NOT be described as current. If it is still rendered — for
+> audit, for diagnosis, for history — its expired state MUST be colocated with
+> it.
+
+An earlier wording of this rule said "MUST be evaluated against `now()` at the
+point of use, and no surface may render it without an explicit freshness state".
+Adversarial review broke it with two counterexamples that satisfy the letter and
+reproduce the harm:
+
+1. A gate compares the deadline with `now()`, **ignores the result**, denies
+   admission on the stale value, and renders `freshness: stale`. It has
+   evaluated the deadline and emitted an explicit state — and still reproduces
+   the defect this RFC exists to stop.
+2. A producer **persists** `freshness: fresh` at capture time. Hours later a
+   consumer dutifully obeys §2.1 and displays the owner's classification without
+   re-deriving it. The classification has aged into a lie.
+
+The wording above closes both, because it constrains the *effect* (influence on
+a decision, description as current) rather than the *ritual* (having called a
+comparison). Keep the operational implication in view: evaluate the deadline
+where the value is used, not where it was produced.
 
 "Validity deadline" means any field that answers *until when is this true*:
 `expires`, `resets_at`, `captured_at` paired with a staleness bound, a lease
@@ -57,13 +76,17 @@ TTL, a heartbeat cadence, a pid whose liveness is the deadline.
 
 ### 2.1 Corollary — single owner of freshness
 
-When a component publishes a classification (`fresh`, `stale`, `unknown`,
-`elapsed`, `absent`), consumers **display that classification**. They do not
-re-derive one from the underlying fields.
+There MUST be one freshness evaluator, and consumers MUST NOT re-derive their
+own from the underlying fields. The divergence in #271 exists because two
+components read the same record and answered differently; one of them has to be
+the owner.
 
-Why: the divergence in #271 exists because two components read the same record
-and answered differently. One of them has to be the owner. The owner is the
-component that produces the record.
+**But a classification MUST NOT be serialized as a timeless fact.** A stored
+`freshness: fresh` is a statement about the moment of capture, and it decays.
+What a producer may persist is the *boundary* — `evaluated_at`, `fresh_until`,
+`resets_at` — which the consumer rechecks at the point of use. Owning the rule
+is not the same as owning a verdict with no expiry of its own; without this
+sentence, §2.1 contradicts §2.
 
 ### 2.2 Corollary — a cache of a remote authority is not the remote
 
@@ -106,28 +129,45 @@ A rule with no detector is re-broken at the next commit, and an audit claim with
 no method cannot be contested. This RFC therefore ships a behavioural contract
 test rather than a lint:
 
-`test_freshness_contract_every_surface_marks_elapsed_values` builds one fixture
-in which **every** deadline is already in the past — a usage snapshot far beyond
-its staleness bound, a usage hold whose reset has elapsed, a lock whose lease has
-expired while the state still reads `WORKING_*` — and feeds it to every status
-surface at once.
+`test_freshness_contract_on_four_enumerated_projections` builds one fixture in
+which **every** deadline is already in the past — a usage snapshot far beyond its
+staleness bound, a usage hold whose reset has elapsed, a lock whose lease has
+expired while the state still reads `WORKING_*` — and feeds it to four named
+projections: the status-JSON usage freshness, the status-JSON hold state, the
+human status line, and the TIME accounting total.
+
+Four, not "every": the list is hand-written and the test **discovers nothing**.
+A new renderer, gate, companion lane or derived aggregate passes without ever
+appearing here. The earlier name said "every surface" and was wrong.
 
 A lint over source would be weaker: the rule is about behaviour at the point of
 use, and the same field is legitimately rendered raw in one context (an audit
 record) and forbidden in another (a live dashboard). Only the rendered output
 can tell them apart.
 
-### 4.1 The ratchet
+### 4.1 The known-failure list — and exactly what it does not guarantee
 
-Surfaces that still violate the rule are listed in a `KNOWN_VIOLATIONS` table
-inside the test, each entry naming its open ticket. For those, the test asserts
-the violation **still holds**; for every other surface it asserts compliance.
+Projections that still fail are listed in a `KNOWN_FAILURES` table inside the
+test, each entry naming its open ticket. For those, the test asserts the failure
+**still holds**; for the others it asserts compliance.
 
-The consequence is deliberate: fixing a violation makes the test fail until its
-entry is removed from the table, so the table can only shrink, and an unfinished
-fix cannot look green. A newly introduced violation on a surface that is not in
-the table fails immediately — which is the seventh occurrence, caught before it
-exists.
+**What this guarantees:** fixing a listed projection makes the test fail until
+its entry is removed, so an unfinished fix cannot look green, and a fix cannot
+land silently without updating the record.
+
+**What it does NOT guarantee, and an earlier draft of this RFC wrongly claimed
+it did:** nothing prevents the table from *growing*. A contributor who
+introduces a failure on a covered projection can turn the suite green by adding
+one line here. Membership merely reverses the expected boolean; the ticket value
+is not validated, and the set is not compared against the base branch. Calling
+it a ratchet was false — adversarial review established this before merge, and
+the name was changed to match the mechanism rather than the intention.
+
+Real monotonicity needs a gate the contributor **cannot edit in the same change**
+that adds the exemption: a default-branch CI check comparing the set with the
+merge base and rejecting additions while allowing removals. A self-check living
+in the same file does not establish it. Tracked separately; until it exists,
+this is an expected-failure list with useful assertions, and nothing more.
 
 ### 4.2 What the instrument does not cover
 
@@ -148,13 +188,22 @@ Each of these is a gap in the *instrument*, not an exception to the rule.
 
 ## 5. Acceptance
 
-1. Every surface listed in the contract test either complies or appears in
-   `KNOWN_VIOLATIONS` with a ticket reference. No third category.
-2. `KNOWN_VIOLATIONS` is empty once #270, #271 and #262 are closed. That is the
-   completion criterion for this RFC, and it is machine-checked rather than
-   asserted in prose.
-3. New surfaces that render a deadline-bearing value add themselves to the
-   contract test in the same change that introduces them.
+1. Each of the **four enumerated projections** either complies or appears in
+   `KNOWN_FAILURES` with a ticket reference. No third category. The four are the
+   status-JSON usage freshness, the status-JSON hold state, the human status
+   line, and the TIME accounting total — enumerated because the test discovers
+   nothing beyond them.
+2. `KNOWN_FAILURES` is empty once **#270 and #271** close. Those two are the
+   machine-checked part, and only those two: **#262 is deliberately excluded**,
+   because the detector does not reach the publication gate (§4.2). An earlier
+   draft claimed the table also emptied when #262 closed, which would have let
+   this criterion report completion while #262 stayed open.
+3. New surfaces that render a deadline-bearing value should add themselves to
+   the test in the same change. This is a **contribution rule, not a
+   machine-checked contract** — nothing detects a surface that omits itself.
+   Making it a contract requires deadline-bearing surfaces to register through
+   one enumerable production abstraction the test can iterate; separate work,
+   not done here.
 
 ## 6. Open questions
 

@@ -3684,22 +3684,26 @@ class TestExpiredLeaseAndStaleUsageAreNotCurrent(CLIBase):
 
 class TestFreshnessContract(CLIBase):
     """RFC 078 — a value whose deadline has passed must not be rendered as
-    current by any of the four projections enumerated below.
+    current, on the four projections enumerated below.
 
-    KNOWN_FAILURES is an expected-failure list, NOT a ratchet.  Each entry
-    asserts that the named projection STILL fails, so a fix cannot land without
-    emptying its entry.  What it does NOT prevent is the table GROWING: nothing
-    compares it against the merge base, and the ticket strings are never
-    validated.  Adversarial review established this before merge and the name
-    was changed to match the mechanism rather than the intention.
+    KNOWN_FAILURES is an EXPECTED-FAILURE LIST, not a ratchet.  What it does
+    guarantee: an entry asserts the named projection STILL fails, so fixing it
+    makes this test fail until the entry is removed, and an unfinished fix
+    cannot look green.  What it does NOT guarantee, stated plainly because the
+    name used to imply otherwise: nothing prevents a contributor from adding a
+    key here to turn a new failure green.  Membership merely reverses the
+    expected boolean; the ticket value is not validated and the set is not
+    compared against the base branch.  Enforcing no-growth needs a gate the
+    contributor cannot edit in the same change — tracked separately.
 
-    The four are hand-written and this test DISCOVERS NOTHING — a new renderer,
-    gate or derived aggregate passes without ever appearing here.
+    Coverage is a hand-written closed list.  A new renderer, gate, companion
+    lane or derived aggregate is NOT discovered by this test and passes without
+    appearing here.
     """
 
     KNOWN_FAILURES = {
-        # surface -> forge issue that must close before the entry is removed.
-        # Empty since #270 and #271 landed: every enumerated projection complies.
+        # projection -> forge issue that must close before the entry is removed.
+        # Empty since #270 and #271 landed in 825222e: all four comply.
     }
 
     PAST = "2019-01-01T00:00:00Z"
@@ -3776,7 +3780,7 @@ class TestFreshnessContract(CLIBase):
             self.assertFalse(
                 compliant,
                 "%s is listed in KNOWN_FAILURES (%s) but now COMPLIES. "
-                "Remove the entry from the table. "
+                "Remove its entry: a fixed projection must not stay listed. "
                 "Observed: %s" % (surface, self.KNOWN_FAILURES[surface], detail))
         else:
             self.assertTrue(
