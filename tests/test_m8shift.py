@@ -3551,6 +3551,95 @@ class TestInjector(unittest.TestCase):
 
 # ───────────── §5: advisory turn fields (passthrough) ───────────────────────
 
+
+class TestExpiredLeaseAndStaleUsageAreNotCurrent(CLIBase):
+    """#270 / #271 — the two defects RFC 078 was written from, pinned as
+    regressions on the surfaces that produced them."""
+
+    def _backdate(self, hours_started, hours_since, hours_expires):
+        """A WORKING window opened `hours_since` ago whose lease died
+        `hours_expires` ago, with the ledger kept consistent with the LOCK (an
+        inconsistent one is correctly classified unclassified and proves nothing)."""
+        now_ = dt.datetime.now(dt.timezone.utc)
+        stamp = lambda h: (now_ - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        started, since, expires = stamp(hours_started), stamp(hours_since), stamp(hours_expires)
+        path = os.path.join(self.d, "M8SHIFT.md")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        text = re.sub(r"started:\s*.*", "started:  " + started, text, count=1)
+        text = re.sub(r"since:\s*.*", "since:    " + since, text, count=1)
+        text = re.sub(r"expires:\s*.*", "expires:  " + expires, text, count=1)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        ledger = os.path.join(self.d, "M8SHIFT.sessions.jsonl")
+        with open(ledger, encoding="utf-8") as fh:
+            rows = [ln for ln in fh.read().splitlines() if ln.strip()]
+        for index, row in enumerate(rows):
+            event = json.loads(row)
+            event["at"] = since if index == len(rows) - 1 else started
+            rows[index] = json.dumps(event)
+        with open(ledger, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(rows) + "\n")
+
+    def test_work_stops_accruing_when_the_lease_dies(self):
+        # #270: a two-hour WORKING window whose lease died after one hour billed
+        # the full two — 15h of a sleeping machine was measured this way once.
+        # An interactive holder cannot record a PROTECTIVE beat (the verb accepts
+        # only managed producers), so the horizon here is the lease itself.
+        self.init()
+        self.cw("claim", "claude")
+        self._backdate(3, 2, 1)
+        payload = json.loads(self.cw("time", "--json").stdout)
+        effective = payload["effective_work_seconds"]
+        self.assertLessEqual(effective, 3600 + 120,
+                             "work accrued past the dead lease: %ds" % effective)
+        self.assertGreaterEqual(effective, 3600 - 120,
+                                "the in-lease hour must still count: %ds" % effective)
+        self.assertIn("lease_expired_before_as_of", payload["diagnostics"])
+        self.assertGreaterEqual(payload["unclassified_seconds"], 3600 - 120)
+
+    def _stale_snapshot(self, age_hours, reset_hours_ago):
+        runtime = os.path.join(self.d, ".m8shift", "runtime")
+        os.makedirs(runtime, exist_ok=True)
+        now_ = dt.datetime.now(dt.timezone.utc)
+        stamp = lambda h: (now_ - dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        reset = stamp(reset_hours_ago)
+        snap = {"schema": "m8shift.usage.snapshot.v1", "agent": "claude",
+                "captured_at": stamp(age_hours), "decision_ratio": 0.22,
+                "decision_window": {"kind": "weekly", "resets_at": reset},
+                "source": {"provenance": "official"},
+                "windows": [{"kind": "weekly", "used_ratio": 0.06, "resets_at": reset},
+                            {"kind": "session_5h", "used_ratio": 0.22, "resets_at": reset}]}
+        with open(os.path.join(runtime, "usage.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"agent": "claude",
+                                 "payload": {"snapshot": snap}}) + "\n")
+
+    def test_stale_usage_quotes_no_percentage_and_marks_the_rolled_window(self):
+        # #271: the core printed `weekly left 94%` with a reset that had rolled
+        # three times, while the runtime called the same record unknown. A
+        # percentage is a claim about the CURRENT window.
+        self.init()
+        self._stale_snapshot(age_hours=20, reset_hours_ago=15)
+        text = self.cw("status").stdout
+        line = next((ln for ln in text.splitlines()
+                     if "claude" in ln and "left" in ln), "")
+        self.assertTrue(line, "no usage line rendered")
+        self.assertNotRegex(line, r"\d+%",
+                            "a stale snapshot must not quote a percentage: %r" % line)
+        self.assertIn("stale", line)
+        self.assertIn("ROLLED", line)
+
+    def test_a_live_window_still_shows_its_figures(self):
+        # The rule forbids UNMARKED stale values, not stale data and not fresh
+        # figures: a current snapshot must keep rendering its percentages.
+        self.init()
+        self._stale_snapshot(age_hours=0, reset_hours_ago=-5)
+        line = next((ln for ln in self.cw("status").stdout.splitlines()
+                     if "claude" in ln and "left" in ln), "")
+        self.assertRegex(line, r"\d+%", "a fresh snapshot must still show figures")
+        self.assertNotIn("ROLLED", line)
+        self.assertNotIn("stale", line)
+
 class TestAdvisoryFields(CLIBase):
     """§5 advisory turn fields: sugar flags + the open `--field key=value` namespace,
     written verbatim after the fixed routing block, surfaced by peek, never interpreted."""
