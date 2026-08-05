@@ -329,13 +329,53 @@ So `Mode` is not a normalisation of the beat. It gates exactly one outcome: whet
 a *missing* beat may be read as *the producer failed to deliver*. Everything else in
 the table reads the sidecar directly.
 
-**Immutability across the work window.** `claim --refresh` is a `claim`, so the
-question is real: `holder_mode` is written **once**, when the window opens, and a
-refresh never rewrites it. A refresh presenting a different mode is a signal that
-something changed identity mid-window; it is reported by the lint, not silently
-applied. This is [RFC 078](078-rfc-freshness-first-class.md) §2.1 again — the
-persisted boundary describes the moment it was captured and does not get quietly
-restated later.
+**Immutability for the life of a work window.** `claim --refresh` is a `claim`, so
+the question is real: within one window `holder_mode` is written **once**, when the
+window opens, and a refresh never rewrites it. A refresh presenting a different mode
+is a signal that something changed identity mid-window; it is reported by the lint,
+not silently applied. This is [RFC 078](078-rfc-freshness-first-class.md) §2.1 again
+— the persisted boundary describes the moment it was captured and does not get
+quietly restated later.
+
+Note the qualifier "for the life of a work window". A takeover does not mutate the
+value; it **ends the window**. That transition is specified next, because leaving it
+implicit would have made this immutability rule contradict the trust argument
+further down.
+
+#### The takeover transition, defined once for all three paths
+
+Review found that the RFC said a takeover writes a new `holder_instance` and said
+nothing about `holder_mode`, which left two incompatible implementations open — keep
+the displaced holder's declaration because the WORKING window continues, or capture
+the arriving one's because ownership changed. Both are reachable from the text as it
+stood, and the difference decides who may be automatically displaced later.
+
+Keeping the displaced holder's mode is the unsafe branch, and the argument is
+concrete. If A held the pen as `managed` and B takes over as `manual`, B inherits
+`managed` and becomes automatically displaceable after its own lease lapses, on the
+strength of a declaration **B never made**. The inverse loses the automatic recovery
+B's launcher was supposed to earn. Worse, it falsifies the trust statement two
+sections below — that only a holder can plant its own false `managed` — from the
+first takeover onward.
+
+So: **every instance-changing takeover ends the current work window and opens a new
+one**, in a single atomic LOCK write, identically for all three paths (the automatic
+ordinary `claim`, `--takeover-instance --reason`, and its `--live-override` form):
+
+| Field | On takeover | On matching refresh |
+| --- | --- | --- |
+| `holder_instance` | the arriving caller's token | preserved |
+| `holder_mode` | the arriving caller's declaration, normalised by §1 | preserved |
+| `work_window_id` | fresh | preserved |
+| `since` | now | preserved |
+| lease `expires` | now plus TTL | extended |
+
+The displaced pair — `holder_instance`, `holder_mode`, `work_window_id` — is
+retained **only in the instance-change event**, which is what lets `history` and
+`recap` show who was displaced and under which declaration, without leaving a stale
+declaration governing a holder who never made it.
+
+One contract, three command rows, no implementer choice.
 
 #### Binding the beat to the instance it is used to prove alive
 
@@ -443,9 +483,9 @@ separate columns rather than one collapsed verdict.
 | --- | --- | --- | --- | --- |
 | match | valid | any | any | **refresh** — today's behaviour, unchanged |
 | match | expired | any | any | **refresh** — the holder reclaims its own expired window |
-| not `match` | valid | **fresh** | **any** | **refuse outright.** The holder is provably alive; taking the pen would strand it mid-task. Mode is irrelevant — a beat that exists is evidence whatever the metadata says |
+| not `match` | valid | **fresh** | **any** | **refuse outright.** An *attributed* beat proves this holder alive; an *unattributed* legacy beat proves only that a same-name producer is, and takes the same stricter outcome without that proof. Either way taking the pen risks stranding a live process, and mode is irrelevant — metadata never erases a beat that exists |
 | not `match` | valid | stale or missing | any | **refuse ordinary claim; `--takeover-instance --reason`.** A live lease with no live beat is ambiguous, so it costs a reason and an audit record |
-| not `match` | expired | **fresh** | **any** | **refuse ordinary claim; `--takeover-instance --live-override --reason`.** A fresh beat proves the holder alive and lease expiry does not weaken that proof — the [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) human-authorization floor applies unchanged |
+| not `match` | expired | **fresh** | **any** | **refuse ordinary claim; `--takeover-instance --live-override --reason`.** An attributed fresh beat proves this holder alive, and lease expiry does not weaken that proof — the [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) human-authorization floor applies unchanged. An unattributed legacy beat earns the same floor conservatively, without claiming the proof |
 | not `match` | expired | stale or missing | **`managed` only** | **allow** with an instance-change event. A producer was declared, and it did not deliver |
 | not `match` | expired | stale or missing | any other mode | **refuse ordinary claim; `--takeover-instance --reason`.** Without a declared producer, a missing beat is not evidence of anything |
 | absent both sides | any | any | any | **today's behaviour, byte-identical** |
@@ -488,7 +528,7 @@ agreement is deliberate: it is the one row where both documents weigh the same
 evidence and reach the same answer. Note both qualifiers — the beat must be
 *absent where a producer exists to emit one*, and the mode must be managed.
 
-**`expired / stale or missing / any mode but `managed`` does NOT allow**, and the
+**The `expired / stale or missing` row for any mode other than `managed` does NOT allow**, and the
 history of this row is the most instructive thing in the document. One revision
 concluded that "both signals agree the holder is gone" where there was no second
 signal at all — a missing beat under no declared producer is not evidence, and
