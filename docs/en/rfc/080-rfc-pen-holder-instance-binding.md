@@ -6,10 +6,15 @@
 - **Scope:** core relay — `claim` / `append` / `release` / `done` and the LOCK
   schema — plus an advisory lint in `doctor`. Must stay minimal and
   backward-compatible.
-- **Siblings:** [RFC 049](049-rfc-holder-liveness-stale-claim.md) (holder
-  liveness / stale-claim hardening),
+- **Amends:** [RFC 010](010-rfc-runtime-patterns.md) §4 — see §3.1, which states
+  what is amended and what stays binding
+- **Siblings:** [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) (holder
+  liveness / stale-claim hardening — this RFC defers to it rather than defining a
+  parallel takeover model),
   [RFC 054](054-rfc-pre-exhaustion-session-rotation.md) (pre-exhaustion session
-  rotation), [RFC 079](079-rfc-out-of-roster-observer.md)
+  rotation), [RFC 079](079-rfc-out-of-roster-observer.md),
+  [RFC 078](078-rfc-freshness-first-class.md) (unverifiable values must not be
+  presented as verified)
 
 ## Summary
 
@@ -68,13 +73,12 @@ This rules out the obvious answers before they are proposed:
 
 ## Proposal
 
-### 1. An opt-in instance token in the environment
+### 1. An opt-in instance token, and its lifecycle
 
-`$M8SHIFT_INSTANCE` — an opaque, non-secret string set once per agent session by
-whatever launches the agent (harness, wrapper, runner, or the operator).
+`$M8SHIFT_INSTANCE` — an opaque, non-secret string identifying one agent session.
 
 - **Set** → recorded in the LOCK at claim as `holder_instance:<token>`, and
-  verified by every operation that requires the pen: claim refresh, `append`,
+  compared by every operation that requires the pen: claim refresh, `append`,
   `release`, `done`.
 - **Unset** → behaviour byte-identical to today. This is what keeps the change
   backward-compatible and adoptable one agent at a time.
@@ -82,6 +86,50 @@ whatever launches the agent (harness, wrapper, runner, or the operator).
 The token is **not** an authentication secret. Anyone able to write the LOCK can
 write any token. It is a coordination aid, consistent with a core that detects
 rather than enforces: it makes an accident visible, it does not stop an attacker.
+
+#### Who mints it, and why the environment alone is not enough
+
+An earlier draft said only "set once per agent session by whatever launches the
+agent". That is not a lifecycle, and review established that it fails on the very
+case this RFC exists for: **an exported variable is inherited, not minted.** Two
+sessions started from the same wrapper, or a fresh session started in a shell that
+already exports the value, share one token — which is precisely the silent
+double-drive the design is meant to expose. Stating that case out of scope, as the
+earlier draft did, would have left the motivating incident uncovered while the RFC
+claimed to address it.
+
+So the lifecycle has to be specified per mode, and the guarantee differs by mode:
+
+| Stage | **Managed** (runner or launcher starts the agent) | **Manual** (operator or interactive session) |
+| --- | --- | --- |
+| Created | by the launcher, per invocation | by the operator, per session |
+| Value | the run id the runtime already mints — not a parallel concept | any opaque string |
+| Rotated | necessarily, since a new invocation is a new run | only if the operator rotates it |
+| Cleared | when the invocation ends | never automatically |
+| Freshness | **guaranteed** by the launcher | **not guaranteed** |
+
+The managed row is what makes the motivating case work: a context rotation starts
+a *new invocation*, so it necessarily receives a new id, without anyone having to
+remember anything. The guarantee comes from the launcher minting per invocation,
+never from the environment variable mechanism, which cannot provide it.
+
+#### What honest degradation looks like
+
+Where freshness cannot be guaranteed — manual mode, or an inherited value — the
+core MUST NOT behave as though it could. Two instances sharing a token are
+indistinguishable to the LOCK, and the design says so rather than half-covering
+it:
+
+- the comparison still catches every case where the tokens **differ**, which is
+  the common accident;
+- it catches nothing where they are **equal but the sessions are not**, and no
+  amount of core logic recovers that — the information does not reach the LOCK;
+- therefore `doctor --lint` reports a token that appears across sessions whose
+  boundaries the runtime *can* see (§4), and the docs state the residual gap
+  plainly instead of implying coverage.
+
+This is the same discipline as [RFC 078](078-rfc-freshness-first-class.md): a
+value that cannot be verified must not be presented as though it had been.
 
 ### 2. Refusal that names the situation
 
@@ -92,18 +140,68 @@ the reader must not confuse it with a stale-lock case:
 > the pen is held by a **different instance of the same agent**; this is not a
 > stale lock and force-taking it would strand the other instance mid-task
 
-### 3. Recovery must stay possible, and must be named
+### 3. Recovery must stay possible, and the two recoveries are not the same
 
 The legitimate recovery path — a process dies or exhausts its context, a fresh
 one continues — is **exactly the same event** as an illegitimate concurrent
 drive, seen from the lock. A design that refuses the second instance outright
 would break the recovery it is meant to protect.
 
-Therefore takeover stays available but stops being silent: an explicit
-`claim <agent> --takeover-instance` (or reuse of the existing `--force`, to be
-settled in §Open questions) records an **instance-change event** in the session
-ledger, so the transition appears in `history` and `recap` instead of being
-inferred later from commit timestamps.
+But "seen from the lock" is the whole qualifier, and review was right that the
+earlier draft collapsed two situations the system can in fact tell apart:
+
+**Managed recovery — the old instance's liveness is observable.** When the prior
+holder ran behind a runtime lane, its liveness is already answerable by the
+mechanism [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) defines,
+and the accounting fold already consumes: a protective heartbeat inside the
+window. If that beat is **fresh**, the old instance is alive and this is not a
+recovery at all — ordinary takeover is refused, exactly as RFC 049 refuses a
+force-claim against a live holder. If it is **absent or expired**, the takeover is
+routine and needs no ceremony beyond recording the instance change.
+
+**Unmanaged recovery — nothing distinguishes the two.** An interactive session
+behind no lane leaves no liveness signal, so the core genuinely cannot tell
+recovery from concurrent drive. Here the answer is not a smarter rule but an
+honest one: the operation is refused with the message in §2, and proceeding
+requires the **explicit audited override RFC 049 already defines** rather than a
+second, parallel takeover verb invented here.
+
+Either way the transition stops being silent: an **instance-change event** is
+recorded in the session ledger, so it appears in `history` and `recap` instead of
+being inferred later from commit timestamps.
+
+This is deliberately *not* a new takeover model. Where RFC 049 has an answer, this
+RFC defers to it and adds only the field that says which instance held the pen.
+
+### 3.1 Relationship to RFC 010 §4 — an amendment, stated as one
+
+[RFC 010](010-rfc-runtime-patterns.md) §4 ("Per-agent queue / lane") already
+assigns this exact problem — *"the core identifies agents by roster name, not by
+UI instance. Two Codex sessions can both treat `claim codex` as a refresh"* — to
+the runtime companion, and draws a boundary: instance-level safety *"must not
+change the core identity model, grant the pen, or steal a fresh lane."*
+
+Recording `holder_instance` in the LOCK touches that boundary, and this RFC must
+say so rather than quietly cross it.
+
+**What is amended:** the boundary was written when the lane owner was the only
+instance-safety mechanism available. A lane covers *managed* runtimes only. The
+field observations behind this RFC came from sessions behind no lane, which the
+companion cannot see at all — so the boundary as written leaves the motivating
+case permanently uncovered, not by choice but by construction.
+
+**What is preserved, and should be read as binding:** the token still does not
+grant the pen, still does not steal a fresh lane, and still does not authenticate
+anyone. Ordering and routing are untouched. What changes is narrower than "the
+core identity model": the core records **who claims to hold** the pen alongside
+**which roster name** holds it, and compares the two on pen operations. Agent
+identity for every other purpose — turn order, roles, delegation — remains the
+roster name alone.
+
+If reviewers judge that even this crosses RFC 010 §4, the alternative is explicit
+and should be chosen consciously: keep the field in the companion, and accept that
+unmanaged sessions stay uncovered. This RFC argues against that, but the choice
+belongs in the open, not in an unremarked contradiction between two documents.
 
 ### 4. Advisory detection for the unset case
 
@@ -117,9 +215,12 @@ what it sees.
 
 - It does not make the pen a security boundary. Same doctrine as the rest of the
   core: passive, cooperative, zero-credential.
-- It does not detect two instances that share an environment (same exported
-  token). That case is out of scope and should be named as such in the docs
-  rather than half-covered.
+- It does not detect two instances that share an identical token. This is a
+  **residual gap, not an out-of-scope declaration** — the earlier wording deferred
+  it, which would have left the motivating case uncovered while the document
+  claimed to address it. §1 closes it for managed sessions, where the launcher
+  mints per invocation; for manual sessions it stays open, and the docs must say
+  so plainly rather than imply coverage.
 - It does not touch routing. `holder_instance` is a field of the LOCK, read by
   pen operations only; it must never influence which agent is next.
 
