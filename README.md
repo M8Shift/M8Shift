@@ -407,6 +407,8 @@ published site, or use the repository-local docs when working from a clone.
 | 076 | [Incident-first, deterministic, re-entrant discipline](docs/en/rfc/076-rfc-incident-first-deterministic-reentrant-discipline.md) | Problem packets, hermetic gates, and blank-agent reconstruction | draft / design-only | — | review and operator arbitration required before tooling |
 | 077 | [Safe-boundary model-line routing](docs/en/rfc/077-rfc-safe-boundary-model-line-routing.md) | Same-provider model-line evidence, safe-boundary decisions, and reconstructible audit records | accepted design; Slices A-D implemented | — | fixture-only listener boundary; live pilot operator-gated |
 | 078 | [Freshness is a first-class property](docs/en/rfc/078-rfc-freshness-first-class.md) | Once its deadline has passed, a value must not influence a live decision nor be described as current | draft; detector shipped | — | expected-failure list over four enumerated projections, not a ratchet: it does not prevent growth; emptied once the #270 and #271 fixes landed, not on ticket closure |
+| 079 | [Out-of-roster read-only observer](docs/en/rfc/079-rfc-out-of-roster-observer.md) | A non-roster agent consulted for an audit, recorded as evidence and never as a turn | draft | #285 | attestation of read-only invocation unsettled |
+| 080 | [Pen holder instance binding](docs/en/rfc/080-rfc-pen-holder-instance-binding.md) | Binds the pen to the holder instance, not only the roster name | draft | #286 | refuses on instance mismatch, so it amends the core identity model for pen ownership only; audited takeover keeps recovery possible |
 
 ## 🔁 How it works
 
