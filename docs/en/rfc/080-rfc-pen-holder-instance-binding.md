@@ -219,6 +219,27 @@ so the transition appears in `history` and `recap` rather than being inferred fr
 commit timestamps later, and is refused outright where the table below says
 `refuse`.
 
+#### Which command takes which row, since "allow" is not a command
+
+Review found that the table said `allow` for one row while §2 said mismatching pen
+operations are refused and this operation requires a reason — three statements an
+implementer could only reconcile by choosing an authority-bearing behaviour. Naming
+them:
+
+| Row outcome | Command | Reason | Event recorded |
+| --- | --- | --- | --- |
+| `refresh` | ordinary `claim <agent> [--refresh]` | — | none; the window continues |
+| **automatic `allow`** | **ordinary `claim <agent>`, which succeeds** | **not required** | instance-change, `basis: declared-producer-silent` |
+| `--takeover-instance --reason` | `claim <agent> --takeover-instance --reason <text>` | required | instance-change, `basis: operator-decision` |
+| `--live-override` | the same, plus `--live-override` | required | instance-change, `basis: live-override`, recording that a fresh beat was overridden |
+| `refuse outright` | no command succeeds | — | none |
+
+So §2's blanket refusal has exactly **one** exception, the automatic row, and it is
+an ordinary `claim` rather than a reasonless variant of the audited operation.
+Keeping it an ordinary `claim` is deliberate: a reasonless `--takeover-instance`
+would make the audited operation's own grammar conditional, and the `basis` field
+is what keeps the three outcomes distinguishable in the ledger afterwards.
+
 #### The decision table
 
 **Domain.** The table is read against a `WORKING_<agent>` lock, for a caller using
@@ -316,6 +337,47 @@ applied. This is [RFC 078](078-rfc-freshness-first-class.md) §2.1 again — the
 persisted boundary describes the moment it was captured and does not get quietly
 restated later.
 
+#### Binding the beat to the instance it is used to prove alive
+
+The table treats a fresh beat as proof that **the holder instance** is alive. Review
+found that the signal cannot currently carry that meaning, and verified it in the
+engine rather than inferring it: `heartbeat_matches_window` compares exactly
+`agent`, `session`, `turn` and `state`. There is no instance anywhere in the
+heartbeat identity.
+
+So today a fresh beat proves that *some producer under the same roster name* is
+alive — which is the very ambiguity this RFC exists to remove, sitting underneath
+the row the whole design leans on. Instance B's listener can beat while A is the
+recorded holder; after a takeover, A's listener can keep overwriting the same
+agent-keyed sidecar. Either beat matches all four fields.
+
+Four rules close it, and they are part of this proposal rather than a follow-up:
+
+1. **Production is bound.** `heartbeat` reads `$M8SHIFT_INSTANCE` like every other
+   pen operation and is refused when the LOCK carries a `holder_instance` that does
+   not match, with the §2 message. The managed listener passes the **same
+   invocation token** to `claim --refresh` and to `heartbeat` — one launcher, one
+   token, both commands, which is also why §1 requires the mode and the token to
+   come from one environment.
+2. **The sidecar records it.** The beat carries `producer_instance`.
+3. **Evaluation is bound.** The window match gains that field: a beat whose
+   `producer_instance` differs from the LOCK's `holder_instance` is nonmatching —
+   the same treatment the engine already gives a beat from another session or turn,
+   which it calls *orphaned*.
+4. **Instance change invalidates by construction.** A takeover writes a new
+   `holder_instance`, so every beat from the displaced producer stops matching
+   immediately. No cleanup step, and therefore no window in which a stale sidecar
+   protects the wrong instance.
+
+**Partial adoption, stated rather than left to an implementer.** If the LOCK
+carries no `holder_instance`, matching is exactly today's four fields — the legacy
+row, unchanged. If the LOCK carries one and the sidecar has no `producer_instance`,
+the beat is **unattributed**: it proves a same-name producer is alive without
+saying which. It is still treated as `fresh`, because Property 1 forbids letting
+missing metadata erase a present observation, and because every outcome a fresh
+beat produces is a *stricter* one — refusal, or `--live-override`. An unattributed
+beat can therefore over-protect a holder, never under-protect it.
+
 #### The trust limit, stated because the design leans on it
 
 `managed` is a **cooperative declaration by the caller**, not an attestation the
@@ -323,26 +385,43 @@ core can verify. Nothing proves the value came from a real launcher; a process m
 export `managed` and no producer need exist.
 
 This matters for exactly one row: `not match / expired / stale or missing /
-managed`, the only automatic outcome. It allows takeover on the strength of a
-declaration rather than of proof. A caller wishing to displace a holder could
-declare `managed`, wait for the lease to lapse, and take the pen **without an
-operator decision and without a stated reason**.
+managed`, the only automatic outcome.
 
-To be exact, since an earlier revision overstated this and contradicted the table:
-the takeover is still **recorded** — every row that changes the holder emits an
-instance-change event. What the automatic row skips is the *reason* and the
-*operator override*, not the audit trail. The event is what makes a false
-declaration visible afterwards.
+**Who can actually exploit it — narrower than an earlier revision claimed.** That
+text described "a caller wishing to displace a holder" declaring `managed` and
+waiting for the lease to lapse. That is impossible, and review caught it:
+`holder_mode` is written **once by the holder, at its own claim**, and is immutable
+across refresh. A caller arriving later cannot set it, retroactively or otherwise.
 
-Three reasons to accept that, stated so a reader can disagree with the reasoning
+The only actor who can plant a false `managed` is therefore the holder itself, and
+the effect is **self-harm**: it makes that holder automatically displaceable once
+its lease lapses. There is no path by which declaring `managed` helps someone take
+a pen they do not hold. The exposure I described was pointing at the wrong actor
+and was larger than the real one.
+
+What remains true, and is the honest residue: the automatic row rests on a
+*declaration* that a producer was expected, plus a beat that never arrived — not on
+evidence the holder is gone. A holder that declares `managed` and then loses its
+producer is displaced without ceremony, which is the intended trade and worth
+knowing.
+
+**The takeover is still recorded.** Every row that changes the holder emits an
+instance-change event; the automatic row skips the *reason* and the *operator
+override*, not the audit trail. That event is what makes a wrong declaration
+visible afterwards.
+
+Two reasons to accept the trade, stated so a reader can disagree with the reasoning
 rather than discover it later:
 
 1. it is the same trust model as the token itself, which §1 already says stops an
    accident and not an attacker — this RFC adds no authentication anywhere;
-2. the same actor could equally set a matching `holder_instance` and skip the whole
-   mechanism, so the declaration is not the weakest link;
-3. every other outcome in the table is *stricter* under a false declaration, since
-   `unmanaged` is the fail-closed normalisation.
+2. an actor able to write the LOCK could set a matching `holder_instance` and skip
+   the mechanism entirely, so the declaration is nowhere near the weakest link.
+
+An earlier revision listed a third reason — that other outcomes are stricter
+"since `unmanaged` is the fail-closed normalisation". That normalisation no longer
+exists: mode is now irrelevant in every row but one pair, so the sentence described
+a mechanism the document had already removed.
 
 What the design must therefore **not** claim is that the automatic row rests on
 evidence the previous instance is gone. It rests on a declaration that a producer
