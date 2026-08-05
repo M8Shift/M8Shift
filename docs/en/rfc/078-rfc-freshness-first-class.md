@@ -229,9 +229,16 @@ Each of these is a gap in the *instrument*, not an exception to the rule.
    observed; a table entry citing a closed ticket, or a fictional one, passes
    exactly like a correct one.
 
-   So "the table empties when #270 and #271 close" describes what a maintainer
-   must do, not something the suite can confirm. Turning it into a contract needs
-   a gate outside the test — one that reads issue state and that a contributor
+   Note also which event empties the table: **the fixes landing, not the tickets
+   closing.** Those are different events, they can happen in either order, and an
+   earlier wording here named the wrong one — while §4.1 was already stating that
+   the suite never observes issue state at all. The entries for #270 and #271 came
+   out because the corrections landed on `main`, and the contract test then
+   asserted compliance on all four projections instead of failure.
+
+   So "the table empties once those fixes land" describes what a maintainer must
+   do, not something the suite can confirm. Turning it into a contract needs a
+   gate outside the test — one that reads issue state and that a contributor
    cannot edit in the same change. Until then, treat an empty table as evidence
    the fixes landed and the tickets as evidence they were the right ones, and do
    not let the first stand in for the second.

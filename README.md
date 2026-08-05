@@ -406,7 +406,7 @@ published site, or use the repository-local docs when working from a clone.
 | 075 | [Model-line budget observability](docs/en/rfc/075-rfc-model-line-budget-observability.md) | Vendor evidence for model/model-family quota visibility and honest unknowns | Phase 1 research / design-only | — | live vendor-contract recheck and Claude review required before failover design |
 | 076 | [Incident-first, deterministic, re-entrant discipline](docs/en/rfc/076-rfc-incident-first-deterministic-reentrant-discipline.md) | Problem packets, hermetic gates, and blank-agent reconstruction | draft / design-only | — | review and operator arbitration required before tooling |
 | 077 | [Safe-boundary model-line routing](docs/en/rfc/077-rfc-safe-boundary-model-line-routing.md) | Same-provider model-line evidence, safe-boundary decisions, and reconstructible audit records | accepted design; Slices A-D implemented | — | fixture-only listener boundary; live pilot operator-gated |
-| 078 | [Freshness is a first-class property](docs/en/rfc/078-rfc-freshness-first-class.md) | Once its deadline has passed, a value must not influence a live decision nor be described as current | draft; detector shipped | — | expected-failure list over four enumerated projections, not a ratchet: it does not prevent growth; empties when #270 and #271 close |
+| 078 | [Freshness is a first-class property](docs/en/rfc/078-rfc-freshness-first-class.md) | Once its deadline has passed, a value must not influence a live decision nor be described as current | draft; detector shipped | — | expected-failure list over four enumerated projections, not a ratchet: it does not prevent growth; emptied once the #270 and #271 fixes landed, not on ticket closure |
 
 ## 🔁 How it works
 
