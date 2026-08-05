@@ -3682,6 +3682,152 @@ class TestExpiredLeaseAndStaleUsageAreNotCurrent(CLIBase):
         self.assertNotIn("ROLLED", line)
         self.assertNotIn("stale", line)
 
+class TestFreshnessContract(CLIBase):
+    """RFC 078 — a value whose deadline has passed must not be rendered as
+    current, on the four projections enumerated below.
+
+    KNOWN_FAILURES is an EXPECTED-FAILURE LIST, not a ratchet.  What it does
+    guarantee: an entry asserts the named projection STILL fails, so fixing it
+    makes this test fail until the entry is removed, and an unfinished fix
+    cannot look green.  What it does NOT guarantee, stated plainly because the
+    name used to imply otherwise: nothing prevents a contributor from adding a
+    key here to turn a new failure green.  Membership merely reverses the
+    expected boolean; the ticket value is not validated and the set is not
+    compared against the base branch.  Enforcing no-growth needs a gate the
+    contributor cannot edit in the same change — tracked separately.
+
+    Coverage is a hand-written closed list.  A new renderer, gate, companion
+    lane or derived aggregate is NOT discovered by this test and passes without
+    appearing here.
+    """
+
+    KNOWN_FAILURES = {
+        # projection -> forge issue that must close before the entry is removed.
+        # Empty since #270 and #271 landed in 825222e: all four comply.
+    }
+
+    PAST = "2019-01-01T00:00:00Z"
+
+    def _fixture_where_every_deadline_has_passed(self):
+        """Stale usage snapshot + elapsed hold + a lease that expired hours ago."""
+        self.init()
+        self.cw("claim", "claude")
+        runtime = os.path.join(self.d, ".m8shift", "runtime")
+        os.makedirs(os.path.join(runtime, "usage-holds"), exist_ok=True)
+
+        # A usage snapshot far beyond any staleness bound, carrying real windows
+        # so a percentage is computable — the point is that it must not be shown
+        # as if it described the current window.
+        snap = {"schema": "m8shift.usage.snapshot.v1", "agent": "claude",
+                "captured_at": self.PAST, "decision_ratio": 0.4,
+                "windows": [{"kind": "weekly", "used_ratio": 0.4,
+                             "resets_at": self.PAST}]}
+        with open(os.path.join(runtime, "usage.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"agent": "claude",
+                                 "payload": {"snapshot": snap}}) + "\n")
+
+        # A hold whose reset elapsed long ago: it must be visible and inert.
+        with open(os.path.join(runtime, "usage-holds", "claude.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump({"schema": cowork.USAGE_HOLD_SCHEMA, "agent": "claude",
+                       "placed_at": self.PAST, "resets_at": self.PAST,
+                       "reason": "fixture", "source": "usage-monitor",
+                       "snapshot_ref": "fixture-snapshot",
+                       "binding_window": {"kind": "weekly",
+                                          "resets_at": self.PAST}}, fh)
+
+        # A lease that expired an hour ago on a window opened two hours ago, so
+        # a compliant fold bills at most the in-lease hour and today's fold bills
+        # the whole two hours.  Fixed offsets keep the assertion deterministic.
+        now = dt.datetime.now(dt.timezone.utc)
+        since = (now - dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        expires = (now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        path = os.path.join(self.d, "M8SHIFT.md")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        started = (now - dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        text = re.sub(r"started:\s*.*", "started:  " + started, text, count=1)
+        text = re.sub(r"since:\s*.*", "since:    " + since, text, count=1)
+        text = re.sub(r"expires:\s*.*", "expires:  " + expires, text, count=1)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+        # The fold reads the ledger, and treats a LOCK that disagrees with it as
+        # unclassified — correct, but not the case under test.  Move the closing
+        # transition to match, so the trailing WORKING span is genuinely open.
+        ledger = os.path.join(self.d, "M8SHIFT.sessions.jsonl")
+        with open(ledger, encoding="utf-8") as fh:
+            rows = [ln for ln in fh.read().splitlines() if ln.strip()]
+        # Every row moves, not just the ends: the session must predate the open
+        # transition (else the fold rejects it as outside the session) and the
+        # chain must stay monotonic (else it is a clock regression).  The whole
+        # fixture derives from a single `now`, so the LOCK and the ledger agree
+        # to the second and the fold does not report a timeline gap.
+        for index, row in enumerate(rows):
+            event = json.loads(row)
+            event["at"] = since if index == len(rows) - 1 else started
+            rows[index] = json.dumps(event)
+        with open(ledger, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(rows) + "\n")
+        return since, expires
+
+    def _violates(self, surface):
+        return surface in self.KNOWN_FAILURES
+
+    def _assert(self, surface, compliant, detail):
+        """Assert compliance, or that a known violation still holds."""
+        if self._violates(surface):
+            self.assertFalse(
+                compliant,
+                "%s is listed in KNOWN_FAILURES (%s) but now COMPLIES. "
+                "Remove its entry: a fixed projection must not stay listed. "
+                "Observed: %s" % (surface, self.KNOWN_FAILURES[surface], detail))
+        else:
+            self.assertTrue(
+                compliant,
+                "%s renders a value whose deadline has passed without marking "
+                "it (RFC 078). Observed: %s" % (surface, detail))
+
+    def test_freshness_contract_on_four_enumerated_projections(self):
+        self._fixture_where_every_deadline_has_passed()
+
+        payload = json.loads(self.cw("status", "--json").stdout)
+        text = self.cw("status").stdout
+        timing = json.loads(self.cw("time", "--json").stdout)
+
+        # 1. The usage projection owns freshness and must publish it.
+        projected = next(a for a in payload["snapshot"]["agents"]
+                         if a["id"] == "claude")["usage"]
+        self._assert("status_json_usage_freshness",
+                     projected.get("freshness") == "stale",
+                     "freshness=%r" % projected.get("freshness"))
+
+        # 2. An elapsed hold stays visible but must not read as current.
+        hold = payload.get("usage_holds", {}).get("claude", {})
+        self._assert("status_json_usage_hold_state",
+                     hold.get("state") == "elapsed",
+                     "state=%r resets_at=%r" % (hold.get("state"),
+                                                hold.get("resets_at")))
+
+        # 3. The human surface must not quote a figure from a stale snapshot:
+        #    a percentage on that line is a claim about the current window.
+        usage_lines = [ln for ln in text.splitlines()
+                       if "claude" in ln and "left" in ln]
+        quotes_percentage = any(re.search(r"\d+%", ln) for ln in usage_lines)
+        self._assert("core_status_text_renders_stale_usage_percentages",
+                     not quotes_percentage,
+                     "lines=%r" % usage_lines)
+
+        # 4. Work must not accrue past the lease.  The window is two hours old
+        #    and the lease died an hour ago, so a compliant fold bills at most
+        #    the in-lease hour; today's fold bills the whole two hours.
+        effective = timing.get("effective_work_seconds", 0)
+        self._assert("time_accounting_bills_work_past_the_lease",
+                     effective <= 3600 + 120,
+                     "effective_work_seconds=%r (lease died 3600s into a "
+                     "7200s window)" % effective)
+
+
 class TestAdvisoryFields(CLIBase):
     """§5 advisory turn fields: sugar flags + the open `--field key=value` namespace,
     written verbatim after the fixed routing block, surfaced by peek, never interpreted."""

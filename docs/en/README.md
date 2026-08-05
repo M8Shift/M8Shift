@@ -141,6 +141,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [075-rfc-model-line-budget-observability.md](rfc/075-rfc-model-line-budget-observability.md) | Phase 1 vendor research on model-line quota observability across API, subscription CLI, cloud, and console surfaces; failover design remains gated. |
 | [076-rfc-incident-first-deterministic-reentrant-discipline.md](rfc/076-rfc-incident-first-deterministic-reentrant-discipline.md) | Draft incident-first, deterministic, and re-entrant contribution discipline with blank-agent reconstruction gates. |
 | [077-rfc-safe-boundary-model-line-routing.md](rfc/077-rfc-safe-boundary-model-line-routing.md) | Accepted same-provider safe-boundary routing design; Slices A-D implement fixture evidence, disabled vendor adapters, pure policy/audit, and fixture-only listener integration while live vendor routing remains gated. |
+| [078-rfc-freshness-first-class.md](rfc/078-rfc-freshness-first-class.md) | Draft design rule with a shipped behavioural detector: freshness is owned by the producing component, a cache of a remote authority is not the remote, and one frame carries one truth. |
 
 ## Security docs
 
