@@ -205,23 +205,47 @@ commit timestamps later, and is refused outright where the table below says
 
 #### The decision table
 
-Read against a `WORKING_<agent>` lock, for a caller using the same roster name.
-`token` compares the caller's `$M8SHIFT_INSTANCE` with the LOCK's
-`holder_instance`.
+**Domain.** The table is read against a `WORKING_<agent>` lock, for a caller using
+the same roster name. Every column below is therefore a property of that lock;
+nothing outside `WORKING_<agent>` appears in it. Adoption from `AWAITING_<agent>`
+or `IDLE` is specified in prose after the table, because a fresh work window has
+no lease, no beat and no holder to displace — putting it in a lease column, as an
+earlier revision did, broke both the domain and the schema.
 
-| Token | Lease TTL | Protective beat | Mode | Outcome |
+**Columns.** `Identity` compares the caller's `$M8SHIFT_INSTANCE` with the LOCK's
+`holder_instance`, over four values: `match`, `mismatch`, `caller unidentified`
+(caller unset, LOCK set) and `holder unidentified` (caller set, LOCK unset).
+`Beat` is `fresh`, `absent/expired`, or `unobservable` — the last meaning *no
+producer exists to read*, which is the unmanaged case, and which is **not** a
+value of the same kind as the other two.
+
+| Identity | Lease | Beat | Mode | Outcome |
 | --- | --- | --- | --- | --- |
 | match | valid | any | any | **refresh** — today's behaviour, unchanged |
-| match | expired | any | any | **refresh** — the holder is reclaiming its own expired window |
-| mismatch | valid | fresh | managed | **refuse.** The other instance is provably alive; taking the pen would strand it mid-task |
-| mismatch | valid | absent/expired | managed | **refuse ordinary claim; `--takeover-instance` permitted.** A live lease with no beat is the ambiguous case, so it costs a reason and an audit record |
-| mismatch | valid | n/a | unmanaged | **refuse ordinary claim; `--takeover-instance` permitted.** Nothing distinguishes recovery from concurrent drive, so the operator decides and the decision is recorded |
-| mismatch | expired | fresh | managed | **refuse ordinary claim; `--takeover-instance --live-override --reason` required.** A fresh beat proves the instance alive, and an expired lease does not weaken that proof — same human-authorization floor as [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) |
-| mismatch | expired | absent, expired, or unobservable | any | **allow** with an instance-change event. Both signals agree the previous instance is gone; `unobservable` is the unmanaged case, which has no beat to read |
-| absent on caller, set in LOCK | any | any | any | **refuse ordinary claim; `--takeover-instance` permitted.** See the mixed-state rule below |
-| set on caller, absent in LOCK | **`AWAITING_<agent>` or `IDLE`** | n/a | any | **allow** and record the caller's token. Entering a fresh work window is where adoption belongs |
-| set on caller, absent in LOCK | `WORKING_<agent>` | any | any | **refuse ordinary claim; the same audited path as the row above.** A tokenless LOCK does **not** prove the holder predates adoption |
+| match | expired | any | any | **refresh** — the holder reclaims its own expired window |
+| not `match` | valid | fresh | managed | **refuse outright.** The holder is provably alive; taking the pen would strand it mid-task |
+| not `match` | valid | absent/expired | managed | **refuse ordinary claim; `--takeover-instance --reason`.** A live lease with no beat is ambiguous, so it costs a reason and an audit record |
+| not `match` | valid | unobservable | unmanaged | **refuse ordinary claim; `--takeover-instance --reason`.** Nothing distinguishes recovery from concurrent drive; the operator decides and the decision is recorded |
+| not `match` | expired | fresh | managed | **refuse ordinary claim; `--takeover-instance --live-override --reason`.** A fresh beat proves the holder alive and lease expiry does not weaken that proof — the [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) human-authorization floor applies unchanged |
+| not `match` | expired | absent/expired | managed | **allow** with an instance-change event. Two independent signals agree the holder is gone |
+| not `match` | expired | unobservable | unmanaged | **refuse ordinary claim; `--takeover-instance --reason`.** There is no second signal here — see below |
 | absent both sides | any | any | any | **today's behaviour, byte-identical** |
+
+**Completeness, so a reviewer can check it rather than trust it.** Nine outcome
+rows cover the domain exactly, because `Beat` and `Mode` are not independent: a
+managed holder has a producer, so its beat is `fresh` or `absent/expired` and never
+`unobservable`; an unmanaged holder has none, so its beat is `unobservable` and
+never the other two. That leaves 2 identity-match rows, 3 lease-beat combinations
+per lease state for non-match (2 managed + 1 unmanaged) × 2 lease states = 6, and
+1 row for the untouched legacy case.
+
+**Why `not match` covers three identity values and not one.** `mismatch`, `caller
+unidentified` and `holder unidentified` all take the same rows. An earlier revision
+gave the two mixed states their own permissive row with `any / any / any`, which
+let a tokenless caller displace a token-bearing holder that had a valid lease *and*
+a fresh beat — evidence the table refuses one row above for a mere token mismatch.
+**An unidentifiable caller has no stronger claim than a caller with the wrong
+token**, and an unidentifiable holder is not thereby a dead one.
 
 Four rows deserve prose, because each is a place where the table either changes an
 existing outcome or was got wrong in an earlier revision.
@@ -229,9 +253,22 @@ existing outcome or was got wrong in an earlier revision.
 **`mismatch / valid / fresh / managed` refuses** where today's code silently
 refreshes. This is the row the whole RFC is for.
 
-**`mismatch / expired / absent` allows**, agreeing with RFC 049's peer flow. The
+**`expired / absent / managed` allows**, agreeing with RFC 049's peer flow. The
 agreement is deliberate: it is the one row where both documents weigh the same
-evidence and reach the same answer.
+evidence and reach the same answer. Note both qualifiers — the beat must be
+*absent where a producer exists to emit one*, and the mode must be managed.
+
+**`expired / unobservable / unmanaged` does NOT allow**, and this is the
+correction that matters most in this revision. An earlier revision folded
+`unobservable` into the same cell as `absent/expired` and concluded that "both
+signals agree the holder is gone". There is no second signal in unmanaged mode:
+the beat is unobservable because nothing produces one. Absence of a reading and a
+reading of absence are different facts, and treating them alike restored automatic
+silent displacement for precisely the case §1 admits the companion cannot see.
+
+Enumerating a case does not turn missing evidence into agreement. That is the same
+error [RFC 078](078-rfc-freshness-first-class.md) exists to name, committed inside
+a table written by the author of the corrections to RFC 078.
 
 **`mismatch / expired / fresh / managed` requires `--live-override`,** not merely a
 reason. An earlier revision let a reason string suffice here, which contradicted
@@ -240,14 +277,22 @@ alive under a valid lease, lease expiry does not make that proof weaker. RFC 049
 reserves overriding a fresh heartbeat for *"explicit human authorization"*, and
 this row now inherits that floor verbatim rather than inventing a cheaper one.
 
-**Adoption is asymmetric, and that asymmetry is the point.** An earlier revision
-allowed any token-bearing caller to claim a tokenless LOCK unconditionally, on the
-reasoning that the LOCK "predates adoption". It does not prove that. A tokenless
-holder may be a live legacy or manual instance, and the token-bearing caller may be
-exactly the second instance this RFC exists to catch — so the permissive reading
-would have let the design be defeated by being adopted. Adoption is therefore free
-when entering a fresh work window from `AWAITING_<agent>` or `IDLE`, and audited
-against a live `WORKING_<agent>`.
+#### Adoption, which lives outside the table
+
+A claim against `AWAITING_<agent>` or `IDLE` opens a **fresh work window**: there
+is no lease to weigh, no beat to read and no holder to displace, so none of the
+table's columns apply. The caller's token is simply recorded. This is where
+adoption belongs, and it is stated here rather than as a table row because an
+earlier revision put those lock states in the *lease* column, which broke both the
+table's stated domain and its schema.
+
+Against a live `WORKING_<agent>`, adoption is not free. An earlier revision allowed
+any token-bearing caller to claim a tokenless LOCK unconditionally, reasoning that
+the LOCK "predates adoption". It does not prove that. A tokenless holder may be a
+live legacy or manual instance, and the token-bearing caller may be exactly the
+second instance this RFC exists to catch — so the permissive reading would have let
+the design **be defeated by being adopted**. That case is `holder unidentified` in
+the table, and it takes the same gates as any other non-`match`.
 
 #### The mixed state, stated rather than glossed
 
