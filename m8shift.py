@@ -4627,7 +4627,8 @@ def _time_bucket(state):
     return "unclassified"
 
 
-def fold_time_accounting(events, session_id, as_of=None, current_lock=None):
+def fold_time_accounting(events, session_id, as_of=None, current_lock=None,
+                         work_horizon=None):
     """Fold canonical RFC-064 transition evidence into mutually exclusive buckets.
 
     Append order is authoritative.  Broken, regressive, unsupported, or legacy spans
@@ -4779,7 +4780,20 @@ def fold_time_accounting(events, session_id, as_of=None, current_lock=None):
         lock_state = (current_lock or {}).get("state")
         if not terminal_row and lock_since and started <= lock_since <= ended:
             add_span(None, (lock_since - started).total_seconds(), forced_unknown=True)
-            add_span(lock_state, (ended - lock_since).total_seconds())
+            # The horizon split below applies here for the same reason it applies on
+            # the telemetry path: an expired lease stops converting wall-clock into
+            # work, and the absence of transition evidence is not evidence that the
+            # holder kept working. Without this the legacy path bills the abandoned
+            # remainder in full, which is #270 reproduced through a different door.
+            horizon = work_horizon if _working_agent(lock_state) else None
+            if horizon is not None and horizon < ended:
+                worked_until = max(lock_since, horizon)
+                add_span(lock_state, (worked_until - lock_since).total_seconds())
+                add_span(None, (ended - worked_until).total_seconds(),
+                         forced_unknown=True)
+                diagnose("lease_expired_before_as_of")
+            else:
+                add_span(lock_state, (ended - lock_since).total_seconds())
             if lock_since > started:
                 diagnose("legacy_claim_boundaries_missing")
         else:
@@ -4794,8 +4808,23 @@ def fold_time_accounting(events, session_id, as_of=None, current_lock=None):
                             lock_since == cursor)
             if not lock_matches:
                 diagnose("current_lock_timeline_gap")
-        add_span(current_state, (ended - cursor).total_seconds(), current_window,
-                 forced_unknown=(broken or not lock_matches))
+        # A WORKING state does not make wall-clock into work forever: past the
+        # lease (and past any protective beat extending it) the pen is abandoned,
+        # and the remainder is unknown rather than effective work. Without this,
+        # a machine asleep overnight under an expired lease bills as a night of
+        # work — measured at 15h once, which is what produced this split.
+        horizon = work_horizon if _working_agent(current_state) else None
+        if horizon is not None and horizon < ended:
+            worked_until = max(cursor, horizon)
+            add_span(current_state, (worked_until - cursor).total_seconds(),
+                     current_window,
+                     forced_unknown=(broken or not lock_matches))
+            add_span(None, (ended - worked_until).total_seconds(),
+                     forced_unknown=True)
+            diagnose("lease_expired_before_as_of")
+        else:
+            add_span(current_state, (ended - cursor).total_seconds(), current_window,
+                     forced_unknown=(broken or not lock_matches))
 
     non_work = totals["awaiting"] + totals["paused"] + totals["idle"]
     accounted = totals["effective_work"] + non_work + totals["unclassified"]
@@ -4837,9 +4866,11 @@ def status_time_accounting(accounting):
 
 def current_time_accounting(lk, as_of=None, events=None):
     """Fold the current session at one caller-owned observation instant."""
+    observed = as_of or now()
     return fold_time_accounting(
         read_session_events() if events is None else events,
-        lk.get("session", ""), as_of=as_of or now(), current_lock=lk,
+        lk.get("session", ""), as_of=observed, current_lock=lk,
+        work_horizon=holder_work_horizon(lk, observed),
     )
 
 
@@ -4892,9 +4923,11 @@ def cmd_time(args):
     if not any(row.get("session_id") == session_id for row in events):
         sys.exit("session not found: %s" % session_id)
     observed = now()
+    is_current = session_id == lk.get("session")
     accounting = fold_time_accounting(
         events, session_id, as_of=observed,
-        current_lock=lk if session_id == lk.get("session") else None,
+        current_lock=lk if is_current else None,
+        work_horizon=holder_work_horizon(lk, observed) if is_current else None,
     )
     if getattr(args, "json", False):
         print(json.dumps(accounting, ensure_ascii=False, sort_keys=True))
@@ -6853,7 +6886,8 @@ def _doctor_accounting_timeline_findings(events, lk):
             os.path.basename(SESSIONS),
             "keep the LOCK authoritative; inspect the append-only session ledger before relying on totals",
         )]
-    folded = fold_time_accounting(events, session_id, current_lock=lk)
+    folded = fold_time_accounting(events, session_id, current_lock=lk,
+                                  work_horizon=holder_work_horizon(lk))
     gap_codes = {
         "malformed_transition_event", "transition_clock_regression",
         "state_chain_broken", "current_lock_timeline_gap", "transition_outside_session",
@@ -7891,6 +7925,37 @@ def remove_heartbeat(agent):
     """Best-effort orphan cleanup (release/done) — never authority, never fatal."""
     with contextlib.suppress(OSError):
         os.remove(_heartbeat_path(agent))
+
+
+def holder_work_horizon(lk, at=None):
+    """Until when the current WORKING holder may still be counted as working.
+
+    The lease `expires` is the floor. A protective heartbeat does NOT extend the
+    lease — RFC 049 makes it protect an expired pen from force-claim, not renew
+    it — so a holder that keeps beating IS genuinely still at work past expiry,
+    and its horizon runs to the end of that beat's protection window. Past both,
+    the pen was abandoned and the wall-clock beyond is not work.
+
+    Returns None when the state is not WORKING_* or no deadline is knowable, in
+    which case the caller must not clamp anything.
+    """
+    agent = _working_agent((lk or {}).get("state", ""))
+    if not agent:
+        return None
+    horizon = parse_iso((lk or {}).get("expires"))
+    status, doc = read_heartbeat(agent)
+    if (status == "valid" and doc.get("protective") is True
+            and heartbeat_matches_window(lk, agent, doc)):
+        beat = parse_iso(doc.get("written_at"))
+        cadence = doc.get("cadence_seconds")
+        if beat is not None and isinstance(cadence, (int, float)) and cadence > 0:
+            # The SAME window heartbeat_protective uses for force-claim, so one
+            # definition of "the holder is alive" serves both.
+            window = max(HEARTBEAT_FLOOR_S, min(2 * cadence, TTL_SECONDS))
+            protected_until = beat + dt.timedelta(seconds=window)
+            horizon = (protected_until if horizon is None
+                       else max(horizon, protected_until))
+    return horizon
 
 
 def heartbeat_meta(lk):
@@ -9644,9 +9709,12 @@ def _usage_reset_when(reset_iso, ref):
     if reset is None:
         return None
     loc = reset.astimezone()
-    if loc.date() == ref.astimezone().date():
-        return loc.strftime("%H:%M")
-    return loc.strftime("%d/%m %H:%M")
+    when = (loc.strftime("%H:%M") if loc.date() == ref.astimezone().date()
+            else loc.strftime("%d/%m %H:%M"))
+    # RFC 078: a deadline already past describes a window that has ROLLED, possibly
+    # several times. Rendering it in the same shape as a live one invites the reader
+    # to plan around a boundary that no longer exists.
+    return when + " ROLLED" if reset <= ref else when
 
 
 def _usage_reset_display(snap, ref):
@@ -9847,6 +9915,12 @@ def _usage_rows(lk, ref=None):
                 "reset": _usage_reset_display(snap, ref),
                 "age_seconds": age,
                 "age_display": _usage_age_display(age),
+                # Two different facts, deliberately kept apart. `stale` also covers
+                # a LAST-KNOWN fallback, which may be seconds old — it means "not
+                # the newest record", not "old". `aged` is the freshness question
+                # alone, and it is the one that decides whether a figure may still
+                # be quoted as describing the current window (#271).
+                "aged": age is None or age > USAGE_STALE_AFTER_SECONDS,
                 "stale": bool(snap.get("_m8shift_last_known"))
                          or age is None or age > USAGE_STALE_AFTER_SECONDS,
             })
@@ -9868,7 +9942,13 @@ def _print_usage_block(lk, rows=None):
         segs = []
         if row.get("consumption"):
             segs.append(row["consumption"])          # #59: actual token consumption
-        if row.get("windows_display"):
+        # RFC 078 / #271: a percentage is a claim about the CURRENT window. On a
+        # stale snapshot the owning component (the runtime companion) reports
+        # `unknown` and `n/a`; the core printed the old figures with a `stale`
+        # suffix, so the two disagreed about the same record and the reader
+        # believed the one on the default screen. Fall through to the n/a branch,
+        # which keeps the attribution, the reset and the age.
+        if row.get("windows_display") and not row["aged"]:
             # Unified line: full-window remaining quota first, then 5h, with reset
             # date when not today — `agent weekly left 58% (...) - 5h left 36%
             # (Reset 16/07 23:45) · (official) · 2m ago`.
