@@ -4780,7 +4780,20 @@ def fold_time_accounting(events, session_id, as_of=None, current_lock=None,
         lock_state = (current_lock or {}).get("state")
         if not terminal_row and lock_since and started <= lock_since <= ended:
             add_span(None, (lock_since - started).total_seconds(), forced_unknown=True)
-            add_span(lock_state, (ended - lock_since).total_seconds())
+            # The horizon split below applies here for the same reason it applies on
+            # the telemetry path: an expired lease stops converting wall-clock into
+            # work, and the absence of transition evidence is not evidence that the
+            # holder kept working. Without this the legacy path bills the abandoned
+            # remainder in full, which is #270 reproduced through a different door.
+            horizon = work_horizon if _working_agent(lock_state) else None
+            if horizon is not None and horizon < ended:
+                worked_until = max(lock_since, horizon)
+                add_span(lock_state, (worked_until - lock_since).total_seconds())
+                add_span(None, (ended - worked_until).total_seconds(),
+                         forced_unknown=True)
+                diagnose("lease_expired_before_as_of")
+            else:
+                add_span(lock_state, (ended - lock_since).total_seconds())
             if lock_since > started:
                 diagnose("legacy_claim_boundaries_missing")
         else:

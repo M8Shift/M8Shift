@@ -3598,6 +3598,48 @@ class TestExpiredLeaseAndStaleUsageAreNotCurrent(CLIBase):
         self.assertIn("lease_expired_before_as_of", payload["diagnostics"])
         self.assertGreaterEqual(payload["unclassified_seconds"], 3600 - 120)
 
+    # The two below exercise the fold directly rather than through the CLI,
+    # because the legacy path is defined by the ABSENCE of transition telemetry:
+    # a CLI fixture would have to prove a negative about the ledger it writes.
+    _LEGACY_START = "2026-08-05T00:00:00Z"
+    _LEGACY_AS_OF = "2026-08-05T03:00:00Z"
+
+    def _legacy_fold(self, horizon, state="WORKING_CODEX"):
+        sid = "20260805T000000Z-legacy"
+        rows = [{"session_id": sid, "event": "start", "at": self._LEGACY_START}]
+        lock = {"state": state, "holder": "codex",
+                "since": "2026-08-05T01:00:00Z", "expires": "2026-08-05T02:00:00Z"}
+        return cowork.fold_time_accounting(
+            rows, sid, as_of=cowork.parse_iso(self._LEGACY_AS_OF),
+            current_lock=lock, work_horizon=cowork.parse_iso(horizon))
+
+    def test_the_legacy_open_interval_also_clamps_at_the_work_horizon(self):
+        # #270 reproduced through the other door: with no transition evidence the
+        # fold billed the whole open interval as work, so the hour AFTER the lease
+        # died counted. Same defect, same expectation — the split is not a property
+        # of having telemetry.
+        result = self._legacy_fold("2026-08-05T02:00:00Z")
+        self.assertEqual(result["effective_work_seconds"], 3600,
+                         "the abandoned hour was billed as work")
+        self.assertEqual(result["unclassified_seconds"], 7200)
+        self.assertIn("lease_expired_before_as_of", result["diagnostics"])
+
+    def test_a_fresh_protective_beat_extends_the_horizon_past_the_lease(self):
+        # The exception that justifies taking a horizon rather than `expires`
+        # itself: a managed producer beating protectively is still holding the
+        # pen, so the whole interval is work and nothing is declared abandoned.
+        result = self._legacy_fold("2026-08-05T04:00:00Z")
+        self.assertEqual(result["effective_work_seconds"], 7200,
+                         "a live protective beat must not be clamped at the lease")
+        self.assertNotIn("lease_expired_before_as_of", result["diagnostics"])
+
+    def test_the_horizon_split_never_applies_to_a_non_working_state(self):
+        # Guard against over-correction: awaiting time is not work, and clamping
+        # it would silently move seconds between buckets rather than fix anything.
+        result = self._legacy_fold("2026-08-05T02:00:00Z", state="AWAITING_CLAUDE")
+        self.assertEqual(result["effective_work_seconds"], 0)
+        self.assertNotIn("lease_expired_before_as_of", result["diagnostics"])
+
     def _stale_snapshot(self, age_hours, reset_hours_ago):
         runtime = os.path.join(self.d, ".m8shift", "runtime")
         os.makedirs(runtime, exist_ok=True)
