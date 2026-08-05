@@ -456,12 +456,29 @@ was *observed* to emit, not the one whose name best described the intent.
 **This RFC extends the RFC 064 fold contract:**
 
 > On every `state` row that **leaves** a working state, the fold MUST compare the
-> row's `work_window_id` with the window it believes open, and on mismatch MUST
-> diagnose `work_window_discontinuity`.
+> **closing** window on that row with the window it believes open, and on mismatch
+> MUST diagnose `work_window_discontinuity`. The closing window is
+> `previous_work_window_id` when the row carries it, and `work_window_id`
+> otherwise.
 
-Rows that *open* a window and carry `previous_work_window_id` are checked the same
-way against the same believed-open window. That case is real but is not the one a
-lost batch produces.
+**Why the precedence matters, measured rather than reasoned.** A row can both close
+one window and open another — every legitimate `WORKING → WORKING` rotation does,
+including the takeover itself. Executing the producer for both shapes:
+
+    WORKING → AWAITING   work_window_id=6d0ea953
+    WORKING → WORKING    work_window_id=cf7f196c   previous_work_window_id=6d0ea953
+
+The believed-open window is `6d0ea953`. On the dual row it appears under
+`previous_work_window_id`, while `work_window_id` holds the **newly opened** window.
+A rule that compared `work_window_id` unconditionally — as an earlier revision of
+this very paragraph did — would therefore fire on *every legitimate rotation*, which
+is worse than the silence it was written to fix: a diagnostic that cries on normal
+operation is one nobody reads when it is right.
+
+The precedence resolves it with no special case: take `previous_work_window_id` when
+present, since its presence is exactly the signal that the row opened something new,
+and `work_window_id` otherwise, since a row that opens nothing carries the closing
+window there.
 
 **The unclassified span, defined exactly rather than left as "the affected span".**
 On a discontinuity the fold cannot know when the window it never saw was opened, so
