@@ -419,11 +419,40 @@ instance-change event — are written as **one atomic ledger batch**: both or ne
 never one alone. Audit and accounting must not be able to disagree about whether a
 takeover happened.
 
-**When the batch fails**, RFC 064's rule stands unchanged and is restated here so
-nobody has to infer it: the LOCK remains authoritative, the takeover *did* happen,
-the failure warns rather than rolling back, and the missing boundary surfaces as the
-timeline-gap warning the fold already emits. That is a degraded but honest state —
-the pen moved, and the record says the record is incomplete. Two
+**When the batch fails**, RFC 064's rule stands unchanged: the LOCK remains
+authoritative, the takeover *did* happen, and the failure warns rather than rolling
+back.
+
+An earlier revision added that the missing boundary "surfaces as the timeline-gap
+warning the fold already emits". **That was false**, and review demonstrated it by
+running the sequence rather than arguing it: after the displaced holder's successor
+appends once, the fold returns `quality=exact`, `unclassified_seconds=0` and no
+diagnostics at all. The gap is visible only while the takeover's LOCK is still the
+live anchor; the next successful transition makes it disappear, and the lost window
+is billed to its predecessor forever.
+
+Verified in the engine before writing the fix, and the finding is sharper than a
+missing field. The producer **already emits** `previous_work_window_id` on every
+transition that opens a window. That identifier appears exactly **once** in the
+whole engine — at the line that writes it. **Nothing reads it.** The fold's
+continuity check is `if broken or row.get("from_state") != current_state`: state
+only, never window.
+
+So the durable detection this RFC needs already has its evidence in the ledger and
+lacks only a consumer. **This RFC therefore extends the RFC 064 fold contract**: on
+every `state` row carrying `previous_work_window_id`, the fold MUST compare it with
+the window it believes open, and on a mismatch MUST diagnose
+`work_window_discontinuity` and treat the affected span as unclassified rather than
+as work.
+
+That closes the sequence above at step 3: the successor's append carries
+`previous_work_window_id` naming the window the takeover opened, which the fold never
+saw open, so the discontinuity is detected then and stays detected afterwards —
+because it is derived from the row rather than from the live anchor.
+
+The honest residue, stated so it is not rediscovered later: this makes a lost batch
+**detectable**, not recoverable. The time is unclassified rather than correctly
+attributed, which is the right direction — unmeasured beats confidently wrong. Two
 consequences follow, and both belong in this RFC rather than in an implementation
 note:
 
