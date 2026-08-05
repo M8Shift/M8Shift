@@ -40,8 +40,9 @@ silent double-drive is indistinguishable from an orderly one.
 
 ## Why the existing pieces do not cover it
 
-**`work_window_id` is not an ownership credential.** A fresh id is minted at each
-claim and recorded in the session ledger, which makes the history auditable
+**`work_window_id` is not an ownership credential.** A fresh id is minted on entry
+to each work window — not on every `claim`, since a matching refresh preserves it —
+and recorded in the session ledger, which makes the history auditable
 *after the fact*, but any process passing the same roster name obtains one. It
 identifies a work window, not who opened it.
 
@@ -365,17 +366,56 @@ ordinary `claim`, `--takeover-instance --reason`, and its `--live-override` form
 | Field | On takeover | On matching refresh |
 | --- | --- | --- |
 | `holder_instance` | the arriving caller's token | preserved |
-| `holder_mode` | the arriving caller's declaration, normalised by §1 | preserved |
+| `holder_mode` | the arriving caller's declaration, normalised by the mode contract above | preserved |
 | `work_window_id` | fresh | preserved |
 | `since` | now | preserved |
 | lease `expires` | now plus TTL | extended |
 
-The displaced pair — `holder_instance`, `holder_mode`, `work_window_id` — is
+The displaced values — `holder_instance`, `holder_mode` and `work_window_id` — are
 retained **only in the instance-change event**, which is what lets `history` and
 `recap` show who was displaced and under which declaration, without leaving a stale
 declaration governing a holder who never made it.
 
 One contract, three command rows, no implementer choice.
+
+#### The accounting boundary, because the audit event alone cannot deliver it
+
+Ending a work window has consequences outside this table, and an earlier revision
+promised a fresh window without saying how accounting would learn of it. Verified in
+the engine rather than assumed:
+
+- the transition producer drops same-state transitions outright —
+  `if from_state == to_state or not after.get("session"): return True`;
+- the accounting fold consumes only `("state", "work_tag")` rows.
+
+A takeover is `WORKING_<agent> → WORKING_<agent>`. Read literally, the previous text
+therefore moved the LOCK from window A to window B while accounting received a
+single `instance-change` event that **nothing consumes**. At the next append the
+fold would still believe window A is current and would attribute the whole
+claim-to-append interval to A: B's time and any B work tag simply lost, and the live
+`since` disagreeing with an unsplit ledger. The document promised a boundary its only
+named event could not create.
+
+So the takeover emits, under the same core file lock and in the same atomic write,
+a **canonical same-state [RFC 064](064-rfc-effective-time-accounting.md) `state`
+transition** carrying `work_window_id` and `previous_work_window_id`. Two
+consequences follow, and both belong in this RFC rather than in an implementation
+note:
+
+1. the same-state drop is **amended for this transition only**. It exists to
+   suppress no-op churn, and a takeover is not a no-op: the holder changed. Every
+   other same-state case keeps being dropped;
+2. the fold **splits A at takeover time and opens B**, so the interval before the
+   takeover bills to A and the interval after bills to B.
+
+The instance-change evidence stays — it carries the displaced declaration, which the
+`state` row does not — but it is no longer load-bearing for accounting. Audit and
+accounting are two consumers with two records, and this revision stops asking one
+event to serve both.
+
+**An ordinary matching refresh emits no boundary**, exactly as today: it preserves
+`work_window_id` and `since`, so no duration is split. That rule is unchanged and is
+the reason the transition table above lists a `preserved` column at all.
 
 #### Binding the beat to the instance it is used to prove alive
 
