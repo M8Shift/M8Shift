@@ -439,16 +439,40 @@ continuity check is `if broken or row.get("from_state") != current_state`: state
 only, never window.
 
 So the durable detection this RFC needs already has its evidence in the ledger and
-lacks only a consumer. **This RFC therefore extends the RFC 064 fold contract**: on
-every `state` row carrying `previous_work_window_id`, the fold MUST compare it with
-the window it believes open, and on a mismatch MUST diagnose
-`work_window_discontinuity` and treat the affected span as unclassified rather than
-as work.
+lacks only a consumer.
 
-That closes the sequence above at step 3: the successor's append carries
-`previous_work_window_id` naming the window the takeover opened, which the fold never
-saw open, so the discontinuity is detected then and stays detected afterwards —
-because it is derived from the row rather than from the live anchor.
+**Which field, since an earlier revision named the wrong one.** That revision had
+the rule consume `previous_work_window_id`, and review executed the producer to show
+it would never fire: on a transition that *leaves* a working state, the row carries
+`work_window_id` alone. Confirmed here by running the function rather than reading
+it — `work_window_id()` returns `None` for a non-working `to_state`, so the producer
+takes its `elif old_window:` branch and writes the **leaving** window under
+`work_window_id`, with no `previous_work_window_id` at all.
+
+That is twice in two revisions that I specified a consumer for a field the relevant
+row does not carry. The rule below is therefore stated over the field the producer
+was *observed* to emit, not the one whose name best described the intent.
+
+**This RFC extends the RFC 064 fold contract:**
+
+> On every `state` row that **leaves** a working state, the fold MUST compare the
+> row's `work_window_id` with the window it believes open, and on mismatch MUST
+> diagnose `work_window_discontinuity`.
+
+Rows that *open* a window and carry `previous_work_window_id` are checked the same
+way against the same believed-open window. That case is real but is not the one a
+lost batch produces.
+
+**The unclassified span, defined exactly rather than left as "the affected span".**
+On a discontinuity the fold cannot know when the window it never saw was opened, so
+it cannot split the interval. Everything from its last trusted boundary up to the
+mismatching row is unclassified — billed to neither window. The interval is of
+unknown composition and is recorded as being exactly that.
+
+That closes the reproduced sequence at step 3: the successor's append carries
+`work_window_id` naming the window the takeover opened, which the fold never saw
+open, so the discontinuity is detected there and **stays** detected afterwards —
+because it derives from the row rather than from the live anchor.
 
 The honest residue, stated so it is not rediscovered later: this makes a lost batch
 **detectable**, not recoverable. The time is unclassified rather than correctly
