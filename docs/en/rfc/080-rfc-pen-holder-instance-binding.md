@@ -96,8 +96,15 @@ displayed truncated to its first 8 characters; machine surfaces carry it whole.
   here.
 
 The token is **not** an authentication secret. Anyone able to write the LOCK can
-write any token. It is a coordination aid, consistent with a core that detects
-rather than enforces: it makes an accident visible, it does not stop an attacker.
+write any token, so it stops an accident and not an attacker.
+
+An earlier revision described this as "a core that detects rather than enforces".
+That is no longer accurate and should not be left standing: §3 **does** enforce —
+a mismatch refuses the operation. The honest distinction is not detection versus
+enforcement but *cooperative* enforcement versus *authentication*: the guard binds
+participants who pass their own token honestly, and offers nothing against a
+writer who chooses to forge one. Every other guard in this core has the same
+shape.
 
 #### Who mints it, and why the environment alone is not enough
 
@@ -115,7 +122,7 @@ So the lifecycle has to be specified per mode, and the guarantee differs by mode
 | Stage | **Managed** (runner or launcher starts the agent) | **Manual** (operator or interactive session) |
 | --- | --- | --- |
 | Created | by the launcher, per invocation | by the operator, per session |
-| Value | the run id the runtime already mints — not a parallel concept | any opaque string |
+| Value | the run id the runtime already mints — not a parallel concept | any token conforming to the grammar above |
 | Rotated | necessarily, since a new invocation is a new run | only if the operator rotates it |
 | Cleared | when the invocation ends | never automatically |
 | Freshness | **guaranteed** by the launcher | **not guaranteed** |
@@ -209,18 +216,38 @@ Read against a `WORKING_<agent>` lock, for a caller using the same roster name.
 | mismatch | valid | fresh | managed | **refuse.** The other instance is provably alive; taking the pen would strand it mid-task |
 | mismatch | valid | absent/expired | managed | **refuse ordinary claim; `--takeover-instance` permitted.** A live lease with no beat is the ambiguous case, so it costs a reason and an audit record |
 | mismatch | valid | n/a | unmanaged | **refuse ordinary claim; `--takeover-instance` permitted.** Nothing distinguishes recovery from concurrent drive, so the operator decides and the decision is recorded |
-| mismatch | expired | fresh | managed | **refuse ordinary claim; `--takeover-instance` permitted.** A fresh beat outranks an expired lease — this is exactly the case [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) protects |
-| mismatch | expired | absent/expired | any | **allow** with an instance-change event. Both signals agree the previous instance is gone |
+| mismatch | expired | fresh | managed | **refuse ordinary claim; `--takeover-instance --live-override --reason` required.** A fresh beat proves the instance alive, and an expired lease does not weaken that proof — same human-authorization floor as [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) |
+| mismatch | expired | absent, expired, or unobservable | any | **allow** with an instance-change event. Both signals agree the previous instance is gone; `unobservable` is the unmanaged case, which has no beat to read |
 | absent on caller, set in LOCK | any | any | any | **refuse ordinary claim; `--takeover-instance` permitted.** See the mixed-state rule below |
-| set on caller, absent in LOCK | any | any | any | **allow**, and record the caller's token. The LOCK predates adoption |
+| set on caller, absent in LOCK | **`AWAITING_<agent>` or `IDLE`** | n/a | any | **allow** and record the caller's token. Entering a fresh work window is where adoption belongs |
+| set on caller, absent in LOCK | `WORKING_<agent>` | any | any | **refuse ordinary claim; the same audited path as the row above.** A tokenless LOCK does **not** prove the holder predates adoption |
 | absent both sides | any | any | any | **today's behaviour, byte-identical** |
 
-Two rows are worth stating in prose because they are where this RFC changes an
-existing outcome rather than adding to it. `mismatch / valid / fresh / managed`
-refuses where today's code silently refreshes. And `mismatch / expired /
-absent/expired` allows where RFC 049's peer flow would also allow — the agreement
-is deliberate, since that is the one row where both documents look at the same
-evidence.
+Four rows deserve prose, because each is a place where the table either changes an
+existing outcome or was got wrong in an earlier revision.
+
+**`mismatch / valid / fresh / managed` refuses** where today's code silently
+refreshes. This is the row the whole RFC is for.
+
+**`mismatch / expired / absent` allows**, agreeing with RFC 049's peer flow. The
+agreement is deliberate: it is the one row where both documents weigh the same
+evidence and reach the same answer.
+
+**`mismatch / expired / fresh / managed` requires `--live-override`,** not merely a
+reason. An earlier revision let a reason string suffice here, which contradicted
+the row above it: if a fresh beat is authoritative enough to prove the instance
+alive under a valid lease, lease expiry does not make that proof weaker. RFC 049
+reserves overriding a fresh heartbeat for *"explicit human authorization"*, and
+this row now inherits that floor verbatim rather than inventing a cheaper one.
+
+**Adoption is asymmetric, and that asymmetry is the point.** An earlier revision
+allowed any token-bearing caller to claim a tokenless LOCK unconditionally, on the
+reasoning that the LOCK "predates adoption". It does not prove that. A tokenless
+holder may be a live legacy or manual instance, and the token-bearing caller may be
+exactly the second instance this RFC exists to catch — so the permissive reading
+would have let the design be defeated by being adopted. Adoption is therefore free
+when entering a fresh work window from `AWAITING_<agent>` or `IDLE`, and audited
+against a live `WORKING_<agent>`.
 
 #### The mixed state, stated rather than glossed
 
