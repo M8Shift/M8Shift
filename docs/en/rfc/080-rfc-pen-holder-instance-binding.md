@@ -250,19 +250,75 @@ lost its sidecar. Inferring mode from the very signal whose meaning depends on t
 mode is circular.
 
 So the mode is **declared at claim and recorded with the work window**, beside
-`holder_instance`, as `holder_mode`:
+`holder_instance`, as `holder_mode`. An earlier revision stopped there, naming
+actors — "the launcher", "the operator" — rather than a command boundary, which
+left the column unimplementable. The contract in full:
 
-| Value | Meaning | Who sets it |
+**Input.** `$M8SHIFT_INSTANCE_MODE`, read at `claim` from the same environment as
+`$M8SHIFT_INSTANCE`, so one launcher sets both or neither. Accepted values are
+exactly `managed` and `manual`, compared case-sensitively. No flag, no config file,
+no other source — a second source would reintroduce the ambiguity this section
+exists to remove.
+
+**Persisted domain.** `holder_mode` stores `managed`, `manual`, or `unknown`.
+
+| Input at claim | Persisted | Why |
 | --- | --- | --- |
-| `managed` | a producer is expected to emit protective beats for this window | the launcher that mints the token |
-| `manual` | no producer exists for this window | the operator, or any caller that declares it |
-| *missing, unrecognised, or inconsistent with the token* | **unknown** | nobody — this is the failure state |
+| `managed`, with a token set | `managed` | a producer is expected to emit protective beats for this window |
+| `manual`, with a token set | `manual` | no producer exists for this window |
+| unset, with a token set | `unknown` | the caller identified itself but said nothing about producers |
+| any value not in {`managed`, `manual`} | `unknown` | malformed; never guessed at |
+| any value, **token unset** | not recorded | there is no window identity to qualify. This is the legacy row, unchanged |
 
-**Unknown maps to `unobservable`.** That is the fail-closed direction: it costs an
-audited takeover where an automatic one might have sufficed, and never the reverse.
-A design that guessed `managed` on missing data would convert every un-instrumented
-or partially-adopted holder into an automatically displaceable one, which is the
-failure this RFC was revised twice to remove.
+That last row is the predicate an earlier revision left as the vague phrase
+"inconsistent with the token": a mode without a token qualifies nothing, so it is
+ignored rather than stored. There is no other inconsistency to define, because the
+two values are independent otherwise.
+
+**Evaluated domain — how the table consumes it.** The `Mode` column has exactly
+**two** evaluated values, and the three persisted values normalise onto them:
+
+    managed              → managed
+    manual               → unmanaged
+    unknown / unrecorded → unmanaged
+
+An earlier revision left `manual` and `unknown` with no matching row at all, so a
+real window carrying `holder_mode: unknown` matched nothing and the nine-row
+completeness claim was false over the persisted domain. It is true now, and true of
+the *stored* values rather than only of the vocabulary the table happens to use.
+
+**Unknown normalises to `unmanaged`, whose beat is `unobservable`.** That is the
+fail-closed direction: it costs an audited takeover where an automatic one might
+have sufficed, and never the reverse. A design that guessed `managed` on missing
+data would convert every un-instrumented or partially-adopted holder into an
+automatically displaceable one — the failure this RFC was revised twice to remove.
+
+#### The trust limit, stated because the design leans on it
+
+`managed` is a **cooperative declaration by the caller**, not an attestation the
+core can verify. Nothing proves the value came from a real launcher; a process may
+export `managed` and no producer need exist.
+
+This matters for exactly one row. `not match / expired / absent/expired / managed`
+allows takeover automatically, and it does so on the strength of a declaration
+rather than of proof. A caller wishing to displace a holder could declare
+`managed`, wait for the lease to lapse, and take the pen without an audit record.
+
+Three reasons to accept that, stated so a reader can disagree with the reasoning
+rather than discover it later:
+
+1. it is the same trust model as the token itself, which §1 already says stops an
+   accident and not an attacker — this RFC adds no authentication anywhere;
+2. the same actor could equally set a matching `holder_instance` and skip the whole
+   mechanism, so the declaration is not the weakest link;
+3. every other outcome in the table is *stricter* under a false declaration, since
+   `unmanaged` is the fail-closed normalisation.
+
+What the design must therefore **not** claim is that the automatic row rests on
+evidence the previous instance is gone. It rests on a declaration that a producer
+was expected, plus a beat that did not arrive. The lint finding
+`instance_tokens_diverge` is where a false declaration becomes visible after the
+fact, and that is the honest limit of it.
 
 Recording the mode rather than re-deriving it later is [RFC
 078](078-rfc-freshness-first-class.md) §2.1 applied directly: what a producer may
@@ -288,7 +344,7 @@ direction, the error of the previous revision.
 
 **Completeness, so a reviewer can check it rather than trust it.** Nine outcome
 rows cover the domain exactly, because `Beat` and `Mode` are not independent: a
-a window declared `managed` expects a producer, so its beat is `fresh` or
+a window whose evaluated mode is `managed` expects a producer, so its beat is `fresh` or
 `absent/expired` and never `unobservable`; a window that is `manual` — or whose
 declaration is missing, which fails closed to the same treatment — has no producer,
 so its beat is `unobservable` and never the other two. The dependency runs through
@@ -445,8 +501,11 @@ doctrine: the core never blocks on either, the lint only names what it sees.
    token so that the subsequent `claim --refresh`, `append`, `release` and `done`
    carry it. Printing a token and calling the problem solved would be the same
    half-measure this RFC was revised to remove.
-3. ~~**Should `status` display it?**~~ **Settled in §1**: truncated to 8 characters
-   on human surfaces, whole on machine surfaces.
+3. ~~**Should `status` display it?**~~ **Settled in §1**: an 8-hex SHA-256 digest
+   on human surfaces, the whole token on machine surfaces. This entry said
+   "truncated to 8 characters" until the truncation was measured and found to carry
+   no per-run entropy — left stale one revision too long, which is why it is called
+   out here rather than quietly rewritten.
 4. **Interaction with RFC 054.** Pre-exhaustion rotation is the *planned* version
    of the event that motivated this RFC. If a rotation hands over deliberately,
    it should carry the instance change explicitly rather than trip the guard.
