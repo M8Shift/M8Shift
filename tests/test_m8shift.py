@@ -40,6 +40,44 @@ import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
 
 VERSION = cowork.VERSION
 
+# ── Ambient-environment isolation (#288) ────────────────────────────────────
+# The suite shells out to `m8shift.py`, so every M8SHIFT_* variable exported by
+# whoever runs it reaches the code under test. That made the result depend on the
+# shell: `TestAdvisoryFields.test_absent_by_default_block_unchanged` asserts an
+# exact handoff key list, and an ambient M8SHIFT_AGENT_MODEL legitimately adds a
+# `model` key — so the suite was green for one agent and red for another on the
+# same commit, twice, with neither number carrying anything to tell them apart.
+#
+# The purge happens once at import, BEFORE any test runs, which is what lets the
+# tests that deliberately set these values keep working: `mock.patch.dict` writes
+# them back afterwards, for the duration of its block. Stripping inside the CLI
+# helper instead would have broken exactly those tests, since a patched variable
+# and an inherited one are indistinguishable at call time.
+#
+# The list is enumerated from the engine rather than from the one variable that
+# was observed to leak — and a first attempt at that enumeration missed five of
+# thirteen, because it grepped only `os.environ.get("M8SHIFT_…")` and several
+# names live behind constants. `test_ambient_isolation_covers_every_engine_env_var`
+# re-derives the set from the sources so the list cannot silently fall behind
+# again.
+AMBIENT_ENV_VARS = (
+    "M8SHIFT_AGENT_EFFORT",
+    "M8SHIFT_AGENT_MODEL",
+    "M8SHIFT_DENYLIST",
+    "M8SHIFT_HYGIENE_ALLOWED_ROOTS",
+    "M8SHIFT_LANG",
+    "M8SHIFT_LISTENER_BACKEND_PROBE",
+    "M8SHIFT_LISTENER_DETACHED",
+    "M8SHIFT_LISTENER_GENERATION",
+    "M8SHIFT_LISTENER_LOG_MAX_BYTES",
+    "M8SHIFT_ROOT",
+    "M8SHIFT_RTK",
+    "M8SHIFT_RTK_ADOPTION_THRESHOLD",
+    "M8SHIFT_SCRUB_ENFORCE",
+)
+for _ambient in AMBIENT_ENV_VARS:
+    os.environ.pop(_ambient, None)
+
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
 
@@ -3850,6 +3888,33 @@ class TestAdvisoryFields(CLIBase):
         peek = self.cw("peek", "codex").stdout
         self.assertIn("x_jira=PROJ-7", peek)
         self.assertIn("branch=feat/x", peek)
+
+    def test_ambient_isolation_covers_every_engine_env_var(self):
+        """#288: the purge list must be re-derived, not remembered.
+
+        My first hand-written list held six of thirteen names, because it grepped
+        only `os.environ.get("M8SHIFT_…")` while several names live behind `*_ENV`
+        constants read through a passed-in mapping. This test scans both engines and
+        fails when a name escapes the purge, so the isolation cannot fall behind the
+        code it protects.
+        """
+        found = set()
+        for name in ("m8shift.py", "m8shift-runtime.py"):
+            with open(os.path.join(REPO, name), encoding="utf-8") as fh:
+                source = fh.read()
+            found |= set(re.findall(r'^[A-Z][A-Z_0-9]*\s*=\s*"(M8SHIFT_[A-Z_0-9]+)"',
+                                    source, re.M))
+            found |= set(re.findall(r'os\.environ(?:\.get)?[\(\[]\s*"(M8SHIFT_[A-Z_0-9]+)"',
+                                    source))
+        missing = sorted(found - set(AMBIENT_ENV_VARS))
+        self.assertEqual(missing, [],
+                         "these engine environment variables can still leak into the "
+                         "suite from the developer's shell: %s" % ", ".join(missing))
+
+    def test_no_ambient_env_var_survives_import(self):
+        # The purge is the mechanism the test above only inventories.
+        leaked = [name for name in AMBIENT_ENV_VARS if name in os.environ]
+        self.assertEqual(leaked, [], "not purged at import: %s" % ", ".join(leaked))
 
     def test_absent_by_default_block_unchanged(self):
         self._claim_append()
