@@ -83,12 +83,28 @@ inventing a second one: 1–128 characters, from the safe set that grammar alrea
 defines, no whitespace and no newline. A value that does not conform is rejected at
 `claim` with a message naming the constraint — never silently truncated, since a
 truncated token would compare unequal to itself and manufacture the very mismatch
-this RFC exists to detect. On human surfaces (`status`, `history`, `recap`) it is
-displayed truncated to its first 8 characters; machine surfaces carry it whole.
+this RFC exists to detect.
 
-- **Set** → recorded in the LOCK at claim as `holder_instance:<token>`, and
-  compared by every operation that requires the pen: claim refresh, `append`,
-  `release`, `done`.
+**Display, and why the obvious truncation is wrong.** An earlier revision showed
+the first 8 characters on human surfaces. Review measured what that produces
+against the managed grammar, which is `YYYYMMDDTHHMMSSZ-<agent>-<uuid8>`: the first
+8 characters are `YYYYMMDD`, so **every managed invocation on the same day renders
+identically** — verified on three real run ids, two of which collapsed to the same
+display. The core would still compare the full value, but the human evidence would
+be misleading at exactly the recovery moment where an operator has to tell two
+invocations apart.
+
+Human surfaces therefore show a **short digest** — the first 8 hex characters of
+the SHA-256 of the whole token, rendered as `inst:3f9a1c02`. It is independent of
+any token grammar, so it stays correct if the managed format changes or a manual
+token is used, and equal tokens always render equally. Its collision resistance is
+stated rather than assumed: 32 bits, so distinct instances collide with meaningful
+probability only in the tens of thousands, far above the scale of one relay
+session. Machine surfaces carry the token whole.
+
+- **Set** → recorded in the LOCK at claim as `holder_instance:<token>`, together
+  with `holder_mode` (see the classifier under §3), and compared by every
+  operation that requires the pen: claim refresh, `append`, `release`, `done`.
 - **Unset on both sides** → behaviour byte-identical to today. This is what keeps
   the change backward-compatible and adoptable one agent at a time. Note the
   qualifier: it holds when *neither* the caller nor the LOCK carries a token. The
@@ -216,8 +232,47 @@ earlier revision did, broke both the domain and the schema.
 `holder_instance`, over four values: `match`, `mismatch`, `caller unidentified`
 (caller unset, LOCK set) and `holder unidentified` (caller set, LOCK unset).
 `Beat` is `fresh`, `absent/expired`, or `unobservable` — the last meaning *no
-producer exists to read*, which is the unmanaged case, and which is **not** a
-value of the same kind as the other two.
+producer exists to read*, which is **not** a value of the same kind as the other
+two.
+
+#### Where `Mode` comes from, since it decides who owns the pen
+
+`Mode` is authority-bearing: on an expired lease, reading a missing sidecar as
+managed absence selects automatic takeover, while reading it as unobservable
+demands an audited operator decision. An earlier revision used the column without
+saying how the core obtains it, which left the table unevaluable — combinatorially
+complete but operationally undefined.
+
+It cannot be inferred from the heartbeat, and this is the crux: `read_heartbeat`
+returns a missing file as `absent`, and a missing file cannot distinguish an
+unmanaged holder from a managed holder whose producer never started, crashed, or
+lost its sidecar. Inferring mode from the very signal whose meaning depends on the
+mode is circular.
+
+So the mode is **declared at claim and recorded with the work window**, beside
+`holder_instance`, as `holder_mode`:
+
+| Value | Meaning | Who sets it |
+| --- | --- | --- |
+| `managed` | a producer is expected to emit protective beats for this window | the launcher that mints the token |
+| `manual` | no producer exists for this window | the operator, or any caller that declares it |
+| *missing, unrecognised, or inconsistent with the token* | **unknown** | nobody — this is the failure state |
+
+**Unknown maps to `unobservable`.** That is the fail-closed direction: it costs an
+audited takeover where an automatic one might have sufficed, and never the reverse.
+A design that guessed `managed` on missing data would convert every un-instrumented
+or partially-adopted holder into an automatically displaceable one, which is the
+failure this RFC was revised twice to remove.
+
+Recording the mode rather than re-deriving it later is [RFC
+078](078-rfc-freshness-first-class.md) §2.1 applied directly: what a producer may
+persist is the *boundary* — here, what was expected of this window — while the
+evaluation of whether a beat is fresh still happens at the point of use.
+
+**A managed holder that never emitted is still `absent`, not `unobservable`.** The
+declaration says a producer was expected; the beat says it did not deliver. Those
+are two facts and the table wants both. Conflating them would repeat, in the other
+direction, the error of the previous revision.
 
 | Identity | Lease | Beat | Mode | Outcome |
 | --- | --- | --- | --- | --- |
@@ -233,9 +288,12 @@ value of the same kind as the other two.
 
 **Completeness, so a reviewer can check it rather than trust it.** Nine outcome
 rows cover the domain exactly, because `Beat` and `Mode` are not independent: a
-managed holder has a producer, so its beat is `fresh` or `absent/expired` and never
-`unobservable`; an unmanaged holder has none, so its beat is `unobservable` and
-never the other two. That leaves 2 identity-match rows, 3 lease-beat combinations
+a window declared `managed` expects a producer, so its beat is `fresh` or
+`absent/expired` and never `unobservable`; a window that is `manual` — or whose
+declaration is missing, which fails closed to the same treatment — has no producer,
+so its beat is `unobservable` and never the other two. The dependency runs through
+the recorded declaration, not through the beat itself, which is what keeps it
+non-circular. That leaves 2 identity-match rows, 3 lease-beat combinations
 per lease state for non-match (2 managed + 1 unmanaged) × 2 lease states = 6, and
 1 row for the untouched legacy case.
 
