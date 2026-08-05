@@ -76,17 +76,33 @@ TTL, a heartbeat cadence, a pid whose liveness is the deadline.
 
 ### 2.1 Corollary — single owner of freshness
 
-There MUST be one freshness evaluator, and consumers MUST NOT re-derive their
-own from the underlying fields. The divergence in #271 exists because two
-components read the same record and answered differently; one of them has to be
-the owner.
+There MUST be **one freshness evaluator** — a single named function or rule —
+and every surface MUST invoke *that* evaluator at its own point of use. The
+divergence in #271 exists because two components read the same record and each
+answered from its own reading; one implementation has to be the owner.
 
-**But a classification MUST NOT be serialized as a timeless fact.** A stored
-`freshness: fresh` is a statement about the moment of capture, and it decays.
-What a producer may persist is the *boundary* — `evaluated_at`, `fresh_until`,
-`resets_at` — which the consumer rechecks at the point of use. Owning the rule
-is not the same as owning a verdict with no expiry of its own; without this
-sentence, §2.1 contradicts §2.
+An earlier wording said consumers must display the producer's published
+classification and never re-derive, then required them to recheck the persisted
+boundary — which is re-derivation under another name. Adversarial review caught
+the contradiction. What is forbidden is a **second implementation of the rule**,
+not the act of evaluating it: calling the shared evaluator is obedience, writing
+your own comparison beside it is the defect.
+
+It follows that a classification MUST NOT be serialized as a timeless fact. A
+stored `freshness: fresh` describes the moment of capture and decays; what a
+producer may persist is the *boundary* — `evaluated_at`, `fresh_until`,
+`resets_at` — which the shared evaluator consumes wherever the value is used.
+
+Either shape satisfies this corollary, and they are the only two that do:
+
+1. **one shared evaluator** invoked at each point of use, over a persisted
+   boundary; or
+2. **a live authority** queried at the point of use, whose verdict carries its
+   own expiry so the answer cannot outlive its own validity.
+
+The worked example is in this repository: `heartbeat_protective` decides whether
+a holder is alive for force-claim, and the accounting fold now consumes **that
+same window** rather than defining a second one (#270).
 
 ### 2.2 Corollary — a cache of a remote authority is not the remote
 
@@ -120,6 +136,15 @@ lines apart.
 - It does not require a network call at every read. Corollary 2.2 offers
   re-observe **or fail closed**; a gate that refuses to answer is compliant, a
   gate that answers from a cache as if it were current is not.
+
+  This is not the exception to §2 it first appears to be, and the distinction is
+  the one that makes the rule usable: **the stale payload and the fact of its
+  expiration are different inputs.** §2 forbids the *payload* from deciding as
+  though it were current. It says nothing against deciding on the *expiration
+  itself* — "this value is past its deadline" is a fresh, true observation, and
+  refusing or returning `unknown` on that basis is exactly the behaviour this RFC
+  wants. What is forbidden is a gate that denies admission on the stale numbers
+  while reporting that it noticed they were stale.
 - It does not forbid caching. It forbids a cache from claiming the authority of
   what it caches.
 
@@ -193,11 +218,26 @@ Each of these is a gap in the *instrument*, not an exception to the rule.
    status-JSON usage freshness, the status-JSON hold state, the human status
    line, and the TIME accounting total — enumerated because the test discovers
    nothing beyond them.
-2. `KNOWN_FAILURES` is empty once **#270 and #271** close. Those two are the
-   machine-checked part, and only those two: **#262 is deliberately excluded**,
-   because the detector does not reach the publication gate (§4.2). An earlier
-   draft claimed the table also emptied when #262 closed, which would have let
-   this criterion report completion while #262 stayed open.
+2. `KNOWN_FAILURES` is empty. **This is repository policy, verified by a human,
+   not a machine-checked criterion** — the correction matters because two earlier
+   drafts claimed otherwise.
+
+   What the test does check: that each listed projection **still fails**, so a
+   fix cannot land without emptying its entry. What it cannot check: whether the
+   ticket named in that entry exists, is open, or has anything to do with the
+   projection. The strings are never validated and no issue state is ever
+   observed; a table entry citing a closed ticket, or a fictional one, passes
+   exactly like a correct one.
+
+   So "the table empties when #270 and #271 close" describes what a maintainer
+   must do, not something the suite can confirm. Turning it into a contract needs
+   a gate outside the test — one that reads issue state and that a contributor
+   cannot edit in the same change. Until then, treat an empty table as evidence
+   the fixes landed and the tickets as evidence they were the right ones, and do
+   not let the first stand in for the second.
+
+   **#262 is excluded from this criterion entirely**, machine-checked or not,
+   because the detector does not reach the publication gate (§4.2).
 3. New surfaces that render a deadline-bearing value should add themselves to
    the test in the same change. This is a **contribution rule, not a
    machine-checked contract** — nothing detects a surface that omits itself.
