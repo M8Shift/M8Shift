@@ -3353,7 +3353,16 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
         findings.append({"severity": "error", "check": "providers.name_duplicate", "message": f"duplicate agent {name}"})
     if seen is not None and isinstance(name, str):
         seen.add(name)
+    # An inactive entry is a template, and templates are allowed to carry the same
+    # NAME as a live agent — the shipped registry ships `claude` and `codex`
+    # examples beside the real ones. Dropping the prefix for anything named
+    # therefore made every example finding read as if it were about the live agent
+    # of that name: `providers check` reported two unset model pins while both
+    # active pins were valid (#284). The scope is kept for inactive entries, and
+    # this fixes every check in this function rather than one message.
     label = name or prefix
+    if not active and name:
+        label = f"{prefix} ({name} template)"
     findings.extend(consult_policy_findings(agent, label))
     if not isinstance(agent.get("provider", ""), str) or not agent.get("provider", "").strip():
         findings.append({"severity": "error", "check": "providers.provider", "message": f"{label} provider is required"})
@@ -3393,7 +3402,15 @@ def provider_entry_findings(agent, prefix, seen=None, active=True):
                    and MODEL_ID_RE.fullmatch(model) is not None)
     adapter = provider_adapter(provider)
     if adapter.managed:
-        if not model_valid:
+        # A template with no model is not a defect: the shipped examples omit the
+        # key on purpose and say so — "copy into agents and adapt locally before
+        # running". Warning on that fires for every healthy install, and a check
+        # that cries during normal operation is one nobody reads on the day it is
+        # right. So an inactive entry is silent when the pin is simply absent or
+        # the UNSET sentinel, and still reports a pin that is present but
+        # malformed, which is a real authoring error (#284).
+        model_absent = model in (None, "", PROVIDER_MODEL_UNSET)
+        if not model_valid and not (not active and model_absent):
             severity = "error" if active and launchable else "warning"
             findings.append({
                 "severity": severity,

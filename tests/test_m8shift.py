@@ -10114,6 +10114,56 @@ class TestRuntimeCompanion(CLIBase):
         self.assertTrue(any(f["check"] == "providers.model" and f["severity"] == "warning"
                             for f in payload["findings"]))
 
+    def test_example_templates_do_not_impersonate_the_live_agents_they_are_named_after(self):
+        # #284: `providers check` reported two unset model pins while BOTH active
+        # pins were valid. The shipped registry ships `claude` and `codex` example
+        # templates beside the real agents, and the finding label was `name or
+        # prefix` — so an example named `codex` produced a message indistinguishable
+        # from one about the live codex. A preflight that cries on a healthy install
+        # is one nobody reads on the day it is right.
+        self.rt("providers", "init", "--force")
+        path = os.path.join(self.d, ".m8shift", "providers.json")
+        with open(path, encoding="utf-8") as fh:
+            registry = json.load(fh)
+        # Every active pin valid, so the template is the only variable under test.
+        for row in registry["agents"]:
+            row["model"] = "test-model-1"
+        live = registry["agents"][0]
+        template = json.loads(json.dumps(live))   # deep copy without a new import
+        template.pop("model", None)          # a template omits it ON PURPOSE
+        registry["examples"] = [template]
+
+        def model_findings():
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(registry, fh)
+            payload = json.loads(self.rt("providers", "check", "--json").stdout)
+            return [f for f in payload["findings"] if f["check"] == "providers.model"]
+
+        # 1. A template with no model is the documented state, not a defect.
+        self.assertEqual(model_findings(), [],
+                         "an unfilled template must not be reported as a bad pin")
+
+        # 2. The UNSET sentinel is the same intent, spelled explicitly.
+        template["model"] = "UNSET"
+        self.assertEqual(model_findings(), [])
+
+        # 3. A template filled in WRONGLY is a real authoring error and still
+        #    reports — but scoped, so it can never be read as the live agent.
+        template["model"] = "not a model id!!"
+        found = model_findings()
+        self.assertEqual(len(found), 1, found)
+        self.assertEqual(found[0]["severity"], "warning")
+        self.assertIn("examples[0]", found[0]["message"],
+                      "an example finding must carry its scope: %r" % found[0]["message"])
+
+        # 4. Active-row validation is untouched: the live agent still fails loudly,
+        #    and its message stays unscoped because it really is about that agent.
+        template.pop("model")
+        live["model"] = "not a model id!!"
+        found = model_findings()
+        self.assertEqual(len(found), 1, found)
+        self.assertNotIn("examples[", found[0]["message"])
+
     def write_routing_manifests(self, models, task_types, defaults=None):
         routing_dir = os.path.join(self.d, ".m8shift", "routing")
         os.makedirs(routing_dir, exist_ok=True)
