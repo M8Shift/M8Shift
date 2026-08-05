@@ -231,14 +231,17 @@ earlier revision did, broke both the domain and the schema.
 **Columns.** `Identity` compares the caller's `$M8SHIFT_INSTANCE` with the LOCK's
 `holder_instance`, over four values: `match`, `mismatch`, `caller unidentified`
 (caller unset, LOCK set) and `holder unidentified` (caller set, LOCK unset).
-`Beat` is `fresh`, `absent/expired`, or `unobservable` — the last meaning *no
-producer exists to read*, which is **not** a value of the same kind as the other
-two.
+`Beat` is read from the heartbeat sidecar and has exactly two values: `fresh`, or
+`stale or missing`. An earlier revision carried a third, `unobservable`, meant for
+*no producer exists to read*; it was removed because it let missing **metadata**
+erase a **present** observation. Whether a producer was expected is now `Mode`'s
+business alone, and it never rewrites what the sidecar says.
 
 #### Where `Mode` comes from, since it decides who owns the pen
 
-`Mode` is authority-bearing: on an expired lease, reading a missing sidecar as
-managed absence selects automatic takeover, while reading it as unobservable
+`Mode` is authority-bearing, on exactly one question: whether a **missing** beat
+under an expired lease may be read as *a declared producer failed to deliver*,
+which permits automatic takeover, rather than as *nothing was ever watching*, which
 demands an audited operator decision. An earlier revision used the column without
 saying how the core obtains it, which left the table unevaluable — combinatorially
 complete but operationally undefined.
@@ -275,23 +278,43 @@ That last row is the predicate an earlier revision left as the vague phrase
 ignored rather than stored. There is no other inconsistency to define, because the
 two values are independent otherwise.
 
-**Evaluated domain — how the table consumes it.** The `Mode` column has exactly
-**two** evaluated values, and the three persisted values normalise onto them:
+**Evaluated domain — and the correction that mattered most in this document.**
 
-    managed              → managed
-    manual               → unmanaged
-    unknown / unrecorded → unmanaged
+An earlier revision normalised `unknown` and `manual` to a single `unmanaged` mode
+*and* made that mode imply an `unobservable` beat. Review showed that this is not
+fail-closed at all, and the counter-example is worth keeping in the text so nobody
+reintroduces it:
 
-An earlier revision left `manual` and `unknown` with no matching row at all, so a
-real window carrying `holder_mode: unknown` matched nothing and the nine-row
-completeness claim was false over the persisted domain. It is true now, and true of
-the *stored* values rather than only of the vocabulary the table happens to use.
+> A holder has a token, a **fresh heartbeat**, and `holder_mode: unknown` — because
+> the launcher is partially adopted, or its mode export failed. A second caller
+> arrives. Under the old normalisation the fresh beat became `unobservable`, so the
+> caller reached a row requiring only `--takeover-instance --reason`, where the real
+> evidence — a fresh beat — demands outright refusal under a valid lease, and
+> `--live-override` under an expired one.
 
-**Unknown normalises to `unmanaged`, whose beat is `unobservable`.** That is the
-fail-closed direction: it costs an audited takeover where an automatic one might
-have sufficed, and never the reverse. A design that guessed `managed` on missing
-data would convert every un-instrumented or partially-adopted holder into an
-automatically displaceable one — the failure this RFC was revised twice to remove.
+The metadata being absent had **erased an observation that was present**. That is
+the same error as the previous revision in a new place: a missing declaration
+treated as though it negated a signal. Two properties now govern the classifier,
+and they are stated as properties rather than left implicit in rows:
+
+1. **A fresh beat is never downgraded.** Missing, malformed, `unknown`, or even a
+   false `manual` declaration cannot remove a sidecar that exists and is fresh. The
+   refusal and `--live-override` floors hold on the beat alone.
+2. **Only an explicit persisted `managed` enables the automatic row.** Every other
+   mode value — `manual`, `unknown`, unrecorded — takes the audited path when the
+   beat is stale or missing.
+
+So `Mode` is not a normalisation of the beat. It gates exactly one outcome: whether
+a *missing* beat may be read as *the producer failed to deliver*. Everything else in
+the table reads the sidecar directly.
+
+**Immutability across the work window.** `claim --refresh` is a `claim`, so the
+question is real: `holder_mode` is written **once**, when the window opens, and a
+refresh never rewrites it. A refresh presenting a different mode is a signal that
+something changed identity mid-window; it is reported by the lint, not silently
+applied. This is [RFC 078](078-rfc-freshness-first-class.md) §2.1 again — the
+persisted boundary describes the moment it was captured and does not get quietly
+restated later.
 
 #### The trust limit, stated because the design leans on it
 
@@ -299,10 +322,17 @@ automatically displaceable one — the failure this RFC was revised twice to rem
 core can verify. Nothing proves the value came from a real launcher; a process may
 export `managed` and no producer need exist.
 
-This matters for exactly one row. `not match / expired / absent/expired / managed`
-allows takeover automatically, and it does so on the strength of a declaration
-rather than of proof. A caller wishing to displace a holder could declare
-`managed`, wait for the lease to lapse, and take the pen without an audit record.
+This matters for exactly one row: `not match / expired / stale or missing /
+managed`, the only automatic outcome. It allows takeover on the strength of a
+declaration rather than of proof. A caller wishing to displace a holder could
+declare `managed`, wait for the lease to lapse, and take the pen **without an
+operator decision and without a stated reason**.
+
+To be exact, since an earlier revision overstated this and contradicted the table:
+the takeover is still **recorded** — every row that changes the holder emits an
+instance-change event. What the automatic row skips is the *reason* and the
+*operator override*, not the audit trail. The event is what makes a false
+declaration visible afterwards.
 
 Three reasons to accept that, stated so a reader can disagree with the reasoning
 rather than discover it later:
@@ -325,33 +355,40 @@ Recording the mode rather than re-deriving it later is [RFC
 persist is the *boundary* — here, what was expected of this window — while the
 evaluation of whether a beat is fresh still happens at the point of use.
 
-**A managed holder that never emitted is still `absent`, not `unobservable`.** The
+**A declared producer that never emitted still reads as `stale or missing`.** The
 declaration says a producer was expected; the beat says it did not deliver. Those
-are two facts and the table wants both. Conflating them would repeat, in the other
-direction, the error of the previous revision.
+are two facts and the table wants both — which is why `Mode` and `Beat` stay
+separate columns rather than one collapsed verdict.
 
 | Identity | Lease | Beat | Mode | Outcome |
 | --- | --- | --- | --- | --- |
 | match | valid | any | any | **refresh** — today's behaviour, unchanged |
 | match | expired | any | any | **refresh** — the holder reclaims its own expired window |
-| not `match` | valid | fresh | managed | **refuse outright.** The holder is provably alive; taking the pen would strand it mid-task |
-| not `match` | valid | absent/expired | managed | **refuse ordinary claim; `--takeover-instance --reason`.** A live lease with no beat is ambiguous, so it costs a reason and an audit record |
-| not `match` | valid | unobservable | unmanaged | **refuse ordinary claim; `--takeover-instance --reason`.** Nothing distinguishes recovery from concurrent drive; the operator decides and the decision is recorded |
-| not `match` | expired | fresh | managed | **refuse ordinary claim; `--takeover-instance --live-override --reason`.** A fresh beat proves the holder alive and lease expiry does not weaken that proof — the [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) human-authorization floor applies unchanged |
-| not `match` | expired | absent/expired | managed | **allow** with an instance-change event. Two independent signals agree the holder is gone |
-| not `match` | expired | unobservable | unmanaged | **refuse ordinary claim; `--takeover-instance --reason`.** There is no second signal here — see below |
+| not `match` | valid | **fresh** | **any** | **refuse outright.** The holder is provably alive; taking the pen would strand it mid-task. Mode is irrelevant — a beat that exists is evidence whatever the metadata says |
+| not `match` | valid | stale or missing | any | **refuse ordinary claim; `--takeover-instance --reason`.** A live lease with no live beat is ambiguous, so it costs a reason and an audit record |
+| not `match` | expired | **fresh** | **any** | **refuse ordinary claim; `--takeover-instance --live-override --reason`.** A fresh beat proves the holder alive and lease expiry does not weaken that proof — the [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) human-authorization floor applies unchanged |
+| not `match` | expired | stale or missing | **`managed` only** | **allow** with an instance-change event. A producer was declared, and it did not deliver |
+| not `match` | expired | stale or missing | any other mode | **refuse ordinary claim; `--takeover-instance --reason`.** Without a declared producer, a missing beat is not evidence of anything |
 | absent both sides | any | any | any | **today's behaviour, byte-identical** |
 
-**Completeness, so a reviewer can check it rather than trust it.** Nine outcome
-rows cover the domain exactly, because `Beat` and `Mode` are not independent: a
-a window whose evaluated mode is `managed` expects a producer, so its beat is `fresh` or
-`absent/expired` and never `unobservable`; a window that is `manual` — or whose
-declaration is missing, which fails closed to the same treatment — has no producer,
-so its beat is `unobservable` and never the other two. The dependency runs through
-the recorded declaration, not through the beat itself, which is what keeps it
-non-circular. That leaves 2 identity-match rows, 3 lease-beat combinations
-per lease state for non-match (2 managed + 1 unmanaged) × 2 lease states = 6, and
-1 row for the untouched legacy case.
+**Completeness, so a reviewer can check it rather than trust it.** Eight outcome
+rows cover the domain exactly. `Beat` is read from the sidecar and has two values,
+`fresh` or `stale or missing` — there is no third, because "no sidecar" and "a
+sidecar that lapsed" are treated alike once no fresh reading exists. `Mode`
+therefore appears in exactly one row pair, splitting `expired / stale or missing` by
+whether a producer was declared.
+
+Count it: 2 rows where identity matches (lease valid or expired, everything else
+irrelevant); 2 rows for `not match` with a **fresh** beat, one per lease state, mode
+irrelevant by property 1; 3 rows for `not match` with a stale or missing beat —
+`valid` lease regardless of mode, then `expired` split by `managed` versus anything
+else; and 1 legacy row where neither side carries a token. Two plus two plus three
+plus one is eight, and every persisted `holder_mode` value lands in one of them.
+
+The earlier nine-row claim covered a table whose `unobservable` beat value no longer
+exists, and it was in any case false over the persisted domain — a real window
+carrying `holder_mode: unknown` matched no row at all. Both defects are gone; this
+count is over stored values, not over vocabulary.
 
 **Why `not match` covers three identity values and not one.** `mismatch`, `caller
 unidentified` and `holder unidentified` all take the same rows. An earlier revision
@@ -372,17 +409,19 @@ agreement is deliberate: it is the one row where both documents weigh the same
 evidence and reach the same answer. Note both qualifiers — the beat must be
 *absent where a producer exists to emit one*, and the mode must be managed.
 
-**`expired / unobservable / unmanaged` does NOT allow**, and this is the
-correction that matters most in this revision. An earlier revision folded
-`unobservable` into the same cell as `absent/expired` and concluded that "both
-signals agree the holder is gone". There is no second signal in unmanaged mode:
-the beat is unobservable because nothing produces one. Absence of a reading and a
-reading of absence are different facts, and treating them alike restored automatic
-silent displacement for precisely the case §1 admits the companion cannot see.
+**`expired / stale or missing / any mode but `managed`` does NOT allow**, and the
+history of this row is the most instructive thing in the document. One revision
+concluded that "both signals agree the holder is gone" where there was no second
+signal at all — a missing beat under no declared producer is not evidence, and
+enumerating the case did not turn missing evidence into agreement. The next
+revision over-corrected: it made the missing declaration *erase a fresh beat that
+was actually present*.
 
-Enumerating a case does not turn missing evidence into agreement. That is the same
-error [RFC 078](078-rfc-freshness-first-class.md) exists to name, committed inside
-a table written by the author of the corrections to RFC 078.
+Both errors are the same mistake pointing in opposite directions — treating the
+absence of one input as though it settled another. That is precisely what
+[RFC 078](078-rfc-freshness-first-class.md) exists to name, committed twice, in a
+table written by the author of RFC 078's own corrections. The two properties above
+exist so the mistake cannot be made a third time in either direction.
 
 **`mismatch / expired / fresh / managed` requires `--live-override`,** not merely a
 reason. An earlier revision let a reason string suffice here, which contradicted
