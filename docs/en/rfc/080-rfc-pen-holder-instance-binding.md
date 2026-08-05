@@ -371,10 +371,16 @@ ordinary `claim`, `--takeover-instance --reason`, and its `--live-override` form
 | `since` | now | preserved |
 | lease `expires` | now plus TTL | extended |
 
-The displaced values — `holder_instance`, `holder_mode` and `work_window_id` — are
-retained **only in the instance-change event**, which is what lets `history` and
+The displaced **identity and declaration** — `holder_instance` and `holder_mode` —
+are retained only in the instance-change event, which is what lets `history` and
 `recap` show who was displaced and under which declaration, without leaving a stale
 declaration governing a holder who never made it.
+
+The displaced **`work_window_id` is deliberately not exclusive**: it also appears on
+the accounting row below, as `previous_work_window_id`, so the two records can be
+correlated without either having to read the other. An earlier revision said all
+three values were retained "only" in the event, which contradicted the accounting
+row two paragraphs later and defined two incompatible ledger schemas.
 
 One contract, three command rows, no implementer choice.
 
@@ -396,9 +402,28 @@ claim-to-append interval to A: B's time and any B work tag simply lost, and the 
 `since` disagreeing with an unsplit ledger. The document promised a boundary its only
 named event could not create.
 
-So the takeover emits, under the same core file lock and in the same atomic write,
-a **canonical same-state [RFC 064](064-rfc-effective-time-accounting.md) `state`
-transition** carrying `work_window_id` and `previous_work_window_id`. Two
+So the takeover emits a **canonical same-state
+[RFC 064](064-rfc-effective-time-accounting.md) `state` transition** carrying
+`work_window_id` and `previous_work_window_id`.
+
+**Where it is written, since an earlier revision said something impossible.** That
+text put the transition "under the same core file lock and in the same atomic
+write" as the LOCK replacement. The LOCK and the session ledger are different files;
+there is no atomic write spanning both, and saying so left an implementer free to
+attempt one. The real ordering is RFC 064's, which the shipped producer already
+implements: the LOCK replacement is authoritative and happens first, then the ledger
+evidence is appended best-effort.
+
+Within that, the two rows this RFC adds — the `state` transition and the
+instance-change event — are written as **one atomic ledger batch**: both or neither,
+never one alone. Audit and accounting must not be able to disagree about whether a
+takeover happened.
+
+**When the batch fails**, RFC 064's rule stands unchanged and is restated here so
+nobody has to infer it: the LOCK remains authoritative, the takeover *did* happen,
+the failure warns rather than rolling back, and the missing boundary surfaces as the
+timeline-gap warning the fold already emits. That is a degraded but honest state —
+the pen moved, and the record says the record is incomplete. Two
 consequences follow, and both belong in this RFC rather than in an implementation
 note:
 
