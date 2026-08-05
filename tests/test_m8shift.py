@@ -33,13 +33,6 @@ import time
 import unittest
 from unittest import mock
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since v3.0.0)
-sys.path.insert(0, REPO)
-import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
-
-VERSION = cowork.VERSION
-
 # ── Ambient-environment isolation (#288) ────────────────────────────────────
 # The suite shells out to `m8shift.py`, so every M8SHIFT_* variable exported by
 # whoever runs it reaches the code under test. That made the result depend on the
@@ -48,11 +41,21 @@ VERSION = cowork.VERSION
 # `model` key — so the suite was green for one agent and red for another on the
 # same commit, twice, with neither number carrying anything to tell them apart.
 #
-# The purge happens once at import, BEFORE any test runs, which is what lets the
-# tests that deliberately set these values keep working: `mock.patch.dict` writes
-# them back afterwards, for the duration of its block. Stripping inside the CLI
-# helper instead would have broken exactly those tests, since a patched variable
-# and an inherited one are indistinguishable at call time.
+# The purge runs BEFORE `import m8shift`, and that ordering is load-bearing twice
+# over.
+#
+# Against the engine: `m8shift.py` reads `M8SHIFT_ROOT` at module scope and calls
+# `configure_root()`, which rebases ELEVEN module-level paths — COWORK, LOCKFILE,
+# SESSIONS, MEMORY and the rest. Popping the variable after the import removes the
+# variable and changes none of them: the module is already rebased and stays that
+# way for the whole run. An earlier revision of this patch purged after the import
+# and was therefore inert for exactly the variable with the widest blast radius.
+#
+# Against the tests: three of them deliberately set these values through
+# `mock.patch.dict(os.environ, …)` and rely on propagation to the subprocess.
+# Purging inside the CLI helper instead would have broken exactly those, because a
+# patched variable and an inherited one are indistinguishable at call time. Early
+# is the only placement that satisfies both.
 #
 # The list is enumerated from the engine rather than from the one variable that
 # was observed to leak — and a first attempt at that enumeration missed five of
@@ -77,6 +80,13 @@ AMBIENT_ENV_VARS = (
 )
 for _ambient in AMBIENT_ENV_VARS:
     os.environ.pop(_ambient, None)
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since v3.0.0)
+sys.path.insert(0, REPO)
+import m8shift as cowork  # noqa: E402  (import after sys.path adjustment)
+
+VERSION = cowork.VERSION
 
 TZ_PREFIXED_TIME_RE = r".+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d"
 
@@ -3910,6 +3920,24 @@ class TestAdvisoryFields(CLIBase):
         self.assertEqual(missing, [],
                          "these engine environment variables can still leak into the "
                          "suite from the developer's shell: %s" % ", ".join(missing))
+
+    def test_ambient_root_cannot_rebase_the_imported_engine(self):
+        """#288: the purge must beat the import, not merely follow it.
+
+        `m8shift.py` reads M8SHIFT_ROOT at module scope and calls configure_root(),
+        which rebases eleven module-level paths. A purge placed after the import
+        removes the variable and leaves every one of them rebased — which is what an
+        earlier revision of this patch did, inertly, for the variable with the widest
+        blast radius. Asserting the variable is gone cannot catch that; only the
+        consumed state can.
+        """
+        rebased = {name: getattr(cowork, name) for name in dir(cowork)
+                   if name.isupper() and isinstance(getattr(cowork, name), str)
+                   and getattr(cowork, name).startswith(os.sep)
+                   and not getattr(cowork, name).startswith(REPO)}
+        self.assertEqual(rebased, {},
+                         "engine paths point outside the repository, so an ambient "
+                         "M8SHIFT_ROOT was consumed before the purge: %s" % rebased)
 
     def test_no_ambient_env_var_survives_import(self):
         # The purge is the mechanism the test above only inventories.
