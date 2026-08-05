@@ -9,8 +9,8 @@
 - **Amends:** [RFC 010](010-rfc-runtime-patterns.md) §4 — see §3.1, which states
   what is amended and what stays binding
 - **Siblings:** [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) (holder
-  liveness / stale-claim hardening — this RFC defers to it rather than defining a
-  parallel takeover model),
+  liveness / stale-claim hardening — adjacent but *not* covering this case; see the
+  correction in §3, which is why a distinct operation is defined here),
   [RFC 054](054-rfc-pre-exhaustion-session-rotation.md) (pre-exhaustion session
   rotation), [RFC 079](079-rfc-out-of-roster-observer.md),
   [RFC 078](078-rfc-freshness-first-class.md) (unverifiable values must not be
@@ -65,7 +65,7 @@ of one agent session.
 This rules out the obvious answers before they are proposed:
 
 | Candidate | Why it fails |
-|---|---|
+| --- | --- |
 | pid / process start time | new process per command |
 | controlling terminal (tty) | absent in headless, CI and runner contexts |
 | a daemon holding session state | against the passive-core doctrine |
@@ -77,11 +77,23 @@ This rules out the obvious answers before they are proposed:
 
 `$M8SHIFT_INSTANCE` — an opaque, non-secret string identifying one agent session.
 
+**Grammar, because this value lands in a one-line LOCK field and on display
+surfaces.** It reuses the run-id grammar the runtime already enforces rather than
+inventing a second one: 1–128 characters, from the safe set that grammar already
+defines, no whitespace and no newline. A value that does not conform is rejected at
+`claim` with a message naming the constraint — never silently truncated, since a
+truncated token would compare unequal to itself and manufacture the very mismatch
+this RFC exists to detect. On human surfaces (`status`, `history`, `recap`) it is
+displayed truncated to its first 8 characters; machine surfaces carry it whole.
+
 - **Set** → recorded in the LOCK at claim as `holder_instance:<token>`, and
   compared by every operation that requires the pen: claim refresh, `append`,
   `release`, `done`.
-- **Unset** → behaviour byte-identical to today. This is what keeps the change
-  backward-compatible and adoptable one agent at a time.
+- **Unset on both sides** → behaviour byte-identical to today. This is what keeps
+  the change backward-compatible and adoptable one agent at a time. Note the
+  qualifier: it holds when *neither* the caller nor the LOCK carries a token. The
+  mixed state is a real behavioural change and is specified in §3, not glossed
+  here.
 
 The token is **not** an authentication secret. Anyone able to write the LOCK can
 write any token. It is a coordination aid, consistent with a core that detects
@@ -147,31 +159,81 @@ one continues — is **exactly the same event** as an illegitimate concurrent
 drive, seen from the lock. A design that refuses the second instance outright
 would break the recovery it is meant to protect.
 
-But "seen from the lock" is the whole qualifier, and review was right that the
-earlier draft collapsed two situations the system can in fact tell apart:
+#### A correction: RFC 049 does not cover this, and a previous revision said it did
 
-**Managed recovery — the old instance's liveness is observable.** When the prior
-holder ran behind a runtime lane, its liveness is already answerable by the
-mechanism [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) defines,
-and the accounting fold already consumes: a protective heartbeat inside the
-window. If that beat is **fresh**, the old instance is alive and this is not a
-recovery at all — ordinary takeover is refused, exactly as RFC 049 refuses a
-force-claim against a live holder. If it is **absent or expired**, the takeover is
-routine and needs no ceremony beyond recording the instance change.
+A previous revision of this section claimed the unmanaged case could defer to "the
+explicit audited override RFC 049 already defines", and that this RFC therefore
+introduced no new takeover model. **That was false**, and it was asserted without
+checking — the same failure this project names everywhere else. Verified against
+both documents before rewriting:
 
-**Unmanaged recovery — nothing distinguishes the two.** An interactive session
-behind no lane leaves no liveness signal, so the core genuinely cannot tell
-recovery from concurrent drive. Here the answer is not a smarter rule but an
-honest one: the operation is refused with the message in §2, and proceeding
-requires the **explicit audited override RFC 049 already defines** rather than a
-second, parallel takeover verb invented here.
+- [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) §`claim --force`
+  step 3 is verbatim *"refuse if peer `WORKING_*` TTL is still valid, as today"*,
+  and the heartbeat is read only at step 4, *"if stale"*. Liveness is therefore
+  consulted **after** staleness, never instead of it — and the subject is a
+  **peer**, a different roster name, not another instance of the same one.
+- The shipped `claim` never reaches that guard for our case at all. It computes
+  `mine = st in ("IDLE", f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}")` and gates the
+  whole force-recovery block on `not mine`. A claim under the **same roster name**
+  against `WORKING_<same agent>` is treated as the holder refreshing its own work
+  window, so no override, no audit event, and no liveness check occurs.
+- `--live-override` consequently audits *a different holder being displaced*. It
+  neither defines nor records a same-agent, different-instance takeover.
 
-Either way the transition stops being silent: an **instance-change event** is
-recorded in the session ledger, so it appears in `history` and `recap` instead of
-being inferred later from commit timestamps.
+So there is no existing contract to defer to. This RFC must define the operation,
+and it now does — which also settles the contradiction the reviewer found between
+§3's "no second verb" and open question 1: **there is a second operation**,
+because none exists today.
 
-This is deliberately *not* a new takeover model. Where RFC 049 has an answer, this
-RFC defers to it and adds only the field that says which instance held the pen.
+#### `claim <agent> --takeover-instance --reason <text>`
+
+A distinct, audited operation. It is not `--force`: `--force` answers *the holder
+is gone*, this answers *the holder may be a different me*. Conflating them would
+make the audit record unable to say which question was answered.
+
+It requires `--reason`, records an **instance-change event** in the session ledger
+so the transition appears in `history` and `recap` rather than being inferred from
+commit timestamps later, and is refused outright where the table below says
+`refuse`.
+
+#### The decision table
+
+Read against a `WORKING_<agent>` lock, for a caller using the same roster name.
+`token` compares the caller's `$M8SHIFT_INSTANCE` with the LOCK's
+`holder_instance`.
+
+| Token | Lease TTL | Protective beat | Mode | Outcome |
+| --- | --- | --- | --- | --- |
+| match | valid | any | any | **refresh** — today's behaviour, unchanged |
+| match | expired | any | any | **refresh** — the holder is reclaiming its own expired window |
+| mismatch | valid | fresh | managed | **refuse.** The other instance is provably alive; taking the pen would strand it mid-task |
+| mismatch | valid | absent/expired | managed | **refuse ordinary claim; `--takeover-instance` permitted.** A live lease with no beat is the ambiguous case, so it costs a reason and an audit record |
+| mismatch | valid | n/a | unmanaged | **refuse ordinary claim; `--takeover-instance` permitted.** Nothing distinguishes recovery from concurrent drive, so the operator decides and the decision is recorded |
+| mismatch | expired | fresh | managed | **refuse ordinary claim; `--takeover-instance` permitted.** A fresh beat outranks an expired lease — this is exactly the case [RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) protects |
+| mismatch | expired | absent/expired | any | **allow** with an instance-change event. Both signals agree the previous instance is gone |
+| absent on caller, set in LOCK | any | any | any | **refuse ordinary claim; `--takeover-instance` permitted.** See the mixed-state rule below |
+| set on caller, absent in LOCK | any | any | any | **allow**, and record the caller's token. The LOCK predates adoption |
+| absent both sides | any | any | any | **today's behaviour, byte-identical** |
+
+Two rows are worth stating in prose because they are where this RFC changes an
+existing outcome rather than adding to it. `mismatch / valid / fresh / managed`
+refuses where today's code silently refreshes. And `mismatch / expired /
+absent/expired` allows where RFC 049's peer flow would also allow — the agreement
+is deliberate, since that is the one row where both documents look at the same
+evidence.
+
+#### The mixed state, stated rather than glossed
+
+The earlier draft said an unset token leaves behaviour "byte-identical to today".
+That is true only when **neither** side carries one. Once a holder has recorded an
+instance, a caller with no token is not indistinguishable from that holder — it is
+unidentifiable, which is a different thing — and the table above refuses it.
+
+This is a real behavioural change in the mixed state, and it is the honest choice:
+the alternative, letting an unset caller through, would mean opt-in protects
+nobody, since any un-instrumented process could still walk over an instrumented
+holder. Adoption cost stated plainly: the first agent to set a token makes
+un-instrumented callers of the *same roster name* take an audited path.
 
 ### 3.1 Relationship to RFC 010 §4 — an amendment, stated as one
 
@@ -190,13 +252,18 @@ field observations behind this RFC came from sessions behind no lane, which the
 companion cannot see at all — so the boundary as written leaves the motivating
 case permanently uncovered, not by choice but by construction.
 
-**What is preserved, and should be read as binding:** the token still does not
-grant the pen, still does not steal a fresh lane, and still does not authenticate
-anyone. Ordering and routing are untouched. What changes is narrower than "the
-core identity model": the core records **who claims to hold** the pen alongside
-**which roster name** holds it, and compares the two on pen operations. Agent
-identity for every other purpose — turn order, roles, delegation — remains the
-roster name alone.
+**What is amended, said without softening.** An earlier revision called this
+"narrower than the core identity model". Review was right that this understates
+it: once a mismatch refuses `append`, `release`, `done` or a refresh, the pen owner
+is operationally the pair **(roster name, instance)**, and calling an
+authority-bearing comparison something other than an identity-model change would
+be exactly the kind of reassuring phrasing this project refuses elsewhere.
+
+So, plainly: **this RFC amends the core identity model for pen ownership only.**
+
+**What is preserved, and should be read as binding:** roster name remains the sole
+identity for routing, turn order, roles and delegation. The token grants no pen,
+steals no fresh lane, authenticates nobody, and never influences who is next.
 
 If reviewers judge that even this crosses RFC 010 §4, the alternative is explicit
 and should be chosen consciously: keep the field in the companion, and accept that
@@ -206,10 +273,18 @@ belongs in the open, not in an unremarked contradiction between two documents.
 ### 4. Advisory detection for the unset case
 
 Adoption is gradual, so most shifts will run with no token for a while. For those,
-a `doctor --lint` check reports when a single session shows claims from
-**different instance tokens or a mix of set and unset**, at severity *warn*. This
-follows the companion doctrine: the core never blocks on it, the lint only names
-what it sees.
+`doctor --lint` reports **two distinct findings**, at severity *warn*. An earlier
+draft described one of them here and the other in §1 as though they were the same
+check; they are not, they detect opposite conditions, and either alone leaves a
+blind spot.
+
+| Finding | Condition | What it suggests |
+| --- | --- | --- |
+| `instance_tokens_diverge` | one relay session shows claims under **different** tokens, or a mix of set and unset | a rotation happened without an instance-change event, or adoption is partial |
+| `instance_token_reused` | **one** token appears across session boundaries the runtime can independently see | the token was inherited rather than minted — the §1 failure mode, and the only signal available for it |
+
+The first sees too many tokens, the second too few. Both follow the companion
+doctrine: the core never blocks on either, the lint only names what it sees.
 
 ## What this does not do
 
@@ -226,15 +301,22 @@ what it sees.
 
 ## Open questions
 
-1. **Reuse `--force` or add `--takeover-instance`?** Reuse keeps the surface
-   small but overloads a flag whose current meaning is "the holder is stale".
-   A distinct flag is clearer and lets `--force` keep refusing a live holder.
-2. **Who sets the token?** A wrapper is the natural place, but a shift driven by
-   hand would then never get the guard. A `claim --new-instance` that mints and
-   prints a token for the caller to export is one answer.
-3. **Should `status` display it?** Showing a token adds noise for the common
-   single-instance case; hiding it makes the refusal message harder to diagnose.
-   Possibly `status --brief` hides it and full `status` shows a short prefix.
+1. ~~**Reuse `--force` or add `--takeover-instance`?**~~ **Settled in §3**: a
+   distinct operation. Leaving this open contradicted the body once §3 committed,
+   and the reviewer was right to say one position had to remain. `--force` answers
+   *the holder is gone*; `--takeover-instance` answers *the holder may be a
+   different me*. One flag cannot record which question was answered.
+2. **Who sets the token in manual mode?** A wrapper is the natural place, but a
+   shift driven by hand would then never get the guard, and §1 is explicit that
+   manual mode carries no freshness guarantee. `claim --new-instance` that mints
+   and prints a token is one answer, but it is **not sufficient on its own**: a
+   child process cannot export a value into its parent shell, so the RFC still
+   owes an exact transport contract — what the operator does with the printed
+   token so that the subsequent `claim --refresh`, `append`, `release` and `done`
+   carry it. Printing a token and calling the problem solved would be the same
+   half-measure this RFC was revised to remove.
+3. ~~**Should `status` display it?**~~ **Settled in §1**: truncated to 8 characters
+   on human surfaces, whole on machine surfaces.
 4. **Interaction with RFC 054.** Pre-exhaustion rotation is the *planned* version
    of the event that motivated this RFC. If a rotation hands over deliberately,
    it should carry the instance change explicitly rather than trip the guard.
