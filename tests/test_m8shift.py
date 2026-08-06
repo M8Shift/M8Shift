@@ -17584,6 +17584,59 @@ class TestRFC052ScrubCheck(CLIBase):
         rv = self._scrub("--verbose", denylist=self._deny(self.TERM + "\n"))
         self.assertIn(self.TERM, rv.stdout)               # forensic local mode
 
+    def _bare_remote(self, name="origin"):
+        """A real bare remote, pushed and fetched, so tracking refs are genuine."""
+        bare = tempfile.mkdtemp(prefix="m8-scrub-remote-")
+        self.addCleanup(shutil.rmtree, bare, True)
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+        for argv in (["remote", "add", name, bare],
+                     ["push", "-q", name, "HEAD:main"],
+                     ["fetch", "-q", name]):
+            subprocess.run(["git", *argv], cwd=self.d, capture_output=True)
+        return bare
+
+    def test_recreated_remote_does_not_make_unpublished_history_look_clean(self):
+        """#262: a remote-tracking ref is a cache, and this gate trusted it as the
+        remote itself.
+
+        The exclusion `--not --remotes=<name>` answers "already published?" from a
+        LOCAL cache. Recreate or purge the remote and the cache survives it, so the
+        walk excludes history that is not published at all — and the gate prints
+        clean at the exact moment the risk is highest, right after a recreation.
+
+        Measured on the fixture below before the fix: with the stale tracking ref
+        present the gate returned rc 0 and zero history hits; with the same ref
+        removed it returned rc 1 and found the leak. Same repository, same commits,
+        same denylist — the only variable was a cache that no longer described the
+        remote, and the walk covered 0 of 2 real commits.
+
+        This is RFC 078 section 2.2 in the surface it was written from: a cache of a
+        remote authority is not the remote.
+        """
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")                  # history-only now
+        tip = self._sha()
+        bare = self._bare_remote()
+
+        # The high-risk moment: the remote is recreated empty, the tracking ref lives on.
+        shutil.rmtree(bare, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+        live = subprocess.run(["git", "ls-remote", "origin"], cwd=self.d,
+                              capture_output=True, text=True)
+        self.assertEqual(live.stdout.strip(), "",
+                         "fixture invalid: the recreated remote must be empty")
+        cached = subprocess.run(["git", "for-each-ref", "refs/remotes/"], cwd=self.d,
+                                capture_output=True, text=True)
+        self.assertIn("origin", cached.stdout,
+                      "fixture invalid: the stale tracking ref must survive")
+
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1,
+                         "nothing is published on the recreated remote, so no history "
+                         "may be excluded from the walk:\n%s" % (r.stdout + r.stderr))
+        self.assertIn("HISTORY hit: commit ", r.stdout)
+
     def test_word_mode_hits_exact_word_on_tip_not_substring(self):
         # Pinned lesson: `git grep -E \\b..\\b` is silently CLEAN on BSD/macOS —
         # word semantics must come from the in-process post-filter.
@@ -17850,13 +17903,21 @@ class TestRFC052ScrubCheck(CLIBase):
         direct = mod.history_cmd(rule, 100, refs_pull=False)
         self.assertIn("HEAD", direct)
         self.assertNotIn("--all", direct)
-        bare, error = mod.parse_ranges(["a" * 40], remote="public")
+        # #262: the exclusion used to be `--remotes=<name>`, which reads LOCAL
+        # tracking refs — a cache. It is now composed from tips re-observed on the
+        # remote itself, so the argv carries explicit revisions.
+        tip_sha = "c" * 40
+        bare, error = mod.parse_ranges(["a" * 40], exclude_tips=[tip_sha])
         self.assertIsNone(error)
-        self.assertEqual(bare[0][1],
-                         ["a" * 40, "--not", "--remotes=public"])
+        self.assertEqual(bare[0][1], ["a" * 40, "--not", tip_sha])
+        # Unchanged and load-bearing: with nothing to exclude, exclude nothing.
+        # Over-scan is the safe direction; under-scan is what #262 was.
         conservative, error = mod.parse_ranges(["b" * 40])
         self.assertIsNone(error)
         self.assertEqual(conservative[0][1], ["b" * 40])
+        unreachable, error = mod.parse_ranges(["d" * 40], exclude_tips=[])
+        self.assertIsNone(error)
+        self.assertEqual(unreachable[0][1], ["d" * 40])
 
     def test_parser_drift_scrub_check_matches_core(self):
         # The script duplicates the core denylist parser (self-contained by
@@ -18017,18 +18078,28 @@ class TestRFC052ScrubCheck(CLIBase):
         # New branch to `public`: commits already tracked by the unrelated
         # private `origin` remote are still publication-bound. The old global
         # `--not --remotes` silently dropped this add-then-remove leak.
+        # #262: the exclusion is now re-observed from the remote, so this fixture
+        # gives each remote a REAL state instead of fabricating tracking refs that
+        # contradict the remote they name. The contract under test is unchanged —
+        # only the target remote's history may be excluded — but it is now pinned
+        # against remotes that actually hold what the test says they hold.
+        remotes = {}
         for remote in ("origin", "public"):
-            subprocess.run(["git", "remote", "add", remote, self.d],
+            bare = tempfile.mkdtemp(prefix="m8-scrub-%s-" % remote)
+            self.addCleanup(shutil.rmtree, bare, True)
+            subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+            subprocess.run(["git", "remote", "add", remote, bare],
                            cwd=self.d, check=True, capture_output=True)
+            remotes[remote] = bare
         self._commit("base.txt", "clean\n", "base")
         base = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/public/main", base],
-                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "push", "-q", "public", "HEAD:main"],
+                       cwd=self.d, check=True, capture_output=True)   # public holds base
         self._commit("docs/transient.md", "temporary %s leak\n" % self.TERM)
         self._rm_commit("docs/transient.md")
         tip = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/feature", tip],
-                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:feature"],
+                       cwd=self.d, check=True, capture_output=True)   # origin holds the tip
         dl = self._deny(self.TERM + "\n")
         r = self._scrub("--range", tip, "--remote", "public", denylist=dl)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -18040,8 +18111,8 @@ class TestRFC052ScrubCheck(CLIBase):
                        cwd=self.d, check=True)
         self._commit("docs/clean.md", "clean feature\n")
         clean_tip = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/clean-feature",
-                        clean_tip], cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:clean-feature"],
+                       cwd=self.d, check=True, capture_output=True)
         clean = self._scrub("--range", clean_tip, "--remote", "public",
                             denylist=dl)
         self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
@@ -18336,17 +18407,23 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertNotIn(self.TERM, result.stdout + result.stderr)
 
     def test_pre_push_new_branch_uses_only_target_remote_tracking(self):
+        # #262: real remote state instead of fabricated tracking refs — the
+        # exclusion is re-observed, so a cache that contradicts its remote is
+        # exactly what must no longer be believed. Contract unchanged.
         for remote in ("origin", "public"):
-            subprocess.run(["git", "remote", "add", remote, self.d],
+            bare = tempfile.mkdtemp(prefix="m8-push-%s-" % remote)
+            self.addCleanup(shutil.rmtree, bare, True)
+            subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+            subprocess.run(["git", "remote", "add", remote, bare],
                            cwd=self.d, check=True, capture_output=True)
         self._commit("base.txt", "clean\n", "base")
         base = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/public/main", base],
+        subprocess.run(["git", "push", "-q", "public", "HEAD:main"],
                        cwd=self.d, check=True, capture_output=True)
         self._commit("transient.txt", "temporary %s leak\n" % self.TERM)
         self._rm_commit("transient.txt")
         tip = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/feature", tip],
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:feature"],
                        cwd=self.d, check=True, capture_output=True)
         os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
         shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),

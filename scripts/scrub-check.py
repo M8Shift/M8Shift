@@ -186,11 +186,43 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     return cmd
 
 
-def parse_ranges(values, remote=None):
+def observed_remote_tips(remote, repo, run):
+    """Re-observe the remote's heads. -> (tips, reachable).
+
+    #262: the exclusion used to be `--not --remotes=<name>`, which answers "already
+    published?" from LOCAL remote-tracking refs. Those are a cache. Recreate or purge
+    the remote and the cache survives it, so history that is published nowhere gets
+    excluded from the walk — and the gate prints clean at the exact moment the risk is
+    highest. Measured on a real recreated remote: with the stale ref present the gate
+    returned rc 0 and zero history hits; with it removed, rc 1 and the leak. Same
+    repository, same commits.
+
+    So the remote is asked directly. When it cannot be reached the answer is not a
+    cached one: `reachable` is False and the caller excludes nothing, which is the
+    over-scan direction this module already declares safe. RFC 078 section 2.2 —
+    re-observe, or fail closed; never let a cache speak for the authority it mirrors.
+    """
+    if not remote:
+        return [], True
+    try:
+        proc = run(["git", "ls-remote", "--heads", "--tags", remote], repo)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+        return [], False
+    if proc.returncode != 0:
+        return [], False
+    tips = []
+    for line in (proc.stdout or "").splitlines():
+        sha = line.split("\t", 1)[0].strip()
+        if OBJECT_RX.match(sha):
+            tips.append(sha)
+    return tips, True
+
+
+def parse_ranges(values, exclude_tips=None):
     """-> (specs, error). specs = [(tip_rev, range_args)] per --range value:
     `A..B` scans tree(B) + commits A..B; a bare SHA (new branch — no remote
-    base) scans tree(SHA) + commits not already on the TARGET remote's tracking
-    refs. With no target remote it excludes nothing (over-scan, never
+    base) scans tree(SHA) + commits not already on the tips RE-OBSERVED on the
+    target remote. With no tips it excludes nothing (over-scan, never
     under-scan). Invalid shapes are a hard error (rc 2)."""
     specs = []
     for value in values or []:
@@ -202,8 +234,8 @@ def parse_ranges(values, remote=None):
             specs.append((tip, [value]))
         else:
             history = [value]
-            if remote:
-                history += ["--not", "--remotes=%s" % remote]
+            if exclude_tips:
+                history += ["--not", *exclude_tips]
             specs.append((value, history))
     return specs, None
 
@@ -674,7 +706,12 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     if remote_err:
         print("scrub-check: ERROR %s" % remote_err, file=err)
         return 2
-    specs, range_err = parse_ranges(args.ranges, remote=remote)
+    exclude_tips, remote_reachable = observed_remote_tips(remote, args.repo, run)
+    if remote and not remote_reachable:
+        print("scrub-check: NOTE remote %r could not be re-observed; excluding "
+              "nothing and scanning the full history (#262 fail-closed)" % remote,
+              file=err)
+    specs, range_err = parse_ranges(args.ranges, exclude_tips=exclude_tips)
     if range_err:
         print("scrub-check: ERROR %s" % range_err, file=err)
         return 2
