@@ -36,7 +36,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ambient_env  # noqa: E402  — purge BEFORE the engine import (#288); see that module
-from _ambient_env import AMBIENT_ENV_VARS, ENV_READING_SOURCES  # noqa: E402
+from _ambient_env import AMBIENT_ENV_VARS  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since v3.0.0)
@@ -3856,63 +3856,73 @@ class TestAdvisoryFields(CLIBase):
         self.assertIn("x_jira=PROJ-7", peek)
         self.assertIn("branch=feat/x", peek)
 
-    def test_ambient_isolation_covers_every_engine_env_var(self):
-        """#288: the purge list is re-derived from every file that reads the env.
+    def test_ambient_isolation_covers_every_name_in_tracked_sources(self):
+        """#288: discovered by NAME, because classifying reads was wrong four times.
 
-        This guard has now been wrong twice, and each time the instrument was
-        narrower than the thing it measured. The first list held 6 names because it
-        grepped only `os.environ.get("M8SHIFT_…")` literals and missed the `*_ENV`
-        constants. The second held 13 because it scanned only `m8shift.py` and
-        `m8shift-runtime.py` — while `m8shift-top.py`, both installers, the shell
-        runner and the git hooks read 19 more between them. The real figure is 32.
+        6 of 40 (literals only), 13 of 40 (two files), 32 of 40 (eight hand-listed
+        files), 37 of 40 (still classifying "is this a read", missing
+        `env.get("M8SHIFT_CLAUDE_CREDENTIALS")` — a read through a mapping passed in
+        as a parameter). Each instrument was narrower than the thing it measured.
 
-        So the scan surface is itself data (`ENV_READING_SOURCES`) rather than a
-        literal buried here, and a name read anywhere in it that is not purged fails
-        this test.
+        So this asserts something a read-detector cannot get wrong: every
+        `M8SHIFT_*` NAME occurring in a tracked non-test source must be purged.
+        Over-purging is free — these are opt-in knobs and a test that wants one sets
+        it explicitly — while under-purging is the defect.
         """
+        listed = subprocess.run(["git", "ls-files"], cwd=REPO,
+                                capture_output=True, text=True)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
         found = set()
-        for relative in ENV_READING_SOURCES:
+        for relative in listed.stdout.split():
+            if relative.startswith("tests/") or relative.endswith((".md", ".sha256")):
+                continue
             path = os.path.join(REPO, relative)
             if not os.path.isfile(path):
-                self.fail("ENV_READING_SOURCES names a file that does not exist: %s"
-                          % relative)
+                continue
             with open(path, encoding="utf-8", errors="replace") as fh:
-                source = fh.read()
-            for name in set(re.findall(r"M8SHIFT_[A-Z0-9_]+", source)):
-                read_patterns = (
-                    r'os\.environ(?:\.get)?[\(\[]\s*"%s"' % name,   # python literal
-                    r'getenv\("%s"' % name,                          # python getenv
-                    r'\$\{?%s\b' % name,                             # shell expansion
-                    r'env:%s\b' % name,                              # powershell
-                    r'^[A-Z_]+\s*=\s*"%s"' % name,                   # *_ENV constant
-                )
-                if any(re.search(pattern, source, re.M) for pattern in read_patterns):
-                    found.add(name)
+                found |= set(re.findall(r"M8SHIFT_[A-Z0-9_]+", fh.read()))
         missing = sorted(found - set(AMBIENT_ENV_VARS))
         self.assertEqual(missing, [],
-                         "these environment variables reach the code under test from "
-                         "the developer's shell and are not purged: %s" % ", ".join(missing))
+                         "these names appear in tracked sources and are not purged, "
+                         "so an ambient value can still reach the code under test: %s"
+                         % ", ".join(missing))
 
-    def test_every_test_module_purges_the_ambient_environment(self):
-        """#288: collection order is not a guarantee.
+    def test_every_test_module_imports_the_purge_before_the_product(self):
+        """#288: the ORDER is the contract, and a substring cannot prove it.
 
-        The first version of this fix purged inside this file only. Adversarial
-        review measured what that left: with M8SHIFT_ROOT exported,
-        `tests/test_worktree.py` alone gave 0 passed / 67 failed against 68 passed
-        co-collected, and `tests/test_m8shift_context.py` 1 passed / 43 failed
-        against 45. A green full suite was hiding per-file runs that were
-        catastrophically red, and `python3 -m unittest` — the runner CONTRIBUTING
-        documents — never loads conftest.py at all.
+        An earlier version of this guard passed whenever the bytes `_ambient_env`
+        occurred anywhere in the file. It could not tell an import from a comment,
+        and — the defect this whole patch exists to fix — it stayed green when the
+        import was moved BELOW the product import. Review caught that.
+
+        This reads the real top-level import statements and compares line numbers.
         """
-        missing = []
+        offenders = []
         for path in sorted(glob.glob(os.path.join(REPO, "tests", "test_*.py"))):
             with open(path, encoding="utf-8") as fh:
-                if "_ambient_env" not in fh.read():
-                    missing.append(os.path.basename(path))
-        self.assertEqual(missing, [],
-                         "these test modules do not purge the ambient environment, so "
-                         "running them alone can differ from running the suite: %s"
-                         % ", ".join(missing))
+                tree = ast.parse(fh.read(), filename=path)
+            purge_line = product_line = None
+            for node in tree.body:                     # top level only
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""]
+                for name in names:
+                    root = name.split(".")[0]
+                    if root == "_ambient_env" and purge_line is None:
+                        purge_line = node.lineno
+                    elif root.startswith("m8shift") and product_line is None:
+                        product_line = node.lineno
+            base = os.path.basename(path)
+            if purge_line is None:
+                offenders.append("%s: never imports _ambient_env" % base)
+            elif product_line is not None and purge_line > product_line:
+                offenders.append("%s: imports the product at line %d, before the purge "
+                                 "at line %d" % (base, product_line, purge_line))
+        self.assertEqual(offenders, [],
+                         "the purge must precede the product import in every test "
+                         "module: %s" % "; ".join(offenders))
 
     def test_ambient_root_cannot_rebase_the_imported_engine(self):
         """#288: the purge must beat the import, not merely follow it.
