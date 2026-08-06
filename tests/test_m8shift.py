@@ -17638,6 +17638,37 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("proves nothing", absent.stderr)
         self.assertNotIn("bad object", absent.stdout + absent.stderr)
 
+    def test_one_proven_finding_cannot_silence_an_unproven_one(self):
+        """#262: the downgrade needs EVERY finding proven, not merely one of them.
+
+        Tag and commit-message findings carry no endpoint proof at all, and an earlier
+        revision counted only history findings — so one proven history hit silenced an
+        unbounded number of unproven ones. Reached by the ordinary release command
+        `git push --follow-tags origin main`: the branch ref earns a base and the tag
+        ref rides on it. Measured on the rejected revision: the same tag pushed alone
+        was blocked, batched it published a denylisted term to a real destination.
+        """
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        published = self._sha()
+        self._bare_remote()                       # destination holds `published`
+        self._commit("docs/clean.md", "clean work\n")
+        tip = self._sha()
+        # A tag whose MESSAGE carries the term, never published anywhere.
+        subprocess.run(["git", "tag", "-a", "v1.0", "-m",
+                        "v1.0 ships the %s integration" % self.TERM],
+                       cwd=self.d, capture_output=True)
+        tag_sha = self._sha("v1.0")
+        dl = self._deny(self.TERM + "\n")
+
+        r = self._scrub("--range", published + ".." + tip, "--ref", "refs/heads/main",
+                        "--range", tag_sha, "--ref", "refs/tags/v1.0",
+                        "--endpoint-base", published, denylist=dl)
+        self.assertEqual(r.returncode, 1,
+                         "a tag the destination has never seen must not ride on a "
+                         "base earned by another ref:\n%s" % (r.stdout + r.stderr))
+        self.assertNotIn("all confirmed pre-existing", r.stdout)
+
     def test_unusual_but_valid_remote_name_is_not_a_scan_error(self):
         """#262: `--remote` is metadata now, and must not veto a name git accepts.
 

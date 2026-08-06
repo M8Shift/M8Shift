@@ -1089,10 +1089,20 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # never receives an inventory of the destination's other refs, so it cannot both
     # avoid the post-recreation false clean and avoid blocking every clean new branch.
     # Where both are required the decision belongs server-side.
-    if pre_existing_hits and not blocking_hits and tip_hits == 0:
+    # The downgrade requires EVERY finding to be proven, not merely some of them.
+    # An earlier revision incremented these counters only in the history loop, so tag
+    # and commit-message findings — which carry no endpoint proof at all — were
+    # invisible to this condition. One proven history hit then silenced an unbounded
+    # number of unproven ones, reached by the ordinary release command
+    # `git push --follow-tags origin main`: the branch ref earns a base, the tag ref
+    # rides on it. Measured: the same tag pushed alone was blocked, batched it was
+    # published, and the summary under-reported the count as well.
+    # `pre_existing_hits == hits` is the fail-closed form — anything not classified
+    # here counts against the downgrade, by construction.
+    if hits and pre_existing_hits == hits and not blocking_hits and tip_hits == 0:
         print("scrub-check: %d hit(s), all confirmed pre-existing at the "
               "destination by this push's own negotiation — reported, not blocking."
-              % pre_existing_hits, file=out)
+              % hits, file=out)
         return 0
 
     if hits:
