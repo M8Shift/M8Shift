@@ -18,6 +18,7 @@ import glob
 import hashlib
 import http.client
 import importlib.util
+import inspect
 import io
 import json
 import math
@@ -17584,6 +17585,90 @@ class TestRFC052ScrubCheck(CLIBase):
         rv = self._scrub("--verbose", denylist=self._deny(self.TERM + "\n"))
         self.assertIn(self.TERM, rv.stdout)               # forensic local mode
 
+    def test_scanner_spawns_no_network_capable_git_subcommand(self):
+        """#262 acceptance 5b: this family is declared network-free.
+
+        The scanner header says "no network" and RFC 052 defines the family as
+        "stdlib-only, no network, no daemon". An earlier attempt at #262 used
+        `git ls-remote` and was rejected for exactly that reason — along with the
+        fetch-versus-push url gap and `fatal: bad object` on tips the local store
+        lacks. This pins the boundary in the source, so the next fix cannot cross it
+        quietly.
+        """
+        with open(os.path.join(REPO, "scripts", "scrub-check.py"),
+                  encoding="utf-8") as fh:
+            source = fh.read()
+        for verb in ("ls-remote", "fetch", "push", "clone", "remote update"):
+            self.assertNotIn('"%s"' % verb, source,
+                             "scrub-check must not run a network git subcommand: %r"
+                             % verb)
+
+    def test_absent_endpoint_tip_does_not_abort_the_walk(self):
+        """#262 acceptance 2: a tip the local store lacks must never reach `git log`.
+
+        The rejected fix spliced re-observed remote tips into `--not <sha>`, and git
+        resolves revisions against the LOCAL object database. Reproduced by hand in
+        the most ordinary state there is — a teammate pushed since the last fetch —
+        `git log HEAD --not <foreign-sha>` dies with `fatal: bad object`, which
+        became rc 128 → rc 2 → a broken pre-push hook.
+        """
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        tip = self._sha()
+        bare = self._bare_remote()
+        # Another clone publishes a branch this repository has never fetched.
+        other = tempfile.mkdtemp(prefix="m8-scrub-other-")
+        self.addCleanup(shutil.rmtree, other, True)
+        subprocess.run(["git", "clone", "-q", bare, other], capture_output=True)
+        for argv in (["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+            subprocess.run(["git", *argv], cwd=other, capture_output=True)
+        with open(os.path.join(other, "theirs.txt"), "w", encoding="utf-8") as fh:
+            fh.write("theirs\n")
+        for argv in (["add", "-A"], ["commit", "-q", "-m", "theirs"],
+                     ["push", "-q", "origin", "HEAD:refs/heads/colleague"]):
+            subprocess.run(["git", *argv], cwd=other, capture_output=True)
+
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertNotIn("bad object", r.stdout + r.stderr)
+        self.assertNotEqual(r.returncode, 2,
+                            "an unfetched remote ref must not break the scan:\n%s"
+                            % (r.stdout + r.stderr))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("HISTORY hit: commit ", r.stdout)
+
+    def test_push_url_divergence_follows_the_stdin_negotiation(self):
+        """#262 acceptance 3: the publication endpoint is what git says it is.
+
+        `git ls-remote <name>` resolves the FETCH url, while pushes go to `pushurl`.
+        When they diverge, an ls-remote-based exclusion described a repository that
+        was not the publication target — verified end to end on the rejected fix,
+        with a real push that published the leak. With no exclusion composed at all,
+        the divergence cannot mislead the walk.
+        """
+        fetch_side = self._bare_remote()
+        push_side = tempfile.mkdtemp(prefix="m8-scrub-push-")
+        self.addCleanup(shutil.rmtree, push_side, True)
+        subprocess.run(["git", "init", "-q", "--bare", push_side], capture_output=True)
+        subprocess.run(["git", "remote", "set-url", "--push", "origin", push_side],
+                       cwd=self.d, check=True, capture_output=True)
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        tip = self._sha()
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:main"],
+                       cwd=self.d, capture_output=True)          # lands on push_side
+        subprocess.run(["git", "fetch", "-q", "origin"], cwd=self.d,
+                       capture_output=True)                      # caches fetch_side
+        self.assertNotEqual(fetch_side, push_side)
+
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1,
+                         "history reachable from a bare range is always scanned, so a "
+                         "divergent fetch url cannot excuse it:\n%s"
+                         % (r.stdout + r.stderr))
+        self.assertIn("HISTORY hit: commit ", r.stdout)
+
     def _bare_remote(self, name="origin"):
         """A real bare remote, pushed and fetched, so tracking refs are genuine."""
         bare = tempfile.mkdtemp(prefix="m8-scrub-remote-")
@@ -17903,21 +17988,24 @@ class TestRFC052ScrubCheck(CLIBase):
         direct = mod.history_cmd(rule, 100, refs_pull=False)
         self.assertIn("HEAD", direct)
         self.assertNotIn("--all", direct)
-        # #262: the exclusion used to be `--remotes=<name>`, which reads LOCAL
-        # tracking refs — a cache. It is now composed from tips re-observed on the
-        # remote itself, so the argv carries explicit revisions.
-        tip_sha = "c" * 40
-        bare, error = mod.parse_ranges(["a" * 40], exclude_tips=[tip_sha])
+        # #262: a bare sha composes NO exclusion, ever. The old
+        # `--not --remotes=<name>` read local tracking refs — a cache — and hid
+        # unpublished history after a remote was recreated. Re-observing the remote
+        # was tried and rejected (fetch-vs-push url, `fatal: bad object` on tips the
+        # local store lacks, and a network round trip this family forbids). The
+        # endpoint authority is the pre-push remote_sha, and the hook already turns a
+        # resolvable one into an `A..B` range; this function's job is not to defeat
+        # that fallback.
+        bare, error = mod.parse_ranges(["a" * 40])
         self.assertIsNone(error)
-        self.assertEqual(bare[0][1], ["a" * 40, "--not", tip_sha])
-        # Unchanged and load-bearing: with nothing to exclude, exclude nothing.
-        # Over-scan is the safe direction; under-scan is what #262 was.
-        conservative, error = mod.parse_ranges(["b" * 40])
+        self.assertEqual(bare[0][1], ["a" * 40])
+        self.assertNotIn("--not", bare[0][1])
+        pair, error = mod.parse_ranges(["b" * 40 + ".." + "c" * 40])
         self.assertIsNone(error)
-        self.assertEqual(conservative[0][1], ["b" * 40])
-        unreachable, error = mod.parse_ranges(["d" * 40], exclude_tips=[])
-        self.assertIsNone(error)
-        self.assertEqual(unreachable[0][1], ["d" * 40])
+        self.assertEqual(pair[0][1], ["b" * 40 + ".." + "c" * 40])
+        self.assertEqual(len(inspect.signature(mod.parse_ranges).parameters), 1,
+                         "parse_ranges must take no exclusion source: #262 is that "
+                         "any such source was a cache or a network call")
 
     def test_parser_drift_scrub_check_matches_core(self):
         # The script duplicates the core denylist parser (self-contained by

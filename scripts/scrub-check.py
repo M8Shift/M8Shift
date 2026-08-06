@@ -21,7 +21,8 @@ a "clean" through a lossy path is unverified by definition):
 Range mode (`--range`, repeatable — the pre-push hook path): scan only what a
 push is about to publish. `--range A..B` scans the B tree plus A..B history; a
 bare `--range SHA` (new ref) scans that tree plus history not already reachable
-from the target remote's tracking refs. The hook also supplies the target
+its whole reachable history (#262: no exclusion is derived from remote-tracking
+refs, which are a cache). The hook also supplies the target
 `--remote` and corresponding `--ref`, so every history finding names its carrier
 branch/tag. Annotated tag objects are scanned directly as well: tree/history
 walks do not inspect their messages. Local side branches, worktree reflogs, and
@@ -169,7 +170,7 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     (no \\b: word-boundary is a GNU extension the system regex may lack; the
     slight over-match on history is the honest, portable choice).
     range_args (range mode) replaces the audit walk with pushed revs only (e.g.
-    ["A..B"] or ["SHA", "--not", "--remotes"]).  Direct mode walks HEAD;
+    ["A..B"] or ["SHA"]).  Direct mode walks HEAD;
     explicit all_refs adds refs, reflogs, and bounded unreachable roots."""
     label, term, mode = rule
     if range_args:
@@ -186,44 +187,29 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     return cmd
 
 
-def observed_remote_tips(remote, repo, run):
-    """Re-observe the remote's heads. -> (tips, reachable).
-
-    #262: the exclusion used to be `--not --remotes=<name>`, which answers "already
-    published?" from LOCAL remote-tracking refs. Those are a cache. Recreate or purge
-    the remote and the cache survives it, so history that is published nowhere gets
-    excluded from the walk — and the gate prints clean at the exact moment the risk is
-    highest. Measured on a real recreated remote: with the stale ref present the gate
-    returned rc 0 and zero history hits; with it removed, rc 1 and the leak. Same
-    repository, same commits.
-
-    So the remote is asked directly. When it cannot be reached the answer is not a
-    cached one: `reachable` is False and the caller excludes nothing, which is the
-    over-scan direction this module already declares safe. RFC 078 section 2.2 —
-    re-observe, or fail closed; never let a cache speak for the authority it mirrors.
-    """
-    if not remote:
-        return [], True
-    try:
-        proc = run(["git", "ls-remote", "--heads", "--tags", remote], repo)
-    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
-        return [], False
-    if proc.returncode != 0:
-        return [], False
-    tips = []
-    for line in (proc.stdout or "").splitlines():
-        sha = line.split("\t", 1)[0].strip()
-        if OBJECT_RX.match(sha):
-            tips.append(sha)
-    return tips, True
-
-
-def parse_ranges(values, exclude_tips=None):
+def parse_ranges(values):
     """-> (specs, error). specs = [(tip_rev, range_args)] per --range value:
-    `A..B` scans tree(B) + commits A..B; a bare SHA (new branch — no remote
-    base) scans tree(SHA) + commits not already on the tips RE-OBSERVED on the
-    target remote. With no tips it excludes nothing (over-scan, never
-    under-scan). Invalid shapes are a hard error (rc 2)."""
+    `A..B` scans tree(B) + commits A..B; a bare SHA scans tree(SHA) and its whole
+    reachable history, excluding NOTHING. Invalid shapes are a hard error (rc 2).
+
+    #262: this used to exclude `--not --remotes=<name>` — local remote-tracking
+    refs, which are a cache. Recreate or purge the remote and the cache survives it,
+    so unpublished history was excluded and the gate printed clean at the moment the
+    risk was highest. Measured on a real recreated remote: rc 0 and zero history
+    hits with the stale ref present, rc 1 and the leak with it removed.
+
+    Re-observing the remote instead was tried and rejected: `git ls-remote` resolves
+    the FETCH url while pushes go to `pushurl`, its tips can name objects the local
+    store lacks (`fatal: bad object` on the routine "a teammate pushed since my last
+    fetch" state), and the scanner header and RFC 052 both declare this family
+    network-free.
+
+    The endpoint authority is the pre-push `remote_sha`, which git obtained from the
+    real push endpoint and hands the hook on stdin — the hook already turns a locally
+    resolvable one into `remote_sha..local_sha` and falls back to a bare sha
+    otherwise. This function's job is simply not to defeat that fallback: with no
+    negotiation there is no basis for excluding anything, and over-scan is the safe
+    direction."""
     specs = []
     for value in values or []:
         value = value.strip()
@@ -233,20 +219,19 @@ def parse_ranges(values, exclude_tips=None):
             base, _, tip = value.partition("..")
             specs.append((tip, [value]))
         else:
-            history = [value]
-            if exclude_tips:
-                history += ["--not", *exclude_tips]
-            specs.append((value, history))
+            specs.append((value, [value]))
     return specs, None
 
 
 def validate_remote(value, repo, run):
-    """Validate a target remote before composing `--remotes=<name>`.
+    """Validate the target remote named by the caller.
 
-    The remote is scan authority: accepting an invented name would make the
-    exclusion set empty and only over-scan, but a malformed name could still
-    produce surprising revision parsing. Require both a safe ref component and
-    an actually configured remote. Returns `(name, error)`.
+    #262: this no longer composes any exclusion — see `parse_ranges`. The name is
+    still validated because an invented or malformed one signals a mistaken
+    invocation, and because it is carried into the mode checks below; it is NOT scan
+    authority, and nothing about the walk depends on it. The endpoint authority is
+    the pre-push `remote_sha` on the hook's stdin, which git resolved against the
+    real push destination. Returns `(name, error)`.
     """
     if not value:
         return None, None
@@ -706,12 +691,7 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     if remote_err:
         print("scrub-check: ERROR %s" % remote_err, file=err)
         return 2
-    exclude_tips, remote_reachable = observed_remote_tips(remote, args.repo, run)
-    if remote and not remote_reachable:
-        print("scrub-check: NOTE remote %r could not be re-observed; excluding "
-              "nothing and scanning the full history (#262 fail-closed)" % remote,
-              file=err)
-    specs, range_err = parse_ranges(args.ranges, exclude_tips=exclude_tips)
+    specs, range_err = parse_ranges(args.ranges)
     if range_err:
         print("scrub-check: ERROR %s" % range_err, file=err)
         return 2
