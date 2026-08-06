@@ -17638,6 +17638,35 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("proves nothing", absent.stderr)
         self.assertNotIn("bad object", absent.stdout + absent.stderr)
 
+    def test_cli_help_does_not_promise_what_the_scanner_stopped_doing(self):
+        """#262: `--help` is a shipped contract, and it outlived two removals.
+
+        Review caught this on the fourth head: the runtime output had been corrected
+        to the weaker, accurate claim, while `--help` still told operators that a
+        bare-sha range excludes the target remote's tracking refs, and that a matching
+        finding is "confirmed pre-existing" at the destination. Both were removed from
+        the code — the first because tracking refs are a cache that survives a
+        recreated destination, the second because `merge-base --is-ancestor` proves
+        local ancestry and not endpoint possession.
+
+        An internal comment drifting is a documentation problem. `--help` drifting
+        leaves the operator holding the model the change exists to correct.
+        """
+        helped = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "scrub-check.py"), "--help"],
+            capture_output=True, text=True)
+        self.assertEqual(helped.returncode, 0, helped.stderr)
+        text = " ".join(helped.stdout.split())          # unwrap argparse line breaks
+
+        for removed in ("range exclusions", "considered published",
+                        "proved the destination already has",
+                        "confirmed pre-existing"):
+            self.assertNotIn(removed, text,
+                             "--help still promises removed behaviour: %r" % removed)
+        self.assertIn("excludes nothing", text)
+        self.assertIn("NOT TRANSMITTED by this push", text)
+        self.assertIn("does not establish that the destination possesses it", text)
+
     def test_one_proven_finding_cannot_silence_an_unproven_one(self):
         """#262: the downgrade needs EVERY finding proven, not merely one of them.
 

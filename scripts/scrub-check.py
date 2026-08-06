@@ -770,17 +770,22 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                          "bare sha for a new branch). The "
                          "pre-push hook fast path; incompatible with --refs-pull")
     ap.add_argument("--remote", default=None, metavar="REMOTE",
-                    help="target Git remote for bare-sha range exclusions; only "
-                         "that remote's tracking refs are considered published")
+                    help="target Git remote, carried as reporting metadata only. "
+                         "It excludes nothing: #262 removed the tracking-ref "
+                         "exclusion, because those refs are a local cache and "
+                         "survive a destination being recreated")
     ap.add_argument("--ref", action="append", dest="range_refs", metavar="REF",
                     help="carrier ref corresponding to the preceding --range "
                          "(repeatable; used by the pre-push hook)")
     ap.add_argument("--endpoint-base", dest="endpoint_bases", action="append",
                     default=[], metavar="SHA",
                     help="a non-zero remote_sha from THIS pre-push batch, i.e. a "
-                         "commit git proved the destination already has. Repeatable. "
-                         "Findings reachable from one are reported as confirmed "
-                         "pre-existing and do not block; everything else does (#262)")
+                         "commit git's negotiation treats the destination as "
+                         "holding. Repeatable. A finding reachable from one is NOT "
+                         "TRANSMITTED by this push and is reported without "
+                         "blocking; everything else blocks. This does not establish "
+                         "that the destination possesses it — a shallow or "
+                         "partially restored endpoint may not (#262)")
     ap.add_argument("--max-commits", type=int, default=HISTORY_MAX_COMMITS,
                     help="history bound per term (default %(default)s)")
     ap.add_argument("--verbose", action="store_true",
