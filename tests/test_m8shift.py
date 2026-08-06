@@ -14,6 +14,7 @@ Standard library only.
 import argparse
 import datetime as dt
 import contextlib
+import glob
 import hashlib
 import http.client
 import importlib.util
@@ -32,6 +33,10 @@ import threading
 import time
 import unittest
 from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ambient_env  # noqa: E402  — purge BEFORE the engine import (#288); see that module
+from _ambient_env import AMBIENT_ENV_VARS  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since v3.0.0)
@@ -3850,6 +3855,104 @@ class TestAdvisoryFields(CLIBase):
         peek = self.cw("peek", "codex").stdout
         self.assertIn("x_jira=PROJ-7", peek)
         self.assertIn("branch=feat/x", peek)
+
+    def test_ambient_isolation_covers_every_name_in_tracked_sources(self):
+        """#288: discovered by NAME, because classifying reads was wrong four times.
+
+        6 of 40 (literals only), 13 of 40 (two files), 32 of 40 (eight hand-listed
+        files), 37 of 40 (still classifying "is this a read", missing
+        `env.get("M8SHIFT_CLAUDE_CREDENTIALS")` — a read through a mapping passed in
+        as a parameter). Each instrument was narrower than the thing it measured.
+
+        So this asserts something a read-detector cannot get wrong: every
+        `M8SHIFT_*` NAME occurring in a tracked non-test source must be purged.
+        Over-purging is free — these are opt-in knobs and a test that wants one sets
+        it explicitly — while under-purging is the defect.
+        """
+        listed = subprocess.run(["git", "ls-files"], cwd=REPO,
+                                capture_output=True, text=True)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        found = set()
+        for relative in listed.stdout.split():
+            if relative.startswith("tests/") or relative.endswith((".md", ".sha256")):
+                continue
+            path = os.path.join(REPO, relative)
+            if not os.path.isfile(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                found |= set(re.findall(r"M8SHIFT_[A-Z0-9_]+", fh.read()))
+        missing = sorted(found - set(AMBIENT_ENV_VARS))
+        self.assertEqual(missing, [],
+                         "these names appear in tracked sources and are not purged, "
+                         "so an ambient value can still reach the code under test: %s"
+                         % ", ".join(missing))
+
+    def test_every_test_module_imports_the_purge_before_the_product(self):
+        """#288: the ORDER is the contract, and a substring cannot prove it.
+
+        An earlier version of this guard passed whenever the bytes `_ambient_env`
+        occurred anywhere in the file. It could not tell an import from a comment,
+        and — the defect this whole patch exists to fix — it stayed green when the
+        import was moved BELOW the product import. Review caught that.
+
+        This reads the real top-level import statements and compares line numbers.
+        """
+        offenders = []
+        for path in sorted(glob.glob(os.path.join(REPO, "tests", "test_*.py"))):
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=path)
+            purge_line = product_line = None
+            for node in tree.body:                     # top level only
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""]
+                for name in names:
+                    root = name.split(".")[0]
+                    if root == "_ambient_env" and purge_line is None:
+                        purge_line = node.lineno
+                    elif root.startswith("m8shift") and product_line is None:
+                        product_line = node.lineno
+            base = os.path.basename(path)
+            if purge_line is None:
+                offenders.append("%s: never imports _ambient_env" % base)
+            elif product_line is not None and purge_line > product_line:
+                offenders.append("%s: imports the product at line %d, before the purge "
+                                 "at line %d" % (base, product_line, purge_line))
+        self.assertEqual(offenders, [],
+                         "the purge must precede the product import in every test "
+                         "module: %s" % "; ".join(offenders))
+
+    def test_ambient_root_cannot_rebase_the_imported_engine(self):
+        """#288: the purge must beat the import, not merely follow it.
+
+        `m8shift.py` reads M8SHIFT_ROOT at module scope and calls configure_root(),
+        which rebases eleven module-level paths. A purge placed after the import
+        removes the variable and leaves every one of them rebased — which is what an
+        earlier revision of this patch did, inertly, for the variable with the widest
+        blast radius. Asserting the variable is gone cannot catch that; only the
+        consumed state can.
+
+        Mutation note, stated because an earlier commit message overclaimed it:
+        disabling the purge makes this test fail ONLY when M8SHIFT_ROOT is actually
+        exported. In a clean shell the mutant passes, so re-verifying the mutation
+        without setting the variable proves nothing. Measured both ways:
+        `M8SHIFT_ROOT=/tmp/x pytest -k ambient_root_cannot_rebase` fails with the
+        purge disabled, and passes with a clean environment.
+        """
+        rebased = {name: getattr(cowork, name) for name in dir(cowork)
+                   if name.isupper() and isinstance(getattr(cowork, name), str)
+                   and getattr(cowork, name).startswith(os.sep)
+                   and not getattr(cowork, name).startswith(REPO)}
+        self.assertEqual(rebased, {},
+                         "engine paths point outside the repository, so an ambient "
+                         "M8SHIFT_ROOT was consumed before the purge: %s" % rebased)
+
+    def test_no_ambient_env_var_survives_import(self):
+        # The purge is the mechanism the test above only inventories.
+        leaked = [name for name in AMBIENT_ENV_VARS if name in os.environ]
+        self.assertEqual(leaked, [], "not purged at import: %s" % ", ".join(leaked))
 
     def test_absent_by_default_block_unchanged(self):
         self._claim_append()

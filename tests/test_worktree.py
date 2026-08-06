@@ -1,3 +1,9 @@
+
+
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ambient_env  # noqa: E402,F401  — purge BEFORE any engine import (#288)
 #!/usr/bin/env python3
 """Deterministic tests for m8shift-worktree.py (§8 degree-2 companion).
 

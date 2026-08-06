@@ -1,3 +1,9 @@
+
+
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ambient_env  # noqa: E402,F401  — purge BEFORE any engine import (#288)
 import datetime as dt
 import importlib.util
 import json
