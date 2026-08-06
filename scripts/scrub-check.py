@@ -596,7 +596,25 @@ def scan_all_object_content(rules, allows, repo):
                     raise RuntimeError("malformed git cat-file object terminator")
                 object_count += 1
                 text = bytes(body).decode("utf-8", "replace")
-                for index in content_match_indexes(text, matcher, allows):
+                # #292: `allow:` exceptions are LINE-SCOPED, and a tree has no
+                # lines. Its body is a binary sequence of `<mode> <name>\0<20-byte
+                # sha>` entries, so whether two entries land on the same decoded
+                # "line" depends on whether those random sha bytes happen to contain
+                # something `str.splitlines()` treats as a break — and that is a
+                # wider set than \n: 0x0a 0x0b 0x0c 0x0d 0x1c 0x1d 0x1e. An allow
+                # substring in one entry's name therefore suppressed the DENIED name
+                # of a neighbouring entry, and which directories got audited flipped
+                # whenever an unrelated sibling file changed.
+                #
+                # That made this mode a false-negative substitute for the manual
+                # ritual it automates — the worst possible relationship between a
+                # tool and the procedure it replaces. There is no defensible line
+                # boundary to scope an exception to inside a tree, so trees get no
+                # suppression at all. Textual objects keep the line-scoped behaviour
+                # unchanged; the noise this costs on tree names is the price of an
+                # audit that can be trusted.
+                object_allows = () if obj_type == "tree" else allows
+                for index in content_match_indexes(text, matcher, object_allows):
                     label, term, _mode = rules[index]
                     findings.append((sha, obj_type, label, term))
             returncode = proc.wait()

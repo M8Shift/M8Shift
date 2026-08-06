@@ -17638,6 +17638,61 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("proves nothing", absent.stderr)
         self.assertNotIn("bad object", absent.stdout + absent.stderr)
 
+    def test_allow_substring_cannot_suppress_a_denied_tree_entry(self):
+        """#292: an allow: exception is line-scoped, and a tree has no lines.
+
+        A tree body is `<mode> <name>\\0<20-byte sha>` repeated. Whether two entries
+        share a decoded "line" depends on whether those random sha bytes contain
+        something `str.splitlines()` breaks on — a wider set than \\n. So an allow
+        substring in one entry's name could suppress the DENIED name of its
+        neighbour, and which directories got audited flipped when an unrelated
+        sibling changed.
+
+        Determinism, which the fixture must not leave to chance: the two entries are
+        placed in the SAME directory so git writes them into one tree object, and
+        `--objects` must report it whatever the object ids come out as. The assertion
+        is that the denied name is found, not that a particular line split occurred.
+        """
+        # Determinism by CONSTRUCTION, not by luck: the allow substring and the
+        # denied term live in the SAME entry name, so no object-id byte can fall
+        # between them and no line split can separate them. Placing them in two
+        # neighbouring entries would leave the outcome to whether a 20-byte sha
+        # happens to contain a break — roughly a coin toss, which is exactly the
+        # non-determinism this ticket is about.
+        allowed_term = "vendorlib"
+        self._commit("pkg/%s-%s.md" % (allowed_term, self.TERM), "clean body\n")
+        # The body carries nothing denied: only the PATH does, so only a tree can hit.
+        grep = subprocess.run(["/usr/bin/grep", "-rIi", self.TERM, self.d],
+                              capture_output=True, text=True)
+        self.assertNotIn(".md:", grep.stdout, "fixture invalid: a body carries it")
+
+        deny = self._deny("%s\nallow:%s\n" % (self.TERM, allowed_term))
+        r = self._scrub("--objects", denylist=deny)
+        self.assertEqual(r.returncode, 1,
+                         "an allow substring on one tree entry must not suppress a "
+                         "denied name on another:\n%s" % (r.stdout + r.stderr))
+        self.assertIn("OBJECT hit: tree ", r.stdout)
+
+    def test_allow_exceptions_still_suppress_the_intended_textual_line(self):
+        """#292 is tree-specific: line-scoped allows must keep working on text.
+
+        The fix removes suppression for tree objects only. If it had been widened to
+        every object, every allow: rule in the operator's denylist would stop working
+        and the audit would become unusable through noise instead of unusable through
+        false negatives.
+        """
+        allowed_term = "vendorlib"
+        self._commit("docs/note.md",
+                     "the %s %s reference is expected here\n"
+                     % (allowed_term, self.TERM))
+        deny = self._deny("%s\nallow:%s\n" % (self.TERM, allowed_term))
+        r = self._scrub("--objects", denylist=deny)
+        blob_hits = [ln for ln in r.stdout.splitlines()
+                     if ln.startswith("OBJECT hit: blob ")]
+        self.assertEqual(blob_hits, [],
+                         "the allow: line exception must still suppress this blob "
+                         "line:\n%s" % r.stdout)
+
     def test_cli_help_does_not_promise_what_the_scanner_stopped_doing(self):
         """#262: `--help` is a shipped contract, and it outlived two removals.
 
