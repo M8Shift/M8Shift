@@ -18,6 +18,7 @@ import glob
 import hashlib
 import http.client
 import importlib.util
+import inspect
 import io
 import json
 import math
@@ -17584,6 +17585,290 @@ class TestRFC052ScrubCheck(CLIBase):
         rv = self._scrub("--verbose", denylist=self._deny(self.TERM + "\n"))
         self.assertIn(self.TERM, rv.stdout)               # forensic local mode
 
+    def test_stale_local_carrier_is_never_proof_that_the_destination_has_it(self):
+        """#262, the whole point: local reachability proves nothing about a remote.
+
+        I proposed classifying a finding as pre-existing when another LOCAL ref
+        reached it. Review rejected that as #262 in a new costume, and this pins the
+        counterexample: the destination is recreated, a local branch still carries the
+        leaked commit, and the endpoint has never seen it. Calling that pre-existing
+        would recreate the false clean.
+        """
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        leaked = self._sha()
+        self._rm_commit("docs/ghost.md")
+        tip = self._sha()
+        bare = self._bare_remote()
+        subprocess.run(["git", "branch", "carrier", leaked], cwd=self.d,
+                       capture_output=True)          # a live LOCAL carrier
+        shutil.rmtree(bare, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+
+        # No endpoint base: the destination proved nothing, so nothing is downgraded.
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("not transmitted by this push", r.stdout)
+
+    def test_endpoint_base_downgrades_only_what_the_destination_proved(self):
+        """#262 acceptance: a non-zero remote_sha from THIS batch is the only proof."""
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        published = self._sha()
+        bare = self._bare_remote()                    # destination now holds `published`
+        self._commit("docs/clean.md", "clean work\n")
+        tip = self._sha()
+        dl = self._deny(self.TERM + "\n")
+
+        # With the proof, the historical hit is reported and does not block.
+        proven = self._scrub("--range", tip, "--remote", "origin",
+                             "--endpoint-base", published, denylist=dl)
+        self.assertEqual(proven.returncode, 0, proven.stdout + proven.stderr)
+        self.assertIn("not transmitted by this push", proven.stdout)
+
+        # Without it, the same repository blocks: unknown is not pre-existing.
+        unknown = self._scrub("--range", tip, "--remote", "origin", denylist=dl)
+        self.assertEqual(unknown.returncode, 1, unknown.stdout + unknown.stderr)
+        self.assertNotIn("not transmitted by this push", unknown.stdout)
+
+        # A base the local store cannot resolve proves nothing and is dropped.
+        absent = self._scrub("--range", tip, "--remote", "origin",
+                             "--endpoint-base", "f" * 40, denylist=dl)
+        self.assertEqual(absent.returncode, 1, absent.stdout + absent.stderr)
+        self.assertIn("proves nothing", absent.stderr)
+        self.assertNotIn("bad object", absent.stdout + absent.stderr)
+
+    def test_cli_help_does_not_promise_what_the_scanner_stopped_doing(self):
+        """#262: `--help` is a shipped contract, and it outlived two removals.
+
+        Review caught this on the fourth head: the runtime output had been corrected
+        to the weaker, accurate claim, while `--help` still told operators that a
+        bare-sha range excludes the target remote's tracking refs, and that a matching
+        finding is "confirmed pre-existing" at the destination. Both were removed from
+        the code — the first because tracking refs are a cache that survives a
+        recreated destination, the second because `merge-base --is-ancestor` proves
+        local ancestry and not endpoint possession.
+
+        An internal comment drifting is a documentation problem. `--help` drifting
+        leaves the operator holding the model the change exists to correct.
+        """
+        helped = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "scrub-check.py"), "--help"],
+            capture_output=True, text=True)
+        self.assertEqual(helped.returncode, 0, helped.stderr)
+        text = " ".join(helped.stdout.split())          # unwrap argparse line breaks
+
+        for removed in ("range exclusions", "considered published",
+                        "proved the destination already has",
+                        "confirmed pre-existing"):
+            self.assertNotIn(removed, text,
+                             "--help still promises removed behaviour: %r" % removed)
+        self.assertIn("excludes nothing", text)
+        self.assertIn("NOT TRANSMITTED by this push", text)
+        self.assertIn("does not establish that the destination possesses it", text)
+
+    def test_one_proven_finding_cannot_silence_an_unproven_one(self):
+        """#262: the downgrade needs EVERY finding proven, not merely one of them.
+
+        Tag and commit-message findings carry no endpoint proof at all, and an earlier
+        revision counted only history findings — so one proven history hit silenced an
+        unbounded number of unproven ones. Reached by the ordinary release command
+        `git push --follow-tags origin main`: the branch ref earns a base and the tag
+        ref rides on it. Measured on the rejected revision: the same tag pushed alone
+        was blocked, batched it published a denylisted term to a real destination.
+        """
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        published = self._sha()
+        self._bare_remote()                       # destination holds `published`
+        self._commit("docs/clean.md", "clean work\n")
+        tip = self._sha()
+        # A tag whose MESSAGE carries the term, never published anywhere.
+        subprocess.run(["git", "tag", "-a", "v1.0", "-m",
+                        "v1.0 ships the %s integration" % self.TERM],
+                       cwd=self.d, capture_output=True)
+        tag_sha = self._sha("v1.0")
+        dl = self._deny(self.TERM + "\n")
+
+        r = self._scrub("--range", published + ".." + tip, "--ref", "refs/heads/main",
+                        "--range", tag_sha, "--ref", "refs/tags/v1.0",
+                        "--endpoint-base", published, denylist=dl)
+        self.assertEqual(r.returncode, 1,
+                         "a tag the destination has never seen must not ride on a "
+                         "base earned by another ref:\n%s" % (r.stdout + r.stderr))
+        self.assertNotIn("none of them transmitted", r.stdout)
+
+    def test_unusual_but_valid_remote_name_is_not_a_scan_error(self):
+        """#262: `--remote` is metadata now, and must not veto a name git accepts.
+
+        I claimed the flag was inert after the exclusion was removed. Review executed
+        it: `validate_remote` still returned rc 2 for names failing its regex, and the
+        hook turns rc 2 into "push blocked", so a remote called `_fork` fail-closed a
+        real push for a value nothing reads.
+        """
+        self._commit("docs/clean.md", "clean\n")
+        for name in ("_fork", "team.mirror", "a/b", "UPPER"):
+            r = self._scrub("--remote", name, denylist=self._deny(self.TERM + "\n"))
+            self.assertNotEqual(r.returncode, 2,
+                                "%r is a name git accepts: %s" % (name, r.stderr))
+
+    def test_network_git_argv_is_refused_before_the_process_is_spawned(self):
+        """#262: the boundary is enforced at the spawn point, not asserted in text.
+
+        My first guard was a substring scan of the source for five quoted literals.
+        Review bypassed it by appending one token to a call already present —
+        `run(["git", "remote"], repo)` becomes `run(["git", "remote", "update"], …)`,
+        which fetches — and the assertion still passed. A source-text claim cannot
+        enforce behaviour.
+        """
+        mod = self._scrub_mod()
+        for argv in (["git", "ls-remote", "--heads", "origin"],
+                     ["git", "fetch", "origin"],
+                     ["git", "push", "origin", "HEAD"],
+                     ["git", "clone", "x", "y"],
+                     ["git", "remote", "update"],       # the exact bypass found
+                     ["git", "remote", "prune", "origin"]):
+            with self.assertRaises(mod.NetworkAttemptRefused, msg=" ".join(argv)):
+                mod.refuse_network_argv(argv)
+
+        # Unrecognised subcommands fail CLOSED: a false refusal is a visible error,
+        # a false allow is a silent network dependency inside a pre-push hook.
+        with self.assertRaises(mod.NetworkAttemptRefused):
+            mod.refuse_network_argv(["git", "some-future-porcelain"])
+        with self.assertRaises(mod.NetworkAttemptRefused):
+            mod.refuse_network_argv(["curl", "https://example.invalid"])
+
+        # The local reads the scanner actually needs stay allowed.
+        for argv in (["git", "grep", "-I", "-i", "-e", "x", "HEAD", "--"],
+                     ["git", "log", "abc..def"], ["git", "cat-file", "-t", "abc"],
+                     ["git", "remote"], ["git", "for-each-ref"], ["git", "fsck"]):
+            self.assertEqual(mod.refuse_network_argv(argv), argv, " ".join(argv))
+
+    def test_the_runtime_boundary_actually_gates_run_git(self):
+        """The refusal must sit in the path every subprocess goes through."""
+        mod = self._scrub_mod()
+        with self.assertRaises(mod.NetworkAttemptRefused):
+            mod.run_git(["git", "ls-remote", "origin"], self.d)
+
+    def test_absent_endpoint_tip_does_not_abort_the_walk(self):
+        """#262 acceptance 2: a tip the local store lacks must never reach `git log`.
+
+        The rejected fix spliced re-observed remote tips into `--not <sha>`, and git
+        resolves revisions against the LOCAL object database. Reproduced by hand in
+        the most ordinary state there is — a teammate pushed since the last fetch —
+        `git log HEAD --not <foreign-sha>` dies with `fatal: bad object`, which
+        became rc 128 → rc 2 → a broken pre-push hook.
+        """
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        tip = self._sha()
+        bare = self._bare_remote()
+        # Another clone publishes a branch this repository has never fetched.
+        other = tempfile.mkdtemp(prefix="m8-scrub-other-")
+        self.addCleanup(shutil.rmtree, other, True)
+        subprocess.run(["git", "clone", "-q", bare, other], capture_output=True)
+        for argv in (["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+            subprocess.run(["git", *argv], cwd=other, capture_output=True)
+        with open(os.path.join(other, "theirs.txt"), "w", encoding="utf-8") as fh:
+            fh.write("theirs\n")
+        for argv in (["add", "-A"], ["commit", "-q", "-m", "theirs"],
+                     ["push", "-q", "origin", "HEAD:refs/heads/colleague"]):
+            subprocess.run(["git", *argv], cwd=other, capture_output=True)
+
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertNotIn("bad object", r.stdout + r.stderr)
+        self.assertNotEqual(r.returncode, 2,
+                            "an unfetched remote ref must not break the scan:\n%s"
+                            % (r.stdout + r.stderr))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("HISTORY hit: commit ", r.stdout)
+
+    def test_push_url_divergence_follows_the_stdin_negotiation(self):
+        """#262 acceptance 3: the publication endpoint is what git says it is.
+
+        `git ls-remote <name>` resolves the FETCH url, while pushes go to `pushurl`.
+        When they diverge, an ls-remote-based exclusion described a repository that
+        was not the publication target — verified end to end on the rejected fix,
+        with a real push that published the leak. With no exclusion composed at all,
+        the divergence cannot mislead the walk.
+        """
+        fetch_side = self._bare_remote()
+        push_side = tempfile.mkdtemp(prefix="m8-scrub-push-")
+        self.addCleanup(shutil.rmtree, push_side, True)
+        subprocess.run(["git", "init", "-q", "--bare", push_side], capture_output=True)
+        subprocess.run(["git", "remote", "set-url", "--push", "origin", push_side],
+                       cwd=self.d, check=True, capture_output=True)
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        tip = self._sha()
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:main"],
+                       cwd=self.d, capture_output=True)          # lands on push_side
+        subprocess.run(["git", "fetch", "-q", "origin"], cwd=self.d,
+                       capture_output=True)                      # caches fetch_side
+        self.assertNotEqual(fetch_side, push_side)
+
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1,
+                         "history reachable from a bare range is always scanned, so a "
+                         "divergent fetch url cannot excuse it:\n%s"
+                         % (r.stdout + r.stderr))
+        self.assertIn("HISTORY hit: commit ", r.stdout)
+
+    def _bare_remote(self, name="origin"):
+        """A real bare remote, pushed and fetched, so tracking refs are genuine."""
+        bare = tempfile.mkdtemp(prefix="m8-scrub-remote-")
+        self.addCleanup(shutil.rmtree, bare, True)
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+        for argv in (["remote", "add", name, bare],
+                     ["push", "-q", name, "HEAD:main"],
+                     ["fetch", "-q", name]):
+            subprocess.run(["git", *argv], cwd=self.d, capture_output=True)
+        return bare
+
+    def test_recreated_remote_does_not_make_unpublished_history_look_clean(self):
+        """#262: a remote-tracking ref is a cache, and this gate trusted it as the
+        remote itself.
+
+        The exclusion `--not --remotes=<name>` answers "already published?" from a
+        LOCAL cache. Recreate or purge the remote and the cache survives it, so the
+        walk excludes history that is not published at all — and the gate prints
+        clean at the exact moment the risk is highest, right after a recreation.
+
+        Measured on the fixture below before the fix: with the stale tracking ref
+        present the gate returned rc 0 and zero history hits; with the same ref
+        removed it returned rc 1 and found the leak. Same repository, same commits,
+        same denylist — the only variable was a cache that no longer described the
+        remote, and the walk covered 0 of 2 real commits.
+
+        This is RFC 078 section 2.2 in the surface it was written from: a cache of a
+        remote authority is not the remote.
+        """
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")                  # history-only now
+        tip = self._sha()
+        bare = self._bare_remote()
+
+        # The high-risk moment: the remote is recreated empty, the tracking ref lives on.
+        shutil.rmtree(bare, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+        live = subprocess.run(["git", "ls-remote", "origin"], cwd=self.d,
+                              capture_output=True, text=True)
+        self.assertEqual(live.stdout.strip(), "",
+                         "fixture invalid: the recreated remote must be empty")
+        cached = subprocess.run(["git", "for-each-ref", "refs/remotes/"], cwd=self.d,
+                                capture_output=True, text=True)
+        self.assertIn("origin", cached.stdout,
+                      "fixture invalid: the stale tracking ref must survive")
+
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1,
+                         "nothing is published on the recreated remote, so no history "
+                         "may be excluded from the walk:\n%s" % (r.stdout + r.stderr))
+        self.assertIn("HISTORY hit: commit ", r.stdout)
+
     def test_word_mode_hits_exact_word_on_tip_not_substring(self):
         # Pinned lesson: `git grep -E \\b..\\b` is silently CLEAN on BSD/macOS —
         # word semantics must come from the in-process post-filter.
@@ -17850,13 +18135,24 @@ class TestRFC052ScrubCheck(CLIBase):
         direct = mod.history_cmd(rule, 100, refs_pull=False)
         self.assertIn("HEAD", direct)
         self.assertNotIn("--all", direct)
-        bare, error = mod.parse_ranges(["a" * 40], remote="public")
+        # #262: a bare sha composes NO exclusion, ever. The old
+        # `--not --remotes=<name>` read local tracking refs — a cache — and hid
+        # unpublished history after a remote was recreated. Re-observing the remote
+        # was tried and rejected (fetch-vs-push url, `fatal: bad object` on tips the
+        # local store lacks, and a network round trip this family forbids). The
+        # endpoint authority is the pre-push remote_sha, and the hook already turns a
+        # resolvable one into an `A..B` range; this function's job is not to defeat
+        # that fallback.
+        bare, error = mod.parse_ranges(["a" * 40])
         self.assertIsNone(error)
-        self.assertEqual(bare[0][1],
-                         ["a" * 40, "--not", "--remotes=public"])
-        conservative, error = mod.parse_ranges(["b" * 40])
+        self.assertEqual(bare[0][1], ["a" * 40])
+        self.assertNotIn("--not", bare[0][1])
+        pair, error = mod.parse_ranges(["b" * 40 + ".." + "c" * 40])
         self.assertIsNone(error)
-        self.assertEqual(conservative[0][1], ["b" * 40])
+        self.assertEqual(pair[0][1], ["b" * 40 + ".." + "c" * 40])
+        self.assertEqual(len(inspect.signature(mod.parse_ranges).parameters), 1,
+                         "parse_ranges must take no exclusion source: #262 is that "
+                         "any such source was a cache or a network call")
 
     def test_parser_drift_scrub_check_matches_core(self):
         # The script duplicates the core denylist parser (self-contained by
@@ -18017,18 +18313,28 @@ class TestRFC052ScrubCheck(CLIBase):
         # New branch to `public`: commits already tracked by the unrelated
         # private `origin` remote are still publication-bound. The old global
         # `--not --remotes` silently dropped this add-then-remove leak.
+        # #262: the exclusion is now re-observed from the remote, so this fixture
+        # gives each remote a REAL state instead of fabricating tracking refs that
+        # contradict the remote they name. The contract under test is unchanged —
+        # only the target remote's history may be excluded — but it is now pinned
+        # against remotes that actually hold what the test says they hold.
+        remotes = {}
         for remote in ("origin", "public"):
-            subprocess.run(["git", "remote", "add", remote, self.d],
+            bare = tempfile.mkdtemp(prefix="m8-scrub-%s-" % remote)
+            self.addCleanup(shutil.rmtree, bare, True)
+            subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+            subprocess.run(["git", "remote", "add", remote, bare],
                            cwd=self.d, check=True, capture_output=True)
+            remotes[remote] = bare
         self._commit("base.txt", "clean\n", "base")
         base = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/public/main", base],
-                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "push", "-q", "public", "HEAD:main"],
+                       cwd=self.d, check=True, capture_output=True)   # public holds base
         self._commit("docs/transient.md", "temporary %s leak\n" % self.TERM)
         self._rm_commit("docs/transient.md")
         tip = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/feature", tip],
-                       cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:feature"],
+                       cwd=self.d, check=True, capture_output=True)   # origin holds the tip
         dl = self._deny(self.TERM + "\n")
         r = self._scrub("--range", tip, "--remote", "public", denylist=dl)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -18040,8 +18346,8 @@ class TestRFC052ScrubCheck(CLIBase):
                        cwd=self.d, check=True)
         self._commit("docs/clean.md", "clean feature\n")
         clean_tip = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/clean-feature",
-                        clean_tip], cwd=self.d, check=True, capture_output=True)
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:clean-feature"],
+                       cwd=self.d, check=True, capture_output=True)
         clean = self._scrub("--range", clean_tip, "--remote", "public",
                             denylist=dl)
         self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
@@ -18336,17 +18642,23 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertNotIn(self.TERM, result.stdout + result.stderr)
 
     def test_pre_push_new_branch_uses_only_target_remote_tracking(self):
+        # #262: real remote state instead of fabricated tracking refs — the
+        # exclusion is re-observed, so a cache that contradicts its remote is
+        # exactly what must no longer be believed. Contract unchanged.
         for remote in ("origin", "public"):
-            subprocess.run(["git", "remote", "add", remote, self.d],
+            bare = tempfile.mkdtemp(prefix="m8-push-%s-" % remote)
+            self.addCleanup(shutil.rmtree, bare, True)
+            subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+            subprocess.run(["git", "remote", "add", remote, bare],
                            cwd=self.d, check=True, capture_output=True)
         self._commit("base.txt", "clean\n", "base")
         base = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/public/main", base],
+        subprocess.run(["git", "push", "-q", "public", "HEAD:main"],
                        cwd=self.d, check=True, capture_output=True)
         self._commit("transient.txt", "temporary %s leak\n" % self.TERM)
         self._rm_commit("transient.txt")
         tip = self._sha()
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/feature", tip],
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:feature"],
                        cwd=self.d, check=True, capture_output=True)
         os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
         shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),

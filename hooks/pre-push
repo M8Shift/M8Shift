@@ -89,6 +89,14 @@ fi
 # `sh hooks/pre-push` run from a shell has no ref lines — fall back to the
 # direct HEAD scan rather than hang on a read).
 ranges=""
+# Initialised beside `ranges`, OUTSIDE the stdin guard. It was declared inside it,
+# and expanded unconditionally further down under `set -eu`, so the documented
+# manual-run path — `sh hooks/pre-push` from a shell, where stdin IS a terminal —
+# aborted with `bases: unbound variable` before the scan ran at all. A real push was
+# unaffected because git always supplies a pipe, so the breakage was fail-closed;
+# what it cost was the operator's hand-run pre-flight, and a hook that errors is a
+# hook someone reaches past with --no-verify.
+bases=""
 stdin_lines=0
 if [ ! -t 0 ]; then
 	while read -r _local_ref local_sha remote_ref remote_sha; do
@@ -106,6 +114,12 @@ if [ ! -t 0 ]; then
 			# over-scans relative to target-remote tracking instead of erroring.
 			if git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
 				ranges="${ranges} --range ${remote_sha}..${local_sha} --ref ${remote_ref}"
+				# #262: git proved the destination has this commit. It is the
+				# only endpoint-authoritative evidence a client-side hook gets,
+				# and it lets a finding on ANOTHER ref of this same batch be
+				# reported as pre-existing instead of blocking. A local branch
+				# reaching the commit proves nothing and is never used for this.
+				bases="${bases} --endpoint-base ${remote_sha}"
 			else
 				ranges="${ranges} --range ${local_sha} --ref ${remote_ref}"
 			fi
@@ -143,7 +157,7 @@ except BaseException as exc:
 		}
 		# shellcheck disable=SC2086 # intentional word-splitting: hex-only rev specs
 		if [ -n "${target_remote}" ]; then
-			run_scrub --repo "${repo_root}" --remote "${target_remote}" ${ranges} >&2 || scrub_rc=$?
+			run_scrub --repo "${repo_root}" --remote "${target_remote}" ${bases} ${ranges} >&2 || scrub_rc=$?
 		else
 			run_scrub --repo "${repo_root}" ${ranges} >&2 || scrub_rc=$?
 		fi
