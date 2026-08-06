@@ -17585,23 +17585,110 @@ class TestRFC052ScrubCheck(CLIBase):
         rv = self._scrub("--verbose", denylist=self._deny(self.TERM + "\n"))
         self.assertIn(self.TERM, rv.stdout)               # forensic local mode
 
-    def test_scanner_spawns_no_network_capable_git_subcommand(self):
-        """#262 acceptance 5b: this family is declared network-free.
+    def test_stale_local_carrier_is_never_proof_that_the_destination_has_it(self):
+        """#262, the whole point: local reachability proves nothing about a remote.
 
-        The scanner header says "no network" and RFC 052 defines the family as
-        "stdlib-only, no network, no daemon". An earlier attempt at #262 used
-        `git ls-remote` and was rejected for exactly that reason — along with the
-        fetch-versus-push url gap and `fatal: bad object` on tips the local store
-        lacks. This pins the boundary in the source, so the next fix cannot cross it
-        quietly.
+        I proposed classifying a finding as pre-existing when another LOCAL ref
+        reached it. Review rejected that as #262 in a new costume, and this pins the
+        counterexample: the destination is recreated, a local branch still carries the
+        leaked commit, and the endpoint has never seen it. Calling that pre-existing
+        would recreate the false clean.
         """
-        with open(os.path.join(REPO, "scripts", "scrub-check.py"),
-                  encoding="utf-8") as fh:
-            source = fh.read()
-        for verb in ("ls-remote", "fetch", "push", "clone", "remote update"):
-            self.assertNotIn('"%s"' % verb, source,
-                             "scrub-check must not run a network git subcommand: %r"
-                             % verb)
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        leaked = self._sha()
+        self._rm_commit("docs/ghost.md")
+        tip = self._sha()
+        bare = self._bare_remote()
+        subprocess.run(["git", "branch", "carrier", leaked], cwd=self.d,
+                       capture_output=True)          # a live LOCAL carrier
+        shutil.rmtree(bare, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+
+        # No endpoint base: the destination proved nothing, so nothing is downgraded.
+        r = self._scrub("--range", tip, "--remote", "origin",
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("confirmed pre-existing", r.stdout)
+
+    def test_endpoint_base_downgrades_only_what_the_destination_proved(self):
+        """#262 acceptance: a non-zero remote_sha from THIS batch is the only proof."""
+        self._commit("docs/ghost.md", "The %s was here.\n" % self.TERM)
+        self._rm_commit("docs/ghost.md")
+        published = self._sha()
+        bare = self._bare_remote()                    # destination now holds `published`
+        self._commit("docs/clean.md", "clean work\n")
+        tip = self._sha()
+        dl = self._deny(self.TERM + "\n")
+
+        # With the proof, the historical hit is reported and does not block.
+        proven = self._scrub("--range", tip, "--remote", "origin",
+                             "--endpoint-base", published, denylist=dl)
+        self.assertEqual(proven.returncode, 0, proven.stdout + proven.stderr)
+        self.assertIn("confirmed pre-existing", proven.stdout)
+
+        # Without it, the same repository blocks: unknown is not pre-existing.
+        unknown = self._scrub("--range", tip, "--remote", "origin", denylist=dl)
+        self.assertEqual(unknown.returncode, 1, unknown.stdout + unknown.stderr)
+        self.assertNotIn("confirmed pre-existing", unknown.stdout)
+
+        # A base the local store cannot resolve proves nothing and is dropped.
+        absent = self._scrub("--range", tip, "--remote", "origin",
+                             "--endpoint-base", "f" * 40, denylist=dl)
+        self.assertEqual(absent.returncode, 1, absent.stdout + absent.stderr)
+        self.assertIn("proves nothing", absent.stderr)
+        self.assertNotIn("bad object", absent.stdout + absent.stderr)
+
+    def test_unusual_but_valid_remote_name_is_not_a_scan_error(self):
+        """#262: `--remote` is metadata now, and must not veto a name git accepts.
+
+        I claimed the flag was inert after the exclusion was removed. Review executed
+        it: `validate_remote` still returned rc 2 for names failing its regex, and the
+        hook turns rc 2 into "push blocked", so a remote called `_fork` fail-closed a
+        real push for a value nothing reads.
+        """
+        self._commit("docs/clean.md", "clean\n")
+        for name in ("_fork", "team.mirror", "a/b", "UPPER"):
+            r = self._scrub("--remote", name, denylist=self._deny(self.TERM + "\n"))
+            self.assertNotEqual(r.returncode, 2,
+                                "%r is a name git accepts: %s" % (name, r.stderr))
+
+    def test_network_git_argv_is_refused_before_the_process_is_spawned(self):
+        """#262: the boundary is enforced at the spawn point, not asserted in text.
+
+        My first guard was a substring scan of the source for five quoted literals.
+        Review bypassed it by appending one token to a call already present —
+        `run(["git", "remote"], repo)` becomes `run(["git", "remote", "update"], …)`,
+        which fetches — and the assertion still passed. A source-text claim cannot
+        enforce behaviour.
+        """
+        mod = self._scrub_mod()
+        for argv in (["git", "ls-remote", "--heads", "origin"],
+                     ["git", "fetch", "origin"],
+                     ["git", "push", "origin", "HEAD"],
+                     ["git", "clone", "x", "y"],
+                     ["git", "remote", "update"],       # the exact bypass found
+                     ["git", "remote", "prune", "origin"]):
+            with self.assertRaises(mod.NetworkAttemptRefused, msg=" ".join(argv)):
+                mod.refuse_network_argv(argv)
+
+        # Unrecognised subcommands fail CLOSED: a false refusal is a visible error,
+        # a false allow is a silent network dependency inside a pre-push hook.
+        with self.assertRaises(mod.NetworkAttemptRefused):
+            mod.refuse_network_argv(["git", "some-future-porcelain"])
+        with self.assertRaises(mod.NetworkAttemptRefused):
+            mod.refuse_network_argv(["curl", "https://example.invalid"])
+
+        # The local reads the scanner actually needs stay allowed.
+        for argv in (["git", "grep", "-I", "-i", "-e", "x", "HEAD", "--"],
+                     ["git", "log", "abc..def"], ["git", "cat-file", "-t", "abc"],
+                     ["git", "remote"], ["git", "for-each-ref"], ["git", "fsck"]):
+            self.assertEqual(mod.refuse_network_argv(argv), argv, " ".join(argv))
+
+    def test_the_runtime_boundary_actually_gates_run_git(self):
+        """The refusal must sit in the path every subprocess goes through."""
+        mod = self._scrub_mod()
+        with self.assertRaises(mod.NetworkAttemptRefused):
+            mod.run_git(["git", "ls-remote", "origin"], self.d)
 
     def test_absent_endpoint_tip_does_not_abort_the_walk(self):
         """#262 acceptance 2: a tip the local store lacks must never reach `git log`.

@@ -224,32 +224,25 @@ def parse_ranges(values):
 
 
 def validate_remote(value, repo, run):
-    """Validate the target remote named by the caller.
+    """Accept the caller's remote name as opaque reporting metadata.
 
-    #262: this no longer composes any exclusion — see `parse_ranges`. The name is
-    still validated because an invented or malformed one signals a mistaken
-    invocation, and because it is carried into the mode checks below; it is NOT scan
-    authority, and nothing about the walk depends on it. The endpoint authority is
-    the pre-push `remote_sha` on the hook's stdin, which git resolved against the
-    real push destination. Returns `(name, error)`.
+    #262: this used to gate the scan, and its rc 2 outlived the exclusion it once
+    guarded. I claimed the flag was inert after removing the exclusion; review
+    executed it and showed otherwise — REMOTE_RX refused names git accepts, so a
+    legitimately configured remote called `_fork` fail-closed a real push through the
+    hook's "scan errors block" rule, for a value nothing reads.
+
+    The walk no longer depends on this name in any way, so the scanner no longer
+    vetoes it. Whether a name is a configured remote is the hook's question, and the
+    hook already answers it with `git remote get-url` before passing one. What
+    remains here is the shape check that keeps a wild value out of the report text.
     """
     if not value:
         return None, None
-    if not REMOTE_RX.match(value) or ".." in value or "//" in value or \
-            value.endswith("/"):
+    if not isinstance(value, str) or "\n" in value or "\r" in value or \
+            len(value) > 256:
         return None, "invalid --remote %r" % value
-    checked = run(["git", "check-ref-format",
-                   "refs/remotes/%s/probe" % value], repo)
-    if checked.returncode != 0:
-        return None, "invalid --remote %r" % value
-    remotes = run(["git", "remote"], repo)
-    if remotes.returncode != 0:
-        return None, "git remote rc=%d: %s" % (
-            remotes.returncode, (remotes.stderr or "").strip()[:200])
-    if value not in remotes.stdout.splitlines():
-        return None, "unknown --remote %r" % value
     return value, None
-
 
 def redact(text, rules):
     """Redact every denied-term occurrence in a display string (review BLOCKER:
@@ -259,11 +252,101 @@ def redact(text, rules):
     return text
 
 
+# Git subcommands this scanner is allowed to run. The family is declared
+# network-free by the module header and by RFC 052 acceptance ("stdlib-only, no
+# network, no daemon"), and #262 showed that boundary is easy to cross by accident:
+# a first attempt at that ticket added `git ls-remote`, and the source-text guard
+# written to prevent a repeat was itself bypassed by appending one token to an
+# existing call — `run(["git", "remote"], …)` becomes `run(["git", "remote",
+# "update"], …)`, which fetches, while a substring assertion still passes.
+#
+# So the boundary is enforced where the process is actually spawned, not asserted
+# about the text. An allowlist of local-only subcommands, plus a refusal of the
+# argument forms that make an otherwise-local subcommand reach the network.
+LOCAL_ONLY_GIT_SUBCOMMANDS = frozenset({
+    "grep", "log", "cat-file", "rev-parse", "rev-list", "show", "for-each-ref",
+    "check-ref-format", "remote", "diff", "diff-tree", "ls-tree", "verify-pack",
+    "count-objects", "name-rev", "branch", "tag", "config", "fsck", "reflog",
+    "merge-base",
+})
+NETWORK_GIT_SUBCOMMANDS = frozenset({
+    "ls-remote", "fetch", "pull", "push", "clone", "submodule", "archive",
+    "send-pack", "fetch-pack", "upload-pack", "request-pull", "bundle",
+})
+NETWORK_GIT_ARGS = frozenset({"update", "prune", "set-head", "--fetch"})
+
+
+class NetworkAttemptRefused(RuntimeError):
+    """A git argv that could reach the network was refused before spawning."""
+
+
+def refuse_network_argv(cmd):
+    """Raise unless `cmd` is a local-only git invocation. Fail closed on anything
+    unrecognised: an unknown subcommand is refused rather than allowed, because the
+    cost of a false refusal is a visible error and the cost of a false allow is a
+    silent network dependency in a pre-push hook."""
+    if not cmd or cmd[0] != "git":
+        raise NetworkAttemptRefused("scrub-check only runs git: %r" % (cmd[:1],))
+    args = [a for a in cmd[1:] if not a.startswith("-") or a in NETWORK_GIT_ARGS]
+    sub = next((a for a in cmd[1:] if not a.startswith("-")), None)
+    if sub in NETWORK_GIT_SUBCOMMANDS:
+        raise NetworkAttemptRefused("network git subcommand refused: %s" % sub)
+    if sub not in LOCAL_ONLY_GIT_SUBCOMMANDS:
+        raise NetworkAttemptRefused("git subcommand not on the local-only allowlist: "
+                                    "%s" % sub)
+    # `git remote` is local; `git remote update` is a fetch. Same for prune/set-head.
+    tail = [a for a in args[1:] if a in NETWORK_GIT_ARGS]
+    if sub == "remote" and tail:
+        raise NetworkAttemptRefused("network git argument refused: remote %s" % tail[0])
+    return cmd
+
+
+def usable_endpoint_bases(values, repo, run):
+    """Keep only bases the local object store can resolve. -> (bases, dropped).
+
+    A base git cannot resolve here cannot be used to prove anything, and feeding it
+    to a revision walk is what made the first #262 attempt die on `fatal: bad
+    object`. Dropping it is safe: fewer proofs means fewer findings are downgraded
+    from blocking, never more.
+    """
+    bases, dropped = [], []
+    for value in values or []:
+        if not OBJECT_RX.match(value or "") or set(value) == {"0"}:
+            dropped.append(value)
+            continue
+        try:
+            proc = run(["git", "cat-file", "-e", value + "^{commit}"], repo)
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+            dropped.append(value)
+            continue
+        (bases if proc.returncode == 0 else dropped).append(value)
+    return bases, dropped
+
+
+def proven_pre_existing(sha, bases, repo, run):
+    """True iff `sha` is an ancestor of a commit the destination is PROVEN to have.
+
+    The proof comes from git's own push negotiation for this batch, never from a
+    local ref and never from a remote-tracking cache — both were rejected in review
+    as #262 in a new costume: a stale local carrier can hold a commit the recreated
+    destination has never seen.
+    """
+    for base in bases:
+        try:
+            proc = run(["git", "merge-base", "--is-ancestor", sha, base], repo)
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+            continue
+        if proc.returncode == 0:
+            return True
+    return False
+
+
 def run_git(cmd, repo):
-    """Raw argv execution (shell=False), bounded. -> CompletedProcess.
+    """Raw argv execution (shell=False), bounded, LOCAL ONLY. -> CompletedProcess.
     Explicit utf-8 + errors=replace: with bare text=True, invalid UTF-8 in a
     tracked file made the decode raise UnicodeDecodeError -> traceback -> rc 1,
     which the hooks then misread as a scrub HIT (review MEDIUM 2)."""
+    refuse_network_argv(cmd)
     return subprocess.run(cmd, cwd=repo, capture_output=True,
                           encoding="utf-8", errors="replace",
                           timeout=GIT_TIMEOUT_S)
@@ -675,6 +758,12 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     ap.add_argument("--ref", action="append", dest="range_refs", metavar="REF",
                     help="carrier ref corresponding to the preceding --range "
                          "(repeatable; used by the pre-push hook)")
+    ap.add_argument("--endpoint-base", dest="endpoint_bases", action="append",
+                    default=[], metavar="SHA",
+                    help="a non-zero remote_sha from THIS pre-push batch, i.e. a "
+                         "commit git proved the destination already has. Repeatable. "
+                         "Findings reachable from one are reported as confirmed "
+                         "pre-existing and do not block; everything else does (#262)")
     ap.add_argument("--max-commits", type=int, default=HISTORY_MAX_COMMITS,
                     help="history bound per term (default %(default)s)")
     ap.add_argument("--verbose", action="store_true",
@@ -691,6 +780,11 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     if remote_err:
         print("scrub-check: ERROR %s" % remote_err, file=err)
         return 2
+    endpoint_bases, dropped_bases = usable_endpoint_bases(
+        args.endpoint_bases, args.repo, run)
+    for value in dropped_bases:
+        print("scrub-check: NOTE endpoint base %r is not resolvable here; it proves "
+              "nothing and is ignored (#262)" % (value or "")[:64], file=err)
     specs, range_err = parse_ranges(args.ranges)
     if range_err:
         print("scrub-check: ERROR %s" % range_err, file=err)
@@ -849,6 +943,8 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     hits = 0
     tip_hits = 0
     history_kinds = []
+    pre_existing_hits = 0
+    blocking_hits = 0
     carrier_cache = {}
     for rule_index, rule in enumerate(rules):
         label, term, mode = rule
@@ -966,11 +1062,38 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                 carrier_text = ", ".join(carriers)
                 if not args.verbose:
                     carrier_text = redact(carrier_text, rules)
-                print("HISTORY hit: commit %s via %s [%s]"
-                      % (sha[:12], carrier_text, shown), file=out)
+                # #262: only this push's own negotiation can prove the destination
+                # already has the commit. `carriers` names LOCAL refs and is
+                # diagnostic attribution, never a downgrade.
+                proven = proven_pre_existing(sha, endpoint_bases, args.repo, run)
+                if proven:
+                    pre_existing_hits += 1
+                else:
+                    blocking_hits += 1
+                print("HISTORY hit: commit %s via %s [%s]%s"
+                      % (sha[:12], carrier_text, shown,
+                         "  (confirmed pre-existing at the destination)" if proven
+                         else ""), file=out)
 
     if history_pool is not None:
         history_pool.shutdown()
+
+    # #262 tri-state. Local reachability is NOT proof of publication — that was the
+    # defect, and proposing it again was rejected in review. The only endpoint-
+    # authoritative evidence a client-side hook has is the non-zero remote_sha git
+    # supplies for refs in THIS batch: git obtained it from the real destination.
+    #   introduced          -> in a resolvable A..B update range: blocks
+    #   confirmed pre-existing -> reachable from an endpoint base: reported, no block
+    #   unknown             -> a new ref has no authoritative baseline: blocks
+    # The boundary this exposes is real and is not papered over: a client-side hook
+    # never receives an inventory of the destination's other refs, so it cannot both
+    # avoid the post-recreation false clean and avoid blocking every clean new branch.
+    # Where both are required the decision belongs server-side.
+    if pre_existing_hits and not blocking_hits and tip_hits == 0:
+        print("scrub-check: %d hit(s), all confirmed pre-existing at the "
+              "destination by this push's own negotiation — reported, not blocking."
+              % pre_existing_hits, file=out)
+        return 0
 
     if hits:
         if (tip_hits == 0 and history_kinds and
