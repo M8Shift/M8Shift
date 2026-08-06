@@ -187,6 +187,76 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     return cmd
 
 
+PATH_COMMIT_MARK = "commit "
+
+
+def scope_path_records(tip_rev, range_args, repo, run):
+    """Enumerate every path a pushed scope publishes or ever carried. -> [(sha, path)]
+
+    #291: both scanners this hook runs match file CONTENT. `git grep` searches blob
+    bodies, the pickaxe counts occurrences inside blobs, and the message scan reads
+    %B — no scan input has ever contained a tree entry name. A denied identifier
+    carried by a filename or a directory therefore published with rc 0 under
+    enforcement, verified end to end with a real push. The scanner's own `redact()`
+    docstring had recorded that hazard without any scan acting on it.
+
+    Enumerated ONCE per scope, not once per denylist term: the cost of this addition
+    must not scale with the term count, and `--objects` stays the standalone audit.
+
+    Two walks, mirroring the existing TIP/HISTORY split:
+
+    * current names — the tree actually being published (`ls-tree` on a bare/new ref)
+      or the endpoint diff for `A..B`, so an existing-ref push does not re-report
+      every name already at the destination;
+    * transient names — the paths each commit in the pushed history touched, with
+      `--root` so an introduction in the first commit is seen, `-m` so a merge's own
+      diffs are, and `--no-renames` so a rename leaves BOTH names observable.
+
+    Records are NUL-delimited and consumed as such. Measured rather than assumed: a
+    file named `ligne1\nligne2.md` yields 4 NUL records where a line split sees 5, so
+    line parsing would both miscount and let a crafted name hide. The commit marker
+    is prefixed rather than sha-shaped for the same reason — a file named with 40 hex
+    characters exists and would otherwise be read as a commit boundary.
+    """
+    records = []
+
+    def harvest(cmd, attribute):
+        proc = run(cmd, repo)
+        if proc.returncode != 0:
+            return
+        current = None
+        for raw in (proc.stdout or "").split("\0"):
+            token = raw.strip("\n")
+            if not token:
+                continue
+            if attribute and token.startswith(PATH_COMMIT_MARK):
+                current = token[len(PATH_COMMIT_MARK):].strip()
+                continue
+            records.append((current, token))
+
+    if range_args and len(range_args) == 1 and ".." in range_args[0]:
+        base, _, tip = range_args[0].partition("..")
+        harvest(["git", "diff", "-z", "--name-only", "--no-renames", base, tip], False)
+    elif tip_rev:
+        harvest(["git", "ls-tree", "-r", "-z", "--name-only", tip_rev], False)
+
+    if range_args:
+        harvest(["git", "log", "--format=%x00" + PATH_COMMIT_MARK + "%H", "-z",
+                 "--name-only", "--no-renames", "--root", "-m", *range_args], True)
+    return records
+
+
+def path_match_indexes(path, matcher):
+    """Rule indexes matching a path. NO allow: suppression, by #292's finding.
+
+    A path is not line-scoped text, exactly as a tree object is not: there is no
+    boundary an `allow:` exception could be scoped to inside `a/b/c`. Applying one
+    would let a legitimate lookalike in one directory component silence a denied
+    identifier in another, which is the defect #292 closed for tree objects.
+    """
+    return content_match_indexes(path, matcher, ())
+
+
 def parse_ranges(values):
     """-> (specs, error). specs = [(tip_rev, range_args)] per --range value:
     `A..B` scans tree(B) + commits A..B; a bare SHA scans tree(SHA) and its whole
@@ -1117,6 +1187,51 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
 
     if history_pool is not None:
         history_pool.shutdown()
+
+    # #291 — PATH scan, once per pushed scope and NOT once per denylist term.
+    # Every other scanner here reads blob content or a commit message, so a denied
+    # identifier carried only by a filename or a directory published with rc 0 under
+    # enforcement. The cost contract is deliberate: two bounded git walks per scope,
+    # independent of how many terms the operator denies, and `--objects` stays the
+    # standalone audit rather than something the hook starts paying for.
+    path_matcher = compile_content_matcher(rules)
+    word_rules = {i: re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
+                  for i, (_label, term, mode) in enumerate(rules) if mode == "word"}
+    path_scopes = [(tip, spec_args) for tip, spec_args in specs] or [(None, None)]
+    seen_paths = set()
+    for scope_tip, scope_args in path_scopes:
+        try:
+            records = scope_path_records(scope_tip, scope_args, args.repo, run)
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
+            print("scrub-check: ERROR enumerating paths (%s)"
+                  % exc.__class__.__name__, file=err)
+            return 2
+        for commit, path in records:
+            for index in path_match_indexes(path, path_matcher):
+                word_rx = word_rules.get(index)
+                if word_rx is not None and not word_rx.search(path):
+                    continue          # literal over-match without a word boundary
+                key = (commit, path, index)
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                label, term, _mode = rules[index]
+                shown = label if not args.verbose else "%s:%s" % (label, term)
+                # The path IS the finding, so the default rendering must not echo it.
+                where = redact(path, rules) if not args.verbose else path
+                carrier = ("commit %s" % commit[:12]) if commit else "pushed tree"
+                hits += 1
+                proven = (commit is not None and endpoint_bases and
+                          not_transmitted_by_this_push(commit, endpoint_bases,
+                                                       args.repo, run))
+                if proven:
+                    pre_existing_hits += 1
+                else:
+                    blocking_hits += 1
+                print("PATH hit: %s via %s [%s]%s"
+                      % (where, carrier, shown,
+                         "  (not transmitted by this push)" if proven else ""),
+                      file=out)
 
     # #262 tri-state. Local reachability is NOT proof of publication — that was the
     # defect, and proposing it again was rejected in review. The only endpoint-

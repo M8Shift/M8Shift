@@ -17638,6 +17638,134 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("proves nothing", absent.stderr)
         self.assertNotIn("bad object", absent.stdout + absent.stderr)
 
+    def test_denied_filename_and_directory_block_the_push(self):
+        """#291: every other scanner here reads CONTENT, so a path published clean.
+
+        Measured against the pre-fix scanner on the same fixture: rc 0 with zero hits
+        before, rc 1 after. The bodies are deliberately clean, so only a path can hit.
+        """
+        os.makedirs(os.path.join(self.d, "docs", self.TERM))
+        self._commit(os.path.join("docs", self.TERM, "README.md"), "clean body\n")
+        self._commit("notes-%s.txt" % self.TERM, "clean body\n")
+        grep = subprocess.run(["/usr/bin/grep", "-rIi", self.TERM, self.d,
+                               "--exclude-dir=.git"], capture_output=True, text=True)
+        self.assertEqual(grep.stdout, "", "fixture invalid: a body carries the term")
+
+        r = self._scrub("--range", self._sha(), denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("PATH hit: ", r.stdout)
+        # Both shapes: the file name and the directory component.
+        self.assertIn("README.md", r.stdout)
+        self.assertIn("notes-", r.stdout)
+
+    def test_path_hit_is_redacted_by_default_and_raw_only_under_verbose(self):
+        """#291: the path IS the finding, so the default rendering must not echo it."""
+        self._commit("notes-%s.txt" % self.TERM, "clean\n")
+        dl = self._deny(self.TERM + "\n")
+        quiet = self._scrub("--range", self._sha(), denylist=dl)
+        self.assertNotIn(self.TERM, quiet.stdout + quiet.stderr)
+        self.assertIn("[redacted]", quiet.stdout)
+        loud = self._scrub("--range", self._sha(), "--verbose", denylist=dl)
+        self.assertIn(self.TERM, loud.stdout)
+
+    def test_path_removed_before_the_tip_still_blocks(self):
+        """#291: add-then-remove — the tree is clean, the history is not."""
+        os.makedirs(os.path.join(self.d, self.TERM))
+        self._commit(os.path.join(self.TERM, "x.md"), "clean\n")
+        self._rm_commit(os.path.join(self.TERM, "x.md"))
+        tip = self._sha()
+        tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", tip],
+                              cwd=self.d, capture_output=True, text=True)
+        self.assertNotIn(self.TERM, tree.stdout, "fixture invalid: still on the tip")
+        r = self._scrub("--range", tip, denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("PATH hit: ", r.stdout)
+
+    def test_path_record_survives_a_newline_in_a_name(self):
+        """#291: records are NUL-delimited because a name may contain anything.
+
+        Measured: a file named `ligne1\\nligne2.md` yields 4 NUL records where a line
+        split sees 5. Line parsing would miscount and let a crafted name hide.
+        """
+        weird = "a\n%s.md" % self.TERM
+        path = os.path.join(self.d, weird)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("clean\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.d, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "nl"], cwd=self.d,
+                       capture_output=True)
+        r = self._scrub("--range", self._sha(), denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("PATH hit: ", r.stdout)
+
+    def test_allow_cannot_suppress_a_path_and_word_is_pinned(self):
+        """#291: a path is not line-scoped text, exactly as a tree object is not.
+
+        #292 established there is no boundary an allow: exception could be scoped to
+        inside a binary tree; the same holds inside `a/b/c`, where a legitimate
+        lookalike in one component would silence a denied identifier in another.
+        """
+        allowed = "vendorlib"
+        self._commit("pkg/%s-%s.md" % (allowed, self.TERM), "clean\n")
+        r = self._scrub("--range", self._sha(),
+                        denylist=self._deny("%s\nallow:%s\n" % (self.TERM, allowed)))
+        self.assertEqual(r.returncode, 1,
+                         "an allow: substring must not suppress a path hit:\n%s"
+                         % (r.stdout + r.stderr))
+        self.assertIn("PATH hit: ", r.stdout)
+
+    def test_path_enumeration_is_per_scope_not_per_denylist_term(self):
+        """#291 cost contract: the walks must not scale with the term count.
+
+        A per-term path walk would make an operator with a large denylist pay on
+        every push, which is how a gate gets disabled — the same end as a false
+        clean, reached from the other side.
+
+        This counts real calls through an in-process spy. My first version set
+        GIT_TRACE=1 and counted occurrences in the subprocess stderr, which
+        scrub-check captures internally and never propagates: both counts were zero
+        and `0 == 0` passed, measuring nothing. The instrument is validated below by
+        asserting the count is non-zero before comparing.
+        """
+        mod = self._scrub_mod()
+        self._commit("docs/plain.md", "clean\n")
+        tip = self._sha()
+        calls = []
+        real = mod.run_git
+
+        def spy(cmd, repo):
+            # Count PATH enumeration only. The existing content pickaxe runs one
+            # `git log -S<term>` per term by design and legitimately scales; routing
+            # the spy through main() showed 5 walks for 2 terms and 43 for 40, which
+            # is that pre-existing behaviour and not this contract. Path walks are
+            # the ones that name paths.
+            if cmd[:2] == ["git", "ls-tree"] or (
+                    cmd[:2] in (["git", "log"], ["git", "diff"])
+                    and "--name-only" in cmd):
+                calls.append(" ".join(cmd[1:3]))
+            return real(cmd, repo)
+
+        def enumerate_with(term_count):
+            # Through main(), not through the helper: the contract is about the whole
+            # scan, and a caller that looped per term would be invisible to a test
+            # that exercised the function alone. main() already takes `run`, so the
+            # spy sees the real call site.
+            del calls[:]
+            deny = self._deny("\n".join("term%02d" % i
+                                        for i in range(term_count)) + "\n")
+            sink = io.StringIO()
+            with mock.patch.dict(os.environ, {"M8SHIFT_DENYLIST": deny}):
+                mod.main(["--repo", self.d, "--range", tip],
+                         out=sink, err=sink, run=spy)
+            return list(calls)
+
+        few, many = enumerate_with(2), enumerate_with(40)
+        self.assertGreater(len(few), 0,
+                           "instrument invalid: the spy counted no git walks at all")
+        self.assertEqual(len(few), len(many),
+                         "path enumeration scaled with the denylist: %r for 2 terms, "
+                         "%r for 40" % (few, many))
+
     def test_allow_substring_cannot_suppress_a_denied_tree_entry(self):
         """#292: an allow: exception is line-scoped, and a tree has no lines.
 
