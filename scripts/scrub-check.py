@@ -323,13 +323,30 @@ def usable_endpoint_bases(values, repo, run):
     return bases, dropped
 
 
-def proven_pre_existing(sha, bases, repo, run):
-    """True iff `sha` is an ancestor of a commit the destination is PROVEN to have.
+def not_transmitted_by_this_push(sha, bases, repo, run):
+    """True iff this push does not transmit `sha`, per git's own negotiation.
 
-    The proof comes from git's own push negotiation for this batch, never from a
-    local ref and never from a remote-tracking cache — both were rejected in review
-    as #262 in a new costume: a stale local carrier can hold a commit the recreated
-    destination has never seen.
+    Read the name carefully, because an earlier version of this function claimed
+    more than it can know. `merge-base --is-ancestor` answers a question about the
+    LOCAL object graph: is `sha` an ancestor of `base` here. It does not establish
+    that the destination holds `sha`. Against a destination whose object store is
+    not ancestor-complete — a shallow bare repo, a partial restore, the truncated
+    endpoint family this ticket is about — review demonstrated the gate announcing
+    "confirmed pre-existing at the destination" for commits `git cat-file -e` proved
+    ABSENT there.
+
+    What the code CAN substantiate is weaker and sufficient: git computed the pack
+    by excluding everything reachable from the destination's advertised refs, and
+    `bases` are a subset of those refs. So a finding answering True here is one this
+    push does not send, and downgrading it can never suppress a block on content that
+    is actually published. That is structural rather than lucky, and review verified
+    it — including a case where git's own receive-side connectivity check stayed
+    silent and the push fully succeeded, with no denylisted byte reaching the
+    destination.
+
+    The bases themselves still come only from git's push negotiation, never from a
+    local ref and never from a remote-tracking cache: a stale local carrier can hold
+    a commit a recreated destination has never seen, which is #262 itself.
     """
     for base in bases:
         try:
@@ -1065,14 +1082,14 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                 # #262: only this push's own negotiation can prove the destination
                 # already has the commit. `carriers` names LOCAL refs and is
                 # diagnostic attribution, never a downgrade.
-                proven = proven_pre_existing(sha, endpoint_bases, args.repo, run)
+                proven = not_transmitted_by_this_push(sha, endpoint_bases, args.repo, run)
                 if proven:
                     pre_existing_hits += 1
                 else:
                     blocking_hits += 1
                 print("HISTORY hit: commit %s via %s [%s]%s"
                       % (sha[:12], carrier_text, shown,
-                         "  (confirmed pre-existing at the destination)" if proven
+                         "  (not transmitted by this push)" if proven
                          else ""), file=out)
 
     if history_pool is not None:
@@ -1083,7 +1100,8 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # authoritative evidence a client-side hook has is the non-zero remote_sha git
     # supplies for refs in THIS batch: git obtained it from the real destination.
     #   introduced          -> in a resolvable A..B update range: blocks
-    #   confirmed pre-existing -> reachable from an endpoint base: reported, no block
+    #   not transmitted    -> reachable from an endpoint base: reported, no block
+    #                         (this does NOT assert the destination holds it)
     #   unknown             -> a new ref has no authoritative baseline: blocks
     # The boundary this exposes is real and is not papered over: a client-side hook
     # never receives an inventory of the destination's other refs, so it cannot both
@@ -1100,8 +1118,9 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # `pre_existing_hits == hits` is the fail-closed form — anything not classified
     # here counts against the downgrade, by construction.
     if hits and pre_existing_hits == hits and not blocking_hits and tip_hits == 0:
-        print("scrub-check: %d hit(s), all confirmed pre-existing at the "
-              "destination by this push's own negotiation — reported, not blocking."
+        print("scrub-check: %d hit(s), none of them transmitted by this push "
+              "according to git's own negotiation — reported, not blocking. This "
+              "does NOT assert the destination already holds them."
               % hits, file=out)
         return 0
 

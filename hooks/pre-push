@@ -89,9 +89,16 @@ fi
 # `sh hooks/pre-push` run from a shell has no ref lines — fall back to the
 # direct HEAD scan rather than hang on a read).
 ranges=""
+# Initialised beside `ranges`, OUTSIDE the stdin guard. It was declared inside it,
+# and expanded unconditionally further down under `set -eu`, so the documented
+# manual-run path — `sh hooks/pre-push` from a shell, where stdin IS a terminal —
+# aborted with `bases: unbound variable` before the scan ran at all. A real push was
+# unaffected because git always supplies a pipe, so the breakage was fail-closed;
+# what it cost was the operator's hand-run pre-flight, and a hook that errors is a
+# hook someone reaches past with --no-verify.
+bases=""
 stdin_lines=0
 if [ ! -t 0 ]; then
-	bases=""
 	while read -r _local_ref local_sha remote_ref remote_sha; do
 		[ -n "${local_sha:-}" ] || continue
 		stdin_lines=$((stdin_lines + 1))

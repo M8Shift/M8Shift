@@ -17608,7 +17608,7 @@ class TestRFC052ScrubCheck(CLIBase):
         r = self._scrub("--range", tip, "--remote", "origin",
                         denylist=self._deny(self.TERM + "\n"))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertNotIn("confirmed pre-existing", r.stdout)
+        self.assertNotIn("not transmitted by this push", r.stdout)
 
     def test_endpoint_base_downgrades_only_what_the_destination_proved(self):
         """#262 acceptance: a non-zero remote_sha from THIS batch is the only proof."""
@@ -17624,12 +17624,12 @@ class TestRFC052ScrubCheck(CLIBase):
         proven = self._scrub("--range", tip, "--remote", "origin",
                              "--endpoint-base", published, denylist=dl)
         self.assertEqual(proven.returncode, 0, proven.stdout + proven.stderr)
-        self.assertIn("confirmed pre-existing", proven.stdout)
+        self.assertIn("not transmitted by this push", proven.stdout)
 
         # Without it, the same repository blocks: unknown is not pre-existing.
         unknown = self._scrub("--range", tip, "--remote", "origin", denylist=dl)
         self.assertEqual(unknown.returncode, 1, unknown.stdout + unknown.stderr)
-        self.assertNotIn("confirmed pre-existing", unknown.stdout)
+        self.assertNotIn("not transmitted by this push", unknown.stdout)
 
         # A base the local store cannot resolve proves nothing and is dropped.
         absent = self._scrub("--range", tip, "--remote", "origin",
@@ -17667,7 +17667,7 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertEqual(r.returncode, 1,
                          "a tag the destination has never seen must not ride on a "
                          "base earned by another ref:\n%s" % (r.stdout + r.stderr))
-        self.assertNotIn("all confirmed pre-existing", r.stdout)
+        self.assertNotIn("none of them transmitted", r.stdout)
 
     def test_unusual_but_valid_remote_name_is_not_a_scan_error(self):
         """#262: `--remote` is metadata now, and must not veto a name git accepts.
