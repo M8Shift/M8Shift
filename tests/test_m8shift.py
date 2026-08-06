@@ -14,6 +14,7 @@ Standard library only.
 import argparse
 import datetime as dt
 import contextlib
+import glob
 import hashlib
 import http.client
 import importlib.util
@@ -33,53 +34,9 @@ import time
 import unittest
 from unittest import mock
 
-# ── Ambient-environment isolation (#288) ────────────────────────────────────
-# The suite shells out to `m8shift.py`, so every M8SHIFT_* variable exported by
-# whoever runs it reaches the code under test. That made the result depend on the
-# shell: `TestAdvisoryFields.test_absent_by_default_block_unchanged` asserts an
-# exact handoff key list, and an ambient M8SHIFT_AGENT_MODEL legitimately adds a
-# `model` key — so the suite was green for one agent and red for another on the
-# same commit, twice, with neither number carrying anything to tell them apart.
-#
-# The purge runs BEFORE `import m8shift`, and that ordering is load-bearing twice
-# over.
-#
-# Against the engine: `m8shift.py` reads `M8SHIFT_ROOT` at module scope and calls
-# `configure_root()`, which rebases ELEVEN module-level paths — COWORK, LOCKFILE,
-# SESSIONS, MEMORY and the rest. Popping the variable after the import removes the
-# variable and changes none of them: the module is already rebased and stays that
-# way for the whole run. An earlier revision of this patch purged after the import
-# and was therefore inert for exactly the variable with the widest blast radius.
-#
-# Against the tests: three of them deliberately set these values through
-# `mock.patch.dict(os.environ, …)` and rely on propagation to the subprocess.
-# Purging inside the CLI helper instead would have broken exactly those, because a
-# patched variable and an inherited one are indistinguishable at call time. Early
-# is the only placement that satisfies both.
-#
-# The list is enumerated from the engine rather than from the one variable that
-# was observed to leak — and a first attempt at that enumeration missed five of
-# thirteen, because it grepped only `os.environ.get("M8SHIFT_…")` and several
-# names live behind constants. `test_ambient_isolation_covers_every_engine_env_var`
-# re-derives the set from the sources so the list cannot silently fall behind
-# again.
-AMBIENT_ENV_VARS = (
-    "M8SHIFT_AGENT_EFFORT",
-    "M8SHIFT_AGENT_MODEL",
-    "M8SHIFT_DENYLIST",
-    "M8SHIFT_HYGIENE_ALLOWED_ROOTS",
-    "M8SHIFT_LANG",
-    "M8SHIFT_LISTENER_BACKEND_PROBE",
-    "M8SHIFT_LISTENER_DETACHED",
-    "M8SHIFT_LISTENER_GENERATION",
-    "M8SHIFT_LISTENER_LOG_MAX_BYTES",
-    "M8SHIFT_ROOT",
-    "M8SHIFT_RTK",
-    "M8SHIFT_RTK_ADOPTION_THRESHOLD",
-    "M8SHIFT_SCRUB_ENFORCE",
-)
-for _ambient in AMBIENT_ENV_VARS:
-    os.environ.pop(_ambient, None)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ambient_env  # noqa: E402  — purge BEFORE the engine import (#288); see that module
+from _ambient_env import AMBIENT_ENV_VARS, ENV_READING_SOURCES  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "m8shift.py")   # canonical tool (M8Shift-only since v3.0.0)
@@ -3900,26 +3857,62 @@ class TestAdvisoryFields(CLIBase):
         self.assertIn("branch=feat/x", peek)
 
     def test_ambient_isolation_covers_every_engine_env_var(self):
-        """#288: the purge list must be re-derived, not remembered.
+        """#288: the purge list is re-derived from every file that reads the env.
 
-        My first hand-written list held six of thirteen names, because it grepped
-        only `os.environ.get("M8SHIFT_…")` while several names live behind `*_ENV`
-        constants read through a passed-in mapping. This test scans both engines and
-        fails when a name escapes the purge, so the isolation cannot fall behind the
-        code it protects.
+        This guard has now been wrong twice, and each time the instrument was
+        narrower than the thing it measured. The first list held 6 names because it
+        grepped only `os.environ.get("M8SHIFT_…")` literals and missed the `*_ENV`
+        constants. The second held 13 because it scanned only `m8shift.py` and
+        `m8shift-runtime.py` — while `m8shift-top.py`, both installers, the shell
+        runner and the git hooks read 19 more between them. The real figure is 32.
+
+        So the scan surface is itself data (`ENV_READING_SOURCES`) rather than a
+        literal buried here, and a name read anywhere in it that is not purged fails
+        this test.
         """
         found = set()
-        for name in ("m8shift.py", "m8shift-runtime.py"):
-            with open(os.path.join(REPO, name), encoding="utf-8") as fh:
+        for relative in ENV_READING_SOURCES:
+            path = os.path.join(REPO, relative)
+            if not os.path.isfile(path):
+                self.fail("ENV_READING_SOURCES names a file that does not exist: %s"
+                          % relative)
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 source = fh.read()
-            found |= set(re.findall(r'^[A-Z][A-Z_0-9]*\s*=\s*"(M8SHIFT_[A-Z_0-9]+)"',
-                                    source, re.M))
-            found |= set(re.findall(r'os\.environ(?:\.get)?[\(\[]\s*"(M8SHIFT_[A-Z_0-9]+)"',
-                                    source))
+            for name in set(re.findall(r"M8SHIFT_[A-Z0-9_]+", source)):
+                read_patterns = (
+                    r'os\.environ(?:\.get)?[\(\[]\s*"%s"' % name,   # python literal
+                    r'getenv\("%s"' % name,                          # python getenv
+                    r'\$\{?%s\b' % name,                             # shell expansion
+                    r'env:%s\b' % name,                              # powershell
+                    r'^[A-Z_]+\s*=\s*"%s"' % name,                   # *_ENV constant
+                )
+                if any(re.search(pattern, source, re.M) for pattern in read_patterns):
+                    found.add(name)
         missing = sorted(found - set(AMBIENT_ENV_VARS))
         self.assertEqual(missing, [],
-                         "these engine environment variables can still leak into the "
-                         "suite from the developer's shell: %s" % ", ".join(missing))
+                         "these environment variables reach the code under test from "
+                         "the developer's shell and are not purged: %s" % ", ".join(missing))
+
+    def test_every_test_module_purges_the_ambient_environment(self):
+        """#288: collection order is not a guarantee.
+
+        The first version of this fix purged inside this file only. Adversarial
+        review measured what that left: with M8SHIFT_ROOT exported,
+        `tests/test_worktree.py` alone gave 0 passed / 67 failed against 68 passed
+        co-collected, and `tests/test_m8shift_context.py` 1 passed / 43 failed
+        against 45. A green full suite was hiding per-file runs that were
+        catastrophically red, and `python3 -m unittest` — the runner CONTRIBUTING
+        documents — never loads conftest.py at all.
+        """
+        missing = []
+        for path in sorted(glob.glob(os.path.join(REPO, "tests", "test_*.py"))):
+            with open(path, encoding="utf-8") as fh:
+                if "_ambient_env" not in fh.read():
+                    missing.append(os.path.basename(path))
+        self.assertEqual(missing, [],
+                         "these test modules do not purge the ambient environment, so "
+                         "running them alone can differ from running the suite: %s"
+                         % ", ".join(missing))
 
     def test_ambient_root_cannot_rebase_the_imported_engine(self):
         """#288: the purge must beat the import, not merely follow it.
@@ -3930,6 +3923,13 @@ class TestAdvisoryFields(CLIBase):
         earlier revision of this patch did, inertly, for the variable with the widest
         blast radius. Asserting the variable is gone cannot catch that; only the
         consumed state can.
+
+        Mutation note, stated because an earlier commit message overclaimed it:
+        disabling the purge makes this test fail ONLY when M8SHIFT_ROOT is actually
+        exported. In a clean shell the mutant passes, so re-verifying the mutation
+        without setting the variable proves nothing. Measured both ways:
+        `M8SHIFT_ROOT=/tmp/x pytest -k ambient_root_cannot_rebase` fails with the
+        purge disabled, and passes with a clean environment.
         """
         rebased = {name: getattr(cowork, name) for name in dir(cowork)
                    if name.isupper() and isinstance(getattr(cowork, name), str)
