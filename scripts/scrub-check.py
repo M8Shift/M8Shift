@@ -223,7 +223,7 @@ def is_publish_scope(range_args):
 
 
 def scope_path_records(tip_rev, range_args, repo, run, history=True,
-                       history_revs_args=None):
+                       history_revs_args=None, max_commits=None):
     """Enumerate the paths a pushed scope publishes or carries.
 
     -> [(sha_or_None, status, path)]; status is a Git name-status letter, or "" for
@@ -267,6 +267,11 @@ def scope_path_records(tip_rev, range_args, repo, run, history=True,
     (4 records where a line split sees 5).
     """
     records = []
+    # Distinct commit SHAs, not frames. Measured: with `-m` a merge re-emits the
+    # format block once per parent, so a 4-commit history yielded 5 frames. Counting
+    # frames would over-count merges and could declare the window exhausted when it
+    # is not — a false rc 2 that trains an operator to raise the bound for nothing.
+    walked = set()
 
     def harvest(cmd, attribute):
         proc = run(cmd, repo)
@@ -281,6 +286,8 @@ def scope_path_records(tip_rev, range_args, repo, run, history=True,
             if attribute and fields[index] == "" and index + 2 < len(fields) \
                     and fields[index + 1] == "":
                 current = fields[index + 2].strip()
+                if current:
+                    walked.add(current)
                 index += 3
                 continue
             token = fields[index]
@@ -318,9 +325,21 @@ def scope_path_records(tip_rev, range_args, repo, run, history=True,
         # commit_message_cmd(). Same shape, same selector, same position: a reader
         # comparing the three walks should not have to reconstruct the equivalence,
         # and the argv test asserts it rather than trusting it.
-        harvest(["git", "log"] + list(revs) +
+        #
+        # #297: the audit window. `max_commits` is set ONLY for the range-less
+        # direct/`--all` walks; an explicit publish scope stays COMPLETE, because a
+        # push larger than the window must still be caught on its oldest transmitted
+        # commit. N+1 is requested rather than N: the extra frame is how truncation
+        # is DETECTED. Seeing it means the window is too small to answer, and the
+        # caller must fail closed instead of reporting on a prefix.
+        bound = [] if max_commits is None else ["-n", str(max_commits + 1)]
+        harvest(["git", "log"] + list(revs) + bound +
                 ["--format=%x00%x00%H", "-z", "--name-status",
                  "--no-renames", "--root", "-m", "--"], True)
+        if max_commits is not None and len(walked) > max_commits:
+            raise PathEnumerationError(
+                "audit window exhausted (>%d commits); raise --max-commits"
+                % max_commits)
     return records
 
 
@@ -982,7 +1001,11 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                          "that the destination possesses it — a shallow or "
                          "partially restored endpoint may not (#262)")
     ap.add_argument("--max-commits", type=int, default=HISTORY_MAX_COMMITS,
-                    help="history bound per term (default %(default)s)")
+                    help="range-less AUDIT completeness window (default "
+                         "%(default)s). Direct and --all refuse to answer rather "
+                         "than report on a prefix when more commits are reachable; "
+                         "explicit --range scopes are deliberately unbounded, since "
+                         "a push must be judged whole")
     ap.add_argument("--verbose", action="store_true",
                     help="forensic local mode: show the matched terms (default "
                          "output is redacted so it can be pasted safely)")
@@ -1327,10 +1350,17 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         # it publishes a whole history with no base, so it may not conclude that an
         # all-deletions path is a cleanup — see path_records_block().
         publish_scope = is_publish_scope(scope_args)
+        # #297: the audit completeness window applies to the range-less walks ONLY.
+        # An explicit publish scope — `A..B` or a bare-SHA new ref — stays complete:
+        # a push larger than --max-commits must still be caught on its oldest
+        # transmitted commit, and an add-then-delete spanning more than the window
+        # must still block rather than read as a cleanup.
+        audit_bound = None if scope_args else args.max_commits
         try:
             records = scope_path_records(scope_tip, scope_args, args.repo, run,
                                          history=not args.no_history,
-                                         history_revs_args=scope_revs)
+                                         history_revs_args=scope_revs,
+                                         max_commits=audit_bound)
         except (PathEnumerationError, OSError, subprocess.SubprocessError,
                 UnicodeError, ValueError) as exc:
             # Fail CLOSED. Returning a clean result on an incomplete walk is the
