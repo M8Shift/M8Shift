@@ -18566,18 +18566,20 @@ class TestRFC052ScrubCheck(CLIBase):
             mod.scope_path_records(None, None, self.d, fake_run,
                                    history_revs_args=["HEAD"], max_commits=0)
 
-    def test_bounded_walk_isolates_the_publish_scope_guard(self):
-        """#297: the fixture that finally makes the guard decidable.
+    def test_a_real_bounded_git_walk_produces_the_deletion_only_shape(self):
+        """#297: the guard judged on output Git actually produced under a bound.
 
-        Until now no Git history could produce an all-deletions record set for a
-        range-less walk — the deleting commit's parent carries the file and is
-        reachable, so its `A` appears. A WINDOW changes that: put the addition before
-        the window and the deletion inside it, and Git itself yields records that are
-        deletions only. The guard then decides, on real Git output rather than a
-        hand-built dict.
+        My first version of this test called the enumerator with NO bound, walked
+        the complete history, then kept only the `D` statuses in test code — while
+        claiming Git had produced a deletion-only set. The bound created none of the
+        input, so it proved nothing the pre-existing hand-built seam test did not
+        already prove. Review caught it.
 
-        Production still refuses (rc 2) on such a walk; this exercises the helper to
-        prove the policy is defence in depth, not to license a partial audit.
+        This runs a real truncated `git log -n K`, whose window reaches the deletion
+        but not the addition, and hands the raw stream to the production parser. The
+        `A` record is absent because Git never emitted it, not because a test dropped
+        it. Production still REFUSES such a walk (asserted separately below); this
+        exercises the policy seam that refusal defends.
         """
         mod = self._scrub_mod()
         os.makedirs(os.path.join(self.d, "gone", self.TERM))
@@ -18585,24 +18587,46 @@ class TestRFC052ScrubCheck(CLIBase):
         self._pad(4, "after")
         self._rm_commit(os.path.join("gone", self.TERM, "a.md"))
         self._pad(1, "tail")
-        # A window that reaches the deletion but not the addition.
-        records = mod.scope_path_records("HEAD", None, self.d, mod.run_git,
-                                         history_revs_args=["HEAD"],
-                                         max_commits=None)
+        target = os.path.join("gone", self.TERM, "a.md")
+
+        # A window that reaches the deletion (6 commits back) but not the addition
+        # (7 back). Git truncates; nothing here filters.
+        raw = subprocess.run(
+            ["git", "log", "HEAD", "-n", "6", "--format=%x00%x00%H", "-z",
+             "--name-status", "--no-renames", "--root", "-m", "--"],
+            cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(raw.returncode, 0, raw.stderr)
+        records, walked = mod.parse_path_records(raw.stdout, True)
         statuses = {}
         for _c, status, path in records:
             statuses.setdefault(path, []).append(status)
-        target = os.path.join("gone", self.TERM, "a.md")
-        self.assertIn(target, statuses)
-        windowed = {target: [s for s in statuses[target] if s == "D"]}
-        self.assertEqual(windowed[target], ["D"],
-                         "fixture invalid: no deletion-only set to judge")
-        blocking, removed = mod.path_records_block(windowed, publish_scope=False)
-        self.assertEqual((blocking, removed), ({target}, set()),
-                         "an audit must block a deletion-only historical path")
-        blocking, removed = mod.path_records_block(windowed, publish_scope=True)
-        self.assertEqual((blocking, removed), (set(), {target}),
-                         "a publish scope must classify it as removed")
+        self.assertIn(target, statuses, "fixture invalid: the window missed it")
+        self.assertEqual(statuses[target], ["D"],
+                         "fixture invalid: Git emitted more than the deletion (%r) "
+                         "— widen the gap instead of filtering" % statuses[target])
+        self.assertEqual(len(walked), 6, "the window did not truncate as intended")
+
+        # The window also holds ordinary added files; they block under either
+        # policy and are not what this asserts. The target is.
+        blocking, removed = mod.path_records_block(statuses, publish_scope=False)
+        self.assertIn(target, blocking,
+                      "an audit must block a deletion-only historical path")
+        self.assertNotIn(target, removed)
+        blocking, removed = mod.path_records_block(statuses, publish_scope=True)
+        self.assertIn(target, removed,
+                      "a publish scope must classify it as removed")
+        self.assertNotIn(target, blocking)
+
+        # ...and production never hands that partial set to the classifier: it
+        # refuses first. The seam is defence in depth, not a reachable downgrade.
+        with mock.patch.object(mod, "scan_commit_messages", lambda *a, **k: []):
+            with mock.patch.dict(os.environ,
+                                 {"M8SHIFT_DENYLIST": self._deny(self.TERM + "\n")}):
+                err = io.StringIO()
+                rc = mod.main(["--repo", self.d, "--max-commits", "6"],
+                              out=io.StringIO(), err=err, run=mod.run_git)
+        self.assertEqual(rc, 2, "production reported on a truncated audit")
+        self.assertIn("audit window exhausted", err.getvalue())
 
     def test_path_enumeration_is_per_scope_not_per_denylist_term(self):
         """#291 cost contract: the walks must not scale with the term count.

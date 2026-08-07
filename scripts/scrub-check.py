@@ -207,6 +207,54 @@ class PathEnumerationError(RuntimeError):
     """A path walk did not complete. Carries no Git output — see scope_path_records."""
 
 
+def parse_path_records(stdout, attribute):
+    """Parse one path-walk stream. -> (records, walked_shas)
+
+    Pure, and separate from the subprocess so a test can hand it the output of a
+    REAL truncated `git log -n K ...` and inspect what Git actually produced.
+
+    #297 review: my first attempt to prove the bounded case called the enumerator
+    with no bound, walked the complete history, and then kept only the `D` statuses
+    in test code — while the docstring claimed Git had produced a deletion-only set.
+    The bound created none of the tested input. Extracting this seam is what makes
+    that claim checkable instead of asserted.
+
+    Framing is a NUL run: Git forbids NUL inside a path and never emits an empty
+    name, so two consecutive empty records cannot come from a filename, and the
+    record after them is the commit. `walked` collects DISTINCT SHAs, never frames:
+    with `-m` a merge re-emits the format block once per parent (measured: five
+    frames for four commits).
+    """
+    records, walked = [], set()
+    fields = (stdout or "").split("\0")
+    index, current = 0, None
+    while index < len(fields):
+        if attribute and fields[index] == "" and index + 2 < len(fields) \
+                and fields[index + 1] == "":
+            current = fields[index + 2].strip()
+            if current:
+                walked.add(current)
+            index += 3
+            continue
+        token = fields[index]
+        if not token:
+            index += 1
+            continue
+        if attribute:
+            # Alternating status/path pairs. Only a status may be stripped: a path
+            # is taken verbatim because a newline is legal inside one.
+            status = token.strip("\n").strip()
+            if index + 1 >= len(fields) or not fields[index + 1]:
+                index += 1
+                continue
+            records.append((current, status, fields[index + 1]))
+            index += 2
+            continue
+        records.append((None, "", token))
+        index += 1
+    return records, walked
+
+
 def is_publish_scope(range_args):
     """True only for a real `A..B` update range, i.e. a scope with TWO known
     endpoints. -> bool
@@ -280,33 +328,9 @@ def scope_path_records(tip_rev, range_args, repo, run, history=True,
             # very thing that may carry a denied identifier. Subcommand and rc are
             # bounded, actionable, and cannot leak.
             raise PathEnumerationError("git %s rc=%d" % (cmd[1], proc.returncode))
-        fields = (proc.stdout or "").split("\0")
-        index, current = 0, None
-        while index < len(fields):
-            if attribute and fields[index] == "" and index + 2 < len(fields) \
-                    and fields[index + 1] == "":
-                current = fields[index + 2].strip()
-                if current:
-                    walked.add(current)
-                index += 3
-                continue
-            token = fields[index]
-            if not token:
-                index += 1
-                continue
-            if attribute:
-                # Alternating status/path pairs. Only a status may be stripped: a
-                # path is taken verbatim because a newline is legal inside one.
-                status = token.strip("\n").strip()
-                if index + 1 >= len(fields) or not fields[index + 1]:
-                    index += 1
-                    continue
-                records.append((current, status, fields[index + 1]))
-                index += 2
-                continue
-            records.append((None, "", token))
-            index += 1
-        return
+        found, seen = parse_path_records(proc.stdout, attribute)
+        records.extend(found)
+        walked.update(seen)
 
     if is_publish_scope(range_args):
         base, _, tip = range_args[0].partition("..")
@@ -360,16 +384,18 @@ def path_records_block(status_by_path, publish_scope=True):
     a deletion means nothing is published. A bare-SHA new-ref push is NOT such a
     scope: it publishes an entire history with no base to compare against.
 
-    Stated precisely, because a name must not claim more than it holds: today this
-    guard is defence against a state a connected history cannot reach. A range-less
-    walk sees the commit that deletes a path, and that commit's parent carries the
-    file and is therefore reachable too, so the parent's own `A` record appears and
-    the path blocks anyway. Measured three ways — add-then-remove, an evil merge, and
-    a shallow clone — and no all-deletions record set could be produced. The guard is
-    kept because the walk is currently UNBOUNDED while the content pickaxe is bounded
-    at `--max-commits`: the day this walk gains that bound, an addition falling
-    before it would make the guard load-bearing, and it fails in the safe direction
-    either way.
+    Stated precisely, because a name must not claim more than it holds. A COMPLETE
+    range-less walk cannot reach the all-deletions state at all: it sees the commit
+    that deletes a path, whose parent carries the file and is therefore reachable, so
+    the parent's own `A` record appears and the path blocks anyway. A BOUNDED walk
+    can produce that shape — put the addition before the window and the deletion
+    inside — but since #297 the range-less scan REFUSES (rc 2) as soon as the window
+    is exhausted, so production never hands a truncated record set to this function.
+
+    The guard is therefore defence in depth, not a reachable production downgrade
+    path. It is kept because it is the fail-safe direction and because the policy is
+    exercised directly on real bounded Git output, and it must not be deleted as dead
+    code: it is what a future change to the refusal semantics would land against.
     """
     blocking, removed = set(), set()
     for path, statuses in status_by_path.items():
@@ -1322,9 +1348,10 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # Every other scanner here reads blob content or a commit message, so a denied
     # identifier carried only by a filename or a directory published with rc 0 under
     # enforcement. The cost contract is deliberate: two git walks per scope, both
-    # independent of how many terms the operator denies (they are NOT bounded by
-    # --max-commits, unlike the content and message walks — tracked separately),
-    # and `--objects` stays the
+    # independent of how many terms the operator denies. #297: the tree/endpoint walk
+    # and explicit publication history stay COMPLETE; only range-less audit history
+    # carries the `--max-commits` window, and it refuses rather than classifying an
+    # incomplete read. `--objects` stays the
     # standalone audit rather than something the hook starts paying for.
     # No word_rx post-filter here, unlike the TIP scan. There, `git grep` does the
     # matching and the boundary has to be re-checked in-process; here the matcher IS
