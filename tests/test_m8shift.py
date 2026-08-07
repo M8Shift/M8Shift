@@ -18120,6 +18120,301 @@ class TestRFC052ScrubCheck(CLIBase):
                          "add-then-remove inside one push stopped blocking:\n%s"
                          % both.stdout)
 
+    def test_path_scan_covers_all_and_direct_modes_not_only_range(self):
+        """#295: coverage that depends on which caller invoked it is not coverage.
+
+        Restored from the #291 scope split. Measured on this exact fixture before the
+        fix: rc 1 under `--range`, rc 0 and "clean" under both `--all` and direct
+        mode. `--all` is the CI/audit invocation named in hooks/pre-push and
+        SECURITY.md, so the run an operator performs to be certain was the one that
+        said nothing. Bodies are clean, so only a path can produce a finding.
+        """
+        os.makedirs(os.path.join(self.d, "docs", self.TERM))
+        self._commit(os.path.join("docs", self.TERM, "README.md"), "clean\n")
+        grep = subprocess.run(["/usr/bin/grep", "-rIi", self.TERM, self.d,
+                               "--exclude-dir=.git"], capture_output=True, text=True)
+        self.assertEqual(grep.stdout, "", "fixture invalid: a body carries the term")
+        deny = self._deny(self.TERM + "\n")
+        for mode in (["--range", self._sha()], ["--all"], []):
+            r = self._scrub(*mode, denylist=deny)
+            label = " ".join(mode) or "<direct>"
+            self.assertEqual(r.returncode, 1,
+                             "mode %s did not block:\n%s" % (label, r.stdout))
+            self.assertIn("PATH hit: ", r.stdout, label)
+
+    def test_all_mode_covers_a_ref_that_is_not_head(self):
+        """#295: --all must mean all refs for paths too, not HEAD wearing its name.
+
+        Restored from the #291 split. Every other fixture here puts the denied name
+        on the checked-out branch, so a HEAD-only walk would pass them all. An
+        unmerged branch is the case `--all` exists for; direct mode legitimately
+        stays silent on it, which is the TIP/HISTORY split, not a miss.
+        """
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=self.d, capture_output=True,
+                                  text=True)
+        self._commit("base.md", "clean\n")
+        g("checkout", "-q", "-b", "side")
+        os.makedirs(os.path.join(self.d, "pkg", self.TERM))
+        self._commit(os.path.join("pkg", self.TERM, "a.md"), "clean\n")
+        g("checkout", "-q", "-")
+        self.assertNotIn(self.TERM, g("ls-tree", "-r", "--name-only", "HEAD").stdout,
+                         "fixture invalid: the name is on HEAD")
+        deny = self._deny(self.TERM + "\n")
+        audit = self._scrub("--all", denylist=deny)
+        self.assertEqual(audit.returncode, 1,
+                         "--all missed a denied path on an unmerged ref:\n%s"
+                         % audit.stdout)
+        self.assertIn("PATH hit: ", audit.stdout)
+        self.assertEqual(self._scrub(denylist=deny).returncode, 0,
+                         "direct mode reported a ref it does not walk")
+
+    def test_audit_never_downgrades_a_historical_path_as_removed(self):
+        """#295: in an AUDIT, a historical occurrence IS the finding.
+
+        The `removed by this push` downgrade belongs to a real `A..B` publish scope,
+        whose two endpoints are known. This test pins the OBSERVABLE contract: an
+        audit blocks a path that is absent from the current tree and never labels it
+        removed, while the publish scope still downgrades the same fixture.
+
+        What it deliberately does NOT claim: the `publish_scope=False` guard itself
+        is not isolable today. A connected history cannot produce an all-deletions
+        record set for a range-less walk — the deleting commit's parent carries the
+        file and is reachable, so its `A` record appears and the path blocks anyway.
+        Measured three ways (add-then-remove, evil merge, shallow clone). Mutating
+        the guard therefore survives this test, and that is reported rather than
+        hidden behind a reassuring test name.
+        """
+        deny = self._deny(self.TERM + "\n")
+        os.makedirs(os.path.join(self.d, "gone", self.TERM))
+        self._commit(os.path.join("gone", self.TERM, "a.md"), "clean\n")
+        base = self._sha()
+        self._rm_commit(os.path.join("gone", self.TERM, "a.md"))
+        tip = self._sha()
+        tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", tip],
+                              cwd=self.d, capture_output=True, text=True).stdout
+        self.assertNotIn(self.TERM, tree, "fixture invalid: still on the tree")
+        for mode in ([], ["--all"]):
+            r = self._scrub(*mode, denylist=deny)
+            label = " ".join(mode) or "<direct>"
+            self.assertEqual(r.returncode, 1,
+                             "audit %s downgraded a historical path:\n%s"
+                             % (label, r.stdout))
+            self.assertNotIn("removed by this push", r.stdout, label)
+        # Control: the publish scope keeps its downgrade, unchanged by this ticket.
+        cleanup = self._scrub("--endpoint-base", base,
+                              "--range", "%s..%s" % (base, tip), denylist=deny)
+        self.assertEqual(cleanup.returncode, 0, cleanup.stdout)
+        self.assertIn("removed by this push", cleanup.stdout)
+
+    def test_range_less_path_walk_failure_fails_closed_without_leaking(self):
+        """#295: the new walks inherit #291's fail-closed contract, not just its code.
+
+        A walk that returns non-zero must never read as clean, and the diagnostic
+        must not echo Git's stderr, which quotes the offending path.
+        """
+        mod = self._scrub_mod()
+        os.makedirs(os.path.join(self.d, "docs", self.TERM))
+        self._commit(os.path.join("docs", self.TERM, "a.md"), "clean\n")
+        deny = self._deny(self.TERM + "\n")
+        real = mod.run_git
+
+        def breaking(cmd, repo):
+            if "--name-status" in cmd or cmd[:2] == ["git", "ls-tree"]:
+                return subprocess.CompletedProcess(
+                    cmd, 128, "", "fatal: bad object /x/%s" % self.TERM)
+            return real(cmd, repo)
+
+        with mock.patch.dict(os.environ, {"M8SHIFT_DENYLIST": deny}):
+            for argv in ([], ["--all"]):
+                out, err = io.StringIO(), io.StringIO()
+                rc = mod.main(["--repo", self.d, *argv], out=out, err=err,
+                              run=breaking)
+                label = " ".join(argv) or "<direct>"
+                self.assertEqual(rc, 2, "%s did not fail closed:\n%s"
+                                 % (label, out.getvalue() + err.getvalue()))
+                self.assertIn("path enumeration incomplete", err.getvalue(), label)
+                self.assertNotIn(self.TERM, out.getvalue() + err.getvalue(),
+                                 "%s: the diagnostic echoed the denied term" % label)
+                ok = io.StringIO()
+                self.assertEqual(mod.main(["--repo", self.d, *argv], out=ok,
+                                          err=io.StringIO(), run=real), 1,
+                                 "probe invalid: %s finds nothing with a healthy Git"
+                                 % label)
+
+    def test_range_less_path_walks_do_not_scale_with_the_denylist(self):
+        """#295 cost contract: direct and --all must not pay per denied term.
+
+        A gate that grows with the operator's denylist is a gate that gets disabled,
+        which is the same end as a false clean reached from the other side. The spy
+        counts only the commands that NAME paths: the content pickaxe legitimately
+        runs one `git log -S<term>` per term and is not this contract.
+        """
+        mod = self._scrub_mod()
+        os.makedirs(os.path.join(self.d, "docs", self.TERM))
+        self._commit(os.path.join("docs", self.TERM, "a.md"), "clean\n")
+        calls = []
+        real = mod.run_git
+
+        def spy(cmd, repo):
+            if cmd[:2] == ["git", "ls-tree"] or (
+                    cmd[:2] in (["git", "log"], ["git", "diff"])
+                    and any(a.startswith("--name-") for a in cmd)):
+                calls.append(cmd[1])
+            return real(cmd, repo)
+
+        def walks(argv, term_count):
+            del calls[:]
+            terms = "\n".join(["term%02d" % i for i in range(term_count)]
+                               + [self.TERM])
+            deny = self._deny(terms + "\n")
+            with mock.patch.dict(os.environ, {"M8SHIFT_DENYLIST": deny}):
+                mod.main(["--repo", self.d, *argv], out=io.StringIO(),
+                         err=io.StringIO(), run=spy)
+            return list(calls)
+
+        for argv in ([], ["--all"]):
+            label = " ".join(argv) or "<direct>"
+            few, many = walks(argv, 2), walks(argv, 40)
+            self.assertGreater(len(few), 0,
+                               "instrument invalid: the spy counted no path walk "
+                               "at all for %s" % label)
+            self.assertLessEqual(len(few), 2,
+                                 "%s: expected one current-name walk and at most "
+                                 "one history walk, got %r" % (label, few))
+            self.assertEqual(len(few), len(many),
+                             "%s scaled with the denylist: %r for 2 terms, %r for 40"
+                             % (label, few, many))
+
+    def test_every_history_walk_shares_one_revision_selector(self):
+        """#295: the three-way rev choice must have ONE source of truth.
+
+        It previously existed verbatim in history_cmd() and commit_message_cmd(), and
+        the first attempt at a range-less path scan wrote a THIRD copy. Copies drift,
+        and a path walk drifting from the content walk is this ticket's own defect in
+        another costume: the audit would answer one question for names and another
+        for contents while printing a single verdict.
+        """
+        mod = self._scrub_mod()
+        configs = [
+            ({"range_args": ["aa..bb"]}, "range"),
+            ({"range_args": ["deadbeef"]}, "bare sha"),
+            ({}, "direct"),
+            ({"all_refs": True}, "--all"),
+            ({"all_refs": True, "extra_revs": ["c0ffee"]}, "--all + unreachable"),
+            ({"all_refs": True, "refs_pull": True}, "--all + refs/pull"),
+        ]
+        rule = ("denylist:x", "zorg", "literal")
+        for kwargs, label in configs:
+            expected = mod.history_revs(kwargs.get("range_args"),
+                                        kwargs.get("all_refs", False),
+                                        kwargs.get("refs_pull", False),
+                                        kwargs.get("extra_revs"))
+            pickaxe = mod.history_cmd(rule, 50, kwargs.get("refs_pull", False),
+                                      kwargs.get("range_args"),
+                                      kwargs.get("all_refs", False),
+                                      kwargs.get("extra_revs"))
+            message = mod.commit_message_cmd(50, kwargs.get("refs_pull", False),
+                                             kwargs.get("range_args"),
+                                             kwargs.get("all_refs", False),
+                                             kwargs.get("extra_revs"))
+            for cmd, who in ((pickaxe, "pickaxe"), (message, "message")):
+                self.assertEqual(cmd[2:2 + len(expected)], expected,
+                                 "%s walk (%s) does not use history_revs(): %r"
+                                 % (who, label, cmd))
+        # ...and the path walk itself, observed through a spy on a real repository.
+        self._commit("docs/plain.md", "clean\n")
+        seen = []
+        real = mod.run_git
+
+        def spy(cmd, repo):
+            if cmd[:2] == ["git", "log"] and "--name-status" in cmd:
+                seen.append(cmd)
+            return real(cmd, repo)
+
+        deny = self._deny(self.TERM + "\n")
+        for argv, kwargs in (([], {}), (["--all"], {"all_refs": True})):
+            del seen[:]
+            with mock.patch.dict(os.environ, {"M8SHIFT_DENYLIST": deny}):
+                mod.main(["--repo", self.d, *argv], out=io.StringIO(),
+                         err=io.StringIO(), run=spy)
+            self.assertTrue(seen, "no path history walk observed for %r" % argv)
+            expected = mod.history_revs(None, kwargs.get("all_refs", False),
+                                        False, [])
+            self.assertEqual(seen[0][2:2 + len(expected)], expected,
+                             "path walk %r does not use history_revs(): %r"
+                             % (argv, seen[0]))
+
+    def test_publish_scope_predicate_and_its_dispatch_for_all_four_modes(self):
+        """#295 review: only a real `A..B` range has two known endpoints.
+
+        The call site used `bool(range_args)`, but parse_ranges() renders a new-ref
+        `--range SHA` as `[SHA]`, so a bare-SHA publish was granted a base it does
+        not have. Dormant today because the walk is unbounded, but it defeated the
+        very reason the guard is kept.
+
+        Both layers are pinned: the predicate itself, and what main() actually passes
+        for each of the four invocation modes, observed rather than inferred.
+        """
+        mod = self._scrub_mod()
+        self.assertTrue(mod.is_publish_scope(["aaaa..bbbb"]))
+        for not_publish in ([], None, ["deadbeef"], ["aaaa..bbbb", "cccc..dddd"]):
+            self.assertFalse(mod.is_publish_scope(not_publish),
+                             "%r is not a publish scope" % (not_publish,))
+
+        self._commit("base.md", "clean\n")
+        base = self._sha()
+        self._commit("docs/plain.md", "clean\n")
+        tip = self._sha()
+        seen = []
+        real = mod.path_records_block
+
+        def spy(statuses, publish_scope=True):
+            seen.append(publish_scope)
+            return real(statuses, publish_scope=publish_scope)
+
+        deny = self._deny(self.TERM + "\n")
+        expected = [([], False), (["--all"], False),
+                    (["--range", tip], False),
+                    (["--range", "%s..%s" % (base, tip)], True)]
+        with mock.patch.object(mod, "path_records_block", spy):
+            with mock.patch.dict(os.environ, {"M8SHIFT_DENYLIST": deny}):
+                for argv, want in expected:
+                    del seen[:]
+                    mod.main(["--repo", self.d, *argv], out=io.StringIO(),
+                             err=io.StringIO(), run=mod.run_git)
+                    label = " ".join(argv) or "<direct>"
+                    self.assertTrue(seen, "no classification ran for %s" % label)
+                    self.assertEqual(seen, [want] * len(seen),
+                                     "%s dispatched publish_scope=%r, expected %r"
+                                     % (label, seen, want))
+
+    def test_path_records_block_policy_seam_both_ways(self):
+        """#295 review: the seam is testable even though Git cannot reach the state.
+
+        A connected history cannot produce an all-deletions record set for a
+        range-less walk — the deleting commit's parent carries the file and is
+        reachable, so its `A` appears — which is why no end-to-end fixture can
+        isolate this guard. The POLICY is still a decision the code makes, and a
+        decision can be called directly. This is what kills the two mutations that
+        otherwise survive, without pretending Git can produce the input.
+        """
+        mod = self._scrub_mod()
+        statuses = {"pkg/secret/a.md": ["D"]}
+        blocking, removed = mod.path_records_block(statuses, publish_scope=True)
+        self.assertEqual((blocking, removed), (set(), {"pkg/secret/a.md"}),
+                         "a publish scope must classify an all-deletions path as "
+                         "removed")
+        blocking, removed = mod.path_records_block(statuses, publish_scope=False)
+        self.assertEqual((blocking, removed), ({"pkg/secret/a.md"}, set()),
+                         "an audit must never downgrade a historical path")
+        # A carried record blocks under either policy.
+        for scope in (True, False):
+            blocking, removed = mod.path_records_block(
+                {"pkg/secret/a.md": ["A", "D"]}, publish_scope=scope)
+            self.assertEqual(blocking, {"pkg/secret/a.md"}, scope)
+            self.assertEqual(removed, set(), scope)
+
     def test_path_enumeration_is_per_scope_not_per_denylist_term(self):
         """#291 cost contract: the walks must not scale with the term count.
 
