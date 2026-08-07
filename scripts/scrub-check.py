@@ -190,7 +190,33 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
 PATH_COMMIT_MARK = "commit "
 
 
-def scope_path_records(tip_rev, range_args, repo, run):
+def path_walk_revs(range_args, all_refs, refs_pull, extra_revs):
+    """Revision universe for the PATH walk — mirrors history_cmd() exactly.
+
+    The first #291 implementation walked paths ONLY when `--range` was supplied, so
+    the two callers that pass no range kept the very defect this ticket exists to
+    close. Measured on one fixture carrying a denied DIRECTORY name and clean bodies:
+    `--range <sha>` gave rc 1 with two PATH hits, while `--all` and direct mode both
+    gave rc 0 and printed clean. `--all` is the CI/audit invocation named in
+    hooks/pre-push and SECURITY.md, so that was a false clean in the mode an operator
+    runs precisely to be sure.
+
+    Coverage that depends on which caller invoked the scanner is not coverage. The
+    revision selection is therefore taken from history_cmd() rather than re-derived:
+    pushed revs in range mode, `--all --reflog` plus bounded unreachable roots (and
+    refs/pull when asked) under --all, HEAD otherwise.
+    """
+    if range_args:
+        return list(range_args)
+    if all_refs:
+        revs = ["--all", "--reflog"] + list(extra_revs or [])
+        if refs_pull:
+            revs.append("--glob=refs/pull")
+        return revs
+    return ["HEAD"]
+
+
+def scope_path_records(tip_rev, range_args, repo, run, history=True):
     """Enumerate every path a pushed scope publishes or ever carried. -> [(sha, path)]
 
     #291: both scanners this hook runs match file CONTENT. `git grep` searches blob
@@ -240,7 +266,7 @@ def scope_path_records(tip_rev, range_args, repo, run):
     elif tip_rev:
         harvest(["git", "ls-tree", "-r", "-z", "--name-only", tip_rev], False)
 
-    if range_args:
+    if history and range_args:
         harvest(["git", "log", "--format=%x00" + PATH_COMMIT_MARK + "%H", "-z",
                  "--name-only", "--no-renames", "--root", "-m", *range_args], True)
     return records
@@ -1194,23 +1220,30 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # enforcement. The cost contract is deliberate: two bounded git walks per scope,
     # independent of how many terms the operator denies, and `--objects` stays the
     # standalone audit rather than something the hook starts paying for.
+    # No word_rx post-filter here, unlike the TIP scan. There, `git grep` does the
+    # matching and the boundary has to be re-checked in-process; here the matcher IS
+    # compile_content_matcher(), which compiles a word: rule as `\b...\b` and never
+    # puts it in the literal trie, so a boundary-less match cannot be produced in the
+    # first place. I had written that filter anyway: it could not change any outcome,
+    # survived being mutated to `if False`, and read exactly like the guarantee it
+    # was not providing.
     path_matcher = compile_content_matcher(rules)
-    word_rules = {i: re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
-                  for i, (_label, term, mode) in enumerate(rules) if mode == "word"}
-    path_scopes = [(tip, spec_args) for tip, spec_args in specs] or [(None, None)]
+    # No specs = the two range-less callers: direct mode (HEAD) and the --all audit.
+    # Both scanned zero paths in the first implementation; see path_walk_revs().
+    path_scopes = [(tip, spec_args) for tip, spec_args in specs] or [("HEAD", None)]
     seen_paths = set()
     for scope_tip, scope_args in path_scopes:
+        scope_revs = path_walk_revs(scope_args, args.all, args.refs_pull,
+                                    unreachable)
         try:
-            records = scope_path_records(scope_tip, scope_args, args.repo, run)
+            records = scope_path_records(scope_tip, scope_revs, args.repo, run,
+                                         history=not args.no_history)
         except (OSError, subprocess.SubprocessError, UnicodeError, ValueError) as exc:
             print("scrub-check: ERROR enumerating paths (%s)"
                   % exc.__class__.__name__, file=err)
             return 2
         for commit, path in records:
             for index in path_match_indexes(path, path_matcher):
-                word_rx = word_rules.get(index)
-                if word_rx is not None and not word_rx.search(path):
-                    continue          # literal over-match without a word boundary
                 key = (commit, path, index)
                 if key in seen_paths:
                     continue

@@ -17698,7 +17698,7 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("PATH hit: ", r.stdout)
 
-    def test_allow_cannot_suppress_a_path_and_word_is_pinned(self):
+    def test_allow_cannot_suppress_a_path(self):
         """#291: a path is not line-scoped text, exactly as a tree object is not.
 
         #292 established there is no boundary an allow: exception could be scoped to
@@ -17713,6 +17713,342 @@ class TestRFC052ScrubCheck(CLIBase):
                          "an allow: substring must not suppress a path hit:\n%s"
                          % (r.stdout + r.stderr))
         self.assertIn("PATH hit: ", r.stdout)
+
+    def test_word_mode_is_pinned_on_paths_in_both_directions(self):
+        """#291: `word:` must keep its meaning on a path, and BOTH answers matter.
+
+        This test previously existed in name only: it was called
+        `..._and_word_is_pinned` while its body exercised `allow:` alone and never
+        wrote a `word:` rule. A one-sided version is barely better — asserting only
+        that the boundary case hits would pass on an implementation that ignores
+        `word:` entirely and matches every substring. So both directions are pinned
+        on the same fixture and the same rule.
+        """
+        deny = self._deny("word:%s\n" % self.TERM)
+        # Delimited by a non-word character: `word:` must hit.
+        self._commit("pkg/%s-notes.md" % self.TERM, "clean\n")
+        hit = self._scrub("--range", self._sha(), denylist=deny)
+        self.assertEqual(hit.returncode, 1, hit.stdout + hit.stderr)
+        self.assertIn("PATH hit: ", hit.stdout)
+        # Same term glued into a longer word: `word:` must NOT hit.
+        other = tempfile.mkdtemp(prefix="m8-word-")
+        self.addCleanup(shutil.rmtree, other, True)
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", *a], cwd=other, capture_output=True)
+        with open(os.path.join(other, "%sExtra.md" % self.TERM), "w",
+                  encoding="utf-8") as fh:
+            fh.write("clean\n")
+        subprocess.run(["git", "add", "-A"], cwd=other, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "c"], cwd=other,
+                       capture_output=True)
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=other,
+                             capture_output=True, text=True).stdout.strip()
+        env = dict(os.environ, HOME=self.home, M8SHIFT_DENYLIST=deny)
+        env.pop("M8SHIFT_SCRUB_ENFORCE", None)
+        miss = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "scrub-check.py"),
+             "--repo", other, "--range", sha],
+            capture_output=True, text=True, env=env)
+        self.assertNotIn("PATH hit: ", miss.stdout,
+                         "word: over-matched inside a longer word:\n%s"
+                         % miss.stdout)
+
+    def test_path_scan_covers_all_and_direct_modes_not_only_range(self):
+        """#291: coverage that depends on which caller invoked it is not coverage.
+
+        The first implementation enumerated paths only when `--range` was supplied.
+        Measured on this exact fixture: rc 1 with --range, rc 0 for both `--all` and
+        direct mode. `--all` is the CI/audit invocation named in hooks/pre-push and
+        SECURITY.md, so the audit an operator runs to be certain printed clean over a
+        denied directory name.
+        """
+        os.makedirs(os.path.join(self.d, "docs", self.TERM))
+        self._commit(os.path.join("docs", self.TERM, "README.md"), "clean\n")
+        deny = self._deny(self.TERM + "\n")
+        for mode in (["--range", self._sha()], ["--all"], []):
+            r = self._scrub(*mode, denylist=deny)
+            label = " ".join(mode) or "<direct>"
+            self.assertEqual(r.returncode, 1,
+                             "mode %s did not block:\n%s" % (label, r.stdout))
+            self.assertIn("PATH hit: ", r.stdout, label)
+
+    def test_existing_ref_range_reports_the_push_not_the_destination(self):
+        """#291: an `A..B` push must report what IT publishes, not what is already
+        at the destination — otherwise every later push re-reports a name the
+        operator cannot remove without rewriting published history, and a gate that
+        cries on every push is a gate someone reaches past with --no-verify.
+        """
+        os.makedirs(os.path.join(self.d, "old", self.TERM))
+        self._commit(os.path.join("old", self.TERM, "a.md"), "clean\n")
+        base = self._sha()
+        self._commit("added-clean.md", "clean\n")
+        deny = self._deny(self.TERM + "\n")
+        quiet = self._scrub("--range", "%s..%s" % (base, self._sha()), denylist=deny)
+        self.assertEqual(quiet.returncode, 0,
+                         "a name already at the destination blocked an unrelated "
+                         "push:\n%s" % quiet.stdout)
+        # ...and the same range shape still blocks when THIS push introduces one.
+        self._commit("new/%s/b.md" % self.TERM, "clean\n")
+        loud = self._scrub("--range", "%s..%s" % (base, self._sha()), denylist=deny)
+        self.assertEqual(loud.returncode, 1, loud.stdout + loud.stderr)
+        self.assertIn("PATH hit: ", loud.stdout)
+
+    def test_merge_commit_own_path_introduction_blocks(self):
+        """#291: an evil merge introduces a path present in NEITHER parent, and it
+        must block even after being removed again before the tip.
+
+        On `-m` and `--root`, stated precisely because the first version of this test
+        claimed more than it measured: neither flag is isolable by any fixture I could
+        build. A path removed before the tip is named by the diff of its own removal
+        commit, and a path kept until the tip is named by the tip walk — so with both
+        walks present, stripping `-m` or `--root` changes no outcome and the mutation
+        survives. They are kept as defence in depth, so the history walk stays
+        complete on its own terms if the tip walk is ever narrowed, and they are NOT
+        presented here as pinned guarantees.
+        """
+        def g(*a, **kw):
+            return subprocess.run(["git", *a], cwd=self.d, capture_output=True,
+                                  text=True, **kw)
+        self._commit("base.md", "clean\n")
+        base = self._sha()
+        g("checkout", "-q", "-b", "side")
+        self._commit("side.md", "clean\n")
+        g("checkout", "-q", "-")
+        self._commit("main.md", "clean\n")
+        g("merge", "--no-commit", "--no-ff", "side")
+        evil = os.path.join(self.d, "pkg", self.TERM)
+        os.makedirs(evil, exist_ok=True)
+        with open(os.path.join(evil, "c.md"), "w", encoding="utf-8") as fh:
+            fh.write("clean\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "merge")
+        merge = self._sha()
+        parents = g("rev-list", "--parents", "-n", "1", merge).stdout.split()
+        self.assertEqual(len(parents), 3, "fixture invalid: not a merge commit")
+        for parent in parents[1:]:
+            tree = g("ls-tree", "-r", "--name-only", parent).stdout
+            self.assertNotIn(self.TERM, tree,
+                             "fixture invalid: a parent already carries the name")
+        # Remove it again, so ONLY the per-commit merge diff can carry the name. A
+        # first version of this test left it on the tip and passed with -m stripped:
+        # the endpoint diff was supplying the finding, not the merge walk.
+        self._rm_commit(os.path.join("pkg", self.TERM, "c.md"))
+        tip = self._sha()
+        for endpoint, what in ((tip, "the tip tree"), (base, "the base tree")):
+            tree = g("ls-tree", "-r", "--name-only", endpoint).stdout
+            self.assertNotIn(self.TERM, tree, "fixture invalid: %s carries it" % what)
+        diff = g("diff", "--name-only", base, tip).stdout
+        self.assertNotIn(self.TERM, diff,
+                         "fixture invalid: the endpoint diff carries the name, so "
+                         "this test would pass without -m")
+        r = self._scrub("--range", "%s..%s" % (base, tip),
+                        denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("PATH hit: ", r.stdout)
+
+    def test_path_with_undecodable_bytes_neither_crashes_nor_hides_the_term(self):
+        """#291: a tree entry name is bytes, and Git will hand back what it stores.
+
+        Built through the index rather than the filesystem: APFS rejects a filename
+        that is not valid UTF-8, so the fixture would be impossible to create on
+        disk while the object database accepts it without complaint. run_git decodes
+        with errors='replace', so the undecodable bytes become U+FFFD and the ASCII
+        term beside them must still match — a crash here would surface as rc 2, which
+        the hook fails closed on, but the operator would never learn why.
+        """
+        raw = b"pkg/\xff\xfe" + self.TERM.encode() + b".md"
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.d,
+                              input=b"clean\n", capture_output=True).stdout.decode().strip()
+        subprocess.run([b"git", b"update-index", b"--add", b"--cacheinfo",
+                        b"100644," + blob.encode() + b"," + raw],
+                       cwd=self.d, capture_output=True)
+        tree = subprocess.run(["git", "write-tree"], cwd=self.d,
+                              capture_output=True, text=True).stdout.strip()
+        commit = subprocess.run(["git", "commit-tree", tree, "-m", "raw"],
+                                cwd=self.d, capture_output=True, text=True).stdout.strip()
+        listing = subprocess.run(["git", "ls-tree", "-r", "-z", "--name-only",
+                                  commit], cwd=self.d, capture_output=True).stdout
+        self.assertIn(b"\xff\xfe", listing,
+                      "fixture invalid: the undecodable bytes did not survive")
+        r = self._scrub("--range", commit, denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(r.returncode, 1,
+                         "undecodable bytes hid the term or crashed the scan:\n%s"
+                         % (r.stdout + r.stderr))
+        self.assertIn("PATH hit: ", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_non_ascii_denied_term_in_a_path_is_not_hidden_by_git_quoting(self):
+        """#291: `-z` is required, not incidental — without it Git octal-escapes.
+
+        Measured on one fixture: `git ls-tree -r --name-only` renders an accented
+        directory as `"docs/Fr\\303\\251.../a.md"`, where a literal search for the
+        accented term finds ZERO matches; the same tree under `-z` yields one. A
+        denylist whose terms are ordinary accented names would therefore have been
+        silently unenforceable on paths, and the scan would have printed clean.
+        """
+        term = "SynthétiqueSecretProjet"
+        deny = self._deny(term + "\n")
+        os.makedirs(os.path.join(self.d, "docs", term))
+        self._commit(os.path.join("docs", term, "a.md"), "clean\n")
+        quoted = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"],
+                                cwd=self.d, capture_output=True, text=True).stdout
+        self.assertNotIn(term, quoted,
+                         "fixture invalid: this Git does not quote the path, so the "
+                         "test cannot distinguish -z from the default format")
+        # TIP walk ALONE. --no-history suppresses the log walk, so a first version of
+        # this test passed with -z stripped from ls-tree: the history walk, still
+        # -z, was quietly supplying the finding the assertion credited to the tip.
+        tip_only = self._scrub("--range", self._sha(), "--no-history", denylist=deny)
+        self.assertEqual(tip_only.returncode, 1,
+                         "tip walk: an accented term was hidden by path quoting:\n%s"
+                         % (tip_only.stdout + tip_only.stderr))
+        self.assertIn("PATH hit: ", tip_only.stdout)
+        # HISTORY walk ALONE: removed before the tip, so no tree lists it any more.
+        self._rm_commit(os.path.join("docs", term, "a.md"))
+        tip = self._sha()
+        tree = subprocess.run(["git", "ls-tree", "-r", "-z", "--name-only", tip],
+                              cwd=self.d, capture_output=True, text=True).stdout
+        self.assertNotIn(term, tree, "fixture invalid: still on the tip")
+        hist_only = self._scrub("--range", tip, denylist=deny)
+        self.assertEqual(hist_only.returncode, 1,
+                         "history walk: an accented term was hidden by quoting:\n%s"
+                         % (hist_only.stdout + hist_only.stderr))
+        self.assertIn("PATH hit: ", hist_only.stdout)
+
+    def test_real_pre_push_hook_blocks_a_denied_directory_under_enforcement(self):
+        """#291 acceptance: the enforced REAL hook, on a real pushed-range stdin.
+
+        Everything above drives the scanner directly. This drives `hooks/pre-push`
+        with the four-field line git actually writes for a new branch, because the
+        hook composes the ranges itself and a scanner that blocks in isolation
+        proves nothing about the gate the operator relies on. Bodies are clean, so
+        only a path can produce the finding.
+        """
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(self.d, "scripts", "scrub-check.py"))
+        os.makedirs(os.path.join(self.d, "docs", self.TERM))
+        self._commit(os.path.join("docs", self.TERM, "README.md"), "clean\n")
+        self._commit("notes-%s.txt" % self.TERM, "clean\n")
+        grep = subprocess.run(["/usr/bin/grep", "-rIi", self.TERM, self.d,
+                               "--exclude-dir=.git"], capture_output=True, text=True)
+        self.assertEqual(grep.stdout, "", "fixture invalid: a body carries the term")
+
+        # The hook does NOT accept --denylist; it resolves the operator's default
+        # list unless M8SHIFT_DENYLIST is exported. Without this the run proves
+        # nothing at all.
+        env = dict(os.environ, HOME=self.home,
+                   M8SHIFT_DENYLIST=self._deny(self.TERM + "\n"))
+        env.pop("M8SHIFT_AGENT", None)
+        env["M8SHIFT_SCRUB_ENFORCE"] = "1"
+        zero = "0" * 40
+        stdin = "refs/heads/main %s refs/heads/main %s\n" % (self._sha(), zero)
+        r = subprocess.run(["sh", os.path.join(REPO, "hooks", "pre-push")],
+                           cwd=self.d, capture_output=True, text=True, env=env,
+                           input=stdin)
+        self.assertEqual(r.returncode, 1,
+                         "the enforced hook did not block a denied directory:\n%s"
+                         % r.stderr)
+        self.assertIn("PATH hit: ", r.stderr)
+        self.assertNotIn(self.TERM, r.stdout + r.stderr)   # hooks stay redacted
+
+    def test_all_mode_covers_a_ref_that_is_not_head(self):
+        """#291: --all must mean all refs for paths too, not HEAD wearing its name.
+
+        Without this, the audit walk could be quietly narrowed to HEAD and every
+        test would still pass, because every other fixture here puts the denied name
+        on the checked-out branch. An unmerged branch is the case an operator runs
+        --all to catch.
+        """
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=self.d, capture_output=True,
+                                  text=True)
+        self._commit("base.md", "clean\n")
+        g("checkout", "-q", "-b", "side")
+        os.makedirs(os.path.join(self.d, "pkg", self.TERM))
+        self._commit(os.path.join("pkg", self.TERM, "a.md"), "clean\n")
+        g("checkout", "-q", "-")
+        head_tree = g("ls-tree", "-r", "--name-only", "HEAD").stdout
+        self.assertNotIn(self.TERM, head_tree, "fixture invalid: it is on HEAD")
+        deny = self._deny(self.TERM + "\n")
+        audit = self._scrub("--all", denylist=deny)
+        self.assertEqual(audit.returncode, 1,
+                         "--all missed a denied path on an unmerged ref:\n%s"
+                         % (audit.stdout + audit.stderr))
+        self.assertIn("PATH hit: ", audit.stdout)
+
+    def test_a_file_named_like_a_sha_is_treated_as_a_path(self):
+        """#291: the commit marker is prefixed, not sha-shaped, because such a file
+        exists. Parsing `%H` bare would read a 40-hex FILENAME as a commit boundary,
+        silently reassigning every following record to a carrier that is really a
+        file, and dropping the name itself from the scan.
+        """
+        decoy = "0123456789abcdef0123456789abcdef01234567"
+        self._commit("d/%s" % decoy, "clean\n")
+        self._commit("notes-%s.txt" % self.TERM, "clean\n")
+        r = self._scrub("--range", self._sha(), "--verbose",
+                        denylist=self._deny("%s\n%s\n" % (self.TERM, decoy)))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("d/%s" % decoy, r.stdout,
+                      "the sha-shaped filename was consumed as a commit boundary "
+                      "instead of being scanned as a path:\n%s" % r.stdout)
+        self.assertIn("notes-", r.stdout)
+
+    def test_no_history_skips_the_path_history_walk_as_declared(self):
+        """#291 cost contract, other half: --no-history must not walk path history.
+
+        The scanner declares --no-history as the cheap tip-only mode, and the path
+        pass has to honour that or the flag silently stops meaning what it says. A
+        path removed before the tip is visible to the history walk ALONE, which makes
+        it the exact probe: reported without the flag, silent with it.
+        """
+        os.makedirs(os.path.join(self.d, "gone", self.TERM))
+        self._commit(os.path.join("gone", self.TERM, "a.md"), "clean\n")
+        self._rm_commit(os.path.join("gone", self.TERM, "a.md"))
+        tip, deny = self._sha(), self._deny(self.TERM + "\n")
+        full = self._scrub("--range", tip, denylist=deny)
+        self.assertEqual(full.returncode, 1, "probe invalid: the history walk did "
+                         "not report it either:\n%s" % (full.stdout + full.stderr))
+        self.assertIn("PATH hit: ", full.stdout)
+        cheap = self._scrub("--range", tip, "--no-history", denylist=deny)
+        self.assertNotIn("PATH hit: ", cheap.stdout,
+                         "--no-history walked path history anyway:\n%s"
+                         % cheap.stdout)
+
+    def test_path_findings_join_the_262_accounting_in_both_directions(self):
+        """#291 x #262: a path finding must be classified, not merely printed.
+
+        Nothing pinned this before, so the path pass could have printed `PATH hit`
+        while contributing nothing to the decision, or blocked on a finding git's own
+        negotiation proves this push does not transmit. Both directions on ONE
+        fixture: the same repo, the same denylist, differing only by --endpoint-base.
+
+        The downgrade rests on `pre_existing_hits == hits` — everything must be
+        proven — which is why `blocking_hits` is not isolable here: an unproven
+        finding already fails the equality. It is kept for symmetry with the content
+        path and because it fails in the safe direction.
+        """
+        os.makedirs(os.path.join(self.d, "pkg", self.TERM))
+        self._commit(os.path.join("pkg", self.TERM, "a.md"), "clean\n")
+        self._rm_commit(os.path.join("pkg", self.TERM, "a.md"))
+        tip, deny = self._sha(), self._deny(self.TERM + "\n")
+
+        # No endpoint authority: a bare ref stays unknown, and unknown blocks.
+        bare = self._scrub("--range", tip, denylist=deny)
+        self.assertEqual(bare.returncode, 1,
+                         "a bare ref must stay blocking:\n%s" % bare.stdout)
+        self.assertIn("PATH hit: ", bare.stdout)
+        self.assertNotIn("not transmitted by this push", bare.stdout)
+
+        # Same finding, with the endpoint base git itself supplies for the ref:
+        # reported, classified, and not blocking.
+        based = self._scrub("--endpoint-base", tip, "--range", tip, denylist=deny)
+        self.assertIn("PATH hit: ", based.stdout)
+        self.assertIn("not transmitted by this push", based.stdout)
+        self.assertEqual(based.returncode, 0,
+                         "a finding this push does not transmit still blocked:\n%s"
+                         % based.stdout)
 
     def test_path_enumeration_is_per_scope_not_per_denylist_term(self):
         """#291 cost contract: the walks must not scale with the term count.
