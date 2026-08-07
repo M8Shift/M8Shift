@@ -187,6 +187,136 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     return cmd
 
 
+class PathEnumerationError(RuntimeError):
+    """A path walk did not complete. Carries no Git output — see scope_path_records."""
+
+
+def scope_path_records(tip_rev, range_args, repo, run, history=True):
+    """Enumerate the paths a pushed scope publishes or carries.
+
+    -> [(sha_or_None, status, path)]; status is a Git name-status letter, or "" for
+    a current-name record (which is a tree/endpoint state, not a change).
+
+    #291: both scanners this hook runs match file CONTENT. `git grep` searches blob
+    bodies, the pickaxe counts occurrences inside blobs, and the message scan reads
+    %B — no scan input has ever contained a tree entry name. A denied identifier
+    carried by a filename or a directory therefore published with rc 0 under
+    enforcement, verified end to end with a real push.
+
+    Enumerated ONCE per scope, not once per denylist term: the cost of this addition
+    must not scale with the term count, and `--objects` stays the standalone audit.
+
+    Two walks, mirroring the existing TIP/HISTORY split:
+
+    * current names — the tree actually being published (`ls-tree` on a bare/new ref)
+      or the endpoint diff for `A..B`, so an existing-ref push does not re-report
+      every name already at the destination;
+    * carried names — what each commit in the pushed history did to each path, with
+      `--root` so a first-commit introduction is seen, `-m` so a merge's own diffs
+      are, and `--no-renames` so a rename leaves BOTH names observable.
+
+    FAILURE IS CLOSED. This function used to `return` on any non-zero Git rc, which
+    the caller could not observe: with only the path commands forced to rc 128 and
+    every other scanner command intact, `main()` printed "clean" and returned 0 —
+    a fail-open at the exact boundary this ticket adds (review BLOCKER 1). Any
+    incomplete walk now raises, and the caller fails the scan closed.
+
+    FRAMING IS STRUCTURAL, not a sentinel. The first implementation marked commits
+    with a literal `commit ` prefix, having replaced a bare-%H marker because a file
+    may be named like a 40-hex sha. That merely moved the collision: `commit ` is a
+    perfectly legal path prefix, and a path named `commit <denied-term>`, added and
+    removed inside `A..B`, was consumed as metadata and never matched — measured rc 0
+    where the same fixture without the prefix gave rc 1 (review BLOCKER 2). Any
+    sentinel drawn from the same alphabet as the data has this defect. So the frame
+    is `%x00%x00%H`: a NUL run. Git forbids NUL inside a path and never emits an
+    empty name, so TWO consecutive empty records cannot be produced by any filename,
+    and the record following them is the commit. Measured, not assumed — a file named
+    `ligne1\nligne2.md` also proves why records are split on NUL rather than lines
+    (4 records where a line split sees 5).
+    """
+    records = []
+
+    def harvest(cmd, attribute):
+        proc = run(cmd, repo)
+        if proc.returncode != 0:
+            # Deliberately no Git stderr: it quotes the offending PATH, which is the
+            # very thing that may carry a denied identifier. Subcommand and rc are
+            # bounded, actionable, and cannot leak.
+            raise PathEnumerationError("git %s rc=%d" % (cmd[1], proc.returncode))
+        fields = (proc.stdout or "").split("\0")
+        index, current = 0, None
+        while index < len(fields):
+            if attribute and fields[index] == "" and index + 2 < len(fields) \
+                    and fields[index + 1] == "":
+                current = fields[index + 2].strip()
+                index += 3
+                continue
+            token = fields[index]
+            if not token:
+                index += 1
+                continue
+            if attribute:
+                # Alternating status/path pairs. Only a status may be stripped: a
+                # path is taken verbatim because a newline is legal inside one.
+                status = token.strip("\n").strip()
+                if index + 1 >= len(fields) or not fields[index + 1]:
+                    index += 1
+                    continue
+                records.append((current, status, fields[index + 1]))
+                index += 2
+                continue
+            records.append((None, "", token))
+            index += 1
+        return
+
+    if range_args and len(range_args) == 1 and ".." in range_args[0]:
+        base, _, tip = range_args[0].partition("..")
+        # `--diff-filter=d` drops deletions: a name the endpoint no longer carries is
+        # not a current name. Without it, a push whose only change REMOVES a denied
+        # directory was reported as publishing it and blocked, so the one action the
+        # gate asks an operator to take could not be pushed (review BLOCKER 3).
+        harvest(["git", "diff", "-z", "--name-only", "--no-renames",
+                 "--diff-filter=d", base, tip], False)
+    elif tip_rev:
+        harvest(["git", "ls-tree", "-r", "-z", "--name-only", tip_rev], False)
+
+    if history and range_args:
+        harvest(["git", "log", "--format=%x00%x00%H", "-z", "--name-status",
+                 "--no-renames", "--root", "-m", *range_args], True)
+    return records
+
+
+def path_records_block(status_by_path):
+    """Split enumerated paths into (blocking, removed_only). -> (set, set)
+
+    A path blocks when the pushed scope PUBLISHES or CARRIES it: present in the
+    current-name walk (status ""), or touched by any commit with a status other than
+    `D`. A path whose every record is a deletion is one this push REMOVES: the
+    published tree does not carry it, and if the commit that introduced it were
+    inside the pushed range that commit's own `A` record would appear here and block.
+    So the discrimination is complete without any endpoint evidence and stays closed
+    by construction — which is why an add-then-remove inside one push still blocks.
+    """
+    blocking, removed = set(), set()
+    for path, statuses in status_by_path.items():
+        if any(status != "D" for status in statuses):
+            blocking.add(path)
+        else:
+            removed.add(path)
+    return blocking, removed
+
+
+def path_match_indexes(path, matcher):
+    """Rule indexes matching a path. NO allow: suppression, by #292's finding.
+
+    A path is not line-scoped text, exactly as a tree object is not: there is no
+    boundary an `allow:` exception could be scoped to inside `a/b/c`. Applying one
+    would let a legitimate lookalike in one directory component silence a denied
+    identifier in another, which is the defect #292 closed for tree objects.
+    """
+    return content_match_indexes(path, matcher, ())
+
+
 def parse_ranges(values):
     """-> (specs, error). specs = [(tip_rev, range_args)] per --range value:
     `A..B` scans tree(B) + commits A..B; a bare SHA scans tree(SHA) and its whole
@@ -1117,6 +1247,71 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
 
     if history_pool is not None:
         history_pool.shutdown()
+
+    # #291 — PATH scan, once per pushed scope and NOT once per denylist term.
+    # Every other scanner here reads blob content or a commit message, so a denied
+    # identifier carried only by a filename or a directory published with rc 0 under
+    # enforcement. The cost contract is deliberate: two bounded git walks per scope,
+    # independent of how many terms the operator denies, and `--objects` stays the
+    # standalone audit rather than something the hook starts paying for.
+    # No word_rx post-filter here, unlike the TIP scan. There, `git grep` does the
+    # matching and the boundary has to be re-checked in-process; here the matcher IS
+    # compile_content_matcher(), which compiles a word: rule as `\b...\b` and never
+    # puts it in the literal trie, so a boundary-less match cannot be produced in the
+    # first place. I had written that filter anyway: it could not change any outcome,
+    # survived being mutated to `if False`, and read exactly like the guarantee it
+    # was not providing.
+    path_matcher = compile_content_matcher(rules)
+    # Range-scoped ONLY, by the reviewer's scope ruling on #291. An earlier revision
+    # of this branch also walked paths for the range-less callers (direct mode and
+    # the `--all` audit), because both printed clean on a denied directory name.
+    # That is a real false clean and it is NOT fixed here: it changes callers outside
+    # the pushed-scope contract this ticket bounds, so it moves to its own ticket.
+    path_scopes = [(tip, spec_args) for tip, spec_args in specs]
+    seen_paths = set()
+    for scope_tip, scope_args in path_scopes:
+        try:
+            records = scope_path_records(scope_tip, scope_args, args.repo, run,
+                                         history=not args.no_history)
+        except (PathEnumerationError, OSError, subprocess.SubprocessError,
+                UnicodeError, ValueError) as exc:
+            # Fail CLOSED. Returning a clean result on an incomplete walk is the
+            # failure this ticket exists to prevent, arriving from the other side.
+            print("scrub-check: ERROR path enumeration incomplete (%s)"
+                  % (exc if isinstance(exc, PathEnumerationError)
+                     else exc.__class__.__name__), file=err)
+            return 2
+        statuses = {}
+        for _commit, status, path in records:
+            statuses.setdefault(path, []).append(status)
+        blocking_paths, removed_paths = path_records_block(statuses)
+        for commit, _status, path in records:
+            for index in path_match_indexes(path, path_matcher):
+                key = (commit, path, index)
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                label, term, _mode = rules[index]
+                shown = label if not args.verbose else "%s:%s" % (label, term)
+                # The path IS the finding, so the default rendering must not echo it.
+                where = redact(path, rules) if not args.verbose else path
+                carrier = ("commit %s" % commit[:12]) if commit else "pushed tree"
+                hits += 1
+                # A path this push only REMOVES is not one it publishes. Reported so
+                # the operator still sees it, classified so the cleanup can be pushed.
+                removed_only = path in removed_paths and path not in blocking_paths
+                proven = removed_only or (
+                    commit is not None and endpoint_bases and
+                    not_transmitted_by_this_push(commit, endpoint_bases,
+                                                 args.repo, run))
+                if proven:
+                    pre_existing_hits += 1
+                else:
+                    blocking_hits += 1
+                note = ("  (removed by this push)" if removed_only else
+                        "  (not transmitted by this push)" if proven else "")
+                print("PATH hit: %s via %s [%s]%s"
+                      % (where, carrier, shown, note), file=out)
 
     # #262 tri-state. Local reachability is NOT proof of publication — that was the
     # defect, and proposing it again was rejected in review. The only endpoint-
