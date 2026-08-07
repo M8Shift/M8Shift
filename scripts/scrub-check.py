@@ -163,6 +163,30 @@ def tip_cmd(rule, rev="HEAD"):
     return ["git", "grep", "-I", "-i", "-n", "-F", "-e", term, rev, "--"]
 
 
+def history_revs(range_args=None, all_refs=False, refs_pull=False,
+                 extra_revs=None):
+    """The revision universe for ANY history walk. -> [rev args], no subcommand.
+
+    #295: this three-way choice existed verbatim in history_cmd() and
+    commit_message_cmd(), and the first attempt at a range-less path scan wrote a
+    THIRD copy. Copies drift, and a path walk that drifts from the content walk is
+    exactly the false clean this ticket is about: the audit would answer a different
+    question for names than it answers for contents, while reporting one verdict.
+
+    Pushed revs replace the audit walk in range mode; `--all` adds refs, reflogs and
+    the bounded unreachable roots the caller discovered (plus refs/pull only when
+    asked); otherwise HEAD.
+    """
+    if range_args:
+        return list(range_args)
+    if all_refs:
+        revs = ["--all", "--reflog"] + list(extra_revs or [])
+        if refs_pull:
+            revs.append("--glob=refs/pull")
+        return revs
+    return ["HEAD"]
+
+
 def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
                 extra_revs=None):
     """git log pickaxe argv for one rule — revision specs BEFORE `--`.
@@ -173,15 +197,7 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     ["A..B"] or ["SHA"]).  Direct mode walks HEAD;
     explicit all_refs adds refs, reflogs, and bounded unreachable roots."""
     label, term, mode = rule
-    if range_args:
-        cmd = ["git", "log"] + list(range_args)
-    elif all_refs:
-        cmd = ["git", "log", "--all", "--reflog"]
-        cmd.extend(extra_revs or [])
-        if refs_pull:
-            cmd.append("--glob=refs/pull")
-    else:
-        cmd = ["git", "log", "HEAD"]
+    cmd = ["git", "log"] + history_revs(range_args, all_refs, refs_pull, extra_revs)
     cmd += ["--pickaxe-regex", "-i", "-S", re.escape(term),
             "--format=%H", "-n", str(max_commits), "--"]
     return cmd
@@ -191,7 +207,8 @@ class PathEnumerationError(RuntimeError):
     """A path walk did not complete. Carries no Git output — see scope_path_records."""
 
 
-def scope_path_records(tip_rev, range_args, repo, run, history=True):
+def scope_path_records(tip_rev, range_args, repo, run, history=True,
+                       history_revs_args=None):
     """Enumerate the paths a pushed scope publishes or carries.
 
     -> [(sha_or_None, status, path)]; status is a Git name-status letter, or "" for
@@ -280,13 +297,19 @@ def scope_path_records(tip_rev, range_args, repo, run, history=True):
     elif tip_rev:
         harvest(["git", "ls-tree", "-r", "-z", "--name-only", tip_rev], False)
 
-    if history and range_args:
-        harvest(["git", "log", "--format=%x00%x00%H", "-z", "--name-status",
-                 "--no-renames", "--root", "-m", *range_args], True)
+    revs = history_revs_args if history_revs_args is not None else range_args
+    if history and revs:
+        # Revision specs first and a `--` terminator, exactly like history_cmd() and
+        # commit_message_cmd(). Same shape, same selector, same position: a reader
+        # comparing the three walks should not have to reconstruct the equivalence,
+        # and the argv test asserts it rather than trusting it.
+        harvest(["git", "log"] + list(revs) +
+                ["--format=%x00%x00%H", "-z", "--name-status",
+                 "--no-renames", "--root", "-m", "--"], True)
     return records
 
 
-def path_records_block(status_by_path):
+def path_records_block(status_by_path, publish_scope=True):
     """Split enumerated paths into (blocking, removed_only). -> (set, set)
 
     A path blocks when the pushed scope PUBLISHES or CARRIES it: present in the
@@ -296,10 +319,26 @@ def path_records_block(status_by_path):
     inside the pushed range that commit's own `A` record would appear here and block.
     So the discrimination is complete without any endpoint evidence and stays closed
     by construction — which is why an add-then-remove inside one push still blocks.
+
+    `publish_scope` is False for the range-less AUDIT walks (#295): an audit answers
+    "does this repository carry the name anywhere", so a historical occurrence IS the
+    finding, and only a real `A..B` scope with two known endpoints may conclude that
+    a deletion means nothing is published.
+
+    Stated precisely, because a name must not claim more than it holds: today this
+    guard is defence against a state a connected history cannot reach. A range-less
+    walk sees the commit that deletes a path, and that commit's parent carries the
+    file and is therefore reachable too, so the parent's own `A` record appears and
+    the path blocks anyway. Measured three ways — add-then-remove, an evil merge, and
+    a shallow clone — and no all-deletions record set could be produced. The guard is
+    kept because the walk is currently UNBOUNDED while the content pickaxe is bounded
+    at `--max-commits`: the day this walk gains that bound, an addition falling
+    before it would make the guard load-bearing, and it fails in the safe direction
+    either way.
     """
     blocking, removed = set(), set()
     for path, statuses in status_by_path.items():
-        if any(status != "D" for status in statuses):
+        if not publish_scope or any(status != "D" for status in statuses):
             blocking.add(path)
         else:
             removed.add(path)
@@ -831,15 +870,7 @@ def history_carriers(sha, repo, run, reflog_entries, unreachable):
 def commit_message_cmd(max_commits, refs_pull, range_args=None,
                        all_refs=False, extra_revs=None):
     """Build one bounded commit-message walk for a publish/audit scope."""
-    if range_args:
-        cmd = ["git", "log"] + list(range_args)
-    elif all_refs:
-        cmd = ["git", "log", "--all", "--reflog"]
-        cmd.extend(extra_revs or [])
-        if refs_pull:
-            cmd.append("--glob=refs/pull")
-    else:
-        cmd = ["git", "log", "HEAD"]
+    cmd = ["git", "log"] + history_revs(range_args, all_refs, refs_pull, extra_revs)
     cmd.append("--format=%H%x00%B%x00")
     if not range_args:
         cmd += ["-n", str(max_commits + 1)]
@@ -1261,18 +1292,27 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # first place. I had written that filter anyway: it could not change any outcome,
     # survived being mutated to `if False`, and read exactly like the guarantee it
     # was not providing.
+    # #295: the range-less callers are covered too. They scanned NO path at all, so
+    # `scrub-check.py --all` — the audit invocation named in hooks/pre-push and
+    # SECURITY.md — printed clean on a denied directory name, and so did direct mode.
+    # Measured on one clean-body fixture: rc 1 under `--range`, rc 0 under both of
+    # the others. Coverage that depends on which caller invoked the scanner is not
+    # coverage. The revision universe comes from history_revs(), the SAME selector
+    # the content pickaxe and the message walk use, so the audit cannot answer one
+    # question for names and another for contents.
     path_matcher = compile_content_matcher(rules)
-    # Range-scoped ONLY, by the reviewer's scope ruling on #291. An earlier revision
-    # of this branch also walked paths for the range-less callers (direct mode and
-    # the `--all` audit), because both printed clean on a denied directory name.
-    # That is a real false clean and it is NOT fixed here: it changes callers outside
-    # the pushed-scope contract this ticket bounds, so it moves to its own ticket.
-    path_scopes = [(tip, spec_args) for tip, spec_args in specs]
+    path_scopes = [(tip, spec_args) for tip, spec_args in specs] or [("HEAD", None)]
     seen_paths = set()
     for scope_tip, scope_args in path_scopes:
+        scope_revs = history_revs(scope_args, args.all, args.refs_pull, unreachable)
+        # A publish scope has two known endpoints; an audit walk does not, and it is
+        # bounded. Only the former may conclude that an all-deletions path is a
+        # cleanup — see path_records_block().
+        publish_scope = bool(scope_args)
         try:
             records = scope_path_records(scope_tip, scope_args, args.repo, run,
-                                         history=not args.no_history)
+                                         history=not args.no_history,
+                                         history_revs_args=scope_revs)
         except (PathEnumerationError, OSError, subprocess.SubprocessError,
                 UnicodeError, ValueError) as exc:
             # Fail CLOSED. Returning a clean result on an incomplete walk is the
@@ -1284,7 +1324,8 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         statuses = {}
         for _commit, status, path in records:
             statuses.setdefault(path, []).append(status)
-        blocking_paths, removed_paths = path_records_block(statuses)
+        blocking_paths, removed_paths = path_records_block(
+            statuses, publish_scope=publish_scope)
         for commit, _status, path in records:
             for index in path_match_indexes(path, path_matcher):
                 key = (commit, path, index)
