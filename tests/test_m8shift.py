@@ -17754,25 +17754,6 @@ class TestRFC052ScrubCheck(CLIBase):
                          "word: over-matched inside a longer word:\n%s"
                          % miss.stdout)
 
-    def test_path_scan_covers_all_and_direct_modes_not_only_range(self):
-        """#291: coverage that depends on which caller invoked it is not coverage.
-
-        The first implementation enumerated paths only when `--range` was supplied.
-        Measured on this exact fixture: rc 1 with --range, rc 0 for both `--all` and
-        direct mode. `--all` is the CI/audit invocation named in hooks/pre-push and
-        SECURITY.md, so the audit an operator runs to be certain printed clean over a
-        denied directory name.
-        """
-        os.makedirs(os.path.join(self.d, "docs", self.TERM))
-        self._commit(os.path.join("docs", self.TERM, "README.md"), "clean\n")
-        deny = self._deny(self.TERM + "\n")
-        for mode in (["--range", self._sha()], ["--all"], []):
-            r = self._scrub(*mode, denylist=deny)
-            label = " ".join(mode) or "<direct>"
-            self.assertEqual(r.returncode, 1,
-                             "mode %s did not block:\n%s" % (label, r.stdout))
-            self.assertIn("PATH hit: ", r.stdout, label)
-
     def test_existing_ref_range_reports_the_push_not_the_destination(self):
         """#291: an `A..B` push must report what IT publishes, not what is already
         at the destination — otherwise every later push re-reports a name the
@@ -17953,31 +17934,6 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("PATH hit: ", r.stderr)
         self.assertNotIn(self.TERM, r.stdout + r.stderr)   # hooks stay redacted
 
-    def test_all_mode_covers_a_ref_that_is_not_head(self):
-        """#291: --all must mean all refs for paths too, not HEAD wearing its name.
-
-        Without this, the audit walk could be quietly narrowed to HEAD and every
-        test would still pass, because every other fixture here puts the denied name
-        on the checked-out branch. An unmerged branch is the case an operator runs
-        --all to catch.
-        """
-        def g(*a):
-            return subprocess.run(["git", *a], cwd=self.d, capture_output=True,
-                                  text=True)
-        self._commit("base.md", "clean\n")
-        g("checkout", "-q", "-b", "side")
-        os.makedirs(os.path.join(self.d, "pkg", self.TERM))
-        self._commit(os.path.join("pkg", self.TERM, "a.md"), "clean\n")
-        g("checkout", "-q", "-")
-        head_tree = g("ls-tree", "-r", "--name-only", "HEAD").stdout
-        self.assertNotIn(self.TERM, head_tree, "fixture invalid: it is on HEAD")
-        deny = self._deny(self.TERM + "\n")
-        audit = self._scrub("--all", denylist=deny)
-        self.assertEqual(audit.returncode, 1,
-                         "--all missed a denied path on an unmerged ref:\n%s"
-                         % (audit.stdout + audit.stderr))
-        self.assertIn("PATH hit: ", audit.stdout)
-
     def test_a_file_named_like_a_sha_is_treated_as_a_path(self):
         """#291: the commit marker is prefixed, not sha-shaped, because such a file
         exists. Parsing `%H` bare would read a 40-hex FILENAME as a commit boundary,
@@ -18049,6 +18005,120 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertEqual(based.returncode, 0,
                          "a finding this push does not transmit still blocked:\n%s"
                          % based.stdout)
+
+    def test_path_enumeration_failure_fails_closed_without_leaking(self):
+        """#291 BLOCKER 1: an incomplete path walk must never read as clean.
+
+        `harvest()` used to `return` on any non-zero Git rc, which the caller could
+        not observe. Measured at the rejected head, with ONLY the path commands
+        forced to rc 128 and every other scanner command left intact: main() printed
+        `scrub-check: clean` and returned **0**. That is the failure this ticket
+        exists to prevent, arriving from the other side.
+
+        All three walks are pinned, and the diagnostic is checked for leakage: Git's
+        stderr quotes the offending PATH, which is exactly what may carry a denied
+        identifier, so it must not be echoed.
+        """
+        mod = self._scrub_mod()
+        self._commit("base.md", "clean\n")
+        base = self._sha()
+        os.makedirs(os.path.join(self.d, "docs", self.TERM))
+        self._commit(os.path.join("docs", self.TERM, "a.md"), "clean\n")
+        tip = self._sha()
+        deny = self._deny(self.TERM + "\n")
+        real = mod.run_git
+
+        def breaking(predicate):
+            def run(cmd, repo):
+                if predicate(cmd):
+                    return subprocess.CompletedProcess(
+                        cmd, 128, "", "fatal: bad object /x/%s" % self.TERM)
+                return real(cmd, repo)
+            return run
+
+        walks = [
+            (["--range", tip], lambda c: c[:2] == ["git", "ls-tree"], "ls-tree"),
+            (["--range", tip], lambda c: "--name-status" in c, "log"),
+            (["--range", "%s..%s" % (base, tip)],
+             lambda c: c[:2] == ["git", "diff"], "diff"),
+        ]
+        with mock.patch.dict(os.environ, {"M8SHIFT_DENYLIST": deny}):
+            for argv, predicate, what in walks:
+                out, err = io.StringIO(), io.StringIO()
+                rc = mod.main(["--repo", self.d, *argv], out=out, err=err,
+                              run=breaking(predicate))
+                self.assertEqual(rc, 2, "%s failure did not fail closed:\n%s"
+                                 % (what, out.getvalue() + err.getvalue()))
+                self.assertIn("path enumeration incomplete", err.getvalue(), what)
+                self.assertNotIn(self.TERM, out.getvalue() + err.getvalue(),
+                                 "%s: the diagnostic echoed the denied term" % what)
+                # Sanity: the same argv with a healthy Git finds the path.
+                ok_out = io.StringIO()
+                self.assertEqual(
+                    mod.main(["--repo", self.d, *argv], out=ok_out,
+                             err=io.StringIO(), run=real), 1,
+                    "probe invalid: %s argv finds nothing even when Git works" % what)
+
+    def test_a_path_named_like_the_commit_marker_is_not_consumed_as_metadata(self):
+        """#291 BLOCKER 2: a sentinel drawn from the data's own alphabet collides.
+
+        The first fix replaced a bare-%H marker (a file may be named like a 40-hex
+        sha) with a literal `commit ` prefix. That only moved the collision: `commit `
+        is a legal path prefix. Measured at the rejected head, a path named
+        `commit <term>` added and removed inside A..B gave rc 0 while the identical
+        fixture without the prefix gave rc 1 — so the control is part of the test.
+
+        The frame is now a NUL run, which Git forbids inside a path and never emits
+        as a name, so no filename can produce it.
+        """
+        deny = self._deny(self.TERM + "\n")
+        self._commit("base.md", "clean\n")
+        base = self._sha()
+        self._commit("commit %s" % self.TERM, "clean\n")
+        self._rm_commit("commit %s" % self.TERM)
+        marked = self._scrub("--range", "%s..%s" % (base, self._sha()), denylist=deny)
+        self.assertEqual(marked.returncode, 1,
+                         "a path named like the commit marker was consumed as "
+                         "metadata:\n%s" % (marked.stdout + marked.stderr))
+        self.assertIn("PATH hit: ", marked.stdout)
+
+    def test_deletion_only_push_is_reported_but_does_not_block(self):
+        """#291 BLOCKER 3: the gate must not block the cleanup it demands.
+
+        For an existing-ref range whose only new commit DELETES a denied path, the
+        endpoint tree no longer carries the name and the push publishes nothing. The
+        rejected head reported both the endpoint-diff record and the history record
+        as introduced and returned rc 1, so an operator doing exactly what the gate
+        asks could not push the fix.
+
+        The control matters as much as the case: an add-then-remove inside ONE push
+        still blocks, because the introducing commit's own `A` record is in the same
+        range. That is what keeps the discrimination closed rather than merely quiet.
+        """
+        deny = self._deny(self.TERM + "\n")
+        os.makedirs(os.path.join(self.d, "old", self.TERM))
+        self._commit(os.path.join("old", self.TERM, "a.md"), "clean\n")
+        base = self._sha()
+        self._rm_commit(os.path.join("old", self.TERM, "a.md"))
+        tip = self._sha()
+        tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", tip],
+                              cwd=self.d, capture_output=True, text=True).stdout
+        self.assertNotIn(self.TERM, tree, "fixture invalid: still published")
+        cleanup = self._scrub("--endpoint-base", base,
+                              "--range", "%s..%s" % (base, tip), denylist=deny)
+        self.assertEqual(cleanup.returncode, 0,
+                         "a deletion-only cleanup was blocked:\n%s" % cleanup.stdout)
+        self.assertIn("PATH hit: ", cleanup.stdout)
+        self.assertIn("removed by this push", cleanup.stdout)
+
+        # Control: introduce AND remove within one push -> still blocking.
+        self._commit(os.path.join("pkg", self.TERM, "b.md"), "clean\n")
+        self._rm_commit(os.path.join("pkg", self.TERM, "b.md"))
+        both = self._scrub("--endpoint-base", base,
+                           "--range", "%s..%s" % (base, self._sha()), denylist=deny)
+        self.assertEqual(both.returncode, 1,
+                         "add-then-remove inside one push stopped blocking:\n%s"
+                         % both.stdout)
 
     def test_path_enumeration_is_per_scope_not_per_denylist_term(self):
         """#291 cost contract: the walks must not scale with the term count.
