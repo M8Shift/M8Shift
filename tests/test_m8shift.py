@@ -18345,6 +18345,76 @@ class TestRFC052ScrubCheck(CLIBase):
                              "path walk %r does not use history_revs(): %r"
                              % (argv, seen[0]))
 
+    def test_publish_scope_predicate_and_its_dispatch_for_all_four_modes(self):
+        """#295 review: only a real `A..B` range has two known endpoints.
+
+        The call site used `bool(range_args)`, but parse_ranges() renders a new-ref
+        `--range SHA` as `[SHA]`, so a bare-SHA publish was granted a base it does
+        not have. Dormant today because the walk is unbounded, but it defeated the
+        very reason the guard is kept.
+
+        Both layers are pinned: the predicate itself, and what main() actually passes
+        for each of the four invocation modes, observed rather than inferred.
+        """
+        mod = self._scrub_mod()
+        self.assertTrue(mod.is_publish_scope(["aaaa..bbbb"]))
+        for not_publish in ([], None, ["deadbeef"], ["aaaa..bbbb", "cccc..dddd"]):
+            self.assertFalse(mod.is_publish_scope(not_publish),
+                             "%r is not a publish scope" % (not_publish,))
+
+        self._commit("base.md", "clean\n")
+        base = self._sha()
+        self._commit("docs/plain.md", "clean\n")
+        tip = self._sha()
+        seen = []
+        real = mod.path_records_block
+
+        def spy(statuses, publish_scope=True):
+            seen.append(publish_scope)
+            return real(statuses, publish_scope=publish_scope)
+
+        deny = self._deny(self.TERM + "\n")
+        expected = [([], False), (["--all"], False),
+                    (["--range", tip], False),
+                    (["--range", "%s..%s" % (base, tip)], True)]
+        with mock.patch.object(mod, "path_records_block", spy):
+            with mock.patch.dict(os.environ, {"M8SHIFT_DENYLIST": deny}):
+                for argv, want in expected:
+                    del seen[:]
+                    mod.main(["--repo", self.d, *argv], out=io.StringIO(),
+                             err=io.StringIO(), run=mod.run_git)
+                    label = " ".join(argv) or "<direct>"
+                    self.assertTrue(seen, "no classification ran for %s" % label)
+                    self.assertEqual(seen, [want] * len(seen),
+                                     "%s dispatched publish_scope=%r, expected %r"
+                                     % (label, seen, want))
+
+    def test_path_records_block_policy_seam_both_ways(self):
+        """#295 review: the seam is testable even though Git cannot reach the state.
+
+        A connected history cannot produce an all-deletions record set for a
+        range-less walk — the deleting commit's parent carries the file and is
+        reachable, so its `A` appears — which is why no end-to-end fixture can
+        isolate this guard. The POLICY is still a decision the code makes, and a
+        decision can be called directly. This is what kills the two mutations that
+        otherwise survive, without pretending Git can produce the input.
+        """
+        mod = self._scrub_mod()
+        statuses = {"pkg/secret/a.md": ["D"]}
+        blocking, removed = mod.path_records_block(statuses, publish_scope=True)
+        self.assertEqual((blocking, removed), (set(), {"pkg/secret/a.md"}),
+                         "a publish scope must classify an all-deletions path as "
+                         "removed")
+        blocking, removed = mod.path_records_block(statuses, publish_scope=False)
+        self.assertEqual((blocking, removed), ({"pkg/secret/a.md"}, set()),
+                         "an audit must never downgrade a historical path")
+        # A carried record blocks under either policy.
+        for scope in (True, False):
+            blocking, removed = mod.path_records_block(
+                {"pkg/secret/a.md": ["A", "D"]}, publish_scope=scope)
+            self.assertEqual(blocking, {"pkg/secret/a.md"}, scope)
+            self.assertEqual(removed, set(), scope)
+
     def test_path_enumeration_is_per_scope_not_per_denylist_term(self):
         """#291 cost contract: the walks must not scale with the term count.
 

@@ -207,6 +207,21 @@ class PathEnumerationError(RuntimeError):
     """A path walk did not complete. Carries no Git output — see scope_path_records."""
 
 
+def is_publish_scope(range_args):
+    """True only for a real `A..B` update range, i.e. a scope with TWO known
+    endpoints. -> bool
+
+    #295 review: the call site used `bool(range_args)`, but parse_ranges() renders
+    a new-ref `--range SHA` as `[SHA]`, so a bare-SHA publish was also treated as
+    having a base it does not have. Observationally dormant while the path walk is
+    unbounded, yet it defeated the stated reason for keeping the guard at all: once
+    the walk gains a bound, a bare-SHA publish could classify an old deletion as a
+    cleanup. The predicate lives here so the endpoint-diff decision and the
+    classification decision cannot disagree about what a publish scope is.
+    """
+    return bool(range_args) and len(range_args) == 1 and ".." in range_args[0]
+
+
 def scope_path_records(tip_rev, range_args, repo, run, history=True,
                        history_revs_args=None):
     """Enumerate the paths a pushed scope publishes or carries.
@@ -286,7 +301,7 @@ def scope_path_records(tip_rev, range_args, repo, run, history=True,
             index += 1
         return
 
-    if range_args and len(range_args) == 1 and ".." in range_args[0]:
+    if is_publish_scope(range_args):
         base, _, tip = range_args[0].partition("..")
         # `--diff-filter=d` drops deletions: a name the endpoint no longer carries is
         # not a current name. Without it, a push whose only change REMOVES a denied
@@ -323,7 +338,8 @@ def path_records_block(status_by_path, publish_scope=True):
     `publish_scope` is False for the range-less AUDIT walks (#295): an audit answers
     "does this repository carry the name anywhere", so a historical occurrence IS the
     finding, and only a real `A..B` scope with two known endpoints may conclude that
-    a deletion means nothing is published.
+    a deletion means nothing is published. A bare-SHA new-ref push is NOT such a
+    scope: it publishes an entire history with no base to compare against.
 
     Stated precisely, because a name must not claim more than it holds: today this
     guard is defence against a state a connected history cannot reach. A range-less
@@ -1282,8 +1298,10 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # #291 — PATH scan, once per pushed scope and NOT once per denylist term.
     # Every other scanner here reads blob content or a commit message, so a denied
     # identifier carried only by a filename or a directory published with rc 0 under
-    # enforcement. The cost contract is deliberate: two bounded git walks per scope,
-    # independent of how many terms the operator denies, and `--objects` stays the
+    # enforcement. The cost contract is deliberate: two git walks per scope, both
+    # independent of how many terms the operator denies (they are NOT bounded by
+    # --max-commits, unlike the content and message walks — tracked separately),
+    # and `--objects` stays the
     # standalone audit rather than something the hook starts paying for.
     # No word_rx post-filter here, unlike the TIP scan. There, `git grep` does the
     # matching and the boundary has to be re-checked in-process; here the matcher IS
@@ -1305,10 +1323,10 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     seen_paths = set()
     for scope_tip, scope_args in path_scopes:
         scope_revs = history_revs(scope_args, args.all, args.refs_pull, unreachable)
-        # A publish scope has two known endpoints; an audit walk does not, and it is
-        # bounded. Only the former may conclude that an all-deletions path is a
-        # cleanup — see path_records_block().
-        publish_scope = bool(scope_args)
+        # A publish scope has two KNOWN endpoints. A bare-SHA new-ref push does not:
+        # it publishes a whole history with no base, so it may not conclude that an
+        # all-deletions path is a cleanup — see path_records_block().
+        publish_scope = is_publish_scope(scope_args)
         try:
             records = scope_path_records(scope_tip, scope_args, args.repo, run,
                                          history=not args.no_history,
