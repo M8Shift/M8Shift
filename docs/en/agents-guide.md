@@ -289,8 +289,9 @@ releasable at all times.
 - **Release/tag anti-leak gate.** Before every release or tag, refresh the
   private denylist with any newly emerged cross-project identifiers, then run
   `python3 scripts/scrub-check.py --objects`. This raw all-object pass is
-  explicit (never part of every pre-push): it checks commit/tag message bodies
-  without identity headers, plus tree names and blob bytes. It complements the
+  explicit (never part of every pre-push): it checks full commit and annotated-tag
+  objects, identity and mergetag headers included, plus tree names and blob
+  bytes. It complements the
   carrier-naming range/history gate; treat a finding or scanner error as a
   failed release audit.
 
@@ -401,6 +402,67 @@ If the forge is temporarily unavailable, record the same intent in the relay tas
 ledger (`m8shift.py task add …`) and reconcile to a forge issue when possible.
 
 ## 7. Dogfooding — building M8Shift with M8Shift
+
+### Upgrading the relay's own kit — who, and in which state (#301)
+
+**The coordinating agent performs it.** Not the operator, not the peer: the agent
+holding the coordination role upgrades the kit, the same way it acts as forge
+gateway. This was undefined until v4.0.0 and cost a full round of hesitation, so
+it is written here rather than rediscovered.
+
+Two guards make the window narrow, and both are correct:
+
+- `update` refuses a target whose lock state starts with `WORKING_`
+  (`update only while IDLE/PAUSED/DONE/AWAITING`). An agent holding the pen
+  therefore cannot upgrade the kit it is holding.
+- The safety floor says write only while you hold the pen. An agent *without* the
+  pen therefore should not write either.
+
+The intersection is **`pause`**, whose own help states its purpose: *"why no agent
+should hold the pen until new user scope arrives"*. Pausing is the designed window
+in which nobody is working and the engine can be replaced under no one.
+
+```sh
+# 1. park the session — no agent holds the pen while the engine is swapped
+./m8shift.py pause <you> --reason "kit upgrade to vX.Y.Z"
+
+# 2. run the NEW source against the relay; a major bump also needs the migration
+#    override, because the core treats a Generation as a migration, not a refresh
+python3 <new-source>/m8shift.py update --target <relay> --source <new-source> \
+    --allow-generation-change \
+    --companions context,e2e,headroom,i18n,runtime,worktree,top
+
+# 3. verify BEFORE resuming
+./m8shift.py doctor                  # expect no version-skew findings
+./m8shift.py status                  # turn number and holder preserved
+
+# 4. give the session back
+./m8shift.py resume <you> --reason "kit at vX.Y.Z, doctor clean"
+```
+
+Three things measured during the v4.0.0 upgrade of a live 43-day relay, each of
+which would otherwise be guessed at:
+
+- **`M8SHIFT.md` is not touched by the update.** Verified byte-identical on a
+  throwaway copy of the real relay; the turn log kept all 1534 markers. On the
+  live run the file changed only because `pause` writes the LOCK block — attribute
+  the delta to the pause, not to the upgrade.
+- **`top` is not in the installers' companion list.** `install.sh --upgrade`
+  delegates `context,e2e,headroom,i18n,runtime,worktree` and deliberately omits
+  the dashboard, which is installed on its own via `--with-top`. Name it
+  explicitly on an `update`, or `doctor` reports a skew the operator did not cause.
+- **A resident listener does not need restarting for the core.** It reaches the
+  core through `run_core_command`, an argv subprocess to the project's own
+  `m8shift.py`, so the next interaction already runs the new code. Restart it only
+  to pick up the *companion's own* changes, and prefer the paused window for that
+  too. Repair a stale lane with `listener status --agent <a> --repair`, which never
+  touches a live one.
+
+**Rehearse on a copy first.** Copy the relay's scripts and `.m8shift/` to a
+throwaway directory and upgrade that. It costs a minute and it is how each of the
+facts above was established rather than assumed. Note that an agent bound to the
+real relay root will be refused on the copy — that binding guard is working, and
+it is why the rehearsal validates mechanics, not identity.
 
 ### Waiter vs listener — the host wake-up guard (incident #108)
 
