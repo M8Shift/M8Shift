@@ -363,7 +363,7 @@ Every row has exactly the following contract shape (maps may be empty):
   "refs": {"branch": "feat/example", "commit": "0123456789abcdef"},
   "ids": {"ticket": "229"},
   "digests": {"review": "sha256:<64-lowercase-hex>"},
-  "source": {"tool": "m8shift-runtime.py", "version": "3.65.0"}
+  "source": {"tool": "m8shift-runtime.py", "version": "4.0.0"}
 }
 ```
 
@@ -443,7 +443,7 @@ Reconstruction verifies both hashes before returning the old/new pins and
 invocation boundary. Missing, conflicting, or mismatched evidence fails closed;
 directory mtime and the current configured model are not reconstruction proof.
 Slice C is a pure/example boundary only: no runtime listener consumes these
-records in v3.65.0.
+records in v4.0.0.
 
 ### 6.5 State machine
 
