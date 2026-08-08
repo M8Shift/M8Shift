@@ -17566,6 +17566,352 @@ class TestRFC052Denylist(CLIBase):
         self.assertIn("docs/%s/leak.md" % self.TERM, rv.stdout)
 
 
+class TestPublishedBaseAttestation(unittest.TestCase):
+    """#300 — a NEW ref is the one push shape git gives the gate no endpoint proof for.
+
+    Every test drives real `git ls-remote`, real ref mutation and real pre-push
+    stdin against local bare repositories. No hosted endpoint is required, and none
+    is used: the mechanism is the advertisement, not the host.
+    """
+
+    TERM = "SyntheticSecretProject"
+    HELPER = os.path.join(REPO, "scripts", "publish-attest.py")
+
+    def _fixture(self, tag_message="clean tag", after_base=None, publish_tag=False):
+        root = tempfile.mkdtemp(prefix="m8-att-")
+        self.addCleanup(shutil.rmtree, root, True)
+        self.bare = os.path.join(root, "r.git")
+        self.work = os.path.join(root, "w")
+        subprocess.run(["git", "init", "-q", "--bare", self.bare], capture_output=True)
+        subprocess.run(["git", "init", "-q", self.work], capture_output=True)
+        for a in (["config", "user.email", "a@b.c"], ["config", "user.name", "t"],
+                  ["remote", "add", "origin", self.bare]):
+            self._g(*a)
+        os.makedirs(os.path.join(self.work, ".git", "hooks"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "hooks", "pre-push"),
+                    os.path.join(self.work, ".git", "hooks", "pre-push"))
+        os.chmod(os.path.join(self.work, ".git", "hooks", "pre-push"), 0o755)
+        os.makedirs(os.path.join(self.work, "scripts"), exist_ok=True)
+        for name in ("scrub-check.py", "publish-attest.py"):
+            shutil.copy(os.path.join(REPO, "scripts", name),
+                        os.path.join(self.work, "scripts", name))
+        self.deny = os.path.join(root, "deny.txt")
+        with open(self.deny, "w", encoding="utf-8") as fh:
+            fh.write(self.TERM + "\n")
+        self._w("a.md")
+        self._c("first")
+        self._w("b.md")
+        # The published history carries the finding. This is the normal state of a
+        # repository that adopted the gate after the fact.
+        self._c("old message mentioning %s" % self.TERM)
+        self._g("push", "-q", "origin", "HEAD:refs/heads/main", env=self._env())
+        if after_base:
+            self._w(after_base)
+        else:
+            self._w("c.md")
+        self._c("release")
+        self._g("tag", "-a", "v9.9.9", "-m", tag_message)
+        if publish_tag:
+            self._g("push", "-q", "origin", "v9.9.9", env=self._env())
+
+    def _g(self, *args, **kw):
+        return subprocess.run(["git", *args], cwd=self.work, capture_output=True,
+                              text=True, **kw)
+
+    def _w(self, rel, body="clean\n"):
+        path = os.path.join(self.work, rel)
+        os.makedirs(os.path.dirname(path) or self.work, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def _c(self, message):
+        self._g("add", "-A")
+        self._g("commit", "-q", "-m", message)
+
+    def _env(self, enforce=False, receipt=None):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("M8SHIFT_SCRUB_ENFORCE", "M8SHIFT_AGENT")}
+        env["M8SHIFT_DENYLIST"] = self.deny
+        if enforce:
+            env["M8SHIFT_SCRUB_ENFORCE"] = "1"
+        if receipt:
+            env["M8SHIFT_PUBLISH_ATTESTATION"] = receipt
+        return env
+
+    def _attest(self, *args):
+        return subprocess.run([sys.executable, self.HELPER, "--repo", self.work, *args],
+                              capture_output=True, text=True)
+
+    def _create(self, published="refs/heads/main", destination="refs/tags/v9.9.9",
+                source="v9.9.9"):
+        r = self._attest("create", "--remote", "origin", "--published-ref", published,
+                         "--destination-ref", destination, "--source", source, "--json")
+        if r.returncode != 0:
+            return None, r
+        return json.loads(r.stdout)["receipt_id"], r
+
+    def _push_tag(self, receipt=None):
+        return self._g("push", "origin", "v9.9.9",
+                       env=self._env(enforce=True, receipt=receipt))
+
+    def _tag_published(self):
+        out = subprocess.run(["git", "ls-remote", self.bare, "refs/tags/v9.9.9"],
+                             capture_output=True, text=True).stdout
+        return bool(out.strip())
+
+    # ── the gap, and its closure ────────────────────────────────────────────────
+
+    def test_new_ref_blocks_without_attestation_and_passes_with_one(self):
+        """Both halves on one fixture, because either alone would mislead.
+
+        Without a receipt the push is refused for a finding in ALREADY PUBLISHED
+        history — the state that makes tags unpublishable. With one, the same push
+        is scanned from the attested base and reports clean, under an enforced gate.
+        """
+        self._fixture()
+        blocked = self._push_tag()
+        self.assertNotEqual(blocked.returncode, 0, blocked.stderr)
+        self.assertIn("hit:", blocked.stderr)
+        self.assertFalse(self._tag_published())
+
+        receipt, _ = self._create()
+        self.assertIsNotNone(receipt)
+        allowed = self._push_tag(receipt=receipt)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn("attestation consumed", allowed.stderr)
+        self.assertTrue(self._tag_published())
+
+    def test_attestation_never_admits_a_finding_after_the_base(self):
+        """The point of the whole design: it narrows the range, it does not silence.
+
+        Everything after the attested base stays scanned, so a denied path
+        introduced by the release blocks with a receipt exactly as without one.
+        """
+        self._fixture(after_base=os.path.join("docs", self.TERM, "x.md"))
+        receipt, _ = self._create()
+        r = self._push_tag(receipt=receipt)
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hit:", r.stderr)
+        self.assertFalse(self._tag_published())
+
+    def test_attestation_never_admits_a_dirty_tag_message(self):
+        """The pushed tip is not below the base and is never excluded by it."""
+        self._fixture(tag_message="tag %s dirty" % self.TERM)
+        receipt, _ = self._create()
+        r = self._push_tag(receipt=receipt)
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self._tag_published())
+
+    # ── freshness is state, not age ─────────────────────────────────────────────
+
+    def test_a_published_ref_that_moved_kills_the_receipt(self):
+        """Deliberately stricter than "still an ancestor".
+
+        If the branch advanced, the operator attests the NEW sha rather than having
+        a changed observation silently accepted.
+        """
+        self._fixture()
+        receipt, _ = self._create()
+        self._w("moved.md")
+        self._c("the published branch advances")
+        self._g("push", "-q", "origin", "HEAD:refs/heads/main", env=self._env())
+        r = self._attest("consume", "--receipt-id", receipt,
+                         "--source-sha", self._g("rev-parse", "v9.9.9^{object}").stdout.strip(),
+                         "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("moved", r.stderr)
+
+    def test_a_receipt_is_single_use(self):
+        self._fixture()
+        receipt, _ = self._create()
+        source = self._g("rev-parse", "v9.9.9^{object}").stdout.strip()
+        first = self._attest("consume", "--receipt-id", receipt, "--source-sha", source,
+                             "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self._attest("consume", "--receipt-id", receipt, "--source-sha", source,
+                              "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(second.returncode, 1)
+        self.assertIn("already consumed", second.stderr)
+
+    def test_an_existing_destination_is_not_attestable(self):
+        """This attests the creation of a ref, never an update to a live one."""
+        self._fixture(publish_tag=True)
+        receipt, r = self._create()
+        self.assertIsNone(receipt)
+        self.assertIn("already exists", r.stderr)
+
+    def test_a_tuple_mismatch_supplies_no_base(self):
+        """One receipt authorizes one (source, destination) pair and nothing else."""
+        self._fixture()
+        receipt, _ = self._create()
+        wrong_source = self._attest("consume", "--receipt-id", receipt,
+                                    "--source-sha", "0" * 40,
+                                    "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(wrong_source.returncode, 1)
+        self.assertIn("attested source", wrong_source.stderr)
+        receipt2, _ = self._create()
+        wrong_dest = self._attest("consume", "--receipt-id", receipt2,
+                                  "--source-sha", self._g("rev-parse", "v9.9.9^{object}").stdout.strip(),
+                                  "--destination-ref", "refs/heads/other")
+        self.assertEqual(wrong_dest.returncode, 1)
+        self.assertIn("attested ref", wrong_dest.stderr)
+
+    def test_expiry_and_a_future_date_both_refuse(self):
+        """The ceiling bounds replay. A clock pushed forward must not buy extra life."""
+        self._fixture()
+        source = self._g("rev-parse", "v9.9.9^{object}").stdout.strip()
+        for label, mutate in (("expired", lambda d: d.update(
+                                   created_at=d["created_at"] - 7200,
+                                   expires_at=d["expires_at"] - 7200)),
+                              ("future", lambda d: d.update(
+                                   created_at=d["created_at"] + 7200,
+                                   expires_at=d["expires_at"] + 7200))):
+            receipt, _ = self._create()
+            path = self._receipt_path(receipt)
+            data = json.loads(open(path, encoding="utf-8").read())
+            mutate(data)
+            self._rewrite(path, data)
+            r = self._attest("consume", "--receipt-id", receipt, "--source-sha", source,
+                             "--destination-ref", "refs/tags/v9.9.9")
+            self.assertEqual(r.returncode, 1, "%s: %s" % (label, r.stdout))
+
+    # ── corruption must not become authority ────────────────────────────────────
+
+    def _receipt_path(self, receipt):
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], cwd=self.work,
+                                capture_output=True, text=True).stdout.strip()
+        return os.path.join(os.path.realpath(common), "m8shift-attest",
+                            "%s.json" % receipt)
+
+    @staticmethod
+    def _rewrite(path, data):
+        """Rewrite a receipt WITH a matching checksum, so the test targets one rule."""
+        body = {k: data[k] for k in sorted(data) if k != "checksum"}
+        data["checksum"] = hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, sort_keys=True)
+        os.chmod(path, 0o600)
+
+    def test_a_tampered_receipt_is_refused(self):
+        """The checksum is integrity, not authentication — it stops corruption, not an
+        adversary, and the module says so. Still, a silently edited base must not pass.
+        """
+        self._fixture()
+        receipt, _ = self._create()
+        path = self._receipt_path(receipt)
+        data = json.loads(open(path, encoding="utf-8").read())
+        data["published_sha"] = "0" * 40          # checksum deliberately NOT refreshed
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, sort_keys=True)
+        r = self._attest("consume", "--receipt-id", receipt,
+                         "--source-sha", self._g("rev-parse", "v9.9.9^{object}").stdout.strip(),
+                         "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("checksum", r.stderr)
+
+    def test_unsafe_receipt_files_are_refused(self):
+        """Permissions, symlinks and unknown fields: ordinary corruption, not attacks."""
+        self._fixture()
+        source = self._g("rev-parse", "v9.9.9^{object}").stdout.strip()
+
+        receipt, _ = self._create()
+        path = self._receipt_path(receipt)
+        os.chmod(path, 0o644)
+        loose = self._attest("consume", "--receipt-id", receipt, "--source-sha", source,
+                             "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(loose.returncode, 1)
+        self.assertIn("accessible", loose.stderr)
+
+        receipt, _ = self._create()
+        path = self._receipt_path(receipt)
+        data = json.loads(open(path, encoding="utf-8").read())
+        data["surprise"] = 1
+        self._rewrite(path, data)
+        unknown = self._attest("consume", "--receipt-id", receipt, "--source-sha", source,
+                               "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(unknown.returncode, 1)
+        self.assertIn("unknown field", unknown.stderr)
+
+        receipt, _ = self._create()
+        path = self._receipt_path(receipt)
+        os.unlink(path)
+        os.symlink("/etc/hosts", path)
+        link = self._attest("consume", "--receipt-id", receipt, "--source-sha", source,
+                            "--destination-ref", "refs/tags/v9.9.9")
+        self.assertEqual(link.returncode, 1)
+        self.assertIn("symlink", link.stderr)
+
+    def test_a_receipt_from_another_repository_proves_nothing(self):
+        self._fixture()
+        receipt, _ = self._create()
+        stolen = json.loads(open(self._receipt_path(receipt), encoding="utf-8").read())
+        first_work = self.work
+        self._fixture()
+        target = self._receipt_path(stolen["receipt_id"])
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        self._rewrite(target, stolen)
+        self.assertNotEqual(first_work, self.work)
+        r = self._attest("consume", "--receipt-id", stolen["receipt_id"],
+                         "--source-sha", stolen["source_sha"],
+                         "--destination-ref", stolen["destination_ref"])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("different repository", r.stderr)
+
+    # ── confidentiality and blast radius ────────────────────────────────────────
+
+    def test_no_endpoint_url_is_stored_or_printed(self):
+        """A receipt is meant to be readable by whoever audits the push."""
+        self._fixture()
+        receipt, created = self._create()
+        raw = open(self._receipt_path(receipt), encoding="utf-8").read()
+        for text, where in ((raw, "receipt"), (created.stdout, "stdout"),
+                            (created.stderr, "stderr")):
+            self.assertNotIn(self.bare, text, where)
+            self.assertNotIn("://", text.replace("https://", ""), where)
+
+    def test_the_scanner_keeps_its_local_only_guard(self):
+        """Network capability lives in the helper, never in the scanner.
+
+        Asserted as a CAPABILITY, not as a grep. A first version of this test
+        searched the scanner's source for "ls-remote" and failed on a docstring
+        that explains why re-observing the remote was REJECTED — prose describing
+        an absence, read as evidence of a presence. The guard is callable, so it
+        is called.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "scrub_check_guard", os.path.join(REPO, "scripts", "scrub-check.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for argv in (["git", "ls-remote", "origin"], ["git", "fetch"],
+                     ["git", "push"], ["git", "remote", "update"]):
+            with self.assertRaises(mod.NetworkAttemptRefused, msg=str(argv)):
+                mod.refuse_network_argv(argv)
+        # ...and the local reads it does need still pass, or the guard proves nothing.
+        for argv in (["git", "log", "HEAD"], ["git", "ls-tree", "-r", "HEAD"]):
+            self.assertEqual(mod.refuse_network_argv(argv), argv)
+        self.assertNotIn("publish-attest",
+                         open(os.path.join(REPO, "scripts", "scrub-check.py"),
+                              encoding="utf-8").read())
+
+    def test_direct_urls_and_multi_push_remotes_are_ineligible(self):
+        """V1 refuses what it cannot reason about instead of guessing."""
+        self._fixture()
+        direct = self._attest("create", "--remote", self.bare,
+                              "--published-ref", "refs/heads/main",
+                              "--destination-ref", "refs/tags/v9.9.9", "--source", "v9.9.9")
+        self.assertEqual(direct.returncode, 1)
+        self.assertIn("configured remote NAME", direct.stderr)
+        self._g("remote", "set-url", "--add", "--push", "origin", self.bare)
+        self._g("remote", "set-url", "--add", "--push", "origin", self.bare + "2")
+        multi = self._attest("create", "--remote", "origin",
+                             "--published-ref", "refs/heads/main",
+                             "--destination-ref", "refs/tags/v9.9.9", "--source", "v9.9.9")
+        self.assertEqual(multi.returncode, 1)
+        self.assertIn("push URLs", multi.stderr)
+
+
 class TestRFC052ScrubCheck(CLIBase):
     """RFC 052 (#101) PR2 — E1 `scripts/scrub-check.py` (tip + history) and E2
     hook layering. Fixture repos are built per-test; git runs raw by argv."""
