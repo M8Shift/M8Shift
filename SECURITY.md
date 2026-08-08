@@ -106,8 +106,9 @@ must be repaired. This preserves the clean-push guarantee: unrelated local,
 reflog-only, and unreachable objects cannot block a publication.
 
 Before a release/tag audit, `scripts/scrub-check.py --objects` is the explicit
-database-wide backstop. It scans blobs and tree names plus commit/tag message
-bodies (not identity headers); findings and scanner errors must stop that audit.
+database-wide backstop. It scans blobs and tree names plus full commit and
+annotated-tag objects, identity and mergetag headers included; findings and
+scanner errors must stop that audit.
 
 CI is the backstop, but the cheapest place to stop a compartmentalization leak
 is before it ever leaves the machine. The repo ships `hooks/pre-commit` and
