@@ -1,6 +1,161 @@
 # Changelog
 
-## Unreleased
+## v4.0.0 — 2026-08-08
+
+- **Path names as publish-gate scan input (#291).** No scan input had ever
+  contained a path, so a denied term carried only by a filename or directory
+  published with rc 0 under enforcement; one fixture moves from rc 0 and no
+  hits to rc 1 and four. Each pushed scope is enumerated once, the names it
+  publishes and the paths its commits touch, never per denylist term. Records
+  are NUL-delimited, not lines: a newline inside a name cannot miscount the
+  walk, and a non-ASCII one is not octal-quoted past the matcher. Commit
+  frames are a NUL run, which no path may contain, so none is forgeable, and
+  an incomplete walk fails closed at rc 2 rather than reporting clean, its
+  diagnostic naming the subcommand and rc but never Git's stderr, which quotes
+  the path. An `allow:` exception cannot suppress a path hit — a lookalike
+  in one component would silence a denied term in another — and the hit is
+  redacted unless `--verbose`, the path here being the finding. A path whose
+  every record is a deletion is reported as removed by this push, not blocked;
+  add-then-remove in one push still blocks on its own `A`.
+
+- **Denied tree entry names are no longer suppressible (#292).** An `allow:`
+  exception is line-scoped and a tree has no lines: its body repeats mode,
+  name, NUL and a 20-byte object id, so whether two entries decode onto one
+  line hangs on those random id bytes carrying one of the seven values
+  `splitlines()` breaks on. An allowed substring in one entry could silence a
+  denied name in its neighbour, and which entries got audited could shift
+  whenever an unrelated sibling changed. The standalone `--objects` audit
+  therefore called clean a repository that the manual `cat-file` grep it
+  automates still flagged. Trees now take no suppression at all; textual
+  objects keep line-scoped allows, so existing rules still work.
+
+- **Path-name scanning in every invocation mode (#295).** The path scan ran
+  only under `--range`, so direct mode and `--all` — the CI and release
+  audit invocation named in `hooks/pre-push` and `SECURITY.md` — returned
+  rc 0 and "clean" on a fixture whose sole offence was a denied directory
+  name, which `--range` blocked with rc 1; the run an operator performs to
+  be certain was the one that said nothing. The content, commit-message and
+  path walks now take their revision universe from one shared selector and
+  use the same argv shape — revisions first, `--` terminator — so a name
+  walk cannot drift from the content walk while one verdict is printed. The
+  deletion-only downgrade stays bound to a real `A..B` publish scope: an
+  audit answers whether the repository carries a name anywhere, so a
+  historical occurrence is itself the finding, and a bare-SHA new-ref push
+  has no base endpoint against which a deletion could mean nothing was
+  published. A single predicate now defines that scope for both the
+  endpoint-diff choice and the downgrade, so the two cannot disagree. The
+  walk costs 0.2 s over this repository's 2662 commits of refs and reflogs,
+  and end to end on `--all` the difference is not measurable.
+
+- **Completeness window on the range-less path audit (#297).** Range-less
+  direct and `--all` path walks now request one commit beyond `--max-commits`;
+  the extra commit is how truncation is detected, and seeing it raises rc 2
+  rather than answering for the prefix that was read. That refusal is now the
+  path scan's own: the commit-message walk applies the same N+1 rule over the
+  same revision universe and refused first, so the subsystem no longer depends
+  on a neighbour to fail closed on its behalf. Distinct SHAs are counted, not
+  emitted frames, since `-m` repeats a merge once per parent. The window is an
+  audit concept only — explicitly scoped pushes stay complete, `A..B` and
+  bare-SHA new refs alike, as do the tree and endpoint walks, and
+  `--no-history` probes no window — so a denied name is still caught on the
+  oldest transmitted commit of an oversized push, and an add-then-delete
+  cannot present as deletion-only. The diagnostic names neither a path, a
+  term, nor Git stderr. The bound is a completeness contract, not a resource
+  control: 0.14 s complete against 0.12 s bounded over 2000 commits.
+
+- **Endpoint-proof publish classification (#262).** The gate no longer
+  excludes history from local remote-tracking refs, a cache that outlives a
+  recreated remote and hid two commits published nowhere behind rc 0 and a
+  clean verdict. Nothing is excluded now; findings are classified against the
+  non-zero `remote_sha` git obtains from the destination during push
+  negotiation, never against reachability from a local carrier ref — a stale
+  one can hold a commit a recreated destination has never seen — and never by
+  re-observing the remote, which the scanner's local-only git allowlist now
+  refuses at the spawn point rather than by scanning its own source text. Such
+  a finding is reported as not transmitted by this push, stopping short of
+  claiming the destination holds it, while introduced and unbaselined findings
+  block. The downgrade requires every finding proven, not one: the earlier
+  form let 10 proven history hits silence 30 unproven tag and message findings
+  on a routine `git push --follow-tags`, where the branch earns a base and the
+  tag rides on it — the same tag pushed alone was blocked, batched it reached
+  a real destination. `--remote` is now reporting metadata that excludes
+  nothing and no longer vetoes: its pattern refused names git accepts, so a
+  configured remote called `_fork` blocked a real push for a value nothing
+  reads. Running `hooks/pre-push` by hand as a pre-flight no longer aborts
+  with `unbound variable` before scanning.
+
+- **Commit-message coverage at the publish boundary (#251).** The pickaxe walk
+  sees file-content deltas only, so a denied term living solely in a commit
+  message crossed the gate. Messages are now scanned once over the same
+  bounded pushed range, each hit named by its carrier ref. A standalone
+  `--objects` audit reads the local object database whole, identity headers
+  and unreachable objects included, and never runs from the hook, so the gate
+  stays scoped to published history. Bounds fail closed at rc 2: an explicit
+  denylist path missing or unreadable, any denylist over 64 KiB or 256 terms,
+  a range-less message walk past `--max-commits` (the pushed range bounds
+  itself), an object over 256 MiB, any uncaught scanner failure. The hook
+  invokes the scanner through a wrapper that maps a scanner which cannot even
+  start to rc 2, so a broken scan blocks the push instead of being read as an
+  advisory finding.
+
+- **One authoritative relay root for the runtime companion (#259).** Every
+  runtime path derives from a single root resolved at startup —
+  `--project-root`, or an equally authoritative `M8SHIFT_ROOT` — rather than
+  from the script's own directory, so a companion invoked outside a relay
+  binds to that relay instead of splitting state across two. Disagreeing
+  roots, or any relay-owned path (profile, provider cwd, protocol, core,
+  runtime, runner) resolving outside the selected root, exit before a runner
+  starts or a sidecar is written, and the detached listener child carries the
+  resolved root in its own argv instead of rediscovering one. The plan
+  sidecar and `listener status --json` carry `project_root`,
+  `root_provenance` (`cli`, `env`, `discovery`, `script_location`) and
+  `roots_consistent`; a dry-run driven from a checkout outside the selected
+  root exits 0 and writes in neither tree. For this companion a differing
+  `M8SHIFT_ROOT` no longer refuses mutating commands as it did under
+  RFC 052 — it now names the relay they write to; the core's
+  two-candidate-relay refusal is unchanged.
+
+- **Expired leases and aged usage stop reading as current (#270, #271).**
+  Trailing WORKING spans now clamp at a work horizon on both fold paths,
+  telemetry and legacy, the remainder booked unclassified and diagnosed
+  `lease_expired_before_as_of`, so a machine asleep under a dead pen cannot
+  bill the night: 15h once, and 7200s where 3600s was due on the legacy path.
+  The horizon is `max(expires, last protective beat + its window)`, the
+  window `heartbeat_protective` uses for force-claim, so a holder still
+  beating is not under-counted. An aged snapshot shows `left n/a` but keeps
+  attribution, age and reset, since a percentage claims the current window,
+  and a past reset reads ROLLED; `aged` is split from `stale`, which also
+  covers a seconds-old fallback.
+
+- **Scoped findings for inactive provider entries (#284).** Example templates
+  in the shipped registry reuse the names of live agents, and findings were
+  labelled by name or prefix, so a template's message read as one about the
+  live agent of that name. Inactive entries now carry their `examples[i]`
+  scope in the label itself, which corrects every check in that path —
+  anchor, argv and mode alike, not the model message alone. A template pin
+  left unfilled, whether absent or the `UNSET` sentinel, no longer reports at
+  all, since the shipped examples leave it unfilled by design; a pin filled
+  in wrongly still reports, scoped, as the authoring error it is. Active rows
+  are untouched and stay unscoped. A healthy install raised two model
+  warnings with both active pins valid; it now raises none.
+
+- **Agent-first protocol surface (protocol.m8shift.ai).** A dependency-free
+  Cloudflare Worker now serves `docs/en/AGENT-EXCHANGE-PROTOCOL.md` from a
+  generated `worker.mjs` that embeds the canonical Markdown, its rendered
+  HTML, and an `llms.txt` discovery stub, and performs no runtime fetch. It
+  replies in `text/markdown` by default and switches to HTML only when
+  `Accept` carries `text/html`, does *not* carry `text/markdown`, and the
+  User-Agent matches a browser signature; any `.md` path skips negotiation
+  entirely. So a client sending no `Accept` is never handed a page to scrape,
+  and an agent that asks for Markdown keeps it even behind a browser UA. Each
+  of the three representations carries its own sha256 ETag under
+  `Vary: Accept, User-Agent`, with `If-None-Match` answered by a 304 and
+  `HEAD` by headers alone; the HTML response adds a hash-based CSP over its
+  inline style and JSON-LD. Regeneration is checked, not enforced:
+  `generate.py --check` exits 1 naming the stale outputs, but it runs only as
+  a documented pre-deploy step in `DEPLOY.md`, so a source edit that skips
+  regeneration still ships a stale copy — as one already has, leaving
+  `protocol.md` behind its canonical source at this release.
 
 - **BREAKING — the supported Python floor moves from 3.8 to 3.12 (#252).**
   `GHSA-6w46-j5rx-g56g` / CVE-2025-71176 (CWE-379, predictable `/tmp/pytest-of-{user}`
@@ -75,6 +230,29 @@
   captions its accounting window from session start. During mixed-version
   fleet upgrades, older consumed-percent surfaces and current left-percent
   surfaces may remain side by side until every installed kit is upgraded.
+
+### Migration from v3.x
+
+`update` refuses a generation change by default: the core treats a major bump as
+a protocol Generation, not a routine in-place refresh. Upgrading an adopted kit
+is therefore explicit.
+
+1. **Check the interpreter first.** The floor is now Python 3.12. On 3.8-3.11
+   the kit will not run at all; upgrade the interpreter before the kit.
+2. **Update with the override**, from a copy of the NEW source:
+   `python3 m8shift.py update --target <adopted-root> --allow-generation-change`
+   Every generated write is rebased onto the target, as in any update; the flag
+   only lifts the generation refusal after your review.
+3. **Re-verify**: `python3 m8shift.py doctor` reports the interpreter floor,
+   companion lockstep, and manifest state.
+
+**Expect previously-accepted pushes to be refused.** The publish gate now reads
+tree entry NAMES as well as blob content, in every invocation mode. A repository
+carrying a denied identifier in a file or directory name passed the gate before
+this release and is blocked by it now. That is the intended behaviour change, and
+it is the reason this is a Generation rather than a Revision. Remove or rename
+the offending path; a push whose only change REMOVES such a name is reported and
+does not block.
 
 ## v3.65.0 — 2026-07-20
 

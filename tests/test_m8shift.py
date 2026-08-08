@@ -10687,8 +10687,30 @@ class _InstallerUpgradeDelegateTests(unittest.TestCase):
         subprocess.run([sys.executable, os.path.join(self.target, "m8shift.py"),
                         "init", "--agents", "claude,codex"], cwd=self.target,
                        check=True, capture_output=True, text=True, env=clean_env)
-        self._reversion(os.path.join(self.target, "m8shift.py"), "3.57.0")
+        # #252/v4: fixture versions are derived from VERSION, never pinned to a
+        # literal. Three of these tests used "4.0.0" as their synthetic NEXT
+        # generation; shipping 4.0.0 turned that future into the present and the
+        # generation guard began winning tests that meant to exercise a lower one.
+        # The target keeps the current version and the SOURCE moves up one
+        # revision, so the ordinary delegate case stays same-generation at every
+        # future release — including the first of a generation, where no older
+        # same-generation version exists to upgrade from.
+        for name in self.FILES:
+            self._reversion(os.path.join(self.src, name), self.same_generation_next())
         self._manifest()
+
+    @staticmethod
+    def _version_parts():
+        return [int(part) for part in cowork.VERSION.split(".")[:3]]
+
+    @classmethod
+    def same_generation_next(cls):
+        major, revision, _ = cls._version_parts()
+        return "%d.%d.0" % (major, revision + 1)
+
+    @classmethod
+    def next_generation(cls):
+        return "%d.0.0" % (cls._version_parts()[0] + 1)
 
     @staticmethod
     def _reversion(path, version):
@@ -10724,17 +10746,43 @@ class _InstallerUpgradeDelegateTests(unittest.TestCase):
                     result[rel] = fh.read()
         return result
 
+    # `install.sh --upgrade` delegates with an explicit companion list that omits
+    # `top`: the dashboard is installed on its own (`--with-top`), not refreshed by
+    # an adopter upgrade. Both halves are asserted below.
+    DELEGATED = ("m8shift.py", "m8shift-context.py", "m8shift-e2e.py",
+                 "m8shift-headroom.py", "m8shift-i18n.py", "m8shift-runtime.py",
+                 "m8shift-worktree.py")
+    NOT_DELEGATED = ("m8shift-top.py",)
+
     def test_minor_upgrade_delegates_and_preserves_relay_bytes(self):
+        # Until the fixture derived its versions, source and target were BYTE
+        # IDENTICAL here, so "target == source" held before the upgrade ran and
+        # proved nothing about it. Moving the source one revision ahead is what
+        # makes the assertion mean something — and it immediately showed that the
+        # loop covered a component the upgrade never claims to touch.
+        target_before = {name: open(os.path.join(self.target, name), "rb").read()
+                         for name in self.NOT_DELEGATED}
         relay = open(os.path.join(self.target, "M8SHIFT.md"), "rb").read()
         result = self._run()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(open(os.path.join(self.target, "M8SHIFT.md"), "rb").read(), relay)
-        for name in self.FILES:
+        # The fixture must have had work to do, or the loop below is vacuous again.
+        self.assertIn('VERSION = "%s"' % self.same_generation_next(),
+                      open(os.path.join(self.target, "m8shift.py"), encoding="utf-8").read(),
+                      "the delegate did not refresh the core at all")
+        for name in self.DELEGATED:
             self.assertEqual(open(os.path.join(self.target, name), "rb").read(),
-                             open(os.path.join(self.src, name), "rb").read())
+                             open(os.path.join(self.src, name), "rb").read(),
+                             "%s should have been refreshed by the delegate" % name)
+        for name in self.NOT_DELEGATED:
+            self.assertEqual(open(os.path.join(self.target, name), "rb").read(),
+                             target_before[name],
+                             "%s is not in the delegated companion list and must "
+                             "not be rewritten by an adopter upgrade" % name)
 
     def test_generation_change_is_refused_without_target_mutation(self):
-        self._reversion(os.path.join(self.src, "m8shift.py"), "4.0.0")
+        for name in self.FILES:
+            self._reversion(os.path.join(self.src, name), self.next_generation())
         self._manifest()
         before = self._snapshot()
         result = self._run()
@@ -15382,7 +15430,9 @@ class TestRFC048PRB(CLIBase):
         manifest = os.path.join(self.src, "checksums.sha256")
         with open(manifest, "w", encoding="utf-8") as fh:
             fh.write("0" * 64 + "  m8shift.py\n")
-        r = self.update("--json")
+        # As above: cross the generation explicitly so the assertion isolates the
+        # CHECKSUM refusal rather than being masked by the outer migration guard.
+        r = self.update("--json", "--allow-generation-change")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         d, comps = self._components(r)
         self.assertEqual(comps["core"], "refused")
@@ -15393,7 +15443,7 @@ class TestRFC048PRB(CLIBase):
             good = hashlib.sha256(fh.read()).hexdigest()
         with open(manifest, "w", encoding="utf-8") as fh:
             fh.write(good + "  m8shift.py\n")
-        r = self.update("--json")
+        r = self.update("--json", "--allow-generation-change")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         _, comps = self._components(r)
         self.assertEqual(comps["core"], "updated")
@@ -15405,7 +15455,12 @@ class TestRFC048PRB(CLIBase):
         self._set_banner("3.40.0")
         self._reversion(os.path.join(self.d, "m8shift.py"), "3.40.0")
         before = self._snapshot(self.d)
-        r = self.update()
+        # 3.41 is a fixed HISTORICAL adoption floor, not a guess at a version, so
+        # the literal stays. Since v4 a 3.x target is also a generation crossing,
+        # and the outer guard would answer first; the override makes the crossing
+        # explicit so this test still reaches — and still asserts — the older
+        # floor refusal it exists for.
+        r = self.update("--allow-generation-change")
         self.assertNotEqual(r.returncode, 0)
         msg = r.stderr + r.stdout
         self.assertIn("3.41", msg)
