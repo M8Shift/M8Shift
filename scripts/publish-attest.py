@@ -155,6 +155,32 @@ def observe(url, published_ref, destination_ref):
     return shas[0]
 
 
+def comparable(published_sha, source_commit, repo):
+    """True iff the two commits lie on one line of history, either direction.
+
+    #300 V1 covers both shapes a clean push takes, because both transmit no
+    unpublished commit history:
+
+      published_base <= source   a NEW branch built ON the published base; the
+                                 scan is base..source, exactly what git hands an
+                                 existing-ref update.
+      source <= published_base   a TAG of already-published history; the tag is
+                                 at or behind the base and adds only its own
+                                 object, which the scanner reads independently of
+                                 commit history. This is the shape that opened
+                                 #300, and the first cut excluded it.
+
+    A DIVERGED source shares no line with the base: it carries commits the base
+    has never seen, so it is refused and falls back to the bare-SHA scan. Kept
+    identical at creation and consumption so the two cannot drift.
+    """
+    forward = git(["merge-base", "--is-ancestor", published_sha, source_commit],
+                  repo).returncode == 0
+    reverse = git(["merge-base", "--is-ancestor", source_commit, published_sha],
+                  repo).returncode == 0
+    return forward or reverse
+
+
 def canonical(payload):
     body = {k: payload[k] for k in sorted(payload) if k != "checksum"}
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -244,9 +270,9 @@ def cmd_create(args):
         raise AttestationError(
             "the advertised published commit is absent locally; fetch it explicitly "
             "and retry")
-    if git(["merge-base", "--is-ancestor", published_sha, source_commit],
-           repo).returncode != 0:
-        raise AttestationError("the published base is not an ancestor of --source")
+    if not comparable(published_sha, source_commit, repo):
+        raise AttestationError("the published base and --source are on divergent "
+                               "histories; nothing safe to attest")
 
     now = time.time()
     payload = {
@@ -316,9 +342,8 @@ def cmd_consume(args):
     outcome = "attestation consumed"
     if observed != payload.get("published_sha"):
         outcome = "refused: published ref moved since the observation"
-    elif git(["merge-base", "--is-ancestor", payload["published_sha"],
-              payload["source_commit"]], repo).returncode != 0:
-        outcome = "refused: attested base is not an ancestor of the source"
+    elif not comparable(payload["published_sha"], payload["source_commit"], repo):
+        outcome = "refused: attested base and source are on divergent histories"
 
     final = dict(claimed)
     final["consumed_observed_sha"] = observed

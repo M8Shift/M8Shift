@@ -17661,6 +17661,25 @@ class TestPublishedBaseAttestation(unittest.TestCase):
 
     # ── the gap, and its closure ────────────────────────────────────────────────
 
+    def _fixture_tag_behind(self, tag_message="clean tag"):
+        """Reverse-ancestry shape (#300 V1): the tag points at a commit that is an
+        ANCESTOR of the published base — the release shape that opened the ticket.
+        Built by tagging, then advancing main past the tag before publishing.
+        """
+        self._fixture(tag_message=tag_message)
+        # At this point v9.9.9 is AHEAD of main. Retag an earlier commit and push
+        # main past it so the tag sits at/behind the published base.
+        self._g("tag", "-d", "v9.9.9")
+        behind = self._g("rev-parse", "HEAD~1").stdout.strip()
+        self._g("tag", "-a", "v9.9.9", behind, "-m", tag_message)
+        self._w("advance.md")
+        self._c("main advances past the tag")
+        self._g("push", "-q", "origin", "HEAD:refs/heads/main", env=self._env())
+        anc = self._g("merge-base", "--is-ancestor",
+                      self._g("rev-parse", "v9.9.9^{commit}").stdout.strip(),
+                      "origin/main")
+        assert anc.returncode == 0, "fixture invalid: tag is not behind main"
+
     def test_new_ref_blocks_without_attestation_and_passes_with_one(self):
         """Both halves on one fixture, because either alone would mislead.
 
@@ -17680,6 +17699,50 @@ class TestPublishedBaseAttestation(unittest.TestCase):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn("attestation consumed", allowed.stderr)
         self.assertTrue(self._tag_published())
+
+    def test_reverse_ancestry_tag_of_published_history_is_attestable(self):
+        """#300 V1 blocker: the motivating shape — a tag at/behind the published base.
+
+        Its peeled commit is already an ancestor of main, so it transmits no
+        unpublished history, only the tag object. The forward-only first cut refused
+        exactly this, the case that opened the ticket. Pushed here under enforcement.
+        """
+        self._fixture_tag_behind()
+        blocked = self._push_tag()
+        self.assertNotEqual(blocked.returncode, 0, "fixture: history should still block")
+        receipt, created = self._create()
+        self.assertIsNotNone(receipt, created.stderr if created else "")
+        allowed = self._push_tag(receipt=receipt)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertTrue(self._tag_published())
+
+    def test_reverse_ancestry_still_blocks_a_dirty_tag_object(self):
+        """The base excludes commit HISTORY, never the pushed tag object itself.
+
+        A denied term in the tag message of an at/behind tag must still block, or
+        the reverse case would be a silence rather than a narrowing.
+        """
+        self._fixture_tag_behind(tag_message="tag %s dirty" % self.TERM)
+        receipt, _ = self._create()
+        self.assertIsNotNone(receipt)
+        r = self._push_tag(receipt=receipt)
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hit:", r.stderr)
+        self.assertFalse(self._tag_published())
+
+    def test_a_divergent_source_is_refused(self):
+        """Neither ancestry arm holds: the source carries commits the base never saw."""
+        self._fixture()
+        # An orphan branch shares no history with main.
+        self._g("checkout", "-q", "--orphan", "sideline")
+        self._w("only-here.md")
+        self._c("divergent root")
+        self._g("tag", "-a", "vdiverge", "-m", "clean but unrelated")
+        r = self._attest("create", "--remote", "origin",
+                         "--published-ref", "refs/heads/main",
+                         "--destination-ref", "refs/tags/vdiverge", "--source", "vdiverge")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("divergent", r.stderr)
 
     def test_attestation_never_admits_a_finding_after_the_base(self):
         """The point of the whole design: it narrows the range, it does not silence.
