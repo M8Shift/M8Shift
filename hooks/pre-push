@@ -98,6 +98,7 @@ ranges=""
 # hook someone reaches past with --no-verify.
 bases=""
 stdin_lines=0
+new_refs=0
 if [ ! -t 0 ]; then
 	while read -r _local_ref local_sha remote_ref remote_sha; do
 		[ -n "${local_sha:-}" ] || continue
@@ -124,7 +125,41 @@ if [ ! -t 0 ]; then
 				ranges="${ranges} --range ${local_sha} --ref ${remote_ref}"
 			fi
 			;;
-		*) ranges="${ranges} --range ${local_sha} --ref ${remote_ref}" ;;   # new branch/tag
+		*)
+			# NEW ref (#300). Git supplies no remote_sha here, so #262 has no
+			# endpoint evidence and the bare-sha form scans all reachable
+			# history and can downgrade nothing. That is correct and it is also
+			# why a repository whose PUBLISHED history carries a denied term
+			# cannot create a tag or branch at all.
+			#
+			# An operator may attest the published base beforehand. The helper
+			# re-observes the real push endpoint here, and only a live match
+			# yields a base; every refusal falls through to the bare-sha scan
+			# below, which blocks exactly as before. This is not a bypass: the
+			# tag object, the pushed tip, paths, messages and every commit after
+			# the base stay scanned. V1 attests ONE non-deletion ref per push.
+			attested=""
+			if [ -n "${M8SHIFT_PUBLISH_ATTESTATION:-}" ] && [ "${new_refs}" -eq 0 ]; then
+				attest="${repo_root}/scripts/publish-attest.py"
+				if [ -f "${attest}" ]; then
+					attested="$(python3 "${attest}" --repo "${repo_root}" consume \
+						--receipt-id "${M8SHIFT_PUBLISH_ATTESTATION}" \
+						--source-sha "${local_sha}" \
+						--destination-ref "${remote_ref}" 2>&1 | tail -1)"
+					case "${attested}" in
+					*[!0-9a-f]*|"") attested="" ;;   # any refusal text is not a sha
+					esac
+				fi
+			fi
+			new_refs=$((new_refs + 1))
+			if [ -n "${attested}" ]; then
+				ranges="${ranges} --range ${attested}..${local_sha} --ref ${remote_ref}"
+				bases="${bases} --endpoint-base ${attested}"
+				printf '%s\n' "m8shift pre-push: published-base attestation consumed for ${remote_ref}; scanning from the attested base." >&2
+			else
+				ranges="${ranges} --range ${local_sha} --ref ${remote_ref}"
+			fi
+			;;
 		esac
 	done
 fi
