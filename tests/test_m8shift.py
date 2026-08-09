@@ -19872,6 +19872,69 @@ class TestRFC052ScrubCheck(CLIBase):
             with self.assertRaises(StopIteration):
                 next(stream)
 
+    def test_blob_batch_rejects_an_invalid_production_header(self):
+        """#265 F5: production --batch must fail closed on a bad header."""
+        mod = self._scrub_mod()
+        sha = "1" * 40
+        proc = self._blob_batch_process(b"not-a-batch-header\n")
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "invalid git cat-file batch blob header"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    def test_blob_batch_rejects_a_non_integer_production_size(self):
+        """#265 F5: production --batch must reject a malformed size."""
+        mod = self._scrub_mod()
+        sha = "2" * 40
+        wire = sha.encode() + b" blob nope\n"
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "invalid git cat-file batch blob size"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    def test_blob_batch_rejects_a_truncated_production_body(self):
+        """#265 F5: production --batch must reject a short body/trailer."""
+        mod = self._scrub_mod()
+        sha = "3" * 40
+        wire = sha.encode() + b" blob 5\nshort"
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "truncated git cat-file batch blob body"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    def test_blob_batch_rejects_trailing_production_output(self):
+        """#265 F5: production --batch must reject surplus records/bytes."""
+        mod = self._scrub_mod()
+        sha = "4" * 40
+        wire = sha.encode() + b" blob 2\nok\nextra"
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "unexpected trailing git cat-file batch output"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    @staticmethod
+    def _blob_batch_process(wire):
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(wire)
+                self.returncode = None
+
+            def wait(self):
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        return FakeProcess()
+
     def test_comparison_normalization_does_not_apply_nfkc_widening(self):
         """#265 B negative contract: compatibility lookalikes stay distinct."""
         mod = self._scrub_mod()

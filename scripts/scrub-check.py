@@ -684,16 +684,19 @@ def run_git_bytes(cmd, repo, run=run_git):
 def iter_blob_batch(shas, repo, run=run_git):
     """Yield unique ``(sha, body)`` pairs from one local cat-file process.
 
-    Only the current bounded blob is resident. In particular, neither cat-file's
-    complete stdout nor a second copy of every body is materialized.
+    Production streams ``--batch`` and rejects an oversized blob from its header
+    before reading the body.  An injected runner uses a different one-object
+    read strategy, so its size check is post-hoc rather than parser coverage.
     """
     ordered = list(dict.fromkeys(sha for sha in shas if sha and set(sha) != {"0"}))
     if not ordered:
         return
     if run is not run_git:
         # An injected runner is the authority for every Git invocation.  Fetch
-        # one object at a time through that seam: this retains the one-body
-        # memory bound without letting a real Popen escape a test/policy runner.
+        # one object at a time through that seam so only one body is retained,
+        # without letting a real Popen escape a test/policy runner.  Because a
+        # CompletedProcess already owns stdout, the byte-size bound below is
+        # necessarily post-hoc.
         for expected in ordered:
             result = run_git_bytes(
                 ["git", "cat-file", "blob", expected], repo, run)
