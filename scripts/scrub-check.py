@@ -80,6 +80,13 @@ OBJECT_GIT_TIMEOUT_S = 300
 RANGE_RX = re.compile(r"^[0-9a-fA-F]{4,64}(\.\.[0-9a-fA-F]{4,64})?$")
 OBJECT_RX = re.compile(r"^[0-9a-fA-F]{40,64}$")
 REMOTE_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
+MATCH_SPACE_RX = re.compile(
+    r"[\u0020\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]+")
+MATCH_IGNORABLE_RX = re.compile(
+    r"[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f"
+    r"\ufeff\uffa0\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+    r"\U000e0000-\U000e0fff]")
 
 
 def label_of(term):
@@ -91,13 +98,13 @@ def normalize_for_match(text):
     """Canonicalize only the human-equivalent forms covered by #265.
 
     NFC closes decomposed-accent misses without NFKC's compatibility widening.
-    NBSP is the space operators routinely paste, while zero-width space and soft
-    hyphen are formatting controls that must not split an otherwise identical
-    identifier.  This intentionally does NOT fold ligatures, full-width forms,
-    circled characters, superscripts, or other compatibility characters.
+    Unicode space separators collapse to an ordinary space. Default-ignorable
+    formatting controls are deleted first, so inserting one inside a single-token
+    identifier cannot evade comparison. This intentionally does NOT fold ligatures,
+    full-width forms, circled characters, superscripts, or other compatibility forms.
     """
-    return re.sub(r"[ \u00a0\u200b\u00ad]+", " ",
-                  unicodedata.normalize("NFC", text))
+    visible = MATCH_IGNORABLE_RX.sub("", text)
+    return MATCH_SPACE_RX.sub(" ", unicodedata.normalize("NFC", visible))
 
 
 def validate_word_term(term):
@@ -655,51 +662,69 @@ def run_git_bytes(cmd, repo):
                           timeout=GIT_TIMEOUT_S)
 
 
-def read_blob_batch(shas, repo):
-    """Read unique blob ids through one local cat-file process. -> {sha: bytes}."""
+def iter_blob_batch(shas, repo):
+    """Yield unique ``(sha, body)`` pairs from one local cat-file process.
+
+    Only the current bounded blob is resident. In particular, neither cat-file's
+    complete stdout nor a second copy of every body is materialized.
+    """
     ordered = list(dict.fromkeys(sha for sha in shas if sha and set(sha) != {"0"}))
     if not ordered:
-        return {}
+        return
     cmd = ["git", "cat-file", "--batch"]
     refuse_network_argv(cmd)
-    proc = subprocess.Popen(cmd, cwd=repo, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    payload = ("\n".join(ordered) + "\n").encode("ascii")
-    try:
-        stdout, stderr = proc.communicate(payload, timeout=OBJECT_GIT_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        raise RuntimeError("git cat-file --batch exceeded %ds timeout" %
-                           OBJECT_GIT_TIMEOUT_S)
-    if proc.returncode != 0:
-        raise RuntimeError("git cat-file --batch rc=%d: %s" % (
-            proc.returncode, stderr[:200].decode("utf-8", "replace")))
-    blobs = {}
-    offset = 0
-    for expected in ordered:
-        end = stdout.find(b"\n", offset)
-        if end < 0:
-            raise RuntimeError("truncated git cat-file batch header")
-        header = stdout[offset:end].split()
-        offset = end + 1
-        if len(header) != 3 or header[0].decode("ascii", "replace") != expected \
-                or header[1] != b"blob":
-            raise RuntimeError("invalid git cat-file batch blob header")
+    with tempfile.TemporaryFile() as requests, tempfile.TemporaryFile() as errors:
+        requests.write(("\n".join(ordered) + "\n").encode("ascii"))
+        requests.seek(0)
+        proc = subprocess.Popen(cmd, cwd=repo, stdin=requests,
+                                stdout=subprocess.PIPE, stderr=errors)
+        timed_out = threading.Event()
+
+        def abort():
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(OBJECT_GIT_TIMEOUT_S, abort)
+        timer.daemon = True
+        timer.start()
         try:
-            size = int(header[2])
-        except ValueError:
-            raise RuntimeError("invalid git cat-file batch blob size")
-        if size < 0 or size > OBJECT_MAX_BYTES:
-            raise RuntimeError("blob %s exceeds %d-byte scan bound" % (
-                expected[:12], OBJECT_MAX_BYTES))
-        body = stdout[offset:offset + size]
-        offset += size
-        if len(body) != size or stdout[offset:offset + 1] != b"\n":
-            raise RuntimeError("truncated git cat-file batch blob body")
-        offset += 1
-        blobs[expected] = body
-    return blobs
+            for expected in ordered:
+                header = proc.stdout.readline().rstrip(b"\n").split()
+                if timed_out.is_set():
+                    raise RuntimeError("git cat-file --batch exceeded %ds timeout" %
+                                       OBJECT_GIT_TIMEOUT_S)
+                if len(header) != 3 or \
+                        header[0].decode("ascii", "replace") != expected or \
+                        header[1] != b"blob":
+                    raise RuntimeError("invalid git cat-file batch blob header")
+                try:
+                    size = int(header[2])
+                except ValueError:
+                    raise RuntimeError("invalid git cat-file batch blob size")
+                if size < 0 or size > OBJECT_MAX_BYTES:
+                    raise RuntimeError("blob %s exceeds %d-byte scan bound" % (
+                        expected[:12], OBJECT_MAX_BYTES))
+                body = proc.stdout.read(size)
+                trailer = proc.stdout.read(1)
+                if len(body) != size or trailer != b"\n":
+                    raise RuntimeError("truncated git cat-file batch blob body")
+                yield expected, body
+                body = None
+            if proc.stdout.read(1):
+                raise RuntimeError("unexpected trailing git cat-file batch output")
+            returncode = proc.wait()
+            if timed_out.is_set():
+                raise RuntimeError("git cat-file --batch exceeded %ds timeout" %
+                                   OBJECT_GIT_TIMEOUT_S)
+            if returncode != 0:
+                errors.seek(0)
+                raise RuntimeError("git cat-file --batch rc=%d: %s" % (
+                    returncode, errors.read(200).decode("utf-8", "replace")))
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
 
 
 def decode_comparison_text(raw):
@@ -710,14 +735,12 @@ def decode_comparison_text(raw):
 
 
 def normalized_rule_indexes(rules):
-    """Rules needing the raw-object supplement because Git cannot normalize."""
-    wanted = set()
-    for index, (_label, term, _mode) in enumerate(rules):
-        normalized = normalize_for_match(term)
-        if term != normalized or " " in normalized or \
-                unicodedata.normalize("NFD", normalized) != normalized:
-            wanted.add(index)
-    return wanted
+    """Rules needing the raw-object supplement because Git cannot normalize.
+
+    Every rule qualifies: an otherwise plain single-token term can acquire an
+    invisible formatting control in the candidate text, which Git cannot fold.
+    """
+    return set(range(len(rules)))
 
 
 def scan_normalized_tip(rules, allows, revs, repo):
@@ -743,21 +766,33 @@ def scan_normalized_tip(rules, allows, revs, repo):
                 continue
             records.append((fields[2].decode("ascii"),
                             path_raw.decode("utf-8", "replace")))
-        blobs = read_blob_batch((sha for sha, _path in records), repo)
-        for sha, path in records:
-            text = decode_comparison_text(blobs[sha])
+        matches_by_sha = {}
+        for sha, raw in iter_blob_batch((sha for sha, _path in records), repo):
+            text = decode_comparison_text(raw)
             if text is None:
+                del raw
                 continue
+            matches = []
             for line_no, line in enumerate(text.splitlines(), 1):
                 for index in content_match_indexes(line, matcher, allows) & wanted:
-                    findings.setdefault(index, []).append(
-                        "%s:%s:%d" % (rev, path, line_no))
+                    matches.append((index, line_no))
+            matches_by_sha[sha] = matches
+            del text, raw
+        for sha, path in records:
+            for index, line_no in matches_by_sha.get(sha, ()):
+                findings.setdefault(index, []).append(
+                    "%s:%s:%d" % (rev, path, line_no))
     return findings
 
 
 def _normalized_occurrences(text, term, mode):
     normalized_text = normalize_for_match(text)
     normalized_term = normalize_for_match(term)
+    return _occurrences_in_normalized_text(
+        normalized_text, normalized_term, mode)
+
+
+def _occurrences_in_normalized_text(normalized_text, normalized_term, mode):
     if mode == "word":
         return len(re.findall(r"\b" + re.escape(normalized_term) + r"\b",
                               normalized_text, re.IGNORECASE))
@@ -775,6 +810,10 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None):
     findings = {}
     if not wanted:
         return findings
+    normalized_rules = {
+        index: (normalize_for_match(rules[index][1]), rules[index][2])
+        for index in wanted
+    }
     for range_args, carrier in history_runs:
         cmd = ["git", "log"] + history_revs(
             range_args, args.all, args.refs_pull, extra_revs)
@@ -815,19 +854,33 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None):
                 pairs.append((old_sha, new_sha))
                 blob_ids.extend((old_sha, new_sha))
             commit_records.append((sha, pairs))
-        blobs = read_blob_batch(blob_ids, args.repo)
+        blob_counts = {}
+        for object_sha, raw in iter_blob_batch(blob_ids, args.repo):
+            text = decode_comparison_text(raw)
+            if text is None:
+                blob_counts[object_sha] = None
+                del raw
+                continue
+            normalized_text = normalize_for_match(text)
+            object_counts = {}
+            for index in wanted:
+                count = _occurrences_in_normalized_text(
+                    normalized_text, normalized_rules[index][0],
+                    normalized_rules[index][1])
+                if count:
+                    object_counts[index] = count
+            blob_counts[object_sha] = object_counts
+            del normalized_text, text, raw
         counts = {index: 0 for index in wanted}
         for sha, pairs in commit_records:
             hit_indexes = set()
             for old_sha, new_sha in pairs:
-                old_text = decode_comparison_text(blobs.get(old_sha, b""))
-                new_text = decode_comparison_text(blobs.get(new_sha, b""))
-                if old_text is None or new_text is None:
+                old_counts = {} if set(old_sha) == {"0"} else blob_counts[old_sha]
+                new_counts = {} if set(new_sha) == {"0"} else blob_counts[new_sha]
+                if old_counts is None or new_counts is None:
                     continue
                 for index in wanted:
-                    _label, term, mode = rules[index]
-                    if _normalized_occurrences(old_text, term, mode) != \
-                            _normalized_occurrences(new_text, term, mode):
+                    if old_counts.get(index, 0) != new_counts.get(index, 0):
                         hit_indexes.add(index)
             for index in sorted(hit_indexes):
                 if counts[index] >= args.max_commits:

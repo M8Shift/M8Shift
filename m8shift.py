@@ -7055,12 +7055,20 @@ HYGIENE_DENYLIST_DEFAULT = os.path.join("~", ".config", "m8shift", "denylist.txt
 HYGIENE_DENYLIST_MAX_BYTES = 64 * 1024
 HYGIENE_DENYLIST_MAX_TERMS = 256
 HYGIENE_DENYLIST_MIN_LEN = 3               # 1-2 char terms are a false-positive storm
+HYGIENE_MATCH_SPACE_RX = re.compile(
+    r"[\u0020\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]+")
+HYGIENE_MATCH_IGNORABLE_RX = re.compile(
+    r"[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f"
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f"
+    r"\ufeff\uffa0\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+    r"\U000e0000-\U000e0fff]")
 
 
 def _denylist_normalize(text):
     """Targeted #265 comparison fold; deliberately narrower than NFKC."""
-    return re.sub(r"[ \u00a0\u200b\u00ad]+", " ",
-                  unicodedata.normalize("NFC", text))
+    visible = HYGIENE_MATCH_IGNORABLE_RX.sub("", text)
+    return HYGIENE_MATCH_SPACE_RX.sub(
+        " ", unicodedata.normalize("NFC", visible))
 
 
 def _denylist_validate_word(term):

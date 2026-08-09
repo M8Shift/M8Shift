@@ -17518,14 +17518,26 @@ class TestRFC052Denylist(CLIBase):
         self._track(
             "docs/forms.md",
             "\n".join(("Zorglub\u00e9\u00a0Widgets",
-                        "Zorglub\u00e9\u200bWidgets",
-                        "Zorglub\u00e9\u00adWidgets",
+                        "Zorglub\u00e9 \u200bWidgets",
+                        "Zorglub\u00e9\u00ad Widgets",
                         "Zorglube\u0301 Widgets")) + "\n")
         r = self._run(denylist=self._deny(term + "\n"))
         hits = self._findings(r)
         self.assertEqual(len(hits), 4, r.stdout)
         self.assertEqual({int(hit["message"].split(":")[1]) for hit in hits},
                          {1, 2, 3, 4})
+
+    def test_comparison_normalization_deletes_invisibles_in_core(self):
+        term = "ZorglubWidgets"
+        forms = (term, "Zorglub\u200bWidgets", "Zorglub\u00adWidgets",
+                 "Zorglub\u200cWidgets", "Zorglub\u2060Widgets",
+                 "Zorglub\ufeffWidgets")
+        self._track("docs/forms.md", "\n".join(forms) + "\n")
+        r = self._run(denylist=self._deny(term + "\n"))
+        hits = self._findings(r)
+        self.assertEqual(len(hits), len(forms), r.stdout)
+        for form in forms:
+            self.assertEqual(cowork._denylist_normalize(form), term)
 
     def test_invalid_word_rule_is_a_visible_core_error_and_disables_rules(self):
         self._track("docs/a.md", "Acme (EU)\n")
@@ -19782,8 +19794,10 @@ class TestRFC052ScrubCheck(CLIBase):
         variants = {
             "control.md": term,
             "nbsp.md": "Zorglub\u00e9\u00a0Widgets",
-            "zero-width.md": "Zorglub\u00e9\u200bWidgets",
-            "soft-hyphen.md": "Zorglub\u00e9\u00adWidgets",
+            "narrow-nbsp.md": "Zorglub\u00e9\u202fWidgets",
+            "thin-space.md": "Zorglub\u00e9\u2009Widgets",
+            "zero-width.md": "Zorglub\u00e9 \u200bWidgets",
+            "soft-hyphen.md": "Zorglub\u00e9\u00ad Widgets",
             "nfd.md": "Zorglube\u0301 Widgets",
         }
         commits = {}
@@ -19797,6 +19811,66 @@ class TestRFC052ScrubCheck(CLIBase):
             self.assertIn("HEAD:docs/%s:1" % name, r.stdout)
             self.assertIn("HISTORY hit: commit %s" % sha[:12], r.stdout)
         self.assertNotIn(term, r.stdout + r.stderr)
+
+    def test_comparison_normalization_deletes_invisibles_inside_one_token(self):
+        """#265 review F1/F2: ignorables are deleted, never made separators."""
+        term = "ZorglubWidgets"
+        variants = {
+            "control.md": term,
+            "zero-width.md": "Zorglub\u200bWidgets",
+            "soft-hyphen.md": "Zorglub\u00adWidgets",
+            "zwnj.md": "Zorglub\u200cWidgets",
+            "word-joiner.md": "Zorglub\u2060Widgets",
+            "bom.md": "Zorglub\ufeffWidgets",
+        }
+        commits = {}
+        for name, value in variants.items():
+            self._commit("docs/" + name, "seen %s here\n" % value,
+                         "add " + name)
+            commits[name] = self._sha()
+        r = self._scrub(denylist=self._deny(term + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for name, sha in commits.items():
+            self.assertIn("HEAD:docs/%s:1" % name, r.stdout)
+            self.assertIn("HISTORY hit: commit %s" % sha[:12], r.stdout)
+        mod = self._scrub_mod()
+        for value in variants.values():
+            self.assertEqual(mod.normalize_for_match(value), term)
+
+    def test_blob_batch_is_consumed_one_body_at_a_time(self):
+        """#265 review F3: cat-file stdout is streamed, not communicated whole."""
+        mod = self._scrub_mod()
+        first_sha, second_sha = "1" * 40, "2" * 40
+        first_body, second_body = b"first", b"second"
+        wire = (first_sha.encode() + b" blob 5\n" + first_body + b"\n" +
+                second_sha.encode() + b" blob 6\n" + second_body + b"\n")
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(wire)
+                self.returncode = None
+
+            def wait(self):
+                self.returncode = 0
+                return 0
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        proc = FakeProcess()
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            stream = mod.iter_blob_batch([first_sha, second_sha], ".")
+            self.assertTrue(inspect.isgenerator(stream))
+            self.assertEqual(next(stream), (first_sha, first_body))
+            first_record_size = len(first_sha) + len(" blob 5\n") + 5 + 1
+            self.assertEqual(proc.stdout.tell(), first_record_size,
+                             "the second body was read before the first was consumed")
+            self.assertEqual(next(stream), (second_sha, second_body))
+            with self.assertRaises(StopIteration):
+                next(stream)
 
     def test_comparison_normalization_does_not_apply_nfkc_widening(self):
         """#265 B negative contract: compatibility lookalikes stay distinct."""
