@@ -17598,6 +17598,14 @@ class TestPublishedBaseAttestation(unittest.TestCase):
         self.deny = os.path.join(root, "deny.txt")
         with open(self.deny, "w", encoding="utf-8") as fh:
             fh.write(self.TERM + "\n")
+        # A clean, resolvable hygiene stage. This fixture ships no m8shift.py, and
+        # since #264 a stage that cannot run is `incomplete` and blocks under
+        # enforcement — correctly, but it would make every test in this class
+        # prove that instead of what it is about.
+        self.m8stub = os.path.join(root, "m8stub")
+        with open(self.m8stub, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.m8stub, 0o755)
         self._w("a.md")
         self._c("first")
         self._w("b.md")
@@ -17632,6 +17640,7 @@ class TestPublishedBaseAttestation(unittest.TestCase):
         env = {k: v for k, v in os.environ.items()
                if k not in ("M8SHIFT_SCRUB_ENFORCE", "M8SHIFT_AGENT")}
         env["M8SHIFT_DENYLIST"] = self.deny
+        env["M8SHIFT_BIN"] = self.m8stub
         if enforce:
             env["M8SHIFT_SCRUB_ENFORCE"] = "1"
         if receipt:
@@ -19897,24 +19906,42 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("does not hold a valid write pen", r.stderr)
 
-    def test_hook_scanner_error_fails_open_visibly(self):
+    def test_hook_scanner_error_is_visible_and_blocks_only_under_enforcement(self):
+        """#264: a stage that did not run is visible, and no longer fails open.
+
+        This test previously asserted "continuing without it" and rc 0
+        UNCONDITIONALLY — it pinned the fail-open that #264 closes. The advisory
+        half is unchanged and still asserted; what is new is that arming
+        enforcement now blocks, because "the gate ran" and "the gate found
+        nothing" must not be indistinguishable.
+        """
         self._commit("docs/a.md", "clean\n")
         stub = os.path.join(self.home, "broken-m8shift")
         with open(stub, "w", encoding="utf-8") as fh:
             fh.write("#!/bin/sh\nexit 3\n")
         os.chmod(stub, 0o755)
-        env = dict(os.environ)
-        env.update(HOME=self.home, M8SHIFT_BIN=stub)
-        env.pop("M8SHIFT_AGENT", None)
-        env.pop("M8SHIFT_DENYLIST", None)
+
+        def hook(name, enforce=False):
+            env = dict(os.environ)
+            env.update(HOME=self.home, M8SHIFT_BIN=stub)
+            env.pop("M8SHIFT_AGENT", None)
+            env.pop("M8SHIFT_DENYLIST", None)
+            env.pop("M8SHIFT_SCRUB_ENFORCE", None)
+            if enforce:
+                env["M8SHIFT_SCRUB_ENFORCE"] = "1"
+            # input="" pins stdin to EOF: the pre-push pushed-range read must never
+            # inherit a live harness descriptor.
+            return subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
+                                  cwd=self.d, capture_output=True, text=True,
+                                  env=env, input="")
+
         for name in ("pre-commit", "pre-push"):
-            # input="" pins stdin to EOF (see hook() above): the pre-push
-            # pushed-range read must never inherit a live harness descriptor.
-            r = subprocess.run(["sh", os.path.join(REPO, "hooks", name)],
-                               cwd=self.d, capture_output=True, text=True, env=env,
-                               input="")
-            self.assertEqual(r.returncode, 0, (name, r.stderr))
-            self.assertIn("continuing without it", r.stderr, name)
+            advisory = hook(name)
+            self.assertEqual(advisory.returncode, 0, (name, advisory.stderr))
+        # pre-push reports the incomplete stage rather than silently continuing.
+        self.assertIn("stage incomplete", hook("pre-push").stderr)
+        self.assertEqual(hook("pre-push", enforce=True).returncode, 1,
+                         "an incomplete stage still failed open under enforcement")
 
     def test_pre_push_checksum_manifest_is_advisory_then_enforced(self):
         payload = os.path.join(self.d, "release.bin")
@@ -19926,6 +19953,15 @@ class TestRFC052ScrubCheck(CLIBase):
                   encoding="utf-8") as fh:
             fh.write("%s  release.bin\n" % digest)
 
+        # #264 isolation: a clean scrub stub proves the manifest stage is what the
+        # assertions below measure. Without it the fixture's missing scanner is an
+        # incomplete stage of its own, and an enforced run could never be rc 0 —
+        # the probe would assert the wrong thing.
+        os.makedirs(os.path.join(self.d, "scripts"), exist_ok=True)
+        with open(os.path.join(self.d, "scripts", "scrub-check.py"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("import sys\nsys.exit(0)\n")
+
         def hook(enforce=False):
             env = dict(os.environ, HOME=self.home)
             env.pop("M8SHIFT_DENYLIST", None)
@@ -19936,7 +19972,8 @@ class TestRFC052ScrubCheck(CLIBase):
                 ["sh", os.path.join(REPO, "hooks", "pre-push")], cwd=self.d,
                 capture_output=True, text=True, env=env, input="")
 
-        self.assertEqual(hook(enforce=True).returncode, 0)
+        self.assertEqual(hook(enforce=True).returncode, 0,
+                         "probe invalid: a stage other than the manifest blocks")
         with open(payload, "ab") as fh:
             fh.write(b"stale\n")
         advisory = hook()
@@ -19944,6 +19981,638 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("checksums.sha256 is stale", advisory.stderr)
         self.assertIn("ADVISORY", advisory.stderr)
         self.assertEqual(hook(enforce=True).returncode, 1)
+
+    # ── #264: the fail-open family, proven by end-to-end hook subprocesses ──────
+
+    def _gate_repo(self, with_scrub=True, hygiene_rc=0, manifest=False):
+        """Real bare remote + work tree with the real hook installed.
+
+        Shell needs shell-level proof: `sh -n` says nothing about whether a stage
+        ran, and a return code of 0 is exactly what every fail-open path produced.
+        Each probe below drives the actual hook with real ref records.
+
+        `hygiene_rc=None` means no resolvable m8shift at all — silent stage
+        disappearance, the adjacent spelling of a stage that errored.
+        """
+        root = tempfile.mkdtemp(prefix="m8-gate-")
+        self.addCleanup(shutil.rmtree, root, True)
+        bare = os.path.join(root, "r.git")
+        work = os.path.join(root, "w")
+        subprocess.run(["git", "init", "-q", "--bare", bare], capture_output=True)
+        subprocess.run(["git", "init", "-q", work], capture_output=True)
+
+        def g(*args, **kw):
+            return subprocess.run(["git", *args], cwd=work, capture_output=True,
+                                  text=True, **kw)
+
+        for args in (["config", "user.email", "a@b.c"], ["config", "user.name", "t"],
+                     ["remote", "add", "origin", bare]):
+            g(*args)
+        shutil.copy(os.path.join(REPO, "hooks", "pre-push"),
+                    os.path.join(work, ".git", "hooks", "pre-push"))
+        os.chmod(os.path.join(work, ".git", "hooks", "pre-push"), 0o755)
+        os.makedirs(os.path.join(work, "scripts"), exist_ok=True)
+        if with_scrub:
+            with open(os.path.join(work, "scripts", "scrub-check.py"), "w",
+                      encoding="utf-8") as fh:
+                fh.write("import sys\nsys.exit(0)\n")
+        if manifest:
+            with open(os.path.join(work, "checksums.sha256"), "w",
+                      encoding="utf-8") as fh:
+                fh.write("%s  a.md\n" % ("0" * 64))
+
+        stub = None
+        if hygiene_rc is not None:
+            stub = os.path.join(root, "m8stub")
+            with open(stub, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\n"
+                         "printf 'stub hygiene stage\\n' >&2\n"
+                         "exit " + str(hygiene_rc) + "\n")
+            os.chmod(stub, 0o755)
+
+        with open(os.path.join(work, "a.md"), "w", encoding="utf-8") as fh:
+            fh.write("clean\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "clean")
+
+        def push(ref="HEAD:refs/heads/main", path=None, **extra):
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("M8SHIFT_SCRUB_ENFORCE", "M8SHIFT_AGENT",
+                                "M8SHIFT_BIN", "M8SHIFT_DENYLIST")}
+            if stub is not None:
+                env["M8SHIFT_BIN"] = stub
+            if path is not None:
+                env["PATH"] = path
+            env.update(extra)
+            return g("push", "origin", ref, env=env)
+
+        return work, bare, g, push
+
+    @staticmethod
+    def _hook_lines(stderr):
+        """Only the hook's own output: git's failure line quotes the repo path,
+        which can incidentally contain any short literal."""
+        return "\n".join(line for line in stderr.splitlines()
+                          if line.startswith("m8shift pre-push:"))
+
+    def _landed(self, bare, ref="refs/heads/main"):
+        out = subprocess.run(["git", "ls-remote", bare, ref],
+                             capture_output=True, text=True).stdout
+        return bool(out.strip())
+
+    def test_enforce_variable_is_a_closed_contract(self):
+        """#264: `= 1` meant true|yes|on were SILENTLY advisory.
+
+        An operator who armed the gate in the obvious spelling did not have it
+        armed, and nothing said so. Driven by a real HYGIENE FINDING, which is
+        the only thing whose outcome differs by mode: a missing scanner blocks in
+        both modes, so a table built on one would pass in advisory mode too and
+        prove nothing about enforcement.
+
+        Invalid values use CLEAN stubs, so refusal is proven configuration-driven
+        rather than a finding wearing a different message.
+        """
+        for value in ("1", "true", "TRUE", "yes", "on"):
+            _w, bare, _g, push = self._gate_repo(hygiene_rc=1)
+            r = push(M8SHIFT_SCRUB_ENFORCE=value)
+            self.assertEqual(r.returncode, 1, (value, r.stderr))
+            self.assertNotIn("unrecognised value", r.stderr, value)
+            self.assertFalse(self._landed(bare), "%s: the push was not stopped" % value)
+        for value in (None, "", "0", "false", "NO", "off"):
+            _w, bare, _g, push = self._gate_repo(hygiene_rc=1)
+            r = push() if value is None else push(M8SHIFT_SCRUB_ENFORCE=value)
+            self.assertEqual(r.returncode, 0, (value, r.stderr))
+            self.assertIn("ADVISORY", r.stderr, value)
+            self.assertTrue(self._landed(bare), "%s: advisory mode blocked" % value)
+        for value in ("2", "maybe", " true "):
+            _w, bare, _g, push = self._gate_repo(hygiene_rc=0)
+            r = push(M8SHIFT_SCRUB_ENFORCE=value)
+            self.assertEqual(r.returncode, 1, (value, r.stderr))
+            self.assertIn("unrecognised value", r.stderr, value)
+            self.assertFalse(self._landed(bare), value)
+        # The no-echo property needs a marker that CANNOT collide with the
+        # message's own list of accepted spellings — searching for "true" would
+        # match the hook explaining that "true" is valid, which is not an echo.
+        marker = "Zq7unlikelyZq7"
+        _w, _bare, _g, push = self._gate_repo(hygiene_rc=0)
+        said = self._hook_lines(push(M8SHIFT_SCRUB_ENFORCE=marker).stderr)
+        self.assertIn("unrecognised value", said)
+        self.assertNotIn(marker, said,
+                         "the untrusted value must not be echoed back")
+
+    def test_accepted_spellings_arm_the_REAL_doctor_not_only_the_hook(self):
+        """#264 review blocker: the closed contract stopped at the shell.
+
+        Both hooks parsed `true|yes|on` into their own `enforce` bit and then ran
+        the real `m8shift.py doctor` with the environment untouched, while the
+        core gate was `== "1"`. So under three of the four documented true
+        spellings the doctor returned advisory rc 0 for a denylist finding, the
+        hook saw no finding, and the push went out — the ticket's footgun
+        surviving one layer down.
+
+        Every stub-based probe is blind to this by construction: a stub that
+        returns rc 1 proves the shell's response to a finding, never that the
+        configured real stage produces one. This uses the REAL m8shift.py and a
+        REAL denylist hit, and asserts the remote.
+        """
+        term = "SyntheticSecretProject"
+        for value in cowork.SCRUB_ENFORCE_TRUE:
+            work, bare, g, push = self._gate_repo(hygiene_rc=None)
+            shutil.copy(os.path.join(REPO, "m8shift.py"),
+                        os.path.join(work, "m8shift.py"))
+            deny = os.path.join(work, "..", "deny.txt")
+            with open(deny, "w", encoding="utf-8") as fh:
+                fh.write(term + "\n")
+            with open(os.path.join(work, "leak.md"), "w", encoding="utf-8") as fh:
+                fh.write("a tracked file naming %s\n" % term)
+            g("add", "-A")
+            g("commit", "-q", "-m", "add a tracked denylist hit")
+
+            # The probe is only meaningful if the real doctor actually reports the
+            # finding here, so confirm it directly before trusting the push.
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith("M8SHIFT_")}
+            env["M8SHIFT_DENYLIST"] = deny
+            direct = subprocess.run(
+                [sys.executable, "m8shift.py", "doctor", "--hygiene-only", "--lint"],
+                cwd=work, capture_output=True, text=True,
+                env={**env, "M8SHIFT_SCRUB_ENFORCE": value})
+            self.assertEqual(direct.returncode, 1,
+                             "%s: the real doctor did not gate on the denylist "
+                             "finding (%s)" % (value, direct.stdout + direct.stderr))
+
+            r = push(M8SHIFT_SCRUB_ENFORCE=value, M8SHIFT_DENYLIST=deny)
+            self.assertEqual(r.returncode, 1, (value, r.stderr))
+            self.assertFalse(self._landed(bare),
+                             "%s: a denylist hit published under an armed gate"
+                             % value)
+
+    @staticmethod
+    def _decode_enforce_table(text, label):
+        """Decode EVERY `enforce=0/1` case arm in shell text into {True/False: set}.
+
+        Reads the shell as data rather than searching it for substrings: a
+        containment check cannot see a spelling the hook accepts and the core
+        does not, which is half the drift. Every matching arm is unioned, not
+        just the first — a hook can accept an extra spelling in a second arm
+        (`arm) enforce=1 ;;`) and a first-arm-only reader would report the
+        unchanged set and pass.
+
+        Each alternative is a bare literal, `""`, or POSIX classes that must each
+        hold one letter in both cases. Anything else fails loudly: a decoder that
+        guesses at a pattern it does not understand produces a verdict nobody
+        should trust.
+        """
+        table = {True: set(), False: set()}
+        seen = {True: 0, False: 0}
+        for value, digit in ((False, "0"), (True, "1")):
+            for found in re.finditer(r"^[ \t]*(.*?)\)\s*enforce=%s\s*;;" % digit,
+                                     text, re.M):
+                seen[value] += 1
+                for alt in found.group(1).split("|"):
+                    alt = alt.strip()
+                    if alt == '""':
+                        table[value].add("")
+                        continue
+                    classes = re.findall(r"\[([A-Za-z])([A-Za-z])\]", alt)
+                    if classes:
+                        assert re.fullmatch(r"(\[[A-Za-z][A-Za-z]\])+", alt), \
+                            "%s: undecodable pattern %r" % (label, alt)
+                        letters = []
+                        for upper, lower in classes:
+                            assert upper.lower() == lower.lower() and upper != lower, \
+                                "%s: %r is not one letter in both cases" % (label, alt)
+                            letters.append(lower.lower())
+                        table[value].add("".join(letters))
+                    else:
+                        assert re.fullmatch(r"[A-Za-z0-9]+", alt), \
+                            "%s: undecodable literal %r" % (label, alt)
+                        table[value].add(alt)
+            assert seen[value], "%s: no `enforce=%s` case arm" % (label, digit)
+        return table
+
+    def _hook_enforce_table(self, hook):
+        text = open(os.path.join(REPO, "hooks", hook), encoding="utf-8").read()
+        return self._decode_enforce_table(text, hook)
+
+    def test_the_drift_decoder_sees_a_spelling_hidden_in_a_second_arm(self):
+        """The decoder's own guarantee, pinned on synthetic text.
+
+        A first-arm-only reader passes the equality test while the hook quietly
+        accepts more, so this is the mutation kept as a permanent test rather
+        than run once by hand: the same table plus one extra arm must decode to
+        a strictly larger set, and an undecodable arm must fail rather than be
+        skipped into a smaller one.
+        """
+        base = ('"" | 0 | [Ff][Aa][Ll][Ss][Ee]) enforce=0 ;;\n'
+                '1 | [Tt][Rr][Uu][Ee]) enforce=1 ;;\n')
+        self.assertEqual(self._decode_enforce_table(base, "synthetic"),
+                         {True: {"1", "true"}, False: {"", "0", "false"}})
+        extra = base + "arm) enforce=1 ;;\n"
+        self.assertEqual(self._decode_enforce_table(extra, "synthetic")[True],
+                         {"1", "true", "arm"},
+                         "a second arm was not unioned — the guarantee is blind")
+        with self.assertRaises(AssertionError):
+            self._decode_enforce_table(base + "y*s) enforce=1 ;;\n", "synthetic")
+        with self.assertRaises(AssertionError):
+            self._decode_enforce_table('1) enforce=1 ;;\n', "synthetic")
+
+    def test_an_ambiguous_mode_is_refused_only_where_it_changes_a_verdict(self):
+        """#264 re-review: the first cut printed the refusal on every doctor run.
+
+        The comment claimed silence outside `--lint`; the code diagnosed
+        unconditionally and only scoped the exit code. A plain `doctor` run
+        neither gates on this value nor consults it, so the message was noise
+        about a setting that did nothing — on every unrelated invocation.
+
+        Both halves asserted together, because either alone would mislead: rc 2
+        plus the diagnostic under `--lint`, rc 0 plus a stderr that never
+        mentions the variable without it.
+        """
+        env = {k: v for k, v in os.environ.items() if not k.startswith("M8SHIFT_")}
+        env["M8SHIFT_SCRUB_ENFORCE"] = "maybe"
+
+        quiet = subprocess.run(
+            [sys.executable, os.path.join(REPO, "m8shift.py"), "doctor",
+             "--hygiene-only"],
+            cwd=REPO, capture_output=True, text=True, env=env)
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertNotIn("M8SHIFT_SCRUB_ENFORCE", quiet.stderr)
+        self.assertNotIn("ambiguous gate mode", quiet.stdout)
+
+        # An ambiguous mode must not report a verdict AT ALL. The first cut
+        # rendered the result and then returned 2, so the command printed
+        # `no findings` / `"ok": true` and refused to issue a verdict in the same
+        # breath. Checking only the exit code would have called that clean.
+        for extra, forbidden in (([], ("no findings", "── doctor")),
+                                 (["--json"], ('"ok"', '"findings"'))):
+            refused = subprocess.run(
+                [sys.executable, os.path.join(REPO, "m8shift.py"), "doctor",
+                 "--hygiene-only", "--lint", *extra],
+                cwd=REPO, capture_output=True, text=True, env=env)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("ambiguous gate mode", refused.stderr)
+            for token in forbidden:
+                self.assertNotIn(token, refused.stdout,
+                                 "a verdict was emitted before refusing: %r"
+                                 % refused.stdout[:200])
+            self.assertEqual(refused.stdout.strip(), "", refused.stdout[:200])
+        # And a recognised value still lints normally, so the refusal above is
+        # the value and not the fixture refusing everything.
+        for value in ("", "on"):
+            ok = subprocess.run(
+                [sys.executable, os.path.join(REPO, "m8shift.py"), "doctor",
+                 "--hygiene-only", "--lint"],
+                cwd=REPO, capture_output=True, text=True,
+                env={**env, "M8SHIFT_SCRUB_ENFORCE": value})
+            self.assertNotEqual(ok.returncode, 2, (value, ok.stderr))
+
+    def test_the_core_and_the_hooks_share_one_enforce_table(self):
+        """#264: two parsers for one variable is the drift this closes.
+
+        Set EQUALITY in both directions, on both the true and the false sets, so
+        a spelling added to either side alone fails here rather than in a
+        repository months later. The earlier version of this test only checked
+        that each core true spelling appeared somewhere in each hook: the sets
+        happened to match, but nothing proved they did.
+        """
+        for value in ("1", "true", "TRUE", "yes", "ON"):
+            self.assertIs(cowork.scrub_enforce_mode(value), True, value)
+        for value in ("", "0", "false", "NO", "off"):
+            self.assertIs(cowork.scrub_enforce_mode(value), False, value)
+        for value in ("2", "maybe", " true ", "true ", "yes!"):
+            self.assertIsNone(cowork.scrub_enforce_mode(value), value)
+
+        core = {True: set(cowork.SCRUB_ENFORCE_TRUE),
+                False: set(cowork.SCRUB_ENFORCE_FALSE)}
+        for hook in ("pre-push", "pre-commit"):
+            decoded = self._hook_enforce_table(hook)
+            # The decoder must be sane before its verdict means anything.
+            self.assertIn("true", decoded[True], "%s: decoder is broken" % hook)
+            self.assertEqual(decoded, core,
+                             "%s and the core do not accept the same set" % hook)
+            self.assertEqual(decoded[True] & decoded[False], set(),
+                             "%s: a spelling means both things" % hook)
+
+    def test_stage_one_error_and_disappearance_are_incomplete_not_clean(self):
+        """#264: `continuing without it` and a stage that never existed.
+
+        A hygiene scanner erroring (rc > 1) was announced and waved through even
+        under enforcement, while the file header advertised fail-closed for scan
+        errors. With NO resolvable executable the stage said nothing at all — the
+        operator saw stage 3 and exit 0. Both are now the same state: incomplete,
+        always visible, blocking when enforcement is armed.
+        """
+        for label, hygiene_rc, expected in (("error", 2, "stage incomplete"),
+                                            ("absent", None, "did not run")):
+            _w, bare, _g, push = self._gate_repo(hygiene_rc=hygiene_rc)
+            advisory = push()
+            self.assertEqual(advisory.returncode, 0, (label, advisory.stderr))
+            self.assertIn(expected, advisory.stderr, label)
+            self.assertTrue(self._landed(bare), label)
+            # A negative probe must first prove its fixture was REACHED: an
+            # unreached stub and a stub whose result was ignored produce the same
+            # silence. The erroring stub announces itself; the absent one cannot,
+            # and its diagnostic names exactly that.
+            if hygiene_rc is None:
+                self.assertIn("no m8shift executable resolved", advisory.stderr)
+            else:
+                self.assertIn("stub hygiene stage", advisory.stderr, label)
+
+            _w2, bare2, _g2, push2 = self._gate_repo(hygiene_rc=hygiene_rc)
+            enforced = push2(M8SHIFT_SCRUB_ENFORCE="1")
+            self.assertEqual(enforced.returncode, 1, (label, enforced.stderr))
+            self.assertIn("did not run to completion", enforced.stderr, label)
+            self.assertFalse(self._landed(bare2),
+                             "%s: an unchecked stage let the push through" % label)
+
+    def test_no_checksum_verifier_is_incomplete_not_clean(self):
+        """#264: with neither sha256sum nor shasum on PATH the manifest stage
+        printed `continuing without it` and exited 0, and a stubbed scrub then
+        ran unchallenged. Absence of a verifier and a verifier that fails are the
+        same outcome — the manifest was not checked.
+
+        PATH is controlled to an empty directory, so the absence is real rather
+        than simulated by a stub pretending to be missing. Git itself is invoked
+        by absolute path by the harness, so the hook still runs.
+        """
+        empty = tempfile.mkdtemp(prefix="m8-nopath-")
+        self.addCleanup(shutil.rmtree, empty, True)
+        # Keep exactly what the OTHER stages need resolvable — git and python3 —
+        # so the only thing missing is the checksum verifier. Removing more would
+        # make a different stage fail and the probe would prove that instead.
+        for tool in ("git", "python3"):
+            found = shutil.which(tool)
+            self.assertIsNotNone(found, "probe invalid: %s not found" % tool)
+            os.symlink(found, os.path.join(empty, tool))
+        for verifier in ("sha256sum", "shasum"):
+            self.assertFalse(os.path.exists(os.path.join(empty, verifier)))
+
+        _w, bare, _g, push = self._gate_repo(manifest=True)
+        advisory = push(path=empty)
+        self.assertEqual(advisory.returncode, 0, advisory.stderr)
+        self.assertIn("checksum verification unavailable", advisory.stderr)
+        self.assertTrue(self._landed(bare))
+
+        _w2, bare2, _g2, push2 = self._gate_repo(manifest=True)
+        enforced = push2(path=empty, M8SHIFT_SCRUB_ENFORCE="1")
+        self.assertEqual(enforced.returncode, 1, enforced.stderr)
+        self.assertIn("did not run to completion", enforced.stderr)
+        self.assertFalse(self._landed(bare2))
+
+    def test_a_failing_checksum_verifier_is_incomplete_like_an_absent_one(self):
+        """#264: command absence was only half of it.
+
+        A verifier present on PATH that exits 2 leaves the manifest exactly as
+        unchecked as one that is missing, and the old hook printed `continuing
+        without it` for both. Every accepted true spelling is exercised, because
+        the point of the ticket is that the variable has more than one.
+        """
+        shim = tempfile.mkdtemp(prefix="m8-badsum-")
+        self.addCleanup(shutil.rmtree, shim, True)
+        for tool in ("git", "python3"):
+            os.symlink(shutil.which(tool), os.path.join(shim, tool))
+        broken = os.path.join(shim, "sha256sum")
+        with open(broken, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nprintf 'verifier exploded\\n' >&2\nexit 2\n")
+        os.chmod(broken, 0o755)
+
+        _w, bare, _g, push = self._gate_repo(manifest=True)
+        advisory = push(path=shim)
+        self.assertEqual(advisory.returncode, 0, advisory.stderr)
+        self.assertIn("verifier exploded", advisory.stderr,
+                      "probe invalid: the stub verifier was never reached")
+        self.assertIn("checksum verification unavailable or failed",
+                      advisory.stderr)
+        self.assertTrue(self._landed(bare))
+
+        for value in ("1", "true", "YES", "on"):
+            _w2, bare2, _g2, push2 = self._gate_repo(manifest=True)
+            r = push2(path=shim, M8SHIFT_SCRUB_ENFORCE=value)
+            self.assertEqual(r.returncode, 1, (value, r.stderr))
+            self.assertIn("did not run to completion", r.stderr, value)
+            self.assertFalse(self._landed(bare2), value)
+
+    def test_every_pushed_ref_is_scanned_not_just_the_first(self):
+        """#264: the behavioural half of the argv fix.
+
+        A collapse of the update records would degrade the run to a HEAD-only
+        scan, which still looks like a scan. The denied term is placed ONLY on the
+        SECOND pushed ref, so a fallback that inspects the first cannot satisfy
+        this, and the real scanner is used rather than a stub.
+        """
+        work, bare, g, push = self._gate_repo(with_scrub=False)
+        term = "SyntheticSecretProject"
+        deny = os.path.join(work, "..", "deny.txt")
+        with open(deny, "w", encoding="utf-8") as fh:
+            fh.write(term + "\n")
+
+        # The denied term lives on a SIDE branch and never on the working tip.
+        # This matters: with no range at all the scanner falls back to scanning
+        # the tip, so a dirty tip would let a scan-of-nothing find the term
+        # anyway and the probe would pass against the broken hook.
+        g("branch", "clean_side")
+        g("checkout", "-q", "-b", "dirty_side")
+        with open(os.path.join(work, "b.md"), "w", encoding="utf-8") as fh:
+            fh.write("mentions %s\n" % term)
+        # Stage exactly the one file: `add -A` would sweep in the scanner copied
+        # below and the checkout back would then delete it.
+        g("add", "b.md")
+        g("commit", "-q", "-m", "second")
+        dirty = g("rev-parse", "HEAD").stdout.strip()
+        # Back to the clean branch by NAME rather than "main": git's default
+        # branch name is configurable, and a checkout that quietly failed would
+        # leave the term on the tip and make the probe pass for the wrong reason.
+        self.assertEqual(g("checkout", "-q", "clean_side").returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(work, "b.md")),
+                         "fixture: the term must not be on the tip")
+        # The real scanner, not a stub: this probe is about what gets scanned.
+        # Copied after the branch work so it stays untracked in every commit.
+        shutil.copy(os.path.join(REPO, "scripts", "scrub-check.py"),
+                    os.path.join(work, "scripts", "scrub-check.py"))
+
+        r = push(ref="dirty_side:refs/heads/second", M8SHIFT_SCRUB_ENFORCE="1",
+                 M8SHIFT_DENYLIST=deny)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("hit:", r.stderr)
+        # And the control: the same push without the term on that ref goes through,
+        # so the block above is the term and not the fixture refusing everything.
+        clean = push(ref="clean_side:refs/heads/clean_side",
+                     M8SHIFT_SCRUB_ENFORCE="1", M8SHIFT_DENYLIST=deny)
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+
+        # The half above holds for the PRE-FIX hook too — with a default IFS the
+        # old string form built its ranges correctly, so it is a non-regression
+        # guarantee, not a proof. The proof is the same block surviving the one
+        # condition that used to erase the ranges: an ambient poisoned IFS. There
+        # the old form scanned nothing and returned 0 — a denied term published
+        # under an armed gate.
+        hook = os.path.join(work, ".git", "hooks", "pre-push")
+        self.assertRegex(dirty, r"^[0-9a-f]{40}$", "fixture: the commit did not resolve")
+        # A clean, resolvable stage 1, so the block below is attributable to the
+        # scrub hit rather than to an incomplete hygiene stage.
+        clean_stub = os.path.join(work, "..", "m8clean")
+        with open(clean_stub, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(clean_stub, 0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("M8SHIFT_")}
+        env.update({"M8SHIFT_SCRUB_ENFORCE": "1", "M8SHIFT_DENYLIST": deny,
+                    "M8SHIFT_BIN": clean_stub})
+        for shell in [sh for sh in ("/bin/sh", "/bin/dash", "/bin/bash")
+                      if os.path.exists(sh)]:
+            proc = subprocess.run(
+                [shell, "-c", 'IFS="0123456789abcdef -"; . "$1" origin "$2"',
+                 "_", hook, bare],
+                cwd=work, env=env, capture_output=True, text=True,
+                input="refs/heads/x %s refs/heads/x %s\n" % (dirty, "0" * 40))
+            self.assertEqual(proc.returncode, 1,
+                             "%s: a denied term published under an armed gate — "
+                             "the scan covered nothing (%s)" % (shell, proc.stderr))
+            self.assertIn("hit:", proc.stderr, shell)
+
+    def test_pre_commit_pins_the_same_enforcement_table(self):
+        """#264: the same variable must arm the same way in both hooks.
+
+        Otherwise an operator arms half of the documented local gate and is told
+        nothing — which is the original bug wearing a second hat.
+        """
+        root = tempfile.mkdtemp(prefix="m8-pc-")
+        self.addCleanup(shutil.rmtree, root, True)
+        work = os.path.join(root, "w")
+        subprocess.run(["git", "init", "-q", work], capture_output=True)
+        for a in (["config", "user.email", "a@b.c"], ["config", "user.name", "t"]):
+            subprocess.run(["git", *a], cwd=work, capture_output=True)
+        shutil.copy(os.path.join(REPO, "hooks", "pre-commit"),
+                    os.path.join(work, ".git", "hooks", "pre-commit"))
+        os.chmod(os.path.join(work, ".git", "hooks", "pre-commit"), 0o755)
+
+        def stub(rc):
+            path = os.path.join(root, "m8stub%d" % rc)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nprintf 'stub hygiene stage\\n' >&2\n"
+                         "exit %d\n" % rc)
+            os.chmod(path, 0o755)
+            return path
+
+        def commit(hygiene_rc, value, name):
+            with open(os.path.join(work, name), "w", encoding="utf-8") as fh:
+                fh.write("x\n")
+            subprocess.run(["git", "add", "-A"], cwd=work, capture_output=True)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("M8SHIFT_SCRUB_ENFORCE", "M8SHIFT_AGENT",
+                                "M8SHIFT_BIN", "M8SHIFT_DENYLIST")}
+            env["M8SHIFT_BIN"] = stub(hygiene_rc)
+            if value is not None:
+                env["M8SHIFT_SCRUB_ENFORCE"] = value
+            return subprocess.run(["git", "commit", "-q", "-m", name], cwd=work,
+                                  capture_output=True, text=True, env=env)
+
+        for n, value in enumerate(("1", "true", "TRUE", "yes", "on")):
+            r = commit(1, value, "block%d.md" % n)
+            self.assertEqual(r.returncode, 1, (value, r.stderr))
+            self.assertIn("commit blocked", r.stderr, value)
+            self.assertIn("stub hygiene stage", r.stderr,
+                          "probe invalid: the stub was never reached")
+        for n, value in enumerate((None, "", "0", "false", "NO", "off")):
+            r = commit(1, value, "pass%d.md" % n)
+            self.assertEqual(r.returncode, 0, (value, r.stderr))
+            self.assertIn("ADVISORY", r.stderr, value)
+        for n, value in enumerate(("2", "maybe", " true ")):
+            r = commit(0, value, "refuse%d.md" % n)
+            self.assertEqual(r.returncode, 1, (value, r.stderr))
+            self.assertIn("unrecognised value", r.stderr, value)
+
+    def test_a_missing_scanner_blocks_a_publication_in_both_modes(self):
+        """#264: `if [ -f ... ]` skipped the whole stage with NO message.
+
+        "not installed" and "installed and clean" looked identical, and the gate
+        SECURITY.md promises simply was not there. This is the one stage whose
+        outcome does NOT depend on the mode: the publish-range scrub is the hard
+        boundary, so it blocks in both.
+        """
+        for mode in ("0", "1"):
+            _w, bare, _g, push = self._gate_repo(with_scrub=False)
+            r = push(M8SHIFT_SCRUB_ENFORCE=mode)
+            self.assertEqual(r.returncode, 1, (mode, r.stderr))
+            self.assertIn("scrub-check.py is missing", r.stderr, mode)
+            self.assertFalse(self._landed(bare), "%s: the push was not stopped" % mode)
+
+    def test_a_deletion_only_push_stays_exempt_without_a_scanner(self):
+        """#264: the exemption must be narrow, not a second way to skip the gate.
+
+        A deletion publishes no object, so there is nothing to inspect; anything
+        wider would be the missing-scanner hole with extra steps.
+        """
+        work, bare, _g, push = self._gate_repo(with_scrub=True)
+        self.assertEqual(push(M8SHIFT_SCRUB_ENFORCE="1").returncode, 0)
+        os.rename(os.path.join(work, "scripts", "scrub-check.py"),
+                  os.path.join(work, "scripts", "moved.py"))
+        r = push(ref=":refs/heads/main", M8SHIFT_SCRUB_ENFORCE="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nothing published", r.stderr)
+        self.assertFalse(self._landed(bare), "the deletion did not reach the remote")
+
+    def test_a_poisoned_ifs_cannot_reshape_the_scanner_argv(self):
+        """#264: the scanner argv depended on IFS — ambient shell state.
+
+        The old form accumulated the ranges into a string and relied on unquoted
+        word splitting at the call site. Measured against the pre-fix hook: with a
+        poisoned IFS the scanner was invoked with NO `--range` at all — it scanned
+        zero commits and returned 0, so the gate reported clean without looking.
+
+        The environment is NOT the vector, contrary to the ticket's premise. With
+        a positive control:
+
+            IFS=":" dash -c 'v="x:y z"; set -- $v; echo "[$1]"'   -> [x:y] ignored
+            dash -c 'IFS=":"; v="x:y z"; set -- $v; echo "[$1]"'  -> [x]   honoured
+
+        sh, bash, dash and zsh all reset IFS at startup, so an env-based probe
+        passes against the BROKEN hook and proves nothing. The reachable condition
+        is a shell that already holds a modified IFS and SOURCES the hook, which
+        is what this drives, under every POSIX shell present.
+
+        Two distinct non-deletion ref records, so a collapse to the HEAD-only path
+        cannot satisfy it, and asserted on the argv the scanner ACTUALLY receives.
+        """
+        work, bare, g, _push = self._gate_repo(with_scrub=True)
+        log = os.path.join(work, "argv.log")
+        with open(os.path.join(work, "scripts", "scrub-check.py"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("import sys\n"
+                     "open(%r, 'a').write(repr(sys.argv[1:]) + chr(10))\n"
+                     "sys.exit(0)\n" % log)
+        first = g("rev-parse", "HEAD").stdout.strip()
+        with open(os.path.join(work, "b.md"), "w", encoding="utf-8") as fh:
+            fh.write("second\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "second")
+        second = g("rev-parse", "HEAD").stdout.strip()
+        hook = os.path.join(work, ".git", "hooks", "pre-push")
+        zero = "0" * 40
+        records = ("refs/heads/main %s refs/heads/main %s\n"
+                   "refs/heads/other %s refs/heads/other %s\n"
+                   % (first, zero, second, zero))
+
+        shells = [sh for sh in ("/bin/sh", "/bin/dash", "/bin/bash")
+                  if os.path.exists(sh)]
+        self.assertTrue(shells, "probe invalid: no POSIX shell found")
+        for shell in shells:
+            open(log, "w").close()
+            proc = subprocess.run(
+                [shell, "-c", 'IFS="0123456789abcdef -"; . "$1" origin "$2"',
+                 "_", hook, bare],
+                cwd=work, input=records, capture_output=True, text=True)
+            seen = [ast.literal_eval(line) for line in
+                    open(log, encoding="utf-8").read().splitlines() if line.strip()]
+            self.assertTrue(seen, "%s: the scanner was never invoked (%s)"
+                            % (shell, proc.stderr))
+            for argv in seen:
+                pairs = [(argv[k + 1], argv[k + 3]) for k, v in enumerate(argv)
+                         if v == "--range" and argv[k + 2] == "--ref"]
+                self.assertEqual(
+                    pairs, [(first, "refs/heads/main"), (second, "refs/heads/other")],
+                    "%s: argv reshaped — a scan of nothing that returns clean: %r"
+                    % (shell, argv))
 
     def test_range_scans_only_pushed_commits(self):
         # Codex review blocker (v3.58 cycle): a full-history walk per push

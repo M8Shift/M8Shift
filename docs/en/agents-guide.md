@@ -305,8 +305,10 @@ releasable at all times.
   denylisted identifiers via raw git (never a lossy optimizer); `--all` explicitly
   adds refs, annotated tag messages, worktree reflogs, and unreachable objects.
   `hooks/pre-push` scans only the ref-update ranges Git provides, scopes
-  new-branch exclusions to the target remote, and blocks on scan errors;
-  findings remain advisory unless `M8SHIFT_SCRUB_ENFORCE=1` is set.
+  new-branch exclusions to the target remote, and blocks on scan errors and on a
+  missing scanner; findings remain advisory unless `M8SHIFT_SCRUB_ENFORCE` is
+  set to `1`/`true`/`yes`/`on` (any unrecognised value refuses to run), and a
+  stage that could not run is reported as incomplete rather than passed over.
 - **Signed-off collaboration.** Commit messages include the agreed
   `Co-Authored-By:` trailer.
 - **Dogfooding provenance — model *and* engine, on every commit.** Each commit

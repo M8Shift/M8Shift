@@ -7014,12 +7014,42 @@ _HYGIENE_STRIP_BYTES = b"`.,;:!?'\")]}>*_ "   # trailing markdown/punctuation
 # missing/empty = silent no-op. Findings are REDACTED by default (file:line + a
 # hashed label — never the term, never the matched line); `--hygiene-verbose`
 # shows the term locally for forensics. A denylist hit is a visible WARNING that
-# does NOT gate `--lint` unless M8SHIFT_SCRUB_ENFORCE=1 (higher false-positive
-# risk than the path lint; posture per RFC 052 Q1). Never auto-discovered:
+# does NOT gate `--lint` unless M8SHIFT_SCRUB_ENFORCE is armed — see
+# SCRUB_ENFORCE_TRUE for the closed table, which is the hooks' table (higher
+# false-positive risk than the path lint; posture per RFC 052 Q1). Never
+# auto-discovered:
 # operator-seeded only (auto-discovery would read across projects, violating the
 # rule it enforces).
 HYGIENE_DENYLIST_ENV = "M8SHIFT_DENYLIST"
 HYGIENE_SCRUB_ENFORCE_ENV = "M8SHIFT_SCRUB_ENFORCE"
+# #264: the ONE closed contract for the enforce variable, shared with
+# hooks/pre-push and hooks/pre-commit. The core used to test `== "1"` while the
+# hooks advertised four spellings, so `M8SHIFT_SCRUB_ENFORCE=true` armed the
+# hook's own bookkeeping and left the real denylist gate advisory — the ticket's
+# footgun surviving one layer down, invisible to any test that stubs the doctor.
+# Compared with an ASCII-only fold, not str.lower(), so this stays provably the
+# same table as the POSIX `case` patterns in the hooks.
+SCRUB_ENFORCE_TRUE = ("1", "true", "yes", "on")
+SCRUB_ENFORCE_FALSE = ("", "0", "false", "no", "off")
+
+
+def _ascii_lower(value):
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in value)
+
+
+def scrub_enforce_mode(raw):
+    """True/False for a recognised value, None for an ambiguous one.
+
+    Not stripped: a whitespace-padded value is unrecognised in the hooks, and a
+    parser that disagreed with them would be the drift this closes. None is a
+    configuration error, never a silent side.
+    """
+    folded = _ascii_lower(raw or "")
+    if folded in SCRUB_ENFORCE_FALSE:
+        return False
+    if folded in SCRUB_ENFORCE_TRUE:
+        return True
+    return None
 HYGIENE_DENYLIST_DEFAULT = os.path.join("~", ".config", "m8shift", "denylist.txt")
 HYGIENE_DENYLIST_MAX_BYTES = 64 * 1024
 HYGIENE_DENYLIST_MAX_TERMS = 256
@@ -7047,8 +7077,8 @@ def _denylist_redact(text, rules):
 # EXPLICIT allowed-root pin: the operator declares their own home root(s) in
 # $M8SHIFT_HYGIENE_ALLOWED_ROOTS (comma-separated, e.g. "/Users/<name>"), and
 # only FOREIGN home roots are flagged. Advisory posture: a visible warning that
-# never gates `--lint` unless M8SHIFT_SCRUB_ENFORCE=1 (no default rc 1 for
-# anchors). Never guesses the operator's root — unset means an info notice, not
+# never gates `--lint` unless M8SHIFT_SCRUB_ENFORCE is armed (no default rc 1
+# for anchors). Never guesses the operator's root — unset means an info notice, not
 # a scan with invented ownership.
 HYGIENE_ALLOWED_ROOTS_ENV = "M8SHIFT_HYGIENE_ALLOWED_ROOTS"
 HYGIENE_ANCHOR_BASENAMES = ("CLAUDE.md", "AGENTS.md", "AGENTS.override.md")
@@ -7251,7 +7281,7 @@ def _hygiene_findings(root=None, verbose=False):
     C1 `hygiene.foreign_path`: high-confidence home roots are `warning` (fail
     `doctor --lint --hygiene`); advisory forms are `info` (never gate).
     C3 `hygiene.denylist`: operator-confidential identifiers are `warning` but
-    NEVER gate `--lint` unless M8SHIFT_SCRUB_ENFORCE=1; output is redacted
+    NEVER gate `--lint` unless M8SHIFT_SCRUB_ENFORCE is armed; output is redacted
     (hashed label) unless `verbose` — forensic, local-only.
     Binary/oversize files are skipped with an info finding, never a crash."""
     # Scan the effective COORDINATED project root (honors M8SHIFT_ROOT / an
@@ -8930,6 +8960,27 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
 
 
 def cmd_doctor(args):
+    # #264: the enforce mode is resolved BEFORE anything is collected or
+    # rendered. It used to be read just before the gating decision, after the
+    # human/JSON result had already been printed, so an ambiguous mode produced
+    # `✓ no findings` / `"ok": true` and THEN rc 2 — the command reporting
+    # success and refusing to report at the same time. "Must not report a
+    # verdict" has to mean the verdict is never emitted, not that its exit code
+    # is overridden afterwards.
+    #
+    # Outside `--lint` the value is not parsed at all: it gates nothing there, so
+    # "neither gates nor consults it" is now literally true rather than a claim
+    # about intent.
+    enforce = False
+    if args.lint:
+        enforce = scrub_enforce_mode(os.environ.get(HYGIENE_SCRUB_ENFORCE_ENV, ""))
+        if enforce is None:
+            print(f"{HYGIENE_SCRUB_ENFORCE_ENV} is set to an unrecognised value — "
+                  f"refusing to lint with an ambiguous gate mode. Use "
+                  f"{'/'.join(SCRUB_ENFORCE_TRUE)} to enforce, "
+                  f"{'/'.join(v for v in SCRUB_ENFORCE_FALSE if v)} or unset for "
+                  f"advisory.", file=sys.stderr)
+            return 2
     threshold = SEVERITY_RANK[args.severity_min]
     hygiene_only = getattr(args, "hygiene_only", False)
     hygiene_verbose = getattr(args, "hygiene_verbose", False)
@@ -8999,10 +9050,11 @@ def cmd_doctor(args):
                 if f.get("fix_hint"):
                     print(f"  fix: {f['fix_hint']}")
     # RFC 052 Q1 gating: a `hygiene.denylist` warning is VISIBLE but does not flip
-    # the `--lint` exit code unless M8SHIFT_SCRUB_ENFORCE=1 — the denylist has a
+    # the `--lint` exit code unless M8SHIFT_SCRUB_ENFORCE is armed — the denylist has a
     # higher false-positive risk than the path lint, so it is advisory-by-default
     # even in lint mode. Everything else gates exactly as before.
-    enforce = os.environ.get(HYGIENE_SCRUB_ENFORCE_ENV, "") == "1"
+    # `enforce` was resolved at entry, before any output — see the top of this
+    # function for why the refusal cannot live here.
     advisory_checks = ("hygiene.denylist", "hygiene.anchor_foreign_path",
                        "hygiene.anchor_roots_unset")
     # RFC 050/058: skills.* and rfc.* findings are advisory ALWAYS — they never flip the
@@ -12010,14 +12062,15 @@ def main():
                          "Default output is redacted so a pasted doctor report never re-leaks the "
                          "identifier. The denylist itself is out-of-repo: M8SHIFT_DENYLIST if set, "
                          "else ~/.config/m8shift/denylist.txt; missing = no-op. A hygiene.denylist "
-                         "warning never fails --lint unless M8SHIFT_SCRUB_ENFORCE=1")
+                         "warning never fails --lint unless M8SHIFT_SCRUB_ENFORCE is armed "
+                         "(1/true/yes/on; any other value refuses)")
     dr.add_argument("--hygiene-anchors", action="store_true",
                     help="opt-in anchor hygiene: re-scan the generated anchors "
                          "(CLAUDE.md, AGENTS.md), which C1 excludes by default because they "
                          "legitimately hold YOUR OWN path. Pin your own home root(s) in "
                          "M8SHIFT_HYGIENE_ALLOWED_ROOTS (comma-separated); only FOREIGN home "
                          "roots are flagged (hygiene.anchor_foreign_path, advisory — never "
-                         "fails --lint unless M8SHIFT_SCRUB_ENFORCE=1). Unset roots = an info "
+                         "fails --lint unless M8SHIFT_SCRUB_ENFORCE is armed). Unset roots = an info "
                          "notice, never a guess")
     dr.add_argument("--install", action="store_true",
                     help="include read-only post-install verification (#24): python/script "
