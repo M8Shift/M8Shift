@@ -48,7 +48,10 @@ never the term or the matched content. `--verbose` shows terms locally only.
 
 Exit codes: 0 clean (or empty denylist = no-op), 1 at least one hit, 2 error
 (not a repo, git missing/failed). The shipped pre-push hook treats 1 as advisory
-unless M8SHIFT_SCRUB_ENFORCE=1, and always blocks on 2 (scan errors fail closed).
+unless M8SHIFT_SCRUB_ENFORCE is armed (1|true|yes|on, ASCII case-insensitive;
+any unrecognised value refuses before scanning), always blocks on 2 (scan errors
+fail closed), and blocks on this script's ABSENCE for any push that publishes
+objects — "not installed" and "installed and clean" must not look alike (#264).
 """
 
 import argparse

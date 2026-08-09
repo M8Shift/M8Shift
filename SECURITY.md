@@ -123,15 +123,25 @@ a per-push tax. Install with:
     git config core.hooksPath hooks
 
 They are **advisory by default** (warn, exit 0) so a contributor is never
-hard-blocked by a false positive. Export `M8SHIFT_SCRUB_ENFORCE=1` to make a
-hygiene/denylist hit **block** the commit and the push — the pre-commit hook
+hard-blocked by a false positive. Set `M8SHIFT_SCRUB_ENFORCE` to `1`, `true`,
+`yes` or `on` to make a hygiene/denylist hit **block** the commit and the push;
+`0`, `false`, `no`, `off` or unset keeps it advisory. Any other value is a
+configuration error and the hook refuses before scanning — a gate whose mode is
+ambiguous must not report a verdict. Under enforcement the pre-commit hook
 catches a denylisted identifier on the staged tip *before the commit object is
 written*, so nothing reaches history to purge. The confidential denylist is
 never committed: point `M8SHIFT_DENYLIST` at a private file (default
 `~/.config/m8shift/denylist.txt`, one term per line). Matches are reported as
 hashed labels — never the term, never the matched line.
-An inability to execute the publish-boundary scrub is different from an
-advisory finding: scrub errors fail closed and block the push.
+
+An inability to run a stage is different from an advisory finding, and it is
+never a clean result. Scrub **errors** fail closed and block the push in both
+modes, as does a **missing** `scripts/scrub-check.py` when the push publishes
+objects: "not installed" and "installed and clean" must never look alike. A
+stage that could not run for any other reason (no resolvable `m8shift.py`, no
+checksum verifier) is reported as *incomplete* and blocks under enforcement.
+The only way to publish without a scrub is a deletion-only push, which puts no
+new object on the remote.
 
 Independently of that advisory scrub policy, pre-commit refreshes
 `checksums.sha256` whenever a listed file is staged. It hashes the Git index blob,

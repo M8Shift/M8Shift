@@ -7,9 +7,13 @@
 #
 # Behavior:
 #   1. RFC 052 E2 data-hygiene lint (`doctor --hygiene-only --lint`): ADVISORY —
-#      findings are printed but the commit proceeds, unless M8SHIFT_SCRUB_ENFORCE=1
-#      (then hygiene findings block). Scanner ERRORS always fail open (printed,
-#      never blocking) — a broken scanner must not freeze all commits.
+#      findings are printed but the commit proceeds, unless enforcement is armed
+#      (M8SHIFT_SCRUB_ENFORCE=1/true/yes/on; 0/false/no/off or unset is advisory;
+#      any other value refuses before scanning) — then hygiene findings block.
+#      Scanner ERRORS still fail open here, visibly (printed, never blocking): a
+#      broken scanner must not freeze all commits. This is deliberately NOT the
+#      pre-push posture (#264) — a commit is local and recoverable, a push is the
+#      publish boundary, where an uninspected object leaving the machine is not.
 #   2. Pen guard (#39, unchanged semantics):
 #      - $M8SHIFT_AGENT unset  -> skip (humans/unconfigured checkouts never blocked).
 #      - $M8SHIFT_AGENT set    -> `m8shift.py may-i-write "$M8SHIFT_AGENT"`; on a
@@ -50,16 +54,33 @@ else
 	fi
 fi
 
+# --- enforcement mode, parsed ONCE and identically to pre-push (#264) -----------
+# The same variable must arm the same way in both hooks, or an operator arms half
+# of the documented local gate and is told nothing. See hooks/pre-push for why an
+# unrecognised value refuses instead of defaulting.
+case "${M8SHIFT_SCRUB_ENFORCE:-}" in
+"" | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) enforce=0 ;;
+1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn]) enforce=1 ;;
+*)
+	printf '%s\n' "m8shift pre-commit: M8SHIFT_SCRUB_ENFORCE is set to an unrecognised value — refusing to run with an ambiguous gate mode. Use 1/true/yes/on to enforce, 0/false/no/off or unset for advisory." >&2
+	exit 1
+	;;
+esac
+
 # --- RFC 052 E2: advisory data-hygiene lint (runs for humans AND agents) --------
 if [ -n "${m8shift}" ]; then
 	hygiene_rc=0
-	"${m8shift}" doctor --hygiene-only --lint >&2 || hygiene_rc=$?
+	# #264: hand the doctor the PARSED mode, not the raw variable. The core gate
+	# reads the same closed contract now, but normalising here means the hook's
+	# own parse is what the stage it runs actually obeys — no second table to
+	# drift, and an invalid value has already been refused above.
+	M8SHIFT_SCRUB_ENFORCE="${enforce}" "${m8shift}" doctor --hygiene-only --lint >&2 || hygiene_rc=$?
 	if [ "${hygiene_rc}" -eq 1 ]; then
-		if [ "${M8SHIFT_SCRUB_ENFORCE:-0}" = "1" ]; then
-			printf '%s\n' "m8shift pre-commit: data-hygiene findings above and M8SHIFT_SCRUB_ENFORCE=1 — commit blocked. Fix the findings or unset the enforce variable." >&2
+		if [ "${enforce}" -eq 1 ]; then
+			printf '%s\n' "m8shift pre-commit: data-hygiene findings above and enforcement is armed — commit blocked. Fix the findings or switch to advisory mode." >&2
 			exit 1
 		fi
-		printf '%s\n' "m8shift pre-commit: data-hygiene findings above are ADVISORY (set M8SHIFT_SCRUB_ENFORCE=1 to block on them); committing anyway." >&2
+		printf '%s\n' "m8shift pre-commit: data-hygiene findings above are ADVISORY (arm M8SHIFT_SCRUB_ENFORCE to block on them); committing anyway." >&2
 	elif [ "${hygiene_rc}" -gt 1 ]; then
 		# Scanner error: fail OPEN, visibly — a broken scanner never freezes commits.
 		printf '%s\n' "m8shift pre-commit: hygiene scanner failed (rc ${hygiene_rc}) — continuing without it." >&2

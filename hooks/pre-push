@@ -3,18 +3,24 @@
 # leaves the machine.
 #
 # ADVISORY and LOCAL by default: findings are printed, the push proceeds. Set
-# M8SHIFT_SCRUB_ENFORCE=1 to BLOCK the push on findings. Scrub scanner ERRORS
-# fail closed: inability to inspect publish-bound objects is not a clean result.
+# M8SHIFT_SCRUB_ENFORCE to 1/true/yes/on to BLOCK on findings; 0/false/no/off or
+# unset is advisory; any OTHER value is a configuration error and refuses before
+# scanning, because a gate whose mode is ambiguous must not report a verdict.
+# Under enforcement there is no fail-open path: a stage that did not run to
+# completion blocks exactly like a finding. Publish-range scrub errors and a
+# missing scanner fail closed in BOTH modes — inability to inspect publish-bound
+# objects is not a clean result.
 # `git push --no-verify` bypasses this hook entirely, by design (git semantics).
 #
 # What runs:
 #   1. `m8shift.py doctor --hygiene-only --lint` — the RFC 052 C1+C3 data-hygiene
 #      lint (real home paths + operator-confidential denylist, redacted output).
-#   2. `checksums.sha256` (if present) — verifies that shipped artifacts still
-#      match the release manifest. Mismatches follow the same advisory/enforce
-#      policy as scrub findings; verifier errors fail open.
-#   3. `scripts/scrub-check.py` (if present) — the denylist over WHAT THIS PUSH
-#      PUBLISHES: git feeds the hook one `<local ref> <local sha> <remote ref>
+#   2. `checksums.sha256` (when the repository ships one) — verifies that shipped
+#      artifacts still match the release manifest. Mismatches and an unavailable
+#      or failing verifier alike follow the advisory/enforce policy: the manifest
+#      was not checked either way.
+#   3. `scripts/scrub-check.py` (REQUIRED for any push that publishes objects)
+#      — the denylist over WHAT THIS PUSH PUBLISHES: git feeds the hook one `<local ref> <local sha> <remote ref>
 #      <remote sha>` line per ref on stdin, and each becomes a `--range`
 #      (remote..local; a bare local sha when the remote side is new or unknown;
 #      deletions are skipped — nothing leaves). Bare-sha history exclusions are
@@ -31,6 +37,23 @@
 
 set -eu
 
+# --- 0. enforcement mode, parsed ONCE before any stage (#264) ---------------------
+# The old test was `= 1`, so M8SHIFT_SCRUB_ENFORCE=true|yes|on|2 was SILENTLY
+# advisory: an operator who armed the gate in the obvious spelling did not have it
+# armed, and nothing said so. An unrecognised value is therefore a configuration
+# error rather than a default, and it refuses BEFORE scanning: a gate whose mode is
+# ambiguous must not report a verdict at all. The value is never echoed — it comes
+# from the environment and may carry anything. POSIX `case` does the ASCII case
+# folding, so this adds no PATH dependency (no `tr`) to a trust boundary.
+case "${M8SHIFT_SCRUB_ENFORCE:-}" in
+"" | 0 | [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Oo][Ff][Ff]) enforce=0 ;;
+1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Oo][Nn]) enforce=1 ;;
+*)
+	printf '%s\n' "m8shift pre-push: M8SHIFT_SCRUB_ENFORCE is set to an unrecognised value — refusing to run with an ambiguous gate mode. Use 1/true/yes/on to enforce, 0/false/no/off or unset for advisory." >&2
+	exit 1
+	;;
+esac
+
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || printf '.')"
 
 # Git supplies the target remote name (or URL) as argv[1]. Only pass a configured
@@ -40,6 +63,19 @@ target_remote=""
 if [ "${#}" -ge 1 ] && git remote get-url -- "${1}" >/dev/null 2>&1; then
 	target_remote="${1}"
 fi
+# #264: the scanner argv is built in the POSITIONAL PARAMETERS from here on, each
+# element added quoted. The previous form accumulated `${ranges}`/`${bases}` as
+# strings and relied on unquoted word splitting at the call site, which made the
+# scanner's argv a function of IFS — ambient shell state — at that point. Measured:
+# with a poisoned IFS the old form invoked the scanner with NO `--range` at all, so
+# it scanned zero commits and returned 0: the gate reported clean without looking.
+# The environment is NOT the vector (sh, bash, dash and zsh all reset IFS at
+# startup, so an exported IFS never reaches the hook); a shell that already holds a
+# modified IFS and SOURCES this hook — a wrapper, a test harness — is. That makes
+# this hardening rather than a live remote hole, but the dependency on ambient
+# state does not belong at a publish boundary. Resetting IFS here would not have
+# been enough, because the splitting itself was the mechanism; now there is none.
+set --
 
 # Resolve the m8shift.py program (soft: everything here is advisory-by-default).
 m8shift=""
@@ -51,17 +87,34 @@ elif [ -x "${repo_root}/m8shift.py" ]; then
 	m8shift="${repo_root}/m8shift.py"
 fi
 
-block=0
+# Two bits, deliberately NOT collapsed into one (#264). `findings` means a stage
+# ran and objected; `incomplete` means a configured stage did not run to
+# completion. Merging them would lose the reason in diagnostics, and would let a
+# later change make execution conditional on truthiness again without anyone
+# noticing. Both block under enforcement; only `findings` was advisory before.
+findings=0
+incomplete=0
 
 # --- 1. data-hygiene lint (C1 paths + C3 denylist, redacted) ---------------------
 if [ -n "${m8shift}" ]; then
 	hygiene_rc=0
-	"${m8shift}" doctor --hygiene-only --lint >&2 || hygiene_rc=$?
+	# #264: hand the doctor the PARSED mode, not the raw variable. The core gate
+	# reads the same closed contract now, but normalising here means the hook's
+	# own parse is what the stage it runs actually obeys — no second table to
+	# drift, and an invalid value has already been refused above.
+	M8SHIFT_SCRUB_ENFORCE="${enforce}" "${m8shift}" doctor --hygiene-only --lint >&2 || hygiene_rc=$?
 	if [ "${hygiene_rc}" -eq 1 ]; then
-		block=1
+		findings=1
 	elif [ "${hygiene_rc}" -gt 1 ]; then
-		printf '%s\n' "m8shift pre-push: hygiene scanner failed (rc ${hygiene_rc}) — continuing without it." >&2
+		printf '%s\n' "m8shift pre-push: hygiene scanner failed (rc ${hygiene_rc}) — stage incomplete." >&2
+		incomplete=1
 	fi
+else
+	# Silent disappearance was the adjacent spelling of the same bug: with no
+	# resolvable executable the stage simply did not exist, and the operator saw a
+	# clean run. It is now visible, and blocking when enforcement is armed.
+	printf '%s\n' "m8shift pre-push: no m8shift executable resolved — hygiene stage did not run." >&2
+	incomplete=1
 fi
 
 # --- 2. release checksum manifest ------------------------------------------------
@@ -77,9 +130,14 @@ if [ -f "${manifest}" ]; then
 	fi
 	if [ "${checksum_rc}" -eq 1 ]; then
 		printf '%s\n' "m8shift pre-push: checksums.sha256 is stale or invalid." >&2
-		block=1
+		findings=1
 	elif [ "${checksum_rc}" -gt 1 ]; then
-		printf '%s\n' "m8shift pre-push: checksum verification failed (rc ${checksum_rc}) — continuing without it." >&2
+		# Absence of a verifier and a verifier that fails are the same outcome: the
+		# manifest was not checked. Advisory by default as documented, blocking when
+		# enforcement is armed — "the gate ran" and "the gate found nothing" must not
+		# be indistinguishable.
+		printf '%s\n' "m8shift pre-push: checksum verification unavailable or failed (rc ${checksum_rc}) — stage incomplete." >&2
+		incomplete=1
 	fi
 fi
 
@@ -88,19 +146,21 @@ fi
 # line per ref being pushed. Only read it when stdin is NOT a terminal (a manual
 # `sh hooks/pre-push` run from a shell has no ref lines — fall back to the
 # direct HEAD scan rather than hang on a read).
-ranges=""
-# Initialised beside `ranges`, OUTSIDE the stdin guard. It was declared inside it,
+# Initialised OUTSIDE the stdin guard. It was declared inside it,
 # and expanded unconditionally further down under `set -eu`, so the documented
 # manual-run path — `sh hooks/pre-push` from a shell, where stdin IS a terminal —
 # aborted with `bases: unbound variable` before the scan ran at all. A real push was
 # unaffected because git always supplies a pipe, so the breakage was fail-closed;
 # what it cost was the operator's hand-run pre-flight, and a hook that errors is a
 # hook someone reaches past with --no-verify.
-bases=""
+have_range=0
 stdin_lines=0
 new_refs=0
 if [ ! -t 0 ]; then
-	while read -r _local_ref local_sha remote_ref remote_sha; do
+	# A local IFS for the record split only: ref names cannot contain spaces, so
+	# the Git record separator is unambiguous and this does not depend on the
+	# inherited value.
+	while IFS=' ' read -r _local_ref local_sha remote_ref remote_sha; do
 		[ -n "${local_sha:-}" ] || continue
 		stdin_lines=$((stdin_lines + 1))
 		case "${local_sha}" in
@@ -108,21 +168,26 @@ if [ ! -t 0 ]; then
 		*) continue ;;                   # all zeros: a DELETION — nothing leaves
 		esac
 		case "${remote_sha:-}" in
-		"" ) ranges="${ranges} --range ${local_sha} --ref ${remote_ref}" ;;
+		"" )
+			set -- "$@" --range "${local_sha}" --ref "${remote_ref}"
+			have_range=1
+			;;
 		*[!0]*)
 			# Known remote base -> scan exactly the new commits. If the base
 			# object is absent locally (stale tracking), the bare-sha form
 			# over-scans relative to target-remote tracking instead of erroring.
 			if git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
-				ranges="${ranges} --range ${remote_sha}..${local_sha} --ref ${remote_ref}"
+				set -- "$@" --range "${remote_sha}..${local_sha}" --ref "${remote_ref}"
+				have_range=1
 				# #262: git proved the destination has this commit. It is the
 				# only endpoint-authoritative evidence a client-side hook gets,
 				# and it lets a finding on ANOTHER ref of this same batch be
 				# reported as pre-existing instead of blocking. A local branch
 				# reaching the commit proves nothing and is never used for this.
-				bases="${bases} --endpoint-base ${remote_sha}"
+				set -- "$@" --endpoint-base "${remote_sha}"
 			else
-				ranges="${ranges} --range ${local_sha} --ref ${remote_ref}"
+				set -- "$@" --range "${local_sha}" --ref "${remote_ref}"
+				have_range=1
 			fi
 			;;
 		*)
@@ -153,23 +218,41 @@ if [ ! -t 0 ]; then
 			fi
 			new_refs=$((new_refs + 1))
 			if [ -n "${attested}" ]; then
-				ranges="${ranges} --range ${attested}..${local_sha} --ref ${remote_ref}"
-				bases="${bases} --endpoint-base ${attested}"
+				set -- "$@" --range "${attested}..${local_sha}" --ref "${remote_ref}"
+				set -- "$@" --endpoint-base "${attested}"
 				printf '%s\n' "m8shift pre-push: published-base attestation consumed for ${remote_ref}; scanning from the attested base." >&2
 			else
-				ranges="${ranges} --range ${local_sha} --ref ${remote_ref}"
+				set -- "$@" --range "${local_sha}" --ref "${remote_ref}"
 			fi
+			have_range=1
 			;;
 		esac
 	done
 fi
 
 scrub="${repo_root}/scripts/scrub-check.py"
-if [ -f "${scrub}" ]; then
-	if [ "${stdin_lines}" -gt 0 ] && [ -z "${ranges}" ]; then
-		# Every pushed ref was a deletion: nothing new leaves the machine.
-		printf '%s\n' "m8shift pre-push: deletion-only push — scrub skipped (nothing published)." >&2
-	else
+if [ "${stdin_lines}" -gt 0 ] && [ "${have_range}" -eq 0 ]; then
+	# Every pushed ref was a deletion: nothing new leaves the machine. This is the
+	# ONLY legitimate way to publish without a scrub, and it is deliberately narrow.
+	printf '%s\n' "m8shift pre-push: deletion-only push — scrub skipped (nothing published)." >&2
+elif [ ! -f "${scrub}" ] && [ "${have_range}" -eq 1 ]; then
+	# #264: this used to be `if [ -f ... ]`, so a missing scanner skipped the whole
+	# stage with NO message and the operator saw stage 1 and exit 0 — the gate that
+	# SECURITY.md promises simply was not there. The publish-range scrub is the hard
+	# boundary: for a real PUBLICATION it blocks in BOTH modes, because "not
+	# installed" and "installed and clean" must never look the same. The header's
+	# "if present" wording was the documentation of this hole.
+	printf '%s\n' "m8shift pre-push: scripts/scrub-check.py is missing — the publish-range scrub could not run; push blocked." >&2
+	exit 1
+elif [ ! -f "${scrub}" ]; then
+	# No ref records: this is the documented hand-run pre-flight, not a push, so
+	# nothing is being published and blocking would only break the pre-flight — and
+	# a hook that errors is a hook someone reaches past with --no-verify. It is
+	# still an incomplete stage, so it is visible and blocks under enforcement.
+	printf '%s\n' "m8shift pre-push: scripts/scrub-check.py is missing — stage incomplete (no refs were being pushed)." >&2
+	incomplete=1
+else
+	{
 		scrub_rc=0
 		run_scrub() {
 			python3 -c '
@@ -190,27 +273,38 @@ except BaseException as exc:
     sys.exit(2)
 ' "${scrub}" "$@"
 		}
-		# shellcheck disable=SC2086 # intentional word-splitting: hex-only rev specs
+		# No word splitting: every range/ref/base is a quoted positional parameter.
 		if [ -n "${target_remote}" ]; then
-			run_scrub --repo "${repo_root}" --remote "${target_remote}" ${bases} ${ranges} >&2 || scrub_rc=$?
+			run_scrub --repo "${repo_root}" --remote "${target_remote}" "$@" >&2 || scrub_rc=$?
 		else
-			run_scrub --repo "${repo_root}" ${ranges} >&2 || scrub_rc=$?
+			run_scrub --repo "${repo_root}" "$@" >&2 || scrub_rc=$?
 		fi
 		if [ "${scrub_rc}" -eq 1 ]; then
-			block=1
+			findings=1
 		elif [ "${scrub_rc}" -ge 2 ]; then
 			printf '%s\n' "m8shift pre-push: scrub-check failed (rc ${scrub_rc}) — push blocked (scan errors fail closed)." >&2
 			exit 1
 		fi
-	fi
+	}
 fi
 
-if [ "${block}" -eq 1 ]; then
-	if [ "${M8SHIFT_SCRUB_ENFORCE:-0}" = "1" ]; then
-		printf '%s\n' "m8shift pre-push: gate findings above and M8SHIFT_SCRUB_ENFORCE=1 — push blocked. Fix the findings or unset the enforce variable." >&2
+# The two bits are reported separately so the operator learns WHY, and so an
+# incomplete stage can never be mistaken for a clean one (#264).
+if [ "${findings}" -eq 1 ] || [ "${incomplete}" -eq 1 ]; then
+	if [ "${enforce}" -eq 1 ]; then
+		if [ "${incomplete}" -eq 1 ]; then
+			printf '%s\n' "m8shift pre-push: a gate stage did not run to completion and enforcement is armed — push blocked. An unchecked stage is not a clean one." >&2
+		else
+			printf '%s\n' "m8shift pre-push: gate findings above and enforcement is armed — push blocked. Fix the findings or switch to advisory mode." >&2
+		fi
 		exit 1
 	fi
-	printf '%s\n' "m8shift pre-push: gate findings above are ADVISORY (set M8SHIFT_SCRUB_ENFORCE=1 to block on them); pushing anyway." >&2
+	if [ "${incomplete}" -eq 1 ]; then
+		printf '%s\n' "m8shift pre-push: a gate stage did not run to completion; this run is ADVISORY (arm M8SHIFT_SCRUB_ENFORCE to block on it), pushing anyway." >&2
+	fi
+	if [ "${findings}" -eq 1 ]; then
+		printf '%s\n' "m8shift pre-push: gate findings above are ADVISORY (arm M8SHIFT_SCRUB_ENFORCE to block on them); pushing anyway." >&2
+	fi
 fi
 
 exit 0
