@@ -36,6 +36,9 @@ def test_parallel_scrub_worker_failure_is_ordered_and_fail_closed(tmp_path):
     def run(cmd, repo):
         if cmd[:3] == ["git", "cat-file", "-t"]:
             return SimpleNamespace(returncode=0, stdout="commit\n", stderr="")
+        if cmd[:2] == ["git", "ls-tree"] or "--raw" in cmd or \
+                "--name-status" in cmd or cmd[:2] == ["git", "diff"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "--format=%H%x00%B%x00" in cmd:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         term = cmd[cmd.index("-e") + 1] if "grep" in cmd else cmd[cmd.index("-S") + 1]
@@ -59,6 +62,9 @@ def test_parallel_scrub_worker_failure_is_ordered_and_fail_closed(tmp_path):
     def nonzero(cmd, repo):
         if cmd[:3] == ["git", "cat-file", "-t"]:
             return SimpleNamespace(returncode=0, stdout="commit\n", stderr="")
+        if cmd[:2] == ["git", "ls-tree"] or "--raw" in cmd or \
+                "--name-status" in cmd or cmd[:2] == ["git", "diff"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "--format=%H%x00%B%x00" in cmd:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "log" in cmd:
@@ -96,6 +102,49 @@ def test_nested_tag_peel_failure_is_fail_closed(tmp_path):
     assert rc == 2
     assert "ERROR preparing annotated tags" in err.getvalue()
     assert "scrub-check: clean" not in out.getvalue()
+
+
+def test_normalized_supplement_stays_inside_injected_runner():
+    scrub = load_module("scrub_normalized_runner_contract",
+                        ROOT / "scripts" / "scrub-check.py")
+    term = "PrivateName"
+    rule = (scrub.label_of(term), term, "literal")
+    blob = "b" * 40
+    commit = "c" * 40
+    old_blob = "d" * 40
+    calls = []
+
+    def run(cmd, repo):
+        calls.append(cmd)
+        if cmd[:2] == ["git", "ls-tree"]:
+            tree = "100644 blob %s\tdocs/private.txt\0" % blob
+            return SimpleNamespace(returncode=0, stdout=tree, stderr="")
+        if cmd == ["git", "cat-file", "blob", blob]:
+            return SimpleNamespace(
+                returncode=0, stdout="seen Pri\u200bvateName here\n", stderr="")
+        if "--raw" in cmd:
+            raw = ("\x1e%s\x00:100644 100644 %s %s M\x00"
+                   "docs/private.txt\x00") % (commit, old_blob, blob)
+            return SimpleNamespace(returncode=0, stdout=raw, stderr="")
+        if cmd == ["git", "cat-file", "blob", old_blob]:
+            return SimpleNamespace(returncode=0, stdout="clean\n", stderr="")
+        raise AssertionError("unexpected git argv: %r" % (cmd,))
+
+    with mock.patch.object(scrub.subprocess, "run",
+                           side_effect=AssertionError("real subprocess.run")), \
+            mock.patch.object(scrub.subprocess, "Popen",
+                              side_effect=AssertionError("real subprocess.Popen")):
+        tip_hits = scrub.scan_normalized_tip(
+            [rule], [], ["HEAD"], str(ROOT), run)
+        args = SimpleNamespace(repo=str(ROOT), all=False, refs_pull=False,
+                               max_commits=10)
+        history_hits = scrub.scan_normalized_history(
+            [rule], [(None, "ref HEAD")], args, run=run)
+
+    assert tip_hits == {0: ["HEAD:docs/private.txt:1"]}
+    assert history_hits == {0: [(commit, "ref HEAD")]}
+    assert ["git", "cat-file", "blob", blob] in calls
+    assert ["git", "cat-file", "blob", old_blob] in calls
 
 
 def test_ci_dependency_installs_are_hash_closed():

@@ -17513,6 +17513,42 @@ class TestRFC052Denylist(CLIBase):
         self.assertTrue(any(":2:" in m for m in msgs))   # word-boundary caught
         # l.3 plural not word-matched; l.4 suppressed by allow:
 
+    def test_comparison_normalization_matches_targeted_forms_in_core(self):
+        term = "Zorglub\u00e9 Widgets"
+        self._track(
+            "docs/forms.md",
+            "\n".join(("Zorglub\u00e9\u00a0Widgets",
+                        "Zorglub\u00e9 \u200bWidgets",
+                        "Zorglub\u00e9\u00ad Widgets",
+                        "Zorglube\u0301 Widgets")) + "\n")
+        r = self._run(denylist=self._deny(term + "\n"))
+        hits = self._findings(r)
+        self.assertEqual(len(hits), 4, r.stdout)
+        self.assertEqual({int(hit["message"].split(":")[1]) for hit in hits},
+                         {1, 2, 3, 4})
+
+    def test_comparison_normalization_deletes_invisibles_in_core(self):
+        term = "ZorglubWidgets"
+        forms = (term, "Zorglub\u200bWidgets", "Zorglub\u00adWidgets",
+                 "Zorglub\u200cWidgets", "Zorglub\u2060Widgets",
+                 "Zorglub\ufeffWidgets")
+        self._track("docs/forms.md", "\n".join(forms) + "\n")
+        r = self._run(denylist=self._deny(term + "\n"))
+        hits = self._findings(r)
+        self.assertEqual(len(hits), len(forms), r.stdout)
+        for form in forms:
+            self.assertEqual(cowork._denylist_normalize(form), term)
+
+    def test_invalid_word_rule_is_a_visible_core_error_and_disables_rules(self):
+        self._track("docs/a.md", "Acme (EU)\n")
+        r = self._run("--severity-min", "info",
+                      denylist=self._deny("word:Acme (EU)\n"))
+        invalid = self._findings(r, "hygiene.denylist_invalid")
+        self.assertEqual(len(invalid), 1, r.stdout)
+        self.assertEqual(invalid[0]["severity"], "error")
+        self.assertNotIn("Acme", r.stdout + r.stderr)
+        self.assertEqual(self._findings(r), [])
+
     def test_precedence_env_beats_default_and_default_is_read(self):
         self._track("docs/a.md", "Only %s here.\n" % self.TERM)
         cfg = os.path.join(self.home, ".config", "m8shift")
@@ -18730,7 +18766,7 @@ class TestRFC052ScrubCheck(CLIBase):
         real = mod.run_git
 
         def spy(cmd, repo):
-            if cmd[:2] == ["git", "ls-tree"] or (
+            if (cmd[:2] == ["git", "ls-tree"] and "--name-only" in cmd) or (
                     cmd[:2] in (["git", "log"], ["git", "diff"])
                     and any(a.startswith("--name-") for a in cmd)):
                 calls.append(cmd[1])
@@ -19746,6 +19782,210 @@ class TestRFC052ScrubCheck(CLIBase):
         # short term `xy` still counted — asserted as exact values, not a length.
         self.assertEqual(s_allows, ["approved sample", "xyz"])
         self.assertEqual(s_skipped, 3, "xy + allow:e + allow:ab")
+
+    def test_comparison_normalization_hits_each_documented_equivalent_form(self):
+        """#265 B: selectors and matcher agree on the targeted equivalence set.
+
+        Each mutation gets its own commit, so the assertions prove both the TIP
+        selector and the normalized occurrence-count history supplement. Removing
+        NFC or any one separator alternative kills the corresponding path/commit.
+        """
+        term = "Zorglub\u00e9 Widgets"
+        variants = {
+            "control.md": term,
+            "nbsp.md": "Zorglub\u00e9\u00a0Widgets",
+            "narrow-nbsp.md": "Zorglub\u00e9\u202fWidgets",
+            "thin-space.md": "Zorglub\u00e9\u2009Widgets",
+            "zero-width.md": "Zorglub\u00e9 \u200bWidgets",
+            "soft-hyphen.md": "Zorglub\u00e9\u00ad Widgets",
+            "nfd.md": "Zorglube\u0301 Widgets",
+        }
+        commits = {}
+        for name, value in variants.items():
+            self._commit("docs/" + name, "seen %s here\n" % value,
+                         "add " + name)
+            commits[name] = self._sha()
+        r = self._scrub(denylist=self._deny(term + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for name, sha in commits.items():
+            self.assertIn("HEAD:docs/%s:1" % name, r.stdout)
+            self.assertIn("HISTORY hit: commit %s" % sha[:12], r.stdout)
+        self.assertNotIn(term, r.stdout + r.stderr)
+
+    def test_comparison_normalization_deletes_invisibles_inside_one_token(self):
+        """#265 review F1/F2: ignorables are deleted, never made separators."""
+        term = "ZorglubWidgets"
+        variants = {
+            "control.md": term,
+            "zero-width.md": "Zorglub\u200bWidgets",
+            "soft-hyphen.md": "Zorglub\u00adWidgets",
+            "zwnj.md": "Zorglub\u200cWidgets",
+            "word-joiner.md": "Zorglub\u2060Widgets",
+            "bom.md": "Zorglub\ufeffWidgets",
+        }
+        commits = {}
+        for name, value in variants.items():
+            self._commit("docs/" + name, "seen %s here\n" % value,
+                         "add " + name)
+            commits[name] = self._sha()
+        r = self._scrub(denylist=self._deny(term + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for name, sha in commits.items():
+            self.assertIn("HEAD:docs/%s:1" % name, r.stdout)
+            self.assertIn("HISTORY hit: commit %s" % sha[:12], r.stdout)
+        mod = self._scrub_mod()
+        for value in variants.values():
+            self.assertEqual(mod.normalize_for_match(value), term)
+
+    def test_blob_batch_is_consumed_one_body_at_a_time(self):
+        """#265 review F3: cat-file stdout is streamed, not communicated whole."""
+        mod = self._scrub_mod()
+        first_sha, second_sha = "1" * 40, "2" * 40
+        first_body, second_body = b"first", b"second"
+        wire = (first_sha.encode() + b" blob 5\n" + first_body + b"\n" +
+                second_sha.encode() + b" blob 6\n" + second_body + b"\n")
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(wire)
+                self.returncode = None
+
+            def wait(self):
+                self.returncode = 0
+                return 0
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        proc = FakeProcess()
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            stream = mod.iter_blob_batch([first_sha, second_sha], ".")
+            self.assertTrue(inspect.isgenerator(stream))
+            self.assertEqual(next(stream), (first_sha, first_body))
+            first_record_size = len(first_sha) + len(" blob 5\n") + 5 + 1
+            self.assertEqual(proc.stdout.tell(), first_record_size,
+                             "the second body was read before the first was consumed")
+            self.assertEqual(next(stream), (second_sha, second_body))
+            with self.assertRaises(StopIteration):
+                next(stream)
+
+    def test_blob_batch_rejects_an_invalid_production_header(self):
+        """#265 F5: production --batch must fail closed on a bad header."""
+        mod = self._scrub_mod()
+        sha = "1" * 40
+        proc = self._blob_batch_process(b"not-a-batch-header\n")
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "invalid git cat-file batch blob header"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    def test_blob_batch_rejects_a_non_integer_production_size(self):
+        """#265 F5: production --batch must reject a malformed size."""
+        mod = self._scrub_mod()
+        sha = "2" * 40
+        wire = sha.encode() + b" blob nope\n"
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "invalid git cat-file batch blob size"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    def test_blob_batch_rejects_a_production_size_over_the_scan_bound(self):
+        """#265 F5: reject a declared oversize before reading its body."""
+        mod = self._scrub_mod()
+        sha = "5" * 40
+        wire = (sha + " blob %d\n" % (mod.OBJECT_MAX_BYTES + 1)).encode()
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(RuntimeError, "exceeds .*scan bound"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    def test_blob_batch_rejects_a_truncated_production_body(self):
+        """#265 F5: production --batch must reject a short body/trailer."""
+        mod = self._scrub_mod()
+        sha = "3" * 40
+        wire = sha.encode() + b" blob 5\nshort"
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "truncated git cat-file batch blob body"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    def test_blob_batch_rejects_trailing_production_output(self):
+        """#265 F5: production --batch must reject surplus records/bytes."""
+        mod = self._scrub_mod()
+        sha = "4" * 40
+        wire = sha.encode() + b" blob 2\nok\nextra"
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(
+                    RuntimeError, "unexpected trailing git cat-file batch output"):
+                list(mod.iter_blob_batch([sha], "."))
+
+    @staticmethod
+    def _blob_batch_process(wire):
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(wire)
+                self.returncode = None
+
+            def wait(self):
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        return FakeProcess()
+
+    def test_comparison_normalization_does_not_apply_nfkc_widening(self):
+        """#265 B negative contract: compatibility lookalikes stay distinct."""
+        mod = self._scrub_mod()
+        rules = [
+            (mod.label_of("ffi"), "ffi", "literal"),
+            (mod.label_of("Acme"), "Acme", "literal"),
+            (mod.label_of("IV"), "IV", "literal"),
+        ]
+        matcher = mod.compile_content_matcher(rules)
+        self.assertEqual(mod.content_match_indexes("\ufb03", matcher, ()), set())
+        self.assertEqual(mod.content_match_indexes("\uff21cme", matcher, ()), set())
+        self.assertEqual(mod.content_match_indexes("\u2163", matcher, ()), set())
+
+    def test_word_rule_with_nonword_edge_is_refused_at_load_time(self):
+        """#265 C: a plausible-looking rule may not be silently dead."""
+        invalid = "word:Acme (EU)\n"
+        mod = self._scrub_mod()
+        with self.assertRaisesRegex(ValueError, "start and end"):
+            mod.parse_denylist_text(invalid)
+        with self.assertRaisesRegex(ValueError, "start and end"):
+            cowork._parse_denylist_text(invalid)
+        self._commit("docs/clean.md", "clean\n")
+        r = self._scrub("--no-history", denylist=self._deny(invalid))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("word denylist rule must start and end", r.stderr)
+        self.assertNotIn("Acme", r.stdout + r.stderr)
+
+    def test_overlapping_word_rules_each_report_their_own_label(self):
+        """#265 C: one combined alternation must not hide a longer rule."""
+        short, long = "Zebra", "Zebra Secret"
+        self._commit("docs/clean.md", "clean\n",
+                     msg="release mentions %s" % long)
+        r = self._scrub(
+            denylist=self._deny("word:%s\nword:%s\n" % (short, long)))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        messages = [line for line in r.stdout.splitlines()
+                    if line.startswith("MESSAGE hit:")]
+        mod = self._scrub_mod()
+        self.assertTrue(any(mod.label_of(short) in line for line in messages))
+        self.assertTrue(any(mod.label_of(long) in line for line in messages))
+        self.assertEqual(len(messages), 2)
 
     def _allow_surface(self, deny_body, *args):
         """Run the scanner and return (rc, {hit kinds}). #266 asserts the KIND.
