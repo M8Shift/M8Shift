@@ -19893,6 +19893,16 @@ class TestRFC052ScrubCheck(CLIBase):
                     RuntimeError, "invalid git cat-file batch blob size"):
                 list(mod.iter_blob_batch([sha], "."))
 
+    def test_blob_batch_rejects_a_production_size_over_the_scan_bound(self):
+        """#265 F5: reject a declared oversize before reading its body."""
+        mod = self._scrub_mod()
+        sha = "5" * 40
+        wire = (sha + " blob %d\n" % (mod.OBJECT_MAX_BYTES + 1)).encode()
+        proc = self._blob_batch_process(wire)
+        with mock.patch.object(mod.subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(RuntimeError, "exceeds .*scan bound"):
+                list(mod.iter_blob_batch([sha], "."))
+
     def test_blob_batch_rejects_a_truncated_production_body(self):
         """#265 F5: production --batch must reject a short body/trailer."""
         mod = self._scrub_mod()
