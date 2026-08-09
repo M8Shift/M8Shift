@@ -216,6 +216,16 @@ policy. `full-access` and provider bypass flags are rejected unless the immutabl
 plan carries an operator-authorized waiver and an independently enforced outer
 boundary.
 
+After canonical path resolution, the `writable_roots` of a resolved
+`workspace-write` profile are confined to the attempt workspace or its
+`owned_worktree`. `owned_worktree` means the isolated worktree selected in the
+immutable attempt plan and assigned to that attempt identity under
+[RFC 049](049-rfc-holder-liveness-stale-claim-hardening.md) ownership metadata;
+that advisory metadata is not itself applied-confinement proof. A resolved
+profile or provider projection that permits writes outside those roots MUST be
+classified as `full-access`, regardless of its provider label, and inherits the
+same waiver and independently enforced outer-boundary requirement.
+
 A governed detached attempt MUST resolve `approval_policy="never"`, and the
 provider projection MUST set the provider's explicit non-interactive equivalent
 in attempt-local argv or selected configuration. It MUST NOT inherit approval
@@ -232,6 +242,9 @@ The portable network vocabulary is `deny`, `allowlist`, or `unrestricted`.
 destinations are denied unless individually declared and proven supported by the
 adapter; wildcards do not count as private-network exceptions. Port, protocol,
 or HTTP-method restrictions may be declared only when the adapter proves them.
+Resolved `unrestricted` network access is rejected unless the immutable plan
+carries an operator-authorized waiver and an independently enforced outer
+boundary.
 Enabling a provider's network boolean without active destination enforcement is
 a projection of `unrestricted`, never `allowlist`. An unsupported dimension
 fails validation instead of silently widening the policy.
@@ -284,23 +297,28 @@ Each adapter/version must pass the same fake-project suite:
 6. classify exit 0 without an authored append as non-completion;
 7. reject poisoned user-global defaults and prove that the attempt-local
    `approval_policy="never"` projection leaves no interactive approval path;
-8. prove allowed workspace access and denied out-of-policy filesystem access;
+8. prove allowed workspace access and denied out-of-policy filesystem access,
+   and reject a `workspace-write` profile or projection whose writable roots
+   escape the attempt workspace or `owned_worktree` unless the `full-access`
+   waiver and independently enforced outer boundary are both present;
 9. prove `network=deny`, then prove each exact allowlisted destination while
    rejecting a sibling host, a second private destination, and an alias that
    resolves to a private address;
-10. reject unsupported or misspelled policy keys, bypass flags, policy-hash
+10. reject resolved `network=unrestricted` unless its operator-authorized waiver
+    and independently enforced outer boundary are both present;
+11. reject unsupported or misspelled policy keys, bypass flags, policy-hash
     mismatches, and changed provider versions before model launch;
-11. distinguish configuration parsing, rendered projection, and an actually
+12. distinguish configuration parsing, rendered projection, and an actually
     observed or host-enforced boundary in the policy receipt;
-12. keep `unverified` receipts in shadow mode and fail closed when governed
+13. keep `unverified` receipts in shadow mode and fail closed when governed
     production evidence is unavailable;
-13. route an unsupported private-forge profile through the RFC 065 gateway
+14. route an unsupported private-forge profile through the RFC 065 gateway
     with the author at `network=deny`, never through widened direct access;
-14. redact credentials, session references, secret values, and sensitive relay
+15. redact credentials, session references, secret values, and sensitive relay
     output from argv, events, receipts, and diagnostics;
-15. preserve the same relay and worktree invariants as every other adapter.
+16. preserve the same relay and worktree invariants as every other adapter.
 
-The experimental Codex network proxy can satisfy items 9 and 11 only in the
+The experimental Codex network proxy can satisfy items 9 and 12 only in the
 disposable LAN canary defined in §5.2. Passing that canary does not make the
 experimental projection conforming for production.
 
