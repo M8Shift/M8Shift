@@ -190,6 +190,88 @@ Rules:
 - Rendered argv is element-by-element with no shell interpolation. Persisted argv
   and events are redacted.
 
+#### Policy resolution, projection, and applied evidence
+
+`permission_policy` and `network_policy` are versioned, typed profiles. A
+boolean or free-form provider label is not a conforming resolved policy. Every
+governed attempt distinguishes these four stages:
+
+```text
+requested -> resolved -> provider_projection -> applied_observation
+```
+
+- `requested` records intent without claiming that the host accepted it.
+- `resolved` records the host/operator decision after policy precedence.
+- `provider_projection` records the exact provider/version-specific argv,
+  selected settings, and environment-name allowlist.
+- `applied_observation` records what the launched process demonstrably received
+  or what an independent host boundary enforced.
+
+No stage may be reported as another. In particular, a successful configuration
+parse or zero process exit is not applied-policy attestation.
+
+The portable permission vocabulary includes at least `read-only`,
+`workspace-write`, and `full-access`, explicit writable roots, and an approval
+policy. `full-access` and provider bypass flags are rejected unless the immutable
+plan carries an operator-authorized waiver and an independently enforced outer
+boundary.
+
+A governed detached attempt MUST resolve `approval_policy="never"`, and the
+provider projection MUST set the provider's explicit non-interactive equivalent
+in attempt-local argv or selected configuration. It MUST NOT inherit approval
+behavior from user-global or otherwise uninspectable defaults. The receipt
+distinguishes the requested value, resolved value, exact provider projection,
+and applied observation. If an adapter cannot prove before launch that no
+interactive approval path remains, the governed attempt fails closed. This is a
+liveness requirement, not a permission convenience: a detached approval prompt
+has no respondent and can present as a hung job. A waiver for broader filesystem
+permission does not waive the non-interactive requirement.
+
+The portable network vocabulary is `deny`, `allowlist`, or `unrestricted`.
+`allowlist` carries exact destinations. Private, loopback, and link-local
+destinations are denied unless individually declared and proven supported by the
+adapter; wildcards do not count as private-network exceptions. Port, protocol,
+or HTTP-method restrictions may be declared only when the adapter proves them.
+Enabling a provider's network boolean without active destination enforcement is
+a projection of `unrestricted`, never `allowlist`. An unsupported dimension
+fails validation instead of silently widening the policy.
+
+The experimental Codex network proxy is admissible only for the first LAN
+canary on a disposable fixture, with both positive and negative proofs. While
+the provider labels that feature experimental, it MUST NOT be used for a
+governed production attempt. The canary acceptance does not authorize a provider
+registry, runner, user-global configuration, or headless-invocation change.
+
+User-global defaults are excluded from resolution. Admin or host policy may
+tighten the resolved plan but may not widen it; the receipt records its
+provenance and resulting ceiling. Unknown or uninspectable precedence is a
+validation failure for governed detached execution.
+
+Every launch produces a bounded, redacted policy receipt tied to `attempt_id`.
+It records the provider executable and version, adapter version, platform,
+canonical resolved-policy hash, loaded and ignored configuration sources,
+redacted argv, environment-name allowlist, projection result, and observation
+status. Secrets, values, tokens, raw environment contents, and sensitive relay
+output never appear. Assurance is labelled honestly as `declared`, `projected`,
+`host-enforced`, `provider-observed`, or `unverified`.
+
+`unverified` is shadow-mode-only and is forbidden for a governed production
+attempt. A production attempt that cannot prove its required policy fails
+closed. If `unverified` is admissible in production, it becomes the normal state
+under time pressure and the receipt stops meaning anything.
+
+Network capability remains separate from `external_actions`: reaching a forge
+does not authorize issue creation, push, merge, or another external mutation.
+When a required forge destination cannot be expressed or proven under the
+resolved allowlist, direct access is unsupported. The conforming delivery route
+is the accepted [RFC 065](065-rfc-ticketed-committed-pushed-delivery.md) named
+forge-gateway flow while the author's attempt remains `network=deny`; policy
+MUST NOT be widened to `unrestricted`, and direct success under a wider ambient
+setting is a failed conformance probe. The receipt names the gateway route and
+named gateway role without recording credentials or sensitive relay output.
+RFC 065 continues to govern the exact committed-SHA handoff, gateway review,
+ticket reconciliation, push, and remote evidence.
+
 ### 5.3 Conformance, not a vendor matrix in code
 
 Each adapter/version must pass the same fake-project suite:
@@ -200,8 +282,27 @@ Each adapter/version must pass the same fake-project suite:
 4. resume when declared, and refuse clearly when not declared;
 5. distinguish a live process, a resumable session, and an unknown/orphan;
 6. classify exit 0 without an authored append as non-completion;
-7. redact credentials and session references;
-8. preserve the same relay and worktree invariants as every other adapter.
+7. reject poisoned user-global defaults and prove that the attempt-local
+   `approval_policy="never"` projection leaves no interactive approval path;
+8. prove allowed workspace access and denied out-of-policy filesystem access;
+9. prove `network=deny`, then prove each exact allowlisted destination while
+   rejecting a sibling host, a second private destination, and an alias that
+   resolves to a private address;
+10. reject unsupported or misspelled policy keys, bypass flags, policy-hash
+    mismatches, and changed provider versions before model launch;
+11. distinguish configuration parsing, rendered projection, and an actually
+    observed or host-enforced boundary in the policy receipt;
+12. keep `unverified` receipts in shadow mode and fail closed when governed
+    production evidence is unavailable;
+13. route an unsupported private-forge profile through the RFC 065 gateway
+    with the author at `network=deny`, never through widened direct access;
+14. redact credentials, session references, secret values, and sensitive relay
+    output from argv, events, receipts, and diagnostics;
+15. preserve the same relay and worktree invariants as every other adapter.
+
+The experimental Codex network proxy can satisfy items 9 and 11 only in the
+disposable LAN canary defined in §5.2. Passing that canary does not make the
+experimental projection conforming for production.
 
 ## 6. Provider examples and prior art
 
