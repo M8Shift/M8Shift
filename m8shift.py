@@ -7120,7 +7120,8 @@ def _parse_denylist_text(text):
     `allow:<substring>` = exception (a line containing it is never flagged);
     `word:<term>` = word-boundary match; anything else = literal substring.
     Matching is case-insensitive (the recorded leak recurrences involved case
-    variants). Terms shorter than HYGIENE_DENYLIST_MIN_LEN are counted and
+    variants). Entries shorter than HYGIENE_DENYLIST_MIN_LEN — terms AND
+    `allow:` exceptions alike (#266) — are counted and
     skipped — never echoed. Capped at HYGIENE_DENYLIST_MAX_TERMS rules."""
     rules, allows, skipped = [], [], 0
     for line in text.splitlines():
@@ -7131,7 +7132,14 @@ def _parse_denylist_text(text):
             break
         mode, sep, rest = line.partition(":")
         if sep and mode == "allow" and rest.strip():
-            allows.append(rest.strip().lower())
+            # #266: same floor as a term — see scripts/scrub-check.py for the measured
+            # bypass. Kept identical here so the two parsers cannot drift; the shared
+            # drift fixture asserts they agree.
+            exception = rest.strip()
+            if len(exception) < HYGIENE_DENYLIST_MIN_LEN:
+                skipped += 1
+                continue
+            allows.append(exception.lower())
             continue
         if sep and mode == "word" and rest.strip():
             term = rest.strip()
@@ -7187,8 +7195,9 @@ def _load_denylist(env=None):
     if skipped:
         findings.append(doctor_finding(
             "hygiene.denylist_term_skipped", "info",
-            "%d denylist term(s) shorter than %d chars ignored (terms not echoed)"
-            % (skipped, HYGIENE_DENYLIST_MIN_LEN), base))
+            "%d denylist entr%s shorter than %d chars ignored (entries not echoed)"
+            % (skipped, "y" if skipped == 1 else "ies",
+               HYGIENE_DENYLIST_MIN_LEN), base))
     return rules, allows, findings
 
 

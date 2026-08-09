@@ -19719,7 +19719,10 @@ class TestRFC052ScrubCheck(CLIBase):
         # The script duplicates the core denylist parser (self-contained by
         # design); this pins both to identical semantics on a shared fixture.
         mod = self._scrub_mod()
+        # #266: the fixture carries short EXCEPTIONS as well as a short term, so
+        # both parsers must agree that an exception is held to the same floor.
         fixture = ("# comment\n\n%s\nword:Zebrafish\nallow:approved sample\nxy\n"
+                   "allow:e\nallow:ab\nallow:xyz\n"
                    "foo:bar-is-a-literal\n" % self.TERM)
         core_rules, core_allows, core_skipped = cowork._parse_denylist_text(fixture)
         s_rules, s_allows, s_skipped = mod.parse_denylist_text(fixture)
@@ -19730,6 +19733,99 @@ class TestRFC052ScrubCheck(CLIBase):
         core_word = {t for l, t, rx in core_rules if rx.pattern.startswith("\\b")}
         s_word = {t for l, t, m in s_rules if m == "word"}
         self.assertEqual(core_word, s_word)
+        # #266 exactly: one-and two-character exceptions dropped, three kept, and the
+        # short term `xy` still counted — asserted as exact values, not a length.
+        self.assertEqual(s_allows, ["approved sample", "xyz"])
+        self.assertEqual(s_skipped, 3, "xy + allow:e + allow:ab")
+
+    def _allow_surface(self, deny_body, *args):
+        """Run the scanner and return (rc, {hit kinds}). #266 asserts the KIND.
+
+        Naming the kind matters here: HISTORY evaluates no exceptions and PATH/tree
+        take none since #291/#292, so a run that still blocks for an unrelated reason
+        would make a vulnerable textual surface look covered.
+        """
+        r = self._scrub(*args, denylist=self._deny(deny_body))
+        kinds = sorted({ln.split(" hit")[0] for ln in r.stdout.splitlines()
+                        if " hit:" in ln})
+        return r.returncode, kinds, r.stdout
+
+    def test_a_short_allow_no_longer_silences_the_tip_pass(self):
+        """#266: an exception is stronger than a term, so it needs the same floor.
+
+        Every textual consumer suppresses a WHOLE LINE when any allow substring
+        occurs in it. A one-character exception therefore silences every candidate
+        line: a line cannot contain the denied term without also containing `e`.
+        Measured on the pre-fix parser — rc 1 with a TIP hit for the term alone,
+        rc 0 and nothing once `allow:e` is added.
+        """
+        self._commit("docs/note.md", "this mentions %s here\n" % self.TERM)
+        rc, kinds, _ = self._allow_surface(self.TERM + "\n", "--no-history")
+        self.assertEqual((rc, kinds), (1, ["TIP"]), "probe invalid: no TIP hit at all")
+        rc, kinds, out = self._allow_surface(self.TERM + "\nallow:e\n", "--no-history")
+        self.assertEqual(rc, 1, "a one-character allow silenced the TIP pass:\n%s" % out)
+        self.assertIn("TIP", kinds)
+        self.assertIn("shorter than 3 chars ignored", out,
+                      "the operator must be told an entry was dropped")
+
+    def test_a_three_character_allow_is_still_accepted(self):
+        """#266 positive boundary: the fix must reject SHORTER, not three.
+
+        This is what separates the change from an off-by-one that quietly disables
+        legitimate exceptions.
+        """
+        self._commit("docs/note.md",
+                     "The %s appears beside xyz on this line.\n" % self.TERM)
+        rc, kinds, out = self._allow_surface(self.TERM + "\nallow:xyz\n", "--no-history")
+        self.assertEqual((rc, kinds), (0, []),
+                         "a legitimate 3-character exception stopped suppressing:\n%s"
+                         % out)
+        self.assertNotIn("shorter than", out)
+
+    def test_a_short_allow_no_longer_silences_the_message_pass(self):
+        """#266 on the commit-message surface (#251), named by kind."""
+        self._commit("docs/clean.md", "nothing here\n",
+                     msg="body mentioning %s in the message" % self.TERM)
+        rc, kinds, _ = self._allow_surface(self.TERM + "\n")
+        self.assertIn("MESSAGE", kinds, "probe invalid: no MESSAGE hit at all")
+        rc, kinds, out = self._allow_surface(self.TERM + "\nallow:e\n")
+        self.assertEqual(rc, 1, "a one-character allow silenced the MESSAGE pass")
+        self.assertIn("MESSAGE", kinds, out)
+
+    def test_a_short_allow_no_longer_silences_the_tag_pass(self):
+        """#266 on the annotated-tag surface, named by kind.
+
+        The referenced commit and tree are deliberately clean, so only the tag
+        object's own message can produce the finding.
+        """
+        self._commit("docs/clean.md", "nothing here\n", msg="clean subject")
+        subprocess.run(["git", "tag", "-a", "v9", "-m",
+                        "tag body carrying %s" % self.TERM],
+                       cwd=self.d, capture_output=True)
+        # Annotated-tag messages surface in the repository-wide audit (and in a
+        # pushed range that names the tag ref); the plain direct scan does not reach
+        # them, so the probe must use --all or it would assert nothing.
+        rc, kinds, _ = self._allow_surface(self.TERM + "\n", "--all")
+        self.assertIn("TAG", kinds, "probe invalid: no TAG hit at all")
+        rc, kinds, out = self._allow_surface(self.TERM + "\nallow:e\n", "--all")
+        self.assertEqual(rc, 1, "a one-character allow silenced the TAG pass")
+        self.assertIn("TAG", kinds, out)
+
+    def test_a_short_allow_no_longer_silences_the_object_audit(self):
+        """#266 on the explicit --objects release audit, named by object kind.
+
+        The blob is added then removed from the tip, so only the object walk can
+        reach it; commit subjects stay clean so the finding cannot come from a
+        message.
+        """
+        self._commit("docs/gone.md", "blob body with %s inside\n" % self.TERM,
+                     msg="clean subject")
+        self._rm_commit("docs/gone.md", msg="clean removal")
+        rc, kinds, out = self._allow_surface(self.TERM + "\n", "--objects")
+        self.assertIn("OBJECT hit: blob ", out, "probe invalid: no blob finding")
+        rc, kinds, out = self._allow_surface(self.TERM + "\nallow:e\n", "--objects")
+        self.assertEqual(rc, 1, "a one-character allow silenced the object audit")
+        self.assertIn("OBJECT hit: blob ", out)
 
     def test_term_in_path_redacted_and_allow_in_path_does_not_suppress(self):
         # Review BLOCKER (locator leak) + MEDIUM 3 (allow matched on the full

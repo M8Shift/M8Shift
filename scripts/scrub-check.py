@@ -9,6 +9,9 @@ Denylist (never committed — it IS the confidential data):
   $M8SHIFT_DENYLIST if set, else ~/.config/m8shift/denylist.txt, else no-op.
   Format: one entry per line; `# comment` / blank ignored;
   `allow:<substring>` = exception; `word:<term>` = word-boundary; else literal.
+  Every entry, exception included, must be at least 3 characters: an exception
+  suppresses a whole line for every rule, so a shorter one silences more than any
+  term it could justify (#266).
   Matching is case-insensitive.
 
 Scans (raw `git` by argv — NEVER routed through a lossy optimizer such as rtk;
@@ -93,7 +96,19 @@ def parse_denylist_text(text):
             break
         mode, sep, rest = line.partition(":")
         if sep and mode == "allow" and rest.strip():
-            allows.append(rest.strip().lower())
+            # #266: an exception is held to the same floor as a term, because it is
+            # STRONGER than one. Every textual consumer suppresses a whole line when
+            # any allow substring occurs in it, so a one-character exception silences
+            # every candidate line that can possibly contain a denied term: a line
+            # cannot match `SensitiveToken` without also containing `e`. Measured on
+            # the pre-fix parser: rc 1 and a TIP hit with the term alone, rc 0 and no
+            # hit once `allow:e` is added. The floor was applied to literal and
+            # `word:` rules only — the branch returned before reaching it.
+            exception = rest.strip()
+            if len(exception) < DENYLIST_MIN_LEN:
+                skipped += 1
+                continue
+            allows.append(exception.lower())
             continue
         if sep and mode == "word" and rest.strip():
             term = rest.strip()
@@ -147,7 +162,8 @@ def load_denylist(path_override=None, env=None):
             "denylist exceeds %d-term scan bound" % DENYLIST_MAX_TERMS)
     note = ""
     if skipped:
-        note = "%d term(s) shorter than %d chars ignored" % (skipped, DENYLIST_MIN_LEN)
+        note = ("%d denylist entr%s shorter than %d chars ignored"
+                % (skipped, "y" if skipped == 1 else "ies", DENYLIST_MIN_LEN))
     return rules, allows, note
 
 
