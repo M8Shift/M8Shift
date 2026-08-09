@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
 
 
@@ -7056,6 +7057,20 @@ HYGIENE_DENYLIST_MAX_TERMS = 256
 HYGIENE_DENYLIST_MIN_LEN = 3               # 1-2 char terms are a false-positive storm
 
 
+def _denylist_normalize(text):
+    """Targeted #265 comparison fold; deliberately narrower than NFKC."""
+    return re.sub(r"[ \u00a0\u200b\u00ad]+", " ",
+                  unicodedata.normalize("NFC", text))
+
+
+def _denylist_validate_word(term):
+    normalized = _denylist_normalize(term)
+    if not normalized or not re.match(r"\w", normalized[0], re.UNICODE) or \
+            not re.match(r"\w", normalized[-1], re.UNICODE):
+        raise ValueError(
+            "word denylist rule must start and end with a word character")
+
+
 def _denylist_label(term):
     """Confidential display label for a denied term — a short hash, never the term."""
     return "denylist:" + hashlib.sha256(term.strip().lower().encode("utf-8")).hexdigest()[:10]
@@ -7068,6 +7083,10 @@ def _denylist_redact(text, rules):
     rules, word- and literal-mode alike."""
     for _label, _term, rx in rules:
         text = rx.sub("[redacted]", text)
+    normalized = _denylist_normalize(text)
+    for _label, _term, rx in rules:
+        if rx.search(normalized):
+            return "[redacted]"
     return text
 
 
@@ -7169,21 +7188,24 @@ def _parse_denylist_text(text):
             if len(exception) < HYGIENE_DENYLIST_MIN_LEN:
                 skipped += 1
                 continue
-            allows.append(exception.lower())
+            allows.append(_denylist_normalize(exception).lower())
             continue
         if sep and mode == "word" and rest.strip():
             term = rest.strip()
             if len(term) < HYGIENE_DENYLIST_MIN_LEN:
                 skipped += 1
                 continue
+            _denylist_validate_word(term)
+            normalized = _denylist_normalize(term)
             rules.append((_denylist_label(term), term,
-                          re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)))
+                          re.compile(r"\b" + re.escape(normalized) + r"\b",
+                                     re.IGNORECASE)))
             continue
         if len(line) < HYGIENE_DENYLIST_MIN_LEN:
             skipped += 1
             continue
         rules.append((_denylist_label(line), line,
-                      re.compile(re.escape(line), re.IGNORECASE)))
+                      re.compile(re.escape(_denylist_normalize(line)), re.IGNORECASE)))
     return rules, allows, skipped
 
 
@@ -7221,7 +7243,14 @@ def _load_denylist(env=None):
             "hygiene.denylist_truncated", "info",
             "denylist larger than %d bytes — extra entries ignored"
             % HYGIENE_DENYLIST_MAX_BYTES, base))
-    rules, allows, skipped = _parse_denylist_text(raw.decode("utf-8", "replace"))
+    try:
+        rules, allows, skipped = _parse_denylist_text(raw.decode("utf-8", "replace"))
+    except ValueError as exc:
+        findings.append(doctor_finding(
+            "hygiene.denylist_invalid", "error",
+            "denylist refused: %s (entries not echoed)" % exc, base,
+            "rewrite the invalid rule before relying on hygiene coverage"))
+        return [], [], findings
     if skipped:
         findings.append(doctor_finding(
             "hygiene.denylist_term_skipped", "info",
@@ -7329,11 +7358,12 @@ def _hygiene_findings(root=None, verbose=False):
                 # The matched line is NEVER echoed (it contains the confidential
                 # term); default output is file:line + hashed label only.
                 text_line = line[:HYGIENE_MAX_LINE_BYTES].decode("utf-8", "replace")
-                lowered = text_line.lower()
+                normalized_line = _denylist_normalize(text_line)
+                lowered = normalized_line.lower()
                 if any(a in lowered for a in deny_allows):
                     continue
                 for label, term, rx in deny_rules:
-                    if rx.search(text_line):
+                    if rx.search(normalized_line):
                         detail = (" term=%r" % term) if verbose else ""
                         # Codex review BLOCKER: the PATH itself can carry the
                         # denied term — redact it in the message AND the path

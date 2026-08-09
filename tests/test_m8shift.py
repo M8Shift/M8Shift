@@ -17513,6 +17513,30 @@ class TestRFC052Denylist(CLIBase):
         self.assertTrue(any(":2:" in m for m in msgs))   # word-boundary caught
         # l.3 plural not word-matched; l.4 suppressed by allow:
 
+    def test_comparison_normalization_matches_targeted_forms_in_core(self):
+        term = "Zorglub\u00e9 Widgets"
+        self._track(
+            "docs/forms.md",
+            "\n".join(("Zorglub\u00e9\u00a0Widgets",
+                        "Zorglub\u00e9\u200bWidgets",
+                        "Zorglub\u00e9\u00adWidgets",
+                        "Zorglube\u0301 Widgets")) + "\n")
+        r = self._run(denylist=self._deny(term + "\n"))
+        hits = self._findings(r)
+        self.assertEqual(len(hits), 4, r.stdout)
+        self.assertEqual({int(hit["message"].split(":")[1]) for hit in hits},
+                         {1, 2, 3, 4})
+
+    def test_invalid_word_rule_is_a_visible_core_error_and_disables_rules(self):
+        self._track("docs/a.md", "Acme (EU)\n")
+        r = self._run("--severity-min", "info",
+                      denylist=self._deny("word:Acme (EU)\n"))
+        invalid = self._findings(r, "hygiene.denylist_invalid")
+        self.assertEqual(len(invalid), 1, r.stdout)
+        self.assertEqual(invalid[0]["severity"], "error")
+        self.assertNotIn("Acme", r.stdout + r.stderr)
+        self.assertEqual(self._findings(r), [])
+
     def test_precedence_env_beats_default_and_default_is_read(self):
         self._track("docs/a.md", "Only %s here.\n" % self.TERM)
         cfg = os.path.join(self.home, ".config", "m8shift")
@@ -19746,6 +19770,75 @@ class TestRFC052ScrubCheck(CLIBase):
         # short term `xy` still counted — asserted as exact values, not a length.
         self.assertEqual(s_allows, ["approved sample", "xyz"])
         self.assertEqual(s_skipped, 3, "xy + allow:e + allow:ab")
+
+    def test_comparison_normalization_hits_each_documented_equivalent_form(self):
+        """#265 B: selectors and matcher agree on the targeted equivalence set.
+
+        Each mutation gets its own commit, so the assertions prove both the TIP
+        selector and the normalized occurrence-count history supplement. Removing
+        NFC or any one separator alternative kills the corresponding path/commit.
+        """
+        term = "Zorglub\u00e9 Widgets"
+        variants = {
+            "control.md": term,
+            "nbsp.md": "Zorglub\u00e9\u00a0Widgets",
+            "zero-width.md": "Zorglub\u00e9\u200bWidgets",
+            "soft-hyphen.md": "Zorglub\u00e9\u00adWidgets",
+            "nfd.md": "Zorglube\u0301 Widgets",
+        }
+        commits = {}
+        for name, value in variants.items():
+            self._commit("docs/" + name, "seen %s here\n" % value,
+                         "add " + name)
+            commits[name] = self._sha()
+        r = self._scrub(denylist=self._deny(term + "\n"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for name, sha in commits.items():
+            self.assertIn("HEAD:docs/%s:1" % name, r.stdout)
+            self.assertIn("HISTORY hit: commit %s" % sha[:12], r.stdout)
+        self.assertNotIn(term, r.stdout + r.stderr)
+
+    def test_comparison_normalization_does_not_apply_nfkc_widening(self):
+        """#265 B negative contract: compatibility lookalikes stay distinct."""
+        mod = self._scrub_mod()
+        rules = [
+            (mod.label_of("ffi"), "ffi", "literal"),
+            (mod.label_of("Acme"), "Acme", "literal"),
+            (mod.label_of("IV"), "IV", "literal"),
+        ]
+        matcher = mod.compile_content_matcher(rules)
+        self.assertEqual(mod.content_match_indexes("\ufb03", matcher, ()), set())
+        self.assertEqual(mod.content_match_indexes("\uff21cme", matcher, ()), set())
+        self.assertEqual(mod.content_match_indexes("\u2163", matcher, ()), set())
+
+    def test_word_rule_with_nonword_edge_is_refused_at_load_time(self):
+        """#265 C: a plausible-looking rule may not be silently dead."""
+        invalid = "word:Acme (EU)\n"
+        mod = self._scrub_mod()
+        with self.assertRaisesRegex(ValueError, "start and end"):
+            mod.parse_denylist_text(invalid)
+        with self.assertRaisesRegex(ValueError, "start and end"):
+            cowork._parse_denylist_text(invalid)
+        self._commit("docs/clean.md", "clean\n")
+        r = self._scrub("--no-history", denylist=self._deny(invalid))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("word denylist rule must start and end", r.stderr)
+        self.assertNotIn("Acme", r.stdout + r.stderr)
+
+    def test_overlapping_word_rules_each_report_their_own_label(self):
+        """#265 C: one combined alternation must not hide a longer rule."""
+        short, long = "Zebra", "Zebra Secret"
+        self._commit("docs/clean.md", "clean\n",
+                     msg="release mentions %s" % long)
+        r = self._scrub(
+            denylist=self._deny("word:%s\nword:%s\n" % (short, long)))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        messages = [line for line in r.stdout.splitlines()
+                    if line.startswith("MESSAGE hit:")]
+        mod = self._scrub_mod()
+        self.assertTrue(any(mod.label_of(short) in line for line in messages))
+        self.assertTrue(any(mod.label_of(long) in line for line in messages))
+        self.assertEqual(len(messages), 2)
 
     def _allow_surface(self, deny_body, *args):
         """Run the scanner and return (rc, {hit kinds}). #266 asserts the KIND.

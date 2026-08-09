@@ -63,6 +63,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import unicodedata
 
 DENYLIST_ENV = "M8SHIFT_DENYLIST"
 DENYLIST_DEFAULT = os.path.join("~", ".config", "m8shift", "denylist.txt")
@@ -84,6 +85,27 @@ REMOTE_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 def label_of(term):
     """Confidential display label — a short hash, never the term itself."""
     return "denylist:" + hashlib.sha256(term.strip().lower().encode("utf-8")).hexdigest()[:10]
+
+
+def normalize_for_match(text):
+    """Canonicalize only the human-equivalent forms covered by #265.
+
+    NFC closes decomposed-accent misses without NFKC's compatibility widening.
+    NBSP is the space operators routinely paste, while zero-width space and soft
+    hyphen are formatting controls that must not split an otherwise identical
+    identifier.  This intentionally does NOT fold ligatures, full-width forms,
+    circled characters, superscripts, or other compatibility characters.
+    """
+    return re.sub(r"[ \u00a0\u200b\u00ad]+", " ",
+                  unicodedata.normalize("NFC", text))
+
+
+def validate_word_term(term):
+    normalized = normalize_for_match(term)
+    if not normalized or not re.match(r"\w", normalized[0], re.UNICODE) or \
+            not re.match(r"\w", normalized[-1], re.UNICODE):
+        raise ValueError(
+            "word denylist rule must start and end with a word character")
 
 
 def parse_denylist_text(text):
@@ -111,13 +133,14 @@ def parse_denylist_text(text):
             if len(exception) < DENYLIST_MIN_LEN:
                 skipped += 1
                 continue
-            allows.append(exception.lower())
+            allows.append(normalize_for_match(exception).lower())
             continue
         if sep and mode == "word" and rest.strip():
             term = rest.strip()
             if len(term) < DENYLIST_MIN_LEN:
                 skipped += 1
                 continue
+            validate_word_term(term)
             rules.append((label_of(term), term, "word"))
             continue
         if len(line) < DENYLIST_MIN_LEN:
@@ -498,6 +521,13 @@ def redact(text, rules):
     a denied term inside a file PATH re-leaked through the default locator)."""
     for _label, term, mode in rules:
         text = re.sub(re.escape(term), "[redacted]", text, flags=re.IGNORECASE)
+    normalized = normalize_for_match(text)
+    for _label, term, mode in rules:
+        needle = normalize_for_match(term)
+        pattern = (r"\b" + re.escape(needle) + r"\b") \
+            if mode == "word" else re.escape(needle)
+        if re.search(pattern, normalized, re.IGNORECASE):
+            return "[redacted]"
     return text
 
 
@@ -618,6 +648,195 @@ def run_git(cmd, repo):
                           timeout=GIT_TIMEOUT_S)
 
 
+def run_git_bytes(cmd, repo):
+    """Raw-output sibling used at the explicit decode boundary introduced by #265."""
+    refuse_network_argv(cmd)
+    return subprocess.run(cmd, cwd=repo, capture_output=True,
+                          timeout=GIT_TIMEOUT_S)
+
+
+def read_blob_batch(shas, repo):
+    """Read unique blob ids through one local cat-file process. -> {sha: bytes}."""
+    ordered = list(dict.fromkeys(sha for sha in shas if sha and set(sha) != {"0"}))
+    if not ordered:
+        return {}
+    cmd = ["git", "cat-file", "--batch"]
+    refuse_network_argv(cmd)
+    proc = subprocess.Popen(cmd, cwd=repo, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    payload = ("\n".join(ordered) + "\n").encode("ascii")
+    try:
+        stdout, stderr = proc.communicate(payload, timeout=OBJECT_GIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise RuntimeError("git cat-file --batch exceeded %ds timeout" %
+                           OBJECT_GIT_TIMEOUT_S)
+    if proc.returncode != 0:
+        raise RuntimeError("git cat-file --batch rc=%d: %s" % (
+            proc.returncode, stderr[:200].decode("utf-8", "replace")))
+    blobs = {}
+    offset = 0
+    for expected in ordered:
+        end = stdout.find(b"\n", offset)
+        if end < 0:
+            raise RuntimeError("truncated git cat-file batch header")
+        header = stdout[offset:end].split()
+        offset = end + 1
+        if len(header) != 3 or header[0].decode("ascii", "replace") != expected \
+                or header[1] != b"blob":
+            raise RuntimeError("invalid git cat-file batch blob header")
+        try:
+            size = int(header[2])
+        except ValueError:
+            raise RuntimeError("invalid git cat-file batch blob size")
+        if size < 0 or size > OBJECT_MAX_BYTES:
+            raise RuntimeError("blob %s exceeds %d-byte scan bound" % (
+                expected[:12], OBJECT_MAX_BYTES))
+        body = stdout[offset:offset + size]
+        offset += size
+        if len(body) != size or stdout[offset:offset + 1] != b"\n":
+            raise RuntimeError("truncated git cat-file batch blob body")
+        offset += 1
+        blobs[expected] = body
+    return blobs
+
+
+def decode_comparison_text(raw):
+    """Current text-side decoder; #265 A will add byte encodings at this seam."""
+    if b"\x00" in raw[:8192]:
+        return None
+    return raw.decode("utf-8", "replace")
+
+
+def normalized_rule_indexes(rules):
+    """Rules needing the raw-object supplement because Git cannot normalize."""
+    wanted = set()
+    for index, (_label, term, _mode) in enumerate(rules):
+        normalized = normalize_for_match(term)
+        if term != normalized or " " in normalized or \
+                unicodedata.normalize("NFD", normalized) != normalized:
+            wanted.add(index)
+    return wanted
+
+
+def scan_normalized_tip(rules, allows, revs, repo):
+    """Supplement git-grep with one raw UTF-8 tree pass for normalized forms."""
+    wanted = normalized_rule_indexes(rules)
+    if not wanted:
+        return {}
+    matcher = compile_content_matcher(rules)
+    findings = {}
+    for rev in revs:
+        result = run_git_bytes(
+            ["git", "ls-tree", "-rz", "--full-tree", rev], repo)
+        if result.returncode != 0:
+            raise RuntimeError("git ls-tree rc=%d: %s" % (
+                result.returncode, result.stderr[:200].decode("utf-8", "replace")))
+        records = []
+        for raw_record in result.stdout.split(b"\x00"):
+            if not raw_record:
+                continue
+            meta, sep, path_raw = raw_record.partition(b"\t")
+            fields = meta.split()
+            if not sep or len(fields) != 3 or fields[1] != b"blob":
+                continue
+            records.append((fields[2].decode("ascii"),
+                            path_raw.decode("utf-8", "replace")))
+        blobs = read_blob_batch((sha for sha, _path in records), repo)
+        for sha, path in records:
+            text = decode_comparison_text(blobs[sha])
+            if text is None:
+                continue
+            for line_no, line in enumerate(text.splitlines(), 1):
+                for index in content_match_indexes(line, matcher, allows) & wanted:
+                    findings.setdefault(index, []).append(
+                        "%s:%s:%d" % (rev, path, line_no))
+    return findings
+
+
+def _normalized_occurrences(text, term, mode):
+    normalized_text = normalize_for_match(text)
+    normalized_term = normalize_for_match(term)
+    if mode == "word":
+        return len(re.findall(r"\b" + re.escape(normalized_term) + r"\b",
+                              normalized_text, re.IGNORECASE))
+    return normalized_text.lower().count(normalized_term.lower())
+
+
+def scan_normalized_history(rules, history_runs, args, extra_revs=None):
+    """Supplement pickaxe by comparing normalized counts in changed UTF-8 blobs.
+
+    The unit remains one file pair, matching Git -S semantics (including a term
+    moving between files in one commit).  This is the stable bytes->text boundary:
+    the later encoding slice extends decode_comparison_text(), not comparison.
+    """
+    wanted = normalized_rule_indexes(rules)
+    findings = {}
+    if not wanted:
+        return findings
+    for range_args, carrier in history_runs:
+        cmd = ["git", "log"] + history_revs(
+            range_args, args.all, args.refs_pull, extra_revs)
+        cmd += ["--raw", "-z", "--no-abbrev", "--no-renames", "--root",
+                "--format=%x1e%H%x00"]
+        if not range_args:
+            cmd += ["-n", str(args.max_commits + 1)]
+        cmd.append("--")
+        result = run_git_bytes(cmd, args.repo)
+        if result.returncode != 0:
+            raise RuntimeError("git log normalized history rc=%d: %s" % (
+                result.returncode, result.stderr[:200].decode("utf-8", "replace")))
+        commit_records = []
+        blob_ids = []
+        for chunk in result.stdout.split(b"\x1e"):
+            if not chunk:
+                continue
+            sha_raw, sep, raw_records = chunk.partition(b"\x00")
+            sha = sha_raw.strip().decode("ascii", "replace")
+            if not sep or not OBJECT_RX.match(sha):
+                raise RuntimeError("git log returned malformed normalized history")
+            pairs = []
+            fields = raw_records.split(b"\x00")
+            index = 0
+            while index < len(fields):
+                meta = fields[index].strip()
+                index += 1
+                if not meta:
+                    continue
+                if not meta.startswith(b":") or index >= len(fields):
+                    raise RuntimeError("git log returned malformed raw diff")
+                parts = meta[1:].split()
+                index += 1                         # path (names are irrelevant here)
+                if len(parts) < 5:
+                    raise RuntimeError("git log returned malformed raw metadata")
+                old_sha = parts[2].decode("ascii") if parts[0] != b"160000" else "0"
+                new_sha = parts[3].decode("ascii") if parts[1] != b"160000" else "0"
+                pairs.append((old_sha, new_sha))
+                blob_ids.extend((old_sha, new_sha))
+            commit_records.append((sha, pairs))
+        blobs = read_blob_batch(blob_ids, args.repo)
+        counts = {index: 0 for index in wanted}
+        for sha, pairs in commit_records:
+            hit_indexes = set()
+            for old_sha, new_sha in pairs:
+                old_text = decode_comparison_text(blobs.get(old_sha, b""))
+                new_text = decode_comparison_text(blobs.get(new_sha, b""))
+                if old_text is None or new_text is None:
+                    continue
+                for index in wanted:
+                    _label, term, mode = rules[index]
+                    if _normalized_occurrences(old_text, term, mode) != \
+                            _normalized_occurrences(new_text, term, mode):
+                        hit_indexes.add(index)
+            for index in sorted(hit_indexes):
+                if counts[index] >= args.max_commits:
+                    continue
+                findings.setdefault(index, []).append((sha, carrier))
+                counts[index] += 1
+    return findings
+
+
 def ref_carrier(refname):
     """Turn a canonical Git ref into an actionable, stable carrier label."""
     if refname.startswith("refs/heads/"):
@@ -720,12 +939,14 @@ def tag_candidates_for_all(repo, run):
 
 def tag_message_matches(body, term, mode, allows):
     """Match one rule against tag-message lines with the normal allow policy."""
-    word_rx = (re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
+    normalized_term = normalize_for_match(term)
+    word_rx = (re.compile(r"\b" + re.escape(normalized_term) + r"\b", re.IGNORECASE)
                if mode == "word" else None)
     for line in body.splitlines():
-        matched = word_rx.search(line) if word_rx is not None else \
-            term.lower() in line.lower()
-        if matched and not any(a in line.lower() for a in allows):
+        normalized_line = normalize_for_match(line)
+        matched = word_rx.search(normalized_line) if word_rx is not None else \
+            normalized_term.lower() in normalized_line.lower()
+        if matched and not any(a in normalized_line.lower() for a in allows):
             return True
     return False
 
@@ -733,27 +954,27 @@ def tag_message_matches(body, term, mode, allows):
 def compile_content_matcher(rules):
     """Compile denylist rules for a single pass over decoded object text."""
     literal_trie = {}
-    word_parts = []
+    word_rxs = []
     for index, (_label, term, mode) in enumerate(rules):
+        normalized_term = normalize_for_match(term)
         if mode == "word":
-            word_parts.append(
-                "(?P<r%d>\\b%s\\b)" % (index, re.escape(term)))
+            word_rxs.append((index, re.compile(
+                r"\b" + re.escape(normalized_term) + r"\b", re.IGNORECASE)))
             continue
         node = literal_trie
-        for char in term.lower():
+        for char in normalized_term.lower():
             node = node.setdefault(char, {})
         node.setdefault(None, []).append(index)
-    word_rx = re.compile("|".join(word_parts), re.IGNORECASE) \
-        if word_parts else None
-    return literal_trie, word_rx
+    return literal_trie, word_rxs
 
 
 def content_match_indexes(text, matcher, allows):
     """Return rule indexes matching text, applying line-scoped allows."""
-    literal_trie, word_rx = matcher
+    literal_trie, word_rxs = matcher
     matched = set()
     for line in text.splitlines():
-        lowered = line.lower()
+        normalized_line = normalize_for_match(line)
+        lowered = normalized_line.lower()
         if any(allowed in lowered for allowed in allows):
             continue
         for start in range(len(lowered)):
@@ -763,9 +984,9 @@ def content_match_indexes(text, matcher, allows):
                 node = node[lowered[offset]]
                 matched.update(node.get(None, ()))
                 offset += 1
-        if word_rx is not None:
-            for found in word_rx.finditer(line):
-                matched.add(int(found.lastgroup[1:]))
+        for index, word_rx in word_rxs:
+            if word_rx.search(normalized_line):
+                matched.add(index)
     return matched
 
 
@@ -1165,6 +1386,15 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         return 0
 
     try:
+        normalized_tip_hits = scan_normalized_tip(
+            rules, allows, tip_revs, args.repo)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+            RuntimeError) as exc:
+        print("scrub-check: ERROR scanning normalized tip content (%s)" % exc,
+              file=err)
+        return 2
+
+    try:
         tag_candidates = tag_candidates_for_all(args.repo, run) if args.all else \
             tag_candidates_for_tips(tip_revs, tip_carriers, args.repo, run)
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
@@ -1197,6 +1427,17 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
         except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
                 RuntimeError) as exc:
             print("scrub-check: ERROR preparing --all carriers (%s)" % exc,
+                  file=err)
+            return 2
+
+    normalized_history_hits = {}
+    if not args.no_history:
+        try:
+            normalized_history_hits = scan_normalized_history(
+                rules, history_runs, args, unreachable)
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+                RuntimeError) as exc:
+            print("scrub-check: ERROR scanning normalized history (%s)" % exc,
                   file=err)
             return 2
 
@@ -1268,7 +1509,19 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
             print("MESSAGE hit: commit %s via %s [%s]" %
                   (sha[:12], carrier_text, shown), file=out)
 
-        # TIP — revision(s) before `--`; rc 0 = match, 1 = clean, >1 = error.
+        # TIP — raw-object normalization supplement first, then the unchanged
+        # git-grep fast path.  Locator dedupe keeps the external format stable.
+        seen_tip_locs = set()
+        for loc in normalized_tip_hits.get(rule_index, ()):
+            if loc in seen_tip_locs:
+                continue
+            seen_tip_locs.add(loc)
+            hits += 1
+            tip_hits += 1
+            print("TIP hit: %s [%s]" %
+                  (loc if args.verbose else redact(loc, rules), shown), file=out)
+
+        # revision(s) before `--`; rc 0 = match, 1 = clean, >1 = error.
         for tip_rev in tip_revs:
             try:
                 r = run(tip_cmd(rule, tip_rev), args.repo)
@@ -1281,7 +1534,9 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                       % (r.returncode, (r.stderr or "").strip()[:200]), file=err)
                 return 2
             if r.returncode == 0:
-                word_rx = (re.compile(r"\b" + re.escape(term) + r"\b", re.IGNORECASE)
+                normalized_term = normalize_for_match(term)
+                word_rx = (re.compile(r"\b" + re.escape(normalized_term) + r"\b",
+                                      re.IGNORECASE)
                            if mode == "word" else None)
                 for line in r.stdout.splitlines():
                     # git grep -n output: rev:path:lineno:content — drop the content
@@ -1289,13 +1544,19 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                     parts = line.split(":", 3)
                     loc = ":".join(parts[:3]) if len(parts) >= 3 else line[:120]
                     content = parts[3] if len(parts) >= 4 else line
-                    if word_rx is not None and not word_rx.search(content):
+                    normalized_content = normalize_for_match(content)
+                    matched = word_rx.search(normalized_content) if word_rx is not None \
+                        else normalized_term.lower() in normalized_content.lower()
+                    if not matched:
                         continue          # literal over-match without a word boundary
                     # allow: is matched on the CONTENT only — matching the full grep
                     # line let an allow substring in the PATH suppress a real content
                     # hit (review MEDIUM 3).
-                    if any(a in content.lower() for a in allows):
+                    if any(a in normalized_content.lower() for a in allows):
                         continue
+                    if loc in seen_tip_locs:
+                        continue
+                    seen_tip_locs.add(loc)
                     hits += 1
                     tip_hits += 1
                     # The locator itself can carry a denied term (a term-named dir or
@@ -1318,6 +1579,7 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
             print("scrub-check: ERROR running git log (%s)" % exc.__class__.__name__,
                   file=err)
             return 2
+        history_candidates = list(normalized_history_hits.get(rule_index, ()))
         for r, scoped_carrier in history_results:
             if r.returncode != 0:
                 if history_pool is not None:
@@ -1325,40 +1587,47 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                 print("scrub-check: ERROR git log rc=%d: %s"
                       % (r.returncode, (r.stderr or "").strip()[:200]), file=err)
                 return 2
-            for sha in r.stdout.split():
-                hits += 1
-                try:
-                    if scoped_carrier is not None:
-                        carriers = [scoped_carrier]
-                    else:
-                        if sha not in carrier_cache:
-                            carrier_cache[sha] = history_carriers(
-                                sha, args.repo, run, reflog_entries,
-                                set(unreachable))
-                        carriers = carrier_cache[sha]
-                except (OSError, subprocess.SubprocessError, UnicodeError,
-                        ValueError, RuntimeError) as exc:
-                    if history_pool is not None:
-                        history_pool.shutdown(wait=False)
-                    print("scrub-check: ERROR resolving history carrier (%s)" % exc,
-                          file=err)
-                    return 2
-                history_kinds.extend(carriers)
-                carrier_text = ", ".join(carriers)
-                if not args.verbose:
-                    carrier_text = redact(carrier_text, rules)
-                # #262: only this push's own negotiation can prove the destination
-                # already has the commit. `carriers` names LOCAL refs and is
-                # diagnostic attribution, never a downgrade.
-                proven = not_transmitted_by_this_push(sha, endpoint_bases, args.repo, run)
-                if proven:
-                    pre_existing_hits += 1
+            history_candidates.extend((sha, scoped_carrier)
+                                      for sha in r.stdout.split())
+        seen_history = set()
+        for sha, scoped_carrier in history_candidates:
+            history_key = (sha, scoped_carrier)
+            if history_key in seen_history:
+                continue
+            seen_history.add(history_key)
+            hits += 1
+            try:
+                if scoped_carrier is not None:
+                    carriers = [scoped_carrier]
                 else:
-                    blocking_hits += 1
-                print("HISTORY hit: commit %s via %s [%s]%s"
-                      % (sha[:12], carrier_text, shown,
-                         "  (not transmitted by this push)" if proven
-                         else ""), file=out)
+                    if sha not in carrier_cache:
+                        carrier_cache[sha] = history_carriers(
+                            sha, args.repo, run, reflog_entries,
+                            set(unreachable))
+                    carriers = carrier_cache[sha]
+            except (OSError, subprocess.SubprocessError, UnicodeError,
+                    ValueError, RuntimeError) as exc:
+                if history_pool is not None:
+                    history_pool.shutdown(wait=False)
+                print("scrub-check: ERROR resolving history carrier (%s)" % exc,
+                      file=err)
+                return 2
+            history_kinds.extend(carriers)
+            carrier_text = ", ".join(carriers)
+            if not args.verbose:
+                carrier_text = redact(carrier_text, rules)
+            # #262: only this push's own negotiation can prove the destination
+            # already has the commit. `carriers` names LOCAL refs and is
+            # diagnostic attribution, never a downgrade.
+            proven = not_transmitted_by_this_push(sha, endpoint_bases, args.repo, run)
+            if proven:
+                pre_existing_hits += 1
+            else:
+                blocking_hits += 1
+            print("HISTORY hit: commit %s via %s [%s]%s"
+                  % (sha[:12], carrier_text, shown,
+                     "  (not transmitted by this push)" if proven
+                     else ""), file=out)
 
     if history_pool is not None:
         history_pool.shutdown()

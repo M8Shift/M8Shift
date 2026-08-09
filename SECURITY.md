@@ -134,6 +134,13 @@ never committed: point `M8SHIFT_DENYLIST` at a private file (default
 `~/.config/m8shift/denylist.txt`, one term per line). Matches are reported as
 hashed labels — never the term, never the matched line.
 
+Comparison is Unicode-aware without broad compatibility folding: NFC accents,
+ordinary/NBSP spacing, zero-width spaces and soft hyphens compare equivalently,
+while ligatures, full-width forms and other NFKC lookalikes remain distinct.
+Prefix a term with `word:` only when it starts and ends with a Unicode word
+character; an invalid word rule refuses the whole denylist instead of silently
+providing partial coverage. Overlapping word rules retain separate hashed labels.
+
 An inability to run a stage is different from an advisory finding, and it is
 never a clean result. Scrub **errors** fail closed and block the push in both
 modes, as does a **missing** `scripts/scrub-check.py` when the push publishes
