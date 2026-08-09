@@ -18766,7 +18766,7 @@ class TestRFC052ScrubCheck(CLIBase):
         real = mod.run_git
 
         def spy(cmd, repo):
-            if cmd[:2] == ["git", "ls-tree"] or (
+            if (cmd[:2] == ["git", "ls-tree"] and "--name-only" in cmd) or (
                     cmd[:2] in (["git", "log"], ["git", "diff"])
                     and any(a.startswith("--name-") for a in cmd)):
                 calls.append(cmd[1])

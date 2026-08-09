@@ -644,25 +644,44 @@ def not_transmitted_by_this_push(sha, bases, repo, run):
     return False
 
 
-def run_git(cmd, repo):
+def run_git(cmd, repo, binary=False, stream=False, **stream_kwargs):
     """Raw argv execution (shell=False), bounded, LOCAL ONLY. -> CompletedProcess.
     Explicit utf-8 + errors=replace: with bare text=True, invalid UTF-8 in a
     tracked file made the decode raise UnicodeDecodeError -> traceback -> rc 1,
-    which the hooks then misread as a scrub HIT (review MEDIUM 2)."""
+    which the hooks then misread as a scrub HIT (review MEDIUM 2).
+
+    ``binary`` keeps exact bytes at the normalized-content boundary. ``stream``
+    opens the one bounded cat-file pipeline.  Both primitives deliberately live
+    behind this same policy/injection boundary.
+    """
     refuse_network_argv(cmd)
-    return subprocess.run(cmd, cwd=repo, capture_output=True,
-                          encoding="utf-8", errors="replace",
-                          timeout=GIT_TIMEOUT_S)
+    if stream:
+        return subprocess.Popen(cmd, cwd=repo, **stream_kwargs)
+    kwargs = {"cwd": repo, "capture_output": True, "timeout": GIT_TIMEOUT_S}
+    if not binary:
+        kwargs.update(encoding="utf-8", errors="replace")
+    return subprocess.run(cmd, **kwargs)
 
 
-def run_git_bytes(cmd, repo):
-    """Raw-output sibling used at the explicit decode boundary introduced by #265."""
-    refuse_network_argv(cmd)
-    return subprocess.run(cmd, cwd=repo, capture_output=True,
-                          timeout=GIT_TIMEOUT_S)
+def run_git_bytes(cmd, repo, run=run_git):
+    """Run through the injected Git seam and return byte stdout/stderr.
+
+    Production uses ``run_git(binary=True)`` so invalid UTF-8 remains exact.
+    A test/policy runner keeps authority over the command and may return either
+    text or bytes; text is encoded only after that runner has answered.
+    """
+    if run is run_git:
+        return run(cmd, repo, binary=True)
+    result = run(cmd, repo)
+    stdout = result.stdout if isinstance(result.stdout, bytes) else \
+        (result.stdout or "").encode("utf-8")
+    stderr = result.stderr if isinstance(result.stderr, bytes) else \
+        (result.stderr or "").encode("utf-8")
+    return subprocess.CompletedProcess(
+        cmd, result.returncode, stdout=stdout, stderr=stderr)
 
 
-def iter_blob_batch(shas, repo):
+def iter_blob_batch(shas, repo, run=run_git):
     """Yield unique ``(sha, body)`` pairs from one local cat-file process.
 
     Only the current bounded blob is resident. In particular, neither cat-file's
@@ -671,13 +690,28 @@ def iter_blob_batch(shas, repo):
     ordered = list(dict.fromkeys(sha for sha in shas if sha and set(sha) != {"0"}))
     if not ordered:
         return
+    if run is not run_git:
+        # An injected runner is the authority for every Git invocation.  Fetch
+        # one object at a time through that seam: this retains the one-body
+        # memory bound without letting a real Popen escape a test/policy runner.
+        for expected in ordered:
+            result = run_git_bytes(
+                ["git", "cat-file", "blob", expected], repo, run)
+            if result.returncode != 0:
+                raise RuntimeError("git cat-file blob rc=%d: %s" % (
+                    result.returncode,
+                    result.stderr[:200].decode("utf-8", "replace")))
+            if len(result.stdout) > OBJECT_MAX_BYTES:
+                raise RuntimeError("blob %s exceeds %d-byte scan bound" % (
+                    expected[:12], OBJECT_MAX_BYTES))
+            yield expected, result.stdout
+        return
     cmd = ["git", "cat-file", "--batch"]
-    refuse_network_argv(cmd)
     with tempfile.TemporaryFile() as requests, tempfile.TemporaryFile() as errors:
         requests.write(("\n".join(ordered) + "\n").encode("ascii"))
         requests.seek(0)
-        proc = subprocess.Popen(cmd, cwd=repo, stdin=requests,
-                                stdout=subprocess.PIPE, stderr=errors)
+        proc = run(cmd, repo, binary=True, stream=True, stdin=requests,
+                   stdout=subprocess.PIPE, stderr=errors)
         timed_out = threading.Event()
 
         def abort():
@@ -743,7 +777,7 @@ def normalized_rule_indexes(rules):
     return set(range(len(rules)))
 
 
-def scan_normalized_tip(rules, allows, revs, repo):
+def scan_normalized_tip(rules, allows, revs, repo, run=run_git):
     """Supplement git-grep with one raw UTF-8 tree pass for normalized forms."""
     wanted = normalized_rule_indexes(rules)
     if not wanted:
@@ -752,7 +786,7 @@ def scan_normalized_tip(rules, allows, revs, repo):
     findings = {}
     for rev in revs:
         result = run_git_bytes(
-            ["git", "ls-tree", "-rz", "--full-tree", rev], repo)
+            ["git", "ls-tree", "-rz", "--full-tree", rev], repo, run)
         if result.returncode != 0:
             raise RuntimeError("git ls-tree rc=%d: %s" % (
                 result.returncode, result.stderr[:200].decode("utf-8", "replace")))
@@ -767,7 +801,8 @@ def scan_normalized_tip(rules, allows, revs, repo):
             records.append((fields[2].decode("ascii"),
                             path_raw.decode("utf-8", "replace")))
         matches_by_sha = {}
-        for sha, raw in iter_blob_batch((sha for sha, _path in records), repo):
+        for sha, raw in iter_blob_batch(
+                (sha for sha, _path in records), repo, run):
             text = decode_comparison_text(raw)
             if text is None:
                 del raw
@@ -799,7 +834,8 @@ def _occurrences_in_normalized_text(normalized_text, normalized_term, mode):
     return normalized_text.lower().count(normalized_term.lower())
 
 
-def scan_normalized_history(rules, history_runs, args, extra_revs=None):
+def scan_normalized_history(rules, history_runs, args, extra_revs=None,
+                            run=run_git):
     """Supplement pickaxe by comparing normalized counts in changed UTF-8 blobs.
 
     The unit remains one file pair, matching Git -S semantics (including a term
@@ -822,7 +858,7 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None):
         if not range_args:
             cmd += ["-n", str(args.max_commits + 1)]
         cmd.append("--")
-        result = run_git_bytes(cmd, args.repo)
+        result = run_git_bytes(cmd, args.repo, run)
         if result.returncode != 0:
             raise RuntimeError("git log normalized history rc=%d: %s" % (
                 result.returncode, result.stderr[:200].decode("utf-8", "replace")))
@@ -855,7 +891,7 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None):
                 blob_ids.extend((old_sha, new_sha))
             commit_records.append((sha, pairs))
         blob_counts = {}
-        for object_sha, raw in iter_blob_batch(blob_ids, args.repo):
+        for object_sha, raw in iter_blob_batch(blob_ids, args.repo, run):
             text = decode_comparison_text(raw)
             if text is None:
                 blob_counts[object_sha] = None
@@ -1438,15 +1474,9 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
               (len(rules), object_count), file=out)
         return 0
 
-    try:
-        normalized_tip_hits = scan_normalized_tip(
-            rules, allows, tip_revs, args.repo)
-    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
-            RuntimeError) as exc:
-        print("scrub-check: ERROR scanning normalized tip content (%s)" % exc,
-              file=err)
-        return 2
-
+    # Tag peeling defines the publish object graph.  Prepare it before any
+    # supplemental content walk so a malformed/nested tag reports the tagged
+    # boundary failure instead of being masked by a later tree-scan error.
     try:
         tag_candidates = tag_candidates_for_all(args.repo, run) if args.all else \
             tag_candidates_for_tips(tip_revs, tip_carriers, args.repo, run)
@@ -1483,20 +1513,9 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                   file=err)
             return 2
 
-    normalized_history_hits = {}
-    if not args.no_history:
-        try:
-            normalized_history_hits = scan_normalized_history(
-                rules, history_runs, args, unreachable)
-        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
-                RuntimeError) as exc:
-            print("scrub-check: ERROR scanning normalized history (%s)" % exc,
-                  file=err)
-            return 2
-
-    # Start the independent pickaxe walks early, but consume futures strictly in
-    # denylist order below.  This changes scheduling only: argv, interpretation,
-    # and byte ordering remain identical to the sequential implementation.
+    # Commit-message completeness is an explicit audit bound and therefore
+    # precedes the other history surfaces.  Preserve that diagnostic priority:
+    # a bounded audit must say which authority window was exhausted.
     message_hits = {}
     if not args.no_history:
         try:
@@ -1509,6 +1528,52 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
                   file=err)
             return 2
 
+    # Enumerate the publication path surface before supplemental content reads.
+    # This is a preflight only; findings retain their established output position
+    # below.  An incomplete tree/diff/log walk is the authority failure for that
+    # publish scope and must not be masked by a later normalized-content command.
+    path_scope_records = []
+    path_scopes = [(tip, spec_args) for tip, spec_args in specs] or [("HEAD", None)]
+    for scope_tip, scope_args in path_scopes:
+        scope_revs = history_revs(scope_args, args.all, args.refs_pull, unreachable)
+        audit_bound = None if scope_args else args.max_commits
+        try:
+            records = scope_path_records(
+                scope_tip, scope_args, args.repo, run,
+                history=not args.no_history,
+                history_revs_args=scope_revs,
+                max_commits=audit_bound)
+        except (PathEnumerationError, OSError, subprocess.SubprocessError,
+                UnicodeError, ValueError) as exc:
+            print("scrub-check: ERROR path enumeration incomplete (%s)"
+                  % (exc if isinstance(exc, PathEnumerationError)
+                     else exc.__class__.__name__), file=err)
+            return 2
+        path_scope_records.append((scope_tip, scope_args, records))
+
+    try:
+        normalized_tip_hits = scan_normalized_tip(
+            rules, allows, tip_revs, args.repo, run)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+            RuntimeError) as exc:
+        print("scrub-check: ERROR scanning normalized tip content (%s)" % exc,
+              file=err)
+        return 2
+
+    normalized_history_hits = {}
+    if not args.no_history:
+        try:
+            normalized_history_hits = scan_normalized_history(
+                rules, history_runs, args, unreachable, run)
+        except (OSError, subprocess.SubprocessError, UnicodeError, ValueError,
+                RuntimeError) as exc:
+            print("scrub-check: ERROR scanning normalized history (%s)" % exc,
+                  file=err)
+            return 2
+
+    # Start the independent pickaxe walks early, but consume futures strictly in
+    # denylist order below.  This changes scheduling only: argv, interpretation,
+    # and byte ordering remain identical to the sequential implementation.
     history_futures = {}
     history_pool = None
     if not args.no_history:
@@ -1710,33 +1775,12 @@ def main(argv=None, out=sys.stdout, err=sys.stderr, run=run_git):
     # the content pickaxe and the message walk use, so the audit cannot answer one
     # question for names and another for contents.
     path_matcher = compile_content_matcher(rules)
-    path_scopes = [(tip, spec_args) for tip, spec_args in specs] or [("HEAD", None)]
     seen_paths = set()
-    for scope_tip, scope_args in path_scopes:
-        scope_revs = history_revs(scope_args, args.all, args.refs_pull, unreachable)
+    for scope_tip, scope_args, records in path_scope_records:
         # A publish scope has two KNOWN endpoints. A bare-SHA new-ref push does not:
         # it publishes a whole history with no base, so it may not conclude that an
         # all-deletions path is a cleanup — see path_records_block().
         publish_scope = is_publish_scope(scope_args)
-        # #297: the audit completeness window applies to the range-less walks ONLY.
-        # An explicit publish scope — `A..B` or a bare-SHA new ref — stays complete:
-        # a push larger than --max-commits must still be caught on its oldest
-        # transmitted commit, and an add-then-delete spanning more than the window
-        # must still block rather than read as a cleanup.
-        audit_bound = None if scope_args else args.max_commits
-        try:
-            records = scope_path_records(scope_tip, scope_args, args.repo, run,
-                                         history=not args.no_history,
-                                         history_revs_args=scope_revs,
-                                         max_commits=audit_bound)
-        except (PathEnumerationError, OSError, subprocess.SubprocessError,
-                UnicodeError, ValueError) as exc:
-            # Fail CLOSED. Returning a clean result on an incomplete walk is the
-            # failure this ticket exists to prevent, arriving from the other side.
-            print("scrub-check: ERROR path enumeration incomplete (%s)"
-                  % (exc if isinstance(exc, PathEnumerationError)
-                     else exc.__class__.__name__), file=err)
-            return 2
         statuses = {}
         for _commit, status, path in records:
             statuses.setdefault(path, []).append(status)
