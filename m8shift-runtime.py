@@ -10602,7 +10602,24 @@ def cmd_usage_adapters_check(args):
             for message in scan_warnings:
                 findings.append({"severity": "warning", "check": "usage.scan",
                                  "message": f"{name}: {message}"})
-            probed.append({"name": name, "ok": True})
+            measurement = snapshot.get("measurement") \
+                if isinstance(snapshot.get("measurement"), dict) else None
+            state = measurement.get("state") if measurement else None
+            if state in ("degraded", "unavailable"):
+                reason = measurement.get("reason")
+                detail = f" ({reason})" if reason else ""
+                findings.append({
+                    "severity": "error", "check": f"usage.{state}",
+                    "message": (f"{name}: usage measurement {state}{detail}; "
+                                "adapter probe did not establish a usable reading"),
+                })
+                probed.append({"name": name, "ok": False,
+                               "measurement": measurement})
+            else:
+                row = {"name": name, "ok": True}
+                if measurement is not None:
+                    row["measurement"] = measurement
+                probed.append(row)
     ok = not any(f["severity"] == "error" for f in findings)
     if args.json:
         print(json.dumps({"ok": ok, "probed": probed, "findings": findings,
@@ -11479,7 +11496,28 @@ def usage_watch_tick_probe(args, agent):
         return False, [{"severity": "error", "check": "usage.watch_tick",
                         "message": error}]
     findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
-    success = bool(payload.get("ok") and payload.get("snapshots"))
+    findings = list(findings)
+    snapshots = payload.get("snapshots") if isinstance(payload.get("snapshots"), list) else []
+    readable = []
+    for row in snapshots:
+        snapshot = row.get("snapshot") if isinstance(row, dict) else None
+        measurement = snapshot.get("measurement") if isinstance(snapshot, dict) \
+            and isinstance(snapshot.get("measurement"), dict) else None
+        state = measurement.get("state") if measurement else None
+        if state in ("degraded", "unavailable"):
+            reason = measurement.get("reason")
+            detail = f" ({reason})" if reason else ""
+            findings.append({
+                "severity": "warning", "check": "usage.watch_measurement",
+                "message": (f"usage measurement {state}{detail}; "
+                            "counted as an unsuccessful watcher read"),
+            })
+        else:
+            # A legacy snapshot has no measurement field and retains the
+            # pre-#313 success semantics. New official adapters succeed only
+            # with their validated `measured` state.
+            readable.append(row)
+    success = bool(payload.get("ok") and snapshots and readable)
     no_adapter = bool(payload.get("ok") and not payload.get("snapshots")
                       and any(row.get("check") == "usage.no_adapter"
                               for row in findings if isinstance(row, dict)))
@@ -11488,10 +11526,10 @@ def usage_watch_tick_probe(args, agent):
         # failed read. Keep the watcher healthy without inventing usage data.
         return True, findings
     if not success:
-        findings = list(findings) + [{
+        findings.append({
             "severity": "warning", "check": "usage.watch_read_unknown",
             "message": "fresh tick produced no successful adapter snapshot",
-        }]
+        })
     return success, findings
 
 

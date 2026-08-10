@@ -937,7 +937,11 @@ exception text, response content, or credential data. Legacy fixtures omit the
 object and retain their byte-identical schema. All non-measured states remain
 fail-open for gating, but `usage status` preserves the state and emits a named
 finding instead of collapsing every case into an undifferentiated empty
-official fixture.
+official fixture. They are not healthy watcher reads: `usage adapters check`
+fails its live probe, and each managed watcher tick increments
+`consecutive_unknown`. The existing lifecycle threshold therefore degrades the
+watcher after three consecutive non-measured reads and requires reconciliation;
+legacy snapshots retain their pre-amendment watcher semantics.
 
 #### PR A exit codes (read-only commands only)
 
