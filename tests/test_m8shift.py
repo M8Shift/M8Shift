@@ -17745,7 +17745,7 @@ class TestPublishedBaseAttestation(unittest.TestCase):
         self.assertIn("attestation consumed", allowed.stderr)
         self.assertTrue(self._tag_published())
 
-    def test_public_declaration_arms_an_attested_new_ref_without_ambient_mode(self):
+    def test_public_declaration_allows_a_clean_attested_new_ref_without_ambient_mode(self):
         self._fixture()
         fingerprint = self._attest("fingerprint", "--remote", "origin")
         self.assertEqual(fingerprint.returncode, 0, fingerprint.stderr)
@@ -17759,6 +17759,22 @@ class TestPublishedBaseAttestation(unittest.TestCase):
         self.assertIn("endpoint-bound public declaration", pushed.stderr)
         self.assertIn("enforcement is mandatory", pushed.stderr)
         self.assertTrue(self._tag_published())
+
+    def test_public_declaration_arms_an_attested_finding_without_ambient_mode(self):
+        self._fixture(after_base=os.path.join("docs", self.TERM, "x.md"))
+        fingerprint = self._attest("fingerprint", "--remote", "origin")
+        self.assertEqual(fingerprint.returncode, 0, fingerprint.stderr)
+        self.assertEqual(
+            self._g("config", "remote.origin.m8shiftPublicEndpoint",
+                    fingerprint.stdout.strip()).returncode, 0)
+        receipt, created = self._create()
+        self.assertIsNotNone(receipt, created.stderr)
+        blocked = self._push_tag(receipt=receipt, enforce=False)
+        self.assertNotEqual(blocked.returncode, 0, blocked.stderr)
+        self.assertIn("endpoint-bound public declaration", blocked.stderr)
+        self.assertIn("enforcement is mandatory", blocked.stderr)
+        self.assertIn("gate findings above and enforcement is armed", blocked.stderr)
+        self.assertFalse(self._tag_published())
 
     def test_reverse_ancestry_tag_of_published_history_is_attestable(self):
         """#300 V1 blocker: the motivating shape — a tag at/behind the published base.
@@ -20351,6 +20367,33 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("ADVISORY", advisory.stderr)
         self.assertTrue(self._landed(bare2))
 
+    def test_a_second_name_for_a_declared_endpoint_stays_mandatory(self):
+        work, bare, g, push = self._gate_repo(hygiene_rc=1)
+        self._declare_public(work, g)
+        self.assertEqual(g("remote", "add", "alias", bare).returncode, 0)
+        blocked = push(remote="alias")
+        self.assertEqual(blocked.returncode, 1, blocked.stderr)
+        self.assertIn("endpoint-bound public declaration", blocked.stderr)
+        self.assertIn("enforcement is mandatory", blocked.stderr)
+        self.assertIn("gate findings above and enforcement is armed", blocked.stderr)
+        self.assertFalse(self._landed(bare))
+
+    def test_push_instead_of_to_a_declared_endpoint_stays_mandatory(self):
+        work, public, g, push = self._gate_repo(hygiene_rc=1)
+        self._declare_public(work, g)
+        nominal = tempfile.mkdtemp(prefix="m8-nominal-endpoint-")
+        self.addCleanup(shutil.rmtree, nominal, True)
+        subprocess.run(["git", "init", "-q", "--bare", nominal], capture_output=True)
+        self.assertEqual(g("remote", "set-url", "origin", nominal).returncode, 0)
+        self.assertEqual(
+            g("config", "url.%s.pushInsteadOf" % public, nominal).returncode, 0)
+        blocked = push()
+        self.assertEqual(blocked.returncode, 1, blocked.stderr)
+        self.assertIn("endpoint-bound public declaration", blocked.stderr)
+        self.assertIn("enforcement is mandatory", blocked.stderr)
+        self.assertFalse(self._landed(public))
+        self.assertFalse(self._landed(nominal))
+
     def test_public_declaration_survives_rename_and_changed_endpoint_refuses(self):
         work, bare, g, push = self._gate_repo(hygiene_rc=1)
         self._declare_public(work, g)
@@ -20394,7 +20437,7 @@ class TestRFC052ScrubCheck(CLIBase):
         source = g("rev-parse", "HEAD").stdout.strip()
         self.assertEqual(g("checkout", "-q", "--orphan", "other-line").returncode, 0)
         for name in os.listdir(work):
-            if name != ".git":
+            if name not in (".git", "scripts"):
                 path = os.path.join(work, name)
                 if os.path.isdir(path):
                     shutil.rmtree(path)
@@ -20416,6 +20459,8 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("destination history is not an ancestor", r.stderr)
         self.assertIn("enforcement is mandatory", r.stderr)
+        self.assertIn("gate findings above and enforcement is armed", r.stderr)
+        self.assertNotIn("scripts/scrub-check.py is missing", r.stderr)
 
     def test_enforce_variable_is_a_closed_contract(self):
         """#264: `= 1` meant true|yes|on were SILENTLY advisory.

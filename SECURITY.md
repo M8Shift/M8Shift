@@ -132,11 +132,23 @@ fingerprint, never the URL):
     fp="$(python3 scripts/publish-attest.py fingerprint --remote public)"
     git config --local remote.public.m8shiftPublicEndpoint "$fp"
 
-The remote name is only the declaration lookup key. Renaming it preserves the
-Git config subsection and the policy; changing its resolved `pushurl`, using
-multiple push URLs, supplying a direct URL, or losing the local objects needed
-to prove destination ancestry makes publication ambiguous and therefore
-blocks. Deletion-only pushes remain open for containment. Set
+The remote name is only a declaration storage key: the gate compares the
+resolved destination fingerprint with **every**
+`remote.*.m8shiftPublicEndpoint` value. A second remote name or a
+`pushInsteadOf` rewrite to an already-declared endpoint therefore remains
+mandatory. The fingerprint is SHA-256 over the exact push-URL string Git
+resolves; URL spellings are not normalised, so each accepted spelling must be
+configured under a remote name and declared separately. Renaming a remote
+preserves its Git config subsection and policy; changing its resolved
+`pushurl`, using multiple push URLs, supplying a direct URL, or losing the
+local objects needed to prove destination ancestry makes publication ambiguous
+and therefore blocks.
+
+The ancestry route cannot classify a **new ref**: Git advertises an all-zero
+remote SHA, so there is no destination base to compare. Declare the public
+endpoint before publishing a new branch or tag; a published-base attestation
+may narrow the scan range, but it does not replace that destination policy.
+Deletion-only pushes remain open for containment. Set
 `M8SHIFT_SCRUB_ENFORCE` to `1`, `true`,
 `yes` or `on` to make a hygiene/denylist hit **block** the commit and the push;
 `0`, `false`, `no`, `off` or unset keeps it advisory. Any other value is a

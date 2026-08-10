@@ -68,12 +68,15 @@ if [ "${#}" -ge 1 ] && git remote get-url -- "${1}" >/dev/null 2>&1; then
 fi
 
 # #306: destination policy is evidence-bound, never inferred from a remote name.
-# The declaration is stored per remote but its VALUE is the fingerprint of the
-# one canonical push endpoint Git resolves now. Renames therefore preserve the
-# policy while an endpoint change invalidates it. Direct URLs and multi-pushurl
-# remotes cannot carry one unambiguous, durable declaration and fail closed for
-# publication. The error is deferred until ref records are read so deletion-only
-# containment stays open.
+# Declarations are stored per remote, but every VALUE is an endpoint fingerprint:
+# after Git resolves the one canonical push endpoint, compare that evidence with
+# every declaration in the repository config. An alias or pushInsteadOf rewrite
+# therefore cannot turn an already-declared destination back into advisory mode.
+# The target remote's own declaration still gets stricter structural validation,
+# so a changed or ambiguous policy cannot silently fall through. Direct URLs and
+# multi-pushurl remotes cannot carry one unambiguous, durable declaration and fail
+# closed for publication. The error is deferred until ref records are read so
+# deletion-only containment stays open.
 public_push=0
 public_reason=""
 policy_ambiguous=""
@@ -88,6 +91,9 @@ EOF
 	if [ "${push_url_count}" -ne 1 ]; then
 		policy_ambiguous="the configured remote does not resolve to exactly one push endpoint"
 	else
+		# Validate the declaration stored on the name being pushed first. Other
+		# names may legitimately describe other endpoints, so malformed values on
+		# those names are not allowed to corrupt this target's policy.
 		public_decl=""
 		public_decl_count=0
 		while IFS= read -r declared; do
@@ -103,25 +109,47 @@ EOF
 			case "${public_decl}" in
 			*[!0-9a-f]*|"") policy_ambiguous="the public-endpoint declaration is malformed" ;;
 			esac
-		if [ -z "${policy_ambiguous}" ] && [ "${#public_decl}" -ne 64 ]; then
-			policy_ambiguous="the public-endpoint declaration is malformed"
+			if [ -z "${policy_ambiguous}" ] && [ "${#public_decl}" -ne 64 ]; then
+				policy_ambiguous="the public-endpoint declaration is malformed"
+			fi
 		fi
+
 		if [ -z "${policy_ambiguous}" ]; then
-			endpoint_helper="${repo_root}/scripts/publish-attest.py"
-			observed_fingerprint=""
-			if [ -f "${endpoint_helper}" ]; then
-				observed_fingerprint="$(python3 "${endpoint_helper}" --repo "${repo_root}" \
-					fingerprint --remote "${target_remote}" 2>/dev/null || :)"
+			# Git config keys are case-insensitive, while get-regexp preserves enough
+			# spelling detail to require both conventional capitalisation variants.
+			# Values containing whitespace cannot be valid SHA-256 declarations and
+			# therefore cannot match the observed fingerprint.
+			public_declarations="$(git config --get-regexp \
+				'^remote\..*\.[Mm]8shift[Pp]ublic[Ee]ndpoint$' 2>/dev/null || :)"
+			if [ -n "${public_declarations}" ]; then
+				endpoint_helper="${repo_root}/scripts/publish-attest.py"
+				observed_fingerprint=""
+				if [ -f "${endpoint_helper}" ]; then
+					observed_fingerprint="$(python3 "${endpoint_helper}" --repo "${repo_root}" \
+						fingerprint --remote "${target_remote}" 2>/dev/null || :)"
+				fi
+				if [ -z "${observed_fingerprint}" ]; then
+					policy_ambiguous="the push endpoint could not be resolved against public declarations"
+				else
+					while IFS=' ' read -r _decl_key declared; do
+						[ -n "${_decl_key}" ] || continue
+						case "${declared}" in
+						*[!0-9a-f]*|"") continue ;;
+						esac
+						[ "${#declared}" -eq 64 ] || continue
+						if [ "${declared}" = "${observed_fingerprint}" ]; then
+							public_push=1
+							public_reason="endpoint-bound public declaration"
+							break
+						fi
+					done <<EOF
+${public_declarations}
+EOF
+					if [ "${public_push}" -eq 0 ] && [ "${public_decl_count}" -eq 1 ]; then
+						policy_ambiguous="the declared public push endpoint changed"
+					fi
+				fi
 			fi
-			if [ -z "${observed_fingerprint}" ]; then
-				policy_ambiguous="the declared push endpoint could not be resolved"
-			elif [ "${observed_fingerprint}" != "${public_decl}" ]; then
-				policy_ambiguous="the declared public push endpoint changed"
-			else
-				public_push=1
-				public_reason="endpoint-bound public declaration"
-			fi
-		fi
 		fi
 	fi
 elif [ "${#}" -ge 1 ]; then
