@@ -63,6 +63,18 @@
   term, nor Git stderr. The bound is a completeness contract, not a resource
   control: 0.14 s complete against 0.12 s bounded over 2000 commits.
 
+- **Destination-bound public-push enforcement (#306).** The pre-push gate no
+  longer treats a remote name or the ambient advisory default as publication
+  policy. Operators bind a public declaration to the SHA-256 fingerprint of
+  one canonical resolved push endpoint; every declaration is matched by value,
+  so a second remote name or `pushInsteadOf` rewrite to that destination cannot
+  restore advisory mode. A matching declaration or endpoint proof that a
+  non-zero destination base is not an ancestor of the source line makes findings
+  and incomplete stages mandatory. New refs have no such ancestry evidence and
+  require a declaration. Endpoint changes, direct URLs, multiple push URLs and
+  unavailable ancestry evidence fail closed for publication. Deletion-only
+  containment stays open; mixed batches do not.
+
 - **Endpoint-proof publish classification (#262).** The gate no longer
   excludes history from local remote-tracking refs, a cache that outlives a
   recreated remote and hid two commits published nowhere behind rc 0 and a

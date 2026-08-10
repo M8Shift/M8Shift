@@ -302,6 +302,17 @@ def cmd_create(args):
     return 0
 
 
+def cmd_fingerprint(args):
+    """Print the canonical push-endpoint fingerprint, never the endpoint itself.
+
+    The pre-push public-destination declaration uses this exact resolver so
+    `pushurl`, `pushInsteadOf`, endpoint changes and multi-push ambiguity cannot
+    drift between the operator-facing setup command and enforcement.
+    """
+    print(fingerprint(push_location(args.remote, args.repo)))
+    return 0
+
+
 def cmd_consume(args):
     """Claim a receipt for exactly one push and re-prove it live. -> prints the base.
 
@@ -371,6 +382,11 @@ def main(argv=None):
     create.add_argument("--source", required=True)
     create.add_argument("--json", action="store_true")
     create.set_defaults(func=cmd_create)
+
+    endpoint = sub.add_parser(
+        "fingerprint", help="print a configured remote's push-endpoint fingerprint")
+    endpoint.add_argument("--remote", required=True)
+    endpoint.set_defaults(func=cmd_fingerprint)
 
     consume = sub.add_parser("consume", help="claim a receipt for one push")
     consume.add_argument("--receipt-id", required=True)

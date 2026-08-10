@@ -2,7 +2,10 @@
 # M8Shift pre-push scrub gate (RFC 052 E2) — the last safe moment before content
 # leaves the machine.
 #
-# ADVISORY and LOCAL by default: findings are printed, the push proceeds. Set
+# ADVISORY and LOCAL by default for an unclassified destination: findings are
+# printed, the push proceeds. A destination declared public by an endpoint-bound
+# fingerprint, or proven to be on a different published line, is ALWAYS enforced.
+# Set
 # M8SHIFT_SCRUB_ENFORCE to 1/true/yes/on to BLOCK on findings; 0/false/no/off or
 # unset is advisory; any OTHER value is a configuration error and refuses before
 # scanning, because a gate whose mode is ambiguous must not report a verdict.
@@ -63,6 +66,95 @@ target_remote=""
 if [ "${#}" -ge 1 ] && git remote get-url -- "${1}" >/dev/null 2>&1; then
 	target_remote="${1}"
 fi
+
+# #306: destination policy is evidence-bound, never inferred from a remote name.
+# Declarations are stored per remote, but every VALUE is an endpoint fingerprint:
+# after Git resolves the one canonical push endpoint, compare that evidence with
+# every declaration in the repository config. An alias or pushInsteadOf rewrite
+# therefore cannot turn an already-declared destination back into advisory mode.
+# The target remote's own declaration still gets stricter structural validation,
+# so a changed or ambiguous policy cannot silently fall through. Direct URLs and
+# multi-pushurl remotes cannot carry one unambiguous, durable declaration and fail
+# closed for publication. The error is deferred until ref records are read so
+# deletion-only containment stays open.
+public_push=0
+public_reason=""
+policy_ambiguous=""
+if [ -n "${target_remote}" ]; then
+	push_url_count=0
+	while IFS= read -r push_url; do
+		[ -n "${push_url}" ] || continue
+		push_url_count=$((push_url_count + 1))
+	done <<EOF
+$(git remote get-url --push --all -- "${target_remote}" 2>/dev/null || :)
+EOF
+	if [ "${push_url_count}" -ne 1 ]; then
+		policy_ambiguous="the configured remote does not resolve to exactly one push endpoint"
+	else
+		# Validate the declaration stored on the name being pushed first. Other
+		# names may legitimately describe other endpoints, so malformed values on
+		# those names are not allowed to corrupt this target's policy.
+		public_decl=""
+		public_decl_count=0
+		while IFS= read -r declared; do
+			[ -n "${declared}" ] || continue
+			public_decl="${declared}"
+			public_decl_count=$((public_decl_count + 1))
+		done <<EOF
+$(git config --get-all "remote.${target_remote}.m8shiftPublicEndpoint" 2>/dev/null || :)
+EOF
+		if [ "${public_decl_count}" -gt 1 ]; then
+			policy_ambiguous="the remote has more than one public-endpoint declaration"
+		elif [ "${public_decl_count}" -eq 1 ]; then
+			case "${public_decl}" in
+			*[!0-9a-f]*|"") policy_ambiguous="the public-endpoint declaration is malformed" ;;
+			esac
+			if [ -z "${policy_ambiguous}" ] && [ "${#public_decl}" -ne 64 ]; then
+				policy_ambiguous="the public-endpoint declaration is malformed"
+			fi
+		fi
+
+		if [ -z "${policy_ambiguous}" ]; then
+			# Git config keys are case-insensitive, while get-regexp preserves enough
+			# spelling detail to require both conventional capitalisation variants.
+			# Values containing whitespace cannot be valid SHA-256 declarations and
+			# therefore cannot match the observed fingerprint.
+			public_declarations="$(git config --get-regexp \
+				'^remote\..*\.[Mm]8shift[Pp]ublic[Ee]ndpoint$' 2>/dev/null || :)"
+			if [ -n "${public_declarations}" ]; then
+				endpoint_helper="${repo_root}/scripts/publish-attest.py"
+				observed_fingerprint=""
+				if [ -f "${endpoint_helper}" ]; then
+					observed_fingerprint="$(python3 "${endpoint_helper}" --repo "${repo_root}" \
+						fingerprint --remote "${target_remote}" 2>/dev/null || :)"
+				fi
+				if [ -z "${observed_fingerprint}" ]; then
+					policy_ambiguous="the push endpoint could not be resolved against public declarations"
+				else
+					while IFS=' ' read -r _decl_key declared; do
+						[ -n "${_decl_key}" ] || continue
+						case "${declared}" in
+						*[!0-9a-f]*|"") continue ;;
+						esac
+						[ "${#declared}" -eq 64 ] || continue
+						if [ "${declared}" = "${observed_fingerprint}" ]; then
+							public_push=1
+							public_reason="endpoint-bound public declaration"
+							break
+						fi
+					done <<EOF
+${public_declarations}
+EOF
+					if [ "${public_push}" -eq 0 ] && [ "${public_decl_count}" -eq 1 ]; then
+						policy_ambiguous="the declared public push endpoint changed"
+					fi
+				fi
+			fi
+		fi
+	fi
+elif [ "${#}" -ge 1 ]; then
+	policy_ambiguous="a direct URL has no endpoint-bound public declaration"
+fi
 # #264: the scanner argv is built in the POSITIONAL PARAMETERS from here on, each
 # element added quoted. The previous form accumulated `${ranges}`/`${bases}` as
 # strings and relied on unquoted word splitting at the call site, which made the
@@ -96,7 +188,8 @@ findings=0
 incomplete=0
 
 # --- 1. data-hygiene lint (C1 paths + C3 denylist, redacted) ---------------------
-if [ -n "${m8shift}" ]; then
+run_hygiene_stage() {
+	if [ -n "${m8shift}" ]; then
 	hygiene_rc=0
 	# #264: hand the doctor the PARSED mode, not the raw variable. The core gate
 	# reads the same closed contract now, but normalising here means the hook's
@@ -109,13 +202,15 @@ if [ -n "${m8shift}" ]; then
 		printf '%s\n' "m8shift pre-push: hygiene scanner failed (rc ${hygiene_rc}) — stage incomplete." >&2
 		incomplete=1
 	fi
-else
+	else
 	# Silent disappearance was the adjacent spelling of the same bug: with no
 	# resolvable executable the stage simply did not exist, and the operator saw a
 	# clean run. It is now visible, and blocking when enforcement is armed.
 	printf '%s\n' "m8shift pre-push: no m8shift executable resolved — hygiene stage did not run." >&2
 	incomplete=1
-fi
+	fi
+}
+run_hygiene_stage
 
 # --- 2. release checksum manifest ------------------------------------------------
 manifest="${repo_root}/checksums.sha256"
@@ -156,6 +251,26 @@ fi
 have_range=0
 stdin_lines=0
 new_refs=0
+classify_destination_base() {
+	base_sha="${1}"
+	source_sha="${2}"
+	[ "${public_push}" -eq 0 ] || return 0
+	[ -z "${policy_ambiguous}" ] || return 0
+	if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null ||
+		! git cat-file -e "${source_sha}^{commit}" 2>/dev/null; then
+		policy_ambiguous="destination ancestry cannot be proven from local objects"
+		return 0
+	fi
+	ancestry_rc=0
+	git merge-base --is-ancestor "${base_sha}^{commit}" \
+		"${source_sha}^{commit}" >/dev/null 2>&1 || ancestry_rc=$?
+	if [ "${ancestry_rc}" -eq 1 ]; then
+		public_push=1
+		public_reason="destination history is not an ancestor of the source line"
+	elif [ "${ancestry_rc}" -gt 1 ]; then
+		policy_ambiguous="destination ancestry could not be evaluated"
+	fi
+}
 if [ ! -t 0 ]; then
 	# A local IFS for the record split only: ref names cannot contain spaces, so
 	# the Git record separator is unambiguous and this does not depend on the
@@ -177,6 +292,7 @@ if [ ! -t 0 ]; then
 			# object is absent locally (stale tracking), the bare-sha form
 			# over-scans relative to target-remote tracking instead of erroring.
 			if git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
+				classify_destination_base "${remote_sha}" "${local_sha}"
 				set -- "$@" --range "${remote_sha}..${local_sha}" --ref "${remote_ref}"
 				have_range=1
 				# #262: git proved the destination has this commit. It is the
@@ -186,6 +302,9 @@ if [ ! -t 0 ]; then
 				# reaching the commit proves nothing and is never used for this.
 				set -- "$@" --endpoint-base "${remote_sha}"
 			else
+				if [ "${public_push}" -eq 0 ]; then
+					policy_ambiguous="destination ancestry cannot be proven from local objects"
+				fi
 				set -- "$@" --range "${local_sha}" --ref "${remote_ref}"
 				have_range=1
 			fi
@@ -218,6 +337,7 @@ if [ ! -t 0 ]; then
 			fi
 			new_refs=$((new_refs + 1))
 			if [ -n "${attested}" ]; then
+				classify_destination_base "${attested}" "${local_sha}"
 				set -- "$@" --range "${attested}..${local_sha}" --ref "${remote_ref}"
 				set -- "$@" --endpoint-base "${attested}"
 				printf '%s\n' "m8shift pre-push: published-base attestation consumed for ${remote_ref}; scanning from the attested base." >&2
@@ -228,6 +348,26 @@ if [ ! -t 0 ]; then
 			;;
 		esac
 	done
+fi
+
+# A publication whose destination identity or ancestry is ambiguous is refused
+# before the scrub. Deletion-only has have_range=0 and deliberately bypasses this
+# classifier: containment must not depend on repairing the publication policy.
+if [ "${have_range}" -eq 1 ] && [ -n "${policy_ambiguous}" ]; then
+	printf '%s\n' "m8shift pre-push: destination policy is ambiguous (${policy_ambiguous}) — publication blocked." >&2
+	exit 1
+fi
+
+# Public/different-line findings and incomplete stages are mandatory. The first
+# hygiene pass used the ambient mode because stdin (and therefore automatic
+# classification) had not been consumed yet. Re-run it with the enforced mode
+# when this policy, rather than the operator's ambient setting, arms the gate.
+if [ "${have_range}" -eq 1 ] && [ "${public_push}" -eq 1 ]; then
+	printf '%s\n' "m8shift pre-push: public/different-line destination proven (${public_reason}); enforcement is mandatory." >&2
+	if [ "${enforce}" -eq 0 ]; then
+		enforce=1
+		run_hygiene_stage
+	fi
 fi
 
 scrub="${repo_root}/scripts/scrub-check.py"
