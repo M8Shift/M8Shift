@@ -101,9 +101,10 @@ This repository runs, on every push/PR and on a schedule:
 ## Local pre-commit / pre-push gate
 
 The pre-push scrub is range-scoped: it scans the pushed trees and file history,
-plus commit and annotated-tag messages, while naming the pushed carrier that
-must be repaired. This preserves the clean-push guarantee: unrelated local,
-reflog-only, and unreachable objects cannot block a publication.
+including each merge tree against every parent, plus commit and annotated-tag
+messages, while naming the pushed carrier that must be repaired. This preserves
+the clean-push guarantee: unrelated local, reflog-only, and unreachable objects
+cannot block a publication.
 
 Before a release/tag audit, `scripts/scrub-check.py --objects` is the explicit
 database-wide backstop. It scans blobs and tree names plus full commit and

@@ -17,7 +17,8 @@ Denylist (never committed — it IS the confidential data):
 Scans (raw `git` by argv — NEVER routed through a lossy optimizer such as rtk;
 a "clean" through a lossy path is unverified by definition):
   TIP      git grep -I -i -n [-F|-E] -e <pattern> HEAD --
-  HISTORY  git log <reachable scope> --pickaxe-regex -i -S<escaped> --
+  HISTORY  git log <reachable scope> --diff-merges=separate --no-patch
+           --pickaxe-regex -i -S<escaped> --
   Revisions always precede `--` (bad ordering silently scans nothing — the
   false-negative that let a real leak through; see RFC 052).
 
@@ -75,6 +76,13 @@ HISTORY_MAX_COMMITS = 5000
 SCRUB_MAX_WORKERS = 8
 OBJECT_MAX_BYTES = 256 * 1024 * 1024
 OBJECT_GIT_TIMEOUT_S = 300
+# A pushed merge publishes one tree against every parent it joins.  Separate
+# parent diffs are therefore the strict publication-boundary semantics: a merge
+# resolution that introduces or removes denied content must not disappear merely
+# because ordinary `git log -S` suppresses merge diffs.  Keep this shared by the
+# byte-exact pickaxe and normalized-content supplement so their merge universes
+# cannot drift.
+HISTORY_DIFF_MERGES = "--diff-merges=separate"
 # Hex-only rev specs: `A..B` or a bare SHA. Rejecting anything else keeps a
 # hostile/typoed value from ever reaching the git argv as an option.
 RANGE_RX = re.compile(r"^[0-9a-fA-F]{4,64}(\.\.[0-9a-fA-F]{4,64})?$")
@@ -247,7 +255,11 @@ def history_cmd(rule, max_commits, refs_pull, range_args=None, all_refs=False,
     explicit all_refs adds refs, reflogs, and bounded unreachable roots."""
     label, term, mode = rule
     cmd = ["git", "log"] + history_revs(range_args, all_refs, refs_pull, extra_revs)
-    cmd += ["--pickaxe-regex", "-i", "-S", re.escape(term),
+    # --diff-merges also turns patch output on.  --no-patch is a correctness
+    # boundary here, not presentation: run_history parses every whitespace token
+    # as a candidate object id, so diff text must never enter stdout.
+    cmd += [HISTORY_DIFF_MERGES, "--no-patch",
+            "--pickaxe-regex", "-i", "-S", re.escape(term),
             "--format=%H", "-n", str(max_commits), "--"]
     return cmd
 
@@ -856,7 +868,8 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None,
     for range_args, carrier in history_runs:
         cmd = ["git", "log"] + history_revs(
             range_args, args.all, args.refs_pull, extra_revs)
-        cmd += ["--raw", "-z", "--no-abbrev", "--no-renames", "--root",
+        cmd += [HISTORY_DIFF_MERGES,
+                "--raw", "-z", "--no-abbrev", "--no-renames", "--root",
                 "--format=%x1e%H%x00"]
         if not range_args:
             cmd += ["-n", str(args.max_commits + 1)]
@@ -865,7 +878,10 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None,
         if result.returncode != 0:
             raise RuntimeError("git log normalized history rc=%d: %s" % (
                 result.returncode, result.stderr[:200].decode("utf-8", "replace")))
-        commit_records = []
+        # --diff-merges=separate emits one frame per parent.  Aggregate those
+        # frames by commit before applying the per-term commit bound; otherwise a
+        # two-parent merge could consume two slots and hide a later carrier.
+        commit_records = {}
         blob_ids = []
         for chunk in result.stdout.split(b"\x1e"):
             if not chunk:
@@ -892,7 +908,7 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None,
                 new_sha = parts[3].decode("ascii") if parts[1] != b"160000" else "0"
                 pairs.append((old_sha, new_sha))
                 blob_ids.extend((old_sha, new_sha))
-            commit_records.append((sha, pairs))
+            commit_records.setdefault(sha, []).extend(pairs)
         blob_counts = {}
         for object_sha, raw in iter_blob_batch(blob_ids, args.repo, run):
             text = decode_comparison_text(raw)
@@ -911,7 +927,7 @@ def scan_normalized_history(rules, history_runs, args, extra_revs=None,
             blob_counts[object_sha] = object_counts
             del normalized_text, text, raw
         counts = {index: 0 for index in wanted}
-        for sha, pairs in commit_records:
+        for sha, pairs in commit_records.items():
             hit_indexes = set()
             for old_sha, new_sha in pairs:
                 old_counts = {} if set(old_sha) == {"0"} else blob_counts[old_sha]
