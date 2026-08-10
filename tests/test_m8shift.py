@@ -12501,8 +12501,10 @@ class TestRFC040UsagePRA(CLIBase):
 
     def test_legacy_measurement_omission_is_named_but_remains_successful(self):
         """#313 follow-up: compatibility stays fail-open, but a silent legacy
-        adapter is visible in both the snapshot and live-probe surfaces."""
+        adapter is visible in both the snapshot and live-probe surfaces even
+        when an older fixture also omits its schema declaration."""
         doc = self.usage_doc(used=None, limit=None, captured_at=self.fresh_iso(), windows=[])
+        del doc["schema"]
         rel = self.write_fixture(doc)
         self.write_adapters([self.fixture_adapter(path=rel)])
 
@@ -12511,10 +12513,18 @@ class TestRFC040UsagePRA(CLIBase):
                          snapshot_result.stdout + snapshot_result.stderr)
         snapshot_payload = json.loads(snapshot_result.stdout)
         self.assertNotIn("measurement", snapshot_payload["snapshots"][0]["snapshot"])
+        schema_index = next(
+            i for i, finding in enumerate(snapshot_payload["findings"])
+            if finding["check"] == "usage.normalize"
+            and "does not declare schema" in finding["message"])
+        measurement_index = next(
+            i for i, finding in enumerate(snapshot_payload["findings"])
+            if finding["check"] == "usage.measurement_undeclared")
+        self.assertLess(schema_index, measurement_index)
         snapshot_finding = next(
             f for f in snapshot_payload["findings"]
-            if f["check"] == "usage.normalize"
-            and "measurement is not declared" in f["message"])
+            if f["check"] == "usage.measurement_undeclared")
+        self.assertIn("measurement is not declared", snapshot_finding["message"])
         self.assertIn("claude-fx", snapshot_finding["message"])
 
         check_result = self.rt("usage", "adapters", "check", "--json")
@@ -12524,9 +12534,9 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(check_payload["probed"], [{"name": "claude-fx", "ok": True}])
         check_finding = next(
             f for f in check_payload["findings"]
-            if f["check"] == "usage.normalize"
-            and "measurement is not declared" in f["message"])
+            if f["check"] == "usage.measurement_undeclared")
         self.assertEqual(check_finding["severity"], "warning")
+        self.assertIn("measurement is not declared", check_finding["message"])
         self.assertIn("claude-fx", check_finding["message"])
 
     def test_invalid_measurement_metadata_is_not_copied(self):

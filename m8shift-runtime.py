@@ -9425,6 +9425,9 @@ USAGE_PROVENANCE = ("official", "local_estimate", "proxy_reported",
                     "historical_estimate", "manual", "unknown")
 USAGE_MEASUREMENT_STATES = ("measured", "degraded", "unavailable")
 USAGE_MEASUREMENT_REASON_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,79}\Z")
+USAGE_MEASUREMENT_UNDECLARED = (
+    "measurement is not declared; legacy success semantics retained"
+)
 USAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 USAGE_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 USAGE_ADAPTER_KEYS = {"//", "name", "agent", "provider", "kind", "command",
@@ -9836,7 +9839,7 @@ def _usage_measurement_or_none(value, warnings):
     machine tokens, never exception text or provider response content.
     """
     if value is None:
-        warnings.append("measurement is not declared; legacy success semantics retained")
+        warnings.append(USAGE_MEASUREMENT_UNDECLARED)
         return None
     if not isinstance(value, dict):
         warnings.append("measurement must be an object; ignored")
@@ -10103,6 +10106,14 @@ def record_usage_adapter_error(adapter_name, agent, message):
     )
     append_jsonl(USAGE_ERRORS, row)
     trim_usage_errors_ledger()
+
+
+def usage_normalization_finding(adapter_name, message):
+    """Keep contract disclosures distinct from ordinary fixture validation."""
+    check = "usage.measurement_undeclared" \
+        if message == USAGE_MEASUREMENT_UNDECLARED else "usage.normalize"
+    return {"severity": "warning", "check": check,
+            "message": f"{adapter_name}: {message}"}
 
 
 def run_usage_adapter_bounded(argv, timeout, cap):
@@ -10598,8 +10609,7 @@ def cmd_usage_adapters_check(args):
                 probed.append({"name": name, "ok": False})
                 continue
             for message in warnings:
-                findings.append({"severity": "warning", "check": "usage.normalize",
-                                 "message": f"{name}: {message}"})
+                findings.append(usage_normalization_finding(name, message))
             for message in scan_warnings:
                 findings.append({"severity": "warning", "check": "usage.scan",
                                  "message": f"{name}: {message}"})
@@ -10688,8 +10698,7 @@ def collect_usage_snapshots(agent_filter, warn_threshold, limit_threshold,
             findings.append({"severity": "warning", "check": "usage.unknown",
                              "message": f"{name}: usage unknown for {agent}; fail-open (no pause)"})
         for message in warnings:
-            findings.append({"severity": "warning", "check": "usage.normalize",
-                             "message": f"{name}: {message}"})
+            findings.append(usage_normalization_finding(name, message))
         # jsonl_scan diagnostics (cap-hit / schema-drift) travel back with the doc.
         for message in scan_warnings:
             findings.append({"severity": "warning", "check": "usage.scan",

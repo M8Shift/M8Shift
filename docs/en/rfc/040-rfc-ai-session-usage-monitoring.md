@@ -935,8 +935,9 @@ could be decoded, and `unavailable` means the provider or credential could not
 be observed. Reasons are identifiers such as `no_usable_windows`, never raw
 exception text, response content, or credential data. Legacy fixtures omit the
 object and retain their byte-identical schema. Their omission is nevertheless
-surfaced as a named `usage.normalize` warning (including the adapter name) by
-`usage snapshot` and `usage adapters check`; the live probe remains successful,
+surfaced through the dedicated `usage.measurement_undeclared` warning channel
+(including the adapter name) by `usage snapshot` and `usage adapters check`;
+the live probe remains successful,
 so this disclosure does not turn compatibility into a blocking error. All
 declared non-measured states remain fail-open for gating, but `usage status`
 preserves the state and emits a named finding instead of collapsing every case

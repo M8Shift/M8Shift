@@ -11,7 +11,9 @@
   result is nevertheless operationally consequential: adapter checks fail it,
   managed watchers count it as an unsuccessful read, and three consecutive
   failures degrade the watcher for reconciliation instead of reporting a
-  healthy quota feed.
+  healthy quota feed. An undeclared legacy measurement is disclosed through its
+  own `usage.measurement_undeclared` finding, so older schema-less fixtures cannot
+  hide the contract warning behind an ordinary normalization diagnostic.
 
 ## v4.0.0 — 2026-08-08
 
