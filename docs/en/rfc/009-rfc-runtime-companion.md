@@ -223,12 +223,35 @@ ambiguity about who is expected and what should be resumed.
 
 ### 2. `headless` mode for CLIs
 
-In `headless` mode the companion can drive a local command template:
+> **Erratum (RFC 067 policy amendment).** The former example used
+> `--dangerously-bypass-approvals-and-sandbox`. It was an unsafe historical
+> scaffold and is not a recommended headless template.
 
-```bash
-python3 m8shift-runtime.py run codex \
-  --exec 'codex exec --dangerously-bypass-approvals-and-sandbox "$M8SHIFT_PROMPT"'
+Governed headless execution goes through provider/adapter rendering from an
+immutable attempt plan. The minimum resolved policy is explicit rather than
+inherited:
+
+```yaml
+permission_policy:
+  mode: workspace-write
+  writable_roots: [owned_worktree]
+approval_policy: never
+network_policy:
+  mode: deny
+config_sources:
+  user_global: excluded
+launch: adapter.render_launch(immutable_attempt_plan)
 ```
+
+The adapter projection must set the provider's explicit non-interactive
+equivalent, selected workspace sandbox, and network denial in attempt-local argv
+or selected configuration. Its receipt names loaded and ignored configuration
+sources without recording secret values. A hand-built provider command is not a
+substitute for that projection. Until the governed adapter path is implemented
+and passes [RFC 067](067-rfc-detached-vendor-neutral-cli-orchestration.md)
+conformance, use an interactive/manual runner or the
+[RFC 065](065-rfc-ticketed-committed-pushed-delivery.md) forge-gateway path; do
+not restore the bypass.
 
 The generated prompt must instruct the agent to:
 
@@ -239,7 +262,9 @@ The generated prompt must instruct the agent to:
 5. return control to the companion.
 
 The companion must not assume the command succeeded just because the process exited
-zero; it verifies the core state after the run.
+zero; it verifies the core state after the run. A zero exit or successful config
+parse also does not attest that the resolved permission, approval, or network
+policy was applied.
 
 ## Idempotency
 

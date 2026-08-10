@@ -73,6 +73,25 @@ The shipped companion uses a stdlib-friendly JSON registry at
 
 This file is not a core protocol file. It is host/runtime configuration.
 
+### 5.1 Legacy `permissions` reconciliation
+
+The v1 `permissions` string is a deprecated compatibility input, not launch
+authority and not a second policy surface. During migration it maps into
+[RFC 067](067-rfc-detached-vendor-neutral-cli-orchestration.md)'s versioned,
+typed `permission_policy` during attempt-plan resolution. The resolved immutable
+plan is authoritative; a registry value never overrides it.
+
+The resolver records the legacy source and mapping in the redacted policy
+receipt. User-global defaults remain excluded, and host/admin policy may tighten
+but never widen the result. An ambiguous, unknown, or uninspectable legacy value
+fails closed for governed headless execution. Once every active registry and
+recovery path emits the RFC 067 policy receipt, implementations reject the
+legacy field instead of guessing.
+
+The registry remains responsible for literal argv arrays, adapter capabilities,
+and environment-name allowlisting. RFC 067 owns policy resolution, the exact
+provider projection, applied-policy observation, and production assurance.
+
 Since v3.33.0 / RFC 028, generated registries may also include an opt-in
 `examples` section with curated cooperative CLI samples and optional
 `argv_by_platform` arrays:
