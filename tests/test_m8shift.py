@@ -17695,9 +17695,9 @@ class TestPublishedBaseAttestation(unittest.TestCase):
             return None, r
         return json.loads(r.stdout)["receipt_id"], r
 
-    def _push_tag(self, receipt=None):
+    def _push_tag(self, receipt=None, enforce=True):
         return self._g("push", "origin", "v9.9.9",
-                       env=self._env(enforce=True, receipt=receipt))
+                       env=self._env(enforce=enforce, receipt=receipt))
 
     def _tag_published(self):
         out = subprocess.run(["git", "ls-remote", self.bare, "refs/tags/v9.9.9"],
@@ -17743,6 +17743,21 @@ class TestPublishedBaseAttestation(unittest.TestCase):
         allowed = self._push_tag(receipt=receipt)
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn("attestation consumed", allowed.stderr)
+        self.assertTrue(self._tag_published())
+
+    def test_public_declaration_arms_an_attested_new_ref_without_ambient_mode(self):
+        self._fixture()
+        fingerprint = self._attest("fingerprint", "--remote", "origin")
+        self.assertEqual(fingerprint.returncode, 0, fingerprint.stderr)
+        self.assertEqual(
+            self._g("config", "remote.origin.m8shiftPublicEndpoint",
+                    fingerprint.stdout.strip()).returncode, 0)
+        receipt, created = self._create()
+        self.assertIsNotNone(receipt, created.stderr)
+        pushed = self._push_tag(receipt=receipt, enforce=False)
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertIn("endpoint-bound public declaration", pushed.stderr)
+        self.assertIn("enforcement is mandatory", pushed.stderr)
         self.assertTrue(self._tag_published())
 
     def test_reverse_ancestry_tag_of_published_history_is_attestable(self):
@@ -20252,6 +20267,8 @@ class TestRFC052ScrubCheck(CLIBase):
                     os.path.join(work, ".git", "hooks", "pre-push"))
         os.chmod(os.path.join(work, ".git", "hooks", "pre-push"), 0o755)
         os.makedirs(os.path.join(work, "scripts"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "scripts", "publish-attest.py"),
+                    os.path.join(work, "scripts", "publish-attest.py"))
         if with_scrub:
             with open(os.path.join(work, "scripts", "scrub-check.py"), "w",
                       encoding="utf-8") as fh:
@@ -20275,7 +20292,7 @@ class TestRFC052ScrubCheck(CLIBase):
         g("add", "-A")
         g("commit", "-q", "-m", "clean")
 
-        def push(ref="HEAD:refs/heads/main", path=None, **extra):
+        def push(ref="HEAD:refs/heads/main", path=None, remote="origin", **extra):
             env = {k: v for k, v in os.environ.items()
                    if k not in ("M8SHIFT_SCRUB_ENFORCE", "M8SHIFT_AGENT",
                                 "M8SHIFT_BIN", "M8SHIFT_DENYLIST")}
@@ -20284,7 +20301,7 @@ class TestRFC052ScrubCheck(CLIBase):
             if path is not None:
                 env["PATH"] = path
             env.update(extra)
-            return g("push", "origin", ref, env=env)
+            return g("push", remote, ref, env=env)
 
         return work, bare, g, push
 
@@ -20299,6 +20316,106 @@ class TestRFC052ScrubCheck(CLIBase):
         out = subprocess.run(["git", "ls-remote", bare, ref],
                              capture_output=True, text=True).stdout
         return bool(out.strip())
+
+    def _declare_public(self, work, g, remote="origin"):
+        fingerprint = subprocess.run(
+            [sys.executable, os.path.join(work, "scripts", "publish-attest.py"),
+             "--repo", work, "fingerprint", "--remote", remote],
+            cwd=work, capture_output=True, text=True)
+        self.assertEqual(fingerprint.returncode, 0, fingerprint.stderr)
+        value = fingerprint.stdout.strip()
+        self.assertRegex(value, r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            g("config", "remote.%s.m8shiftPublicEndpoint" % remote,
+              value).returncode, 0)
+        return value
+
+    def test_public_policy_is_endpoint_bound_and_mandatory_not_name_based(self):
+        """#306: declaration forces enforcement; a suggestive name proves nothing.
+
+        The finding lives in stage one so this also proves the hook re-runs the
+        stage under mandatory mode after it has consumed the ref records.
+        """
+        work, bare, g, push = self._gate_repo(hygiene_rc=1)
+        self._declare_public(work, g)
+        blocked = push()
+        self.assertEqual(blocked.returncode, 1, blocked.stderr)
+        self.assertIn("endpoint-bound public declaration", blocked.stderr)
+        self.assertIn("enforcement is mandatory", blocked.stderr)
+        self.assertFalse(self._landed(bare))
+
+        _work2, bare2, g2, push2 = self._gate_repo(hygiene_rc=1)
+        self.assertEqual(g2("remote", "rename", "origin", "github").returncode, 0)
+        advisory = push2(remote="github")
+        self.assertEqual(advisory.returncode, 0, advisory.stderr)
+        self.assertIn("ADVISORY", advisory.stderr)
+        self.assertTrue(self._landed(bare2))
+
+    def test_public_declaration_survives_rename_and_changed_endpoint_refuses(self):
+        work, bare, g, push = self._gate_repo(hygiene_rc=1)
+        self._declare_public(work, g)
+        self.assertEqual(g("remote", "rename", "origin", "mirror").returncode, 0)
+        renamed = push(remote="mirror")
+        self.assertEqual(renamed.returncode, 1, renamed.stderr)
+        self.assertIn("endpoint-bound public declaration", renamed.stderr)
+        self.assertFalse(self._landed(bare))
+
+        work2, _bare2, g2, push2 = self._gate_repo(hygiene_rc=0)
+        self._declare_public(work2, g2)
+        changed = tempfile.mkdtemp(prefix="m8-changed-endpoint-")
+        self.addCleanup(shutil.rmtree, changed, True)
+        subprocess.run(["git", "init", "-q", "--bare", changed], capture_output=True)
+        self.assertEqual(g2("remote", "set-url", "origin", changed).returncode, 0)
+        refused = push2()
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertIn("declared public push endpoint changed", refused.stderr)
+
+    def test_direct_url_and_multi_pushurl_are_ambiguous_for_publication(self):
+        work, bare, _g, push = self._gate_repo(hygiene_rc=0)
+        direct = push(remote=bare)
+        self.assertEqual(direct.returncode, 1, direct.stderr)
+        self.assertIn("direct URL", direct.stderr)
+        self.assertFalse(self._landed(bare))
+
+        _work2, bare2, g2, push2 = self._gate_repo(hygiene_rc=0)
+        second = tempfile.mkdtemp(prefix="m8-second-pushurl-")
+        self.addCleanup(shutil.rmtree, second, True)
+        subprocess.run(["git", "init", "-q", "--bare", second], capture_output=True)
+        self.assertEqual(g2("remote", "set-url", "--add", "--push",
+                            "origin", bare2).returncode, 0)
+        self.assertEqual(g2("remote", "set-url", "--add", "--push",
+                            "origin", second).returncode, 0)
+        multi = push2()
+        self.assertEqual(multi.returncode, 1, multi.stderr)
+        self.assertIn("exactly one push endpoint", multi.stderr)
+
+    def test_different_line_arms_enforcement_without_a_declaration(self):
+        work, bare, g, _push = self._gate_repo(hygiene_rc=1)
+        source = g("rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(g("checkout", "-q", "--orphan", "other-line").returncode, 0)
+        for name in os.listdir(work):
+            if name != ".git":
+                path = os.path.join(work, name)
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.unlink(path)
+        with open(os.path.join(work, "other.md"), "w", encoding="utf-8") as fh:
+            fh.write("other line\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "other root")
+        destination = g("rev-parse", "HEAD").stdout.strip()
+        hook = os.path.join(work, ".git", "hooks", "pre-push")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("M8SHIFT_SCRUB_ENFORCE", "M8SHIFT_AGENT")}
+        env["M8SHIFT_BIN"] = os.path.join(os.path.dirname(work), "m8stub")
+        r = subprocess.run(
+            ["sh", hook, "origin", bare], cwd=work, capture_output=True, text=True,
+            env=env, input="refs/heads/source %s refs/heads/main %s\n" %
+            (source, destination))
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("destination history is not an ancestor", r.stderr)
+        self.assertIn("enforcement is mandatory", r.stderr)
 
     def test_enforce_variable_is_a_closed_contract(self):
         """#264: `= 1` meant true|yes|on were SILENTLY advisory.
@@ -20701,7 +20818,8 @@ class TestRFC052ScrubCheck(CLIBase):
         for shell in [sh for sh in ("/bin/sh", "/bin/dash", "/bin/bash")
                       if os.path.exists(sh)]:
             proc = subprocess.run(
-                [shell, "-c", 'IFS="0123456789abcdef -"; . "$1" origin "$2"',
+                [shell, "-c", 'hook=$1; target=$2; set -- origin "$target"; '
+                 'IFS="0123456789abcdef -"; . "$hook"',
                  "_", hook, bare],
                 cwd=work, env=env, capture_output=True, text=True,
                 input="refs/heads/x %s refs/heads/x %s\n" % (dirty, "0" * 40))
@@ -20792,6 +20910,37 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("nothing published", r.stderr)
         self.assertFalse(self._landed(bare), "the deletion did not reach the remote")
 
+    def test_public_declaration_does_not_close_deletion_only_containment(self):
+        work, bare, g, push = self._gate_repo(with_scrub=True, hygiene_rc=1)
+        self.assertEqual(push().returncode, 0)
+        self._declare_public(work, g)
+        deleted = push(ref=":refs/heads/main")
+        self.assertEqual(deleted.returncode, 0, deleted.stderr)
+        self.assertIn("deletion-only push", deleted.stderr)
+        self.assertNotIn("enforcement is mandatory", deleted.stderr)
+        self.assertFalse(self._landed(bare))
+
+    def test_public_mixed_delete_and_publish_batch_is_not_deletion_only(self):
+        work, bare, g, push = self._gate_repo(with_scrub=True, hygiene_rc=1)
+        # Land the containment target while the destination is still ordinary
+        # advisory, then declare it public for the mixed operation.
+        self.assertEqual(push().returncode, 0)
+        self._declare_public(work, g)
+        with open(os.path.join(work, "mixed.md"), "w", encoding="utf-8") as fh:
+            fh.write("clean publication\n")
+        g("add", "mixed.md")
+        g("commit", "-q", "-m", "mixed publication")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("M8SHIFT_SCRUB_ENFORCE", "M8SHIFT_AGENT")}
+        env["M8SHIFT_BIN"] = os.path.join(os.path.dirname(work), "m8stub")
+        mixed = g("push", "origin", ":refs/heads/main",
+                  "HEAD:refs/heads/other", env=env)
+        self.assertEqual(mixed.returncode, 1, mixed.stderr)
+        self.assertIn("enforcement is mandatory", mixed.stderr)
+        self.assertNotIn("deletion-only push", mixed.stderr)
+        self.assertTrue(self._landed(bare), "blocked batch still deleted main")
+        self.assertFalse(self._landed(bare, "refs/heads/other"))
+
     def test_a_poisoned_ifs_cannot_reshape_the_scanner_argv(self):
         """#264: the scanner argv depended on IFS — ambient shell state.
 
@@ -20839,7 +20988,8 @@ class TestRFC052ScrubCheck(CLIBase):
         for shell in shells:
             open(log, "w").close()
             proc = subprocess.run(
-                [shell, "-c", 'IFS="0123456789abcdef -"; . "$1" origin "$2"',
+                [shell, "-c", 'hook=$1; target=$2; set -- origin "$target"; '
+                 'IFS="0123456789abcdef -"; . "$hook"',
                  "_", hook, bare],
                 cwd=work, input=records, capture_output=True, text=True)
             seen = [ast.literal_eval(line) for line in

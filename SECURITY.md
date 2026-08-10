@@ -122,8 +122,22 @@ a per-push tax. Install with:
 
     git config core.hooksPath hooks
 
-They are **advisory by default** (warn, exit 0) so a contributor is never
-hard-blocked by a false positive. Set `M8SHIFT_SCRUB_ENFORCE` to `1`, `true`,
+They are **advisory by default only for an unclassified destination** (warn,
+exit 0) so an ordinary contributor is not hard-blocked by a false positive.
+A public endpoint declaration or endpoint-proven different history arms
+enforcement regardless of the ambient default. Create the declaration from the
+configured remote's canonical push endpoint (the helper prints only its SHA-256
+fingerprint, never the URL):
+
+    fp="$(python3 scripts/publish-attest.py fingerprint --remote public)"
+    git config --local remote.public.m8shiftPublicEndpoint "$fp"
+
+The remote name is only the declaration lookup key. Renaming it preserves the
+Git config subsection and the policy; changing its resolved `pushurl`, using
+multiple push URLs, supplying a direct URL, or losing the local objects needed
+to prove destination ancestry makes publication ambiguous and therefore
+blocks. Deletion-only pushes remain open for containment. Set
+`M8SHIFT_SCRUB_ENFORCE` to `1`, `true`,
 `yes` or `on` to make a hygiene/denylist hit **block** the commit and the push;
 `0`, `false`, `no`, `off` or unset keeps it advisory. Any other value is a
 configuration error and the hook refuses before scanning — a gate whose mode is
@@ -147,8 +161,9 @@ modes, as does a **missing** `scripts/scrub-check.py` when the push publishes
 objects: "not installed" and "installed and clean" must never look alike. A
 stage that could not run for any other reason (no resolvable `m8shift.py`, no
 checksum verifier) is reported as *incomplete* and blocks under enforcement.
-The only way to publish without a scrub is a deletion-only push, which puts no
-new object on the remote.
+The only way to pass the destination classifier without a scrub is a
+deletion-only push, which puts no new object on the remote. A mixed deletion and
+publication batch is still a publication.
 
 Independently of that advisory scrub policy, pre-commit refreshes
 `checksums.sha256` whenever a listed file is staged. It hashes the Git index blob,
