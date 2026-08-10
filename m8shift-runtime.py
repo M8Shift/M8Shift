@@ -9423,6 +9423,8 @@ USAGE_FIXTURE_SCHEMA = "m8shift.usage.fixture.v1"
 USAGE_ADAPTER_KINDS = ("cli_json", "fixture", "jsonl_scan")
 USAGE_PROVENANCE = ("official", "local_estimate", "proxy_reported",
                     "historical_estimate", "manual", "unknown")
+USAGE_MEASUREMENT_STATES = ("measured", "degraded", "unavailable")
+USAGE_MEASUREMENT_REASON_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,79}\Z")
 USAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 USAGE_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 USAGE_ADAPTER_KEYS = {"//", "name", "agent", "provider", "kind", "command",
@@ -9825,6 +9827,37 @@ def _usage_ratio_or_none(value, field, warnings):
     return ratio
 
 
+def _usage_measurement_or_none(value, warnings):
+    """Validate the optional adapter-observation contract from #313.
+
+    Legacy fixtures omit it and keep byte-identical snapshots.  New adapters
+    can state whether they actually measured quota, decoded only a degraded
+    response, or could not observe the provider at all.  Reasons are bounded
+    machine tokens, never exception text or provider response content.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        warnings.append("measurement must be an object; ignored")
+        return None
+    state = value.get("state")
+    reason = value.get("reason")
+    if state not in USAGE_MEASUREMENT_STATES:
+        warnings.append("measurement.state must be measured, degraded, or unavailable; ignored")
+        return None
+    if reason is not None and (not isinstance(reason, str)
+                               or not USAGE_MEASUREMENT_REASON_RE.fullmatch(reason)):
+        warnings.append("measurement.reason must be a bounded machine token; ignored")
+        return None
+    if state == "degraded" and not reason:
+        warnings.append("measurement.reason is required when state is degraded; ignored")
+        return None
+    if state == "measured" and reason is not None:
+        warnings.append("measurement.reason is not allowed when state is measured; ignored")
+        return None
+    return {"state": state, "reason": reason}
+
+
 def _usage_remaining_ratio(used_ratio):
     """Quota left for a schema-valid cumulative provider ratio.
 
@@ -9871,6 +9904,7 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
     if provenance not in USAGE_PROVENANCE:
         warnings.append(f"unknown provenance {provenance!r}; recorded as \"unknown\"")
         provenance = "unknown"
+    measurement = _usage_measurement_or_none(doc.get("measurement"), warnings)
     captured_at = _usage_iso_or_none(doc.get("captured_at"), "captured_at", warnings) or iso()
     used_tokens = _usage_int_or_none(doc.get("used_tokens"), "used_tokens", warnings)
     limit_tokens = _usage_int_or_none(doc.get("limit_tokens"), "limit_tokens", warnings)
@@ -9992,7 +10026,8 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
     primary_remaining_ratio = (primary_window.get("remaining_ratio")
                                if primary_window else None)
     primary_window_kind = primary_window.get("kind") if primary_window else None
-    known = {"schema", "agent", "provenance", "captured_at", "used_tokens", "limit_tokens", "windows"}
+    known = {"schema", "agent", "provenance", "captured_at", "used_tokens",
+             "limit_tokens", "windows", "measurement"}
     for key in sorted(set(doc) - known):
         warnings.append(f"unknown input key {key!r} ignored")
     snapshot = {
@@ -10008,6 +10043,8 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
         "decision_window": decision_window,
         "windows": windows,
     }
+    if measurement is not None:
+        snapshot["measurement"] = measurement
     if primary_window is not None:
         snapshot.update({
             "used_ratio": primary_used_ratio,
@@ -10796,6 +10833,18 @@ def usage_ledger_report(agent_filter, warn_threshold, limit_threshold, stale_aft
         classification = classify_usage_ratio(
             snapshot.get("decision_ratio"), warn_threshold, limit_threshold)
         effective = classification
+        measurement = snapshot.get("measurement")
+        if not (isinstance(measurement, dict)
+                and measurement.get("state") in USAGE_MEASUREMENT_STATES
+                and (measurement.get("reason") is None
+                     or (isinstance(measurement.get("reason"), str)
+                         and USAGE_MEASUREMENT_REASON_RE.fullmatch(
+                             measurement["reason"])))
+                and (measurement.get("state") != "degraded"
+                     or bool(measurement.get("reason")))
+                and (measurement.get("state") != "measured"
+                     or measurement.get("reason") is None)):
+            measurement = None
         if stale:
             effective = "unknown"
             findings.append({"severity": "warning", "check": "usage.stale",
@@ -10803,8 +10852,18 @@ def usage_ledger_report(agent_filter, warn_threshold, limit_threshold, stale_aft
                                         f"(older than {stale_after_minutes}m); "
                                         "treated as unknown (fail-open)"})
         elif classification == "unknown":
-            findings.append({"severity": "warning", "check": "usage.unknown",
-                             "message": f"{agent}: usage unknown; fail-open (no pause)"})
+            state = measurement.get("state") if measurement else None
+            reason = measurement.get("reason") if measurement else None
+            if state in ("degraded", "unavailable"):
+                detail = f" ({reason})" if reason else ""
+                findings.append({
+                    "severity": "warning", "check": f"usage.{state}",
+                    "message": (f"{agent}: usage measurement {state}{detail}; "
+                                "fail-open (no pause)"),
+                })
+            else:
+                findings.append({"severity": "warning", "check": "usage.unknown",
+                                 "message": f"{agent}: usage unknown; fail-open (no pause)"})
         report.append({
             "agent": agent,
             "adapter": (snapshot.get("source") or {}).get("adapter", ""),
@@ -10819,6 +10878,7 @@ def usage_ledger_report(agent_filter, warn_threshold, limit_threshold, stale_aft
             "used_tokens": snapshot.get("used_tokens"),
             "limit_tokens": snapshot.get("limit_tokens"),
             "classification": effective,
+            "measurement": measurement,
         })
     if not report:
         findings.append({"severity": "warning", "check": "usage.no_data",
@@ -10861,9 +10921,14 @@ def cmd_usage_status(args):
         tokens = f"{row['used_tokens']}/{row['limit_tokens']}" \
             if row["used_tokens"] is not None and row["limit_tokens"] is not None else "-"
         freshness = "stale" if row["stale"] else "fresh"
+        measurement = row.get("measurement") or {}
+        measurement_text = measurement.get("state", "legacy-unknown")
+        if measurement.get("reason"):
+            measurement_text += f"({measurement['reason']})"
         print(f"{row['agent']}  {row['classification']}  {usage_remaining_display(row)} "
               f"tokens={tokens} "
-              f"{freshness} captured={row['captured_at'] or '-'}")
+              f"measurement={measurement_text} {freshness} "
+              f"captured={row['captured_at'] or '-'}")
     print_usage_findings(findings)
     return code
 

@@ -926,6 +926,19 @@ A synthetic sample ships in the repository under
 the Codex adapter is a fixture/stub path normalized to the **same** snapshot
 schema.
 
+**Observation-state amendment (#313).** Official quota adapters may add a
+`measurement` object to the fixture and normalized snapshot. Its `state` is
+exactly `measured`, `degraded`, or `unavailable`; `degraded` requires a bounded
+machine-token `reason`. `measured` means at least one expected quota window was
+decoded, `degraded` means the provider answered but no usable expected window
+could be decoded, and `unavailable` means the provider or credential could not
+be observed. Reasons are identifiers such as `no_usable_windows`, never raw
+exception text, response content, or credential data. Legacy fixtures omit the
+object and retain their byte-identical schema. All non-measured states remain
+fail-open for gating, but `usage status` preserves the state and emits a named
+finding instead of collapsing every case into an undifferentiated empty
+official fixture.
+
 #### PR A exit codes (read-only commands only)
 
 For the five PR A commands, this mapping is the contract and supersedes the

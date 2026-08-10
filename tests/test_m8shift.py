@@ -12434,6 +12434,28 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(json.dumps(event["payload"]["snapshot"], sort_keys=True),
                          json.dumps(expected, sort_keys=True))
 
+    def test_measurement_state_survives_normalization_and_status(self):
+        """#313: an adapter that could not decode a usable provider response is
+        no longer indistinguishable from a legacy/empty successful fixture."""
+        doc = self.usage_doc(used=None, limit=None, captured_at=self.fresh_iso())
+        doc["measurement"] = {"state": "degraded", "reason": "no_usable_windows"}
+        result = self.snapshot_for(doc)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        snapshot = json.loads(result.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snapshot["measurement"], doc["measurement"])
+
+        status = json.loads(self.rt("usage", "status", "--json").stdout)
+        self.assertEqual(status["agents"][0]["measurement"], doc["measurement"])
+        self.assertIn("usage.degraded", {f["check"] for f in status["findings"]})
+
+    def test_invalid_measurement_metadata_is_not_copied(self):
+        doc = self.usage_doc(captured_at=self.fresh_iso())
+        doc["measurement"] = {"state": "degraded", "reason": "SECRET with spaces"}
+        payload = json.loads(self.snapshot_for(doc).stdout)
+        self.assertNotIn("measurement", payload["snapshots"][0]["snapshot"])
+        self.assertIn("bounded machine token",
+                      " ".join(f["message"] for f in payload["findings"]))
+
     # ── RFC 051 Part A: additive `decision_window` attribution of the argmax ─────
 
     def test_decision_window_records_driving_window_with_resets_at(self):
@@ -13343,6 +13365,8 @@ class TestRFC040UsageQuota(CLIBase):
         fx = json.loads(r.stdout)                                 # valid JSON, no NaN
         self.assertEqual(fx["provenance"], "official")
         self.assertEqual(fx["windows"], [])                       # fail-open, no gating
+        self.assertEqual(fx["measurement"], {
+            "state": "unavailable", "reason": "credential_unavailable"})
 
     def test_example_is_fail_open_on_malformed_credential_shape(self):
         """Codex PR #51 blocker 1: a valid-JSON-but-wrong-shape credentials file
@@ -13481,6 +13505,8 @@ class TestRFC040UsageQuota(CLIBase):
             self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
             self.assertEqual(fx["provenance"], "official")
             self.assertEqual(fx["windows"], [])
+            self.assertEqual(fx["measurement"], {
+                "state": "unavailable", "reason": "provider_unavailable"})
 
     def test_example_main_suppresses_broken_stdout_and_returns_zero(self):
         mod = self._example()
@@ -13547,8 +13573,9 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertIsNone(fx["limit_tokens"])
         self.assertEqual(set(fx), {
             "schema", "agent", "provenance", "captured_at",
-            "used_tokens", "limit_tokens", "windows",
+            "used_tokens", "limit_tokens", "windows", "measurement",
         })
+        self.assertEqual(fx["measurement"], {"state": "measured", "reason": None})
         by = {w["kind"]: w for w in fx["windows"]}
         self.assertEqual(by["session_5h"]["used_ratio"], 0.65)   # bucket wins over top 0.80
         self.assertEqual(by["weekly"]["used_ratio"], 0.4)
@@ -13852,11 +13879,25 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
         self.assertEqual(set(fx), {
             "schema", "agent", "provenance", "captured_at",
-            "used_tokens", "limit_tokens", "windows",
+            "used_tokens", "limit_tokens", "windows", "measurement",
         })
+        self.assertEqual(fx["measurement"], {"state": "measured", "reason": None})
         for win in fx["windows"]:
             self.assertEqual(set(win), {"kind", "used_ratio", "resets_at"})
         self.assertEqual(fx["windows"][0]["kind"], "session_5h")
+
+    def test_main_marks_unavailable_app_server_separately_from_empty_read(self):
+        mod = self._example()
+        out = io.StringIO()
+        self.assertEqual(mod.main(out=out, read_limits=lambda: None), 0)
+        unavailable = json.loads(out.getvalue())
+        self.assertEqual(unavailable["measurement"], {
+            "state": "unavailable", "reason": "app_server_unavailable"})
+
+        degraded = mod.build_fixture({"id": 2, "result": {}},
+                                     "2026-01-01T00:00:00Z")
+        self.assertEqual(degraded["measurement"], {
+            "state": "degraded", "reason": "no_usable_windows"})
 
     def test_main_suppresses_broken_stdout_and_returns_zero(self):
         mod = self._example()

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Honest usage-observation state (#313).** The official Claude and Codex
+  quota examples now distinguish a measured reading, a provider response with
+  no usable quota window, and an unavailable provider or credential. The
+  additive bounded `measurement` object survives normalization and `usage
+  status`, while legacy fixtures remain byte-identical and every degraded or
+  unavailable reading stays fail-open.
+
 ## v4.0.0 — 2026-08-08
 
 - **Merge-resolution content at the publish boundary (#263).** History scans now
