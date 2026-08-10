@@ -2,6 +2,17 @@
 
 ## v4.0.0 — 2026-08-08
 
+- **Merge-resolution content at the publish boundary (#263).** History scans now
+  compare every merge against each parent, so a denied identifier introduced by
+  one merge resolution and removed by another cannot cross the gate merely
+  because ordinary `git log -S` suppresses merge diffs. The exact pickaxe keeps
+  hash-only output with `--no-patch`; the normalized-content supplement uses the
+  same merge universe and folds multi-parent frames into one bounded carrier
+  commit. Findings retain pushed-ref attribution and the destination-proven
+  pre-existing downgrade. On a real 12-commit, 3-merge range, the exact walk's
+  median rose from 366 ms to 483 ms and the normalized walk from 24.4 ms to
+  25.7 ms (nine warm runs).
+
 - **Path names as publish-gate scan input (#291).** No scan input had ever
   contained a path, so a denied term carried only by a filename or directory
   published with rc 0 under enforcement; one fixture moves from rc 0 and no

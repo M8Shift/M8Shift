@@ -202,8 +202,10 @@ The read-only scanner checks Git tip and reachable history against a confidentia
 denylist. Direct invocation defaults to HEAD. Pre-push uses repeatable
 `--range A..B|SHA` plus `--remote REMOTE` and the corresponding `--ref REF`, so
 only commits published by those ref updates can gate the push and every HISTORY
-hit names its carrier. For a new ref, only target-remote tracking refs are treated
-as already published. Annotated tag messages are scanned from their tag objects.
+hit names its carrier. Merge commits are compared separately with every parent,
+so resolution-only additions and removals remain visible. Destination negotiation,
+not local remote-tracking refs, is the only authority for a pre-existing-history
+downgrade. Annotated tag messages are scanned from their tag objects.
 Use explicit `--all` for a repository audit across refs, worktree reflogs, and
 bounded unreachable commits; unreachable-only results include the local
 worktree/reflog/GC reap sequence. Other options are `--repo DIR`, `--denylist

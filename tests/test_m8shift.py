@@ -18098,6 +18098,52 @@ class TestRFC052ScrubCheck(CLIBase):
         return subprocess.run(["git", "rev-parse", rev], cwd=self.d,
                               capture_output=True, text=True).stdout.strip()
 
+    def _merge_only_add_remove(self, body):
+        """Return (base, adding merge, removing merge) for a merge-only carrier.
+
+        Neither merge's tree change is represented by a non-merge commit: the
+        first resolution adds ``body`` while both parents are clean, and the
+        second removes it while both parents still carry it.  Ordinary `git log
+        -S` therefore returns no carrier for the complete range.
+        """
+        self._commit("base.txt", "clean\n", "base")
+        base = self._sha()
+        main_branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"], cwd=self.d,
+            check=True, capture_output=True, text=True).stdout.strip()
+
+        subprocess.run(["git", "checkout", "-q", "-b", "merge-add-side"],
+                       cwd=self.d, check=True)
+        self._commit("add-side.txt", "clean side\n", "add side")
+        subprocess.run(["git", "checkout", "-q", main_branch], cwd=self.d,
+                       check=True)
+        self._commit("add-main.txt", "clean main\n", "add main")
+        subprocess.run(["git", "merge", "-q", "--no-ff", "--no-commit",
+                        "merge-add-side"], cwd=self.d, check=True)
+        secret_path = os.path.join(self.d, "docs", "resolution.md")
+        os.makedirs(os.path.dirname(secret_path), exist_ok=True)
+        with open(secret_path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        subprocess.run(["git", "add", "docs/resolution.md"], cwd=self.d,
+                       check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "merge adds resolution"],
+                       cwd=self.d, check=True)
+        adding_merge = self._sha()
+
+        subprocess.run(["git", "checkout", "-q", "-b", "merge-remove-side"],
+                       cwd=self.d, check=True)
+        self._commit("remove-side.txt", "clean side\n", "remove side")
+        subprocess.run(["git", "checkout", "-q", main_branch], cwd=self.d,
+                       check=True)
+        self._commit("remove-main.txt", "clean main\n", "remove main")
+        subprocess.run(["git", "merge", "-q", "--no-ff", "--no-commit",
+                        "merge-remove-side"], cwd=self.d, check=True)
+        subprocess.run(["git", "rm", "-q", "docs/resolution.md"], cwd=self.d,
+                       check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "merge removes resolution"],
+                       cwd=self.d, check=True)
+        return base, adding_merge, self._sha()
+
     def _scrub(self, *args, denylist=None, env_extra=None):
         env = dict(os.environ)
         env["HOME"] = self.home
@@ -19768,6 +19814,8 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("--glob=refs/pull", hist)
         self.assertIn("--pickaxe-regex", hist)
         self.assertIn("-i", hist)
+        self.assertIn("--diff-merges=separate", hist)
+        self.assertIn("--no-patch", hist)
         self.assertLess(hist.index("--all"), hist.index("--"))
         direct = mod.history_cmd(rule, 100, refs_pull=False)
         self.assertIn("HEAD", direct)
@@ -21069,6 +21117,57 @@ class TestRFC052ScrubCheck(CLIBase):
         self.assertIn("TIP hit", r.stdout)
         self.assertIn("HISTORY hit", r.stdout)
         self.assertNotIn(self.TERM, r.stdout + r.stderr)   # still redacted
+
+    def test_merge_only_add_remove_is_blocking_and_names_both_merges(self):
+        """#263: merge resolutions are part of the published object graph.
+
+        Both the introduction and removal are merges, so default pickaxe reports
+        no commits and the term is absent from the tip.  The bounded scanner must
+        still name exactly the two carrier merges and retain pushed-ref
+        attribution; no local carrier may turn either finding into pre-existing
+        destination evidence.
+        """
+        base, adding_merge, removing_merge = self._merge_only_add_remove(
+            "resolution mentioning %s\n" % self.TERM)
+        scope = "%s..%s" % (base, removing_merge)
+        blind = subprocess.run(
+            ["git", "log", scope, "--pickaxe-regex", "-i", "-S", self.TERM,
+             "--format=%H", "--"], cwd=self.d, check=True,
+            capture_output=True, text=True)
+        self.assertEqual(blind.stdout.strip(), "",
+                         "fixture invalid: ordinary pickaxe saw a non-merge carrier")
+
+        result = self._scrub(
+            "--range", scope, "--ref", "refs/heads/publish",
+            denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("TIP hit", result.stdout)
+        history = [line for line in result.stdout.splitlines()
+                   if line.startswith("HISTORY hit:")]
+        self.assertEqual(
+            {line.split()[3] for line in history},
+            {adding_merge[:12], removing_merge[:12]}, result.stdout)
+        self.assertTrue(all("via branch publish" in line for line in history),
+                        result.stdout)
+        self.assertNotIn("not transmitted by this push", result.stdout)
+        self.assertNotIn(self.TERM, result.stdout + result.stderr)
+
+    def test_normalized_merge_only_carriers_count_each_merge_once(self):
+        """#263 + #265: merge coverage includes normalized equivalents too."""
+        obscured = self.TERM.replace("Secret", "Secr\u200bet")
+        base, adding_merge, removing_merge = self._merge_only_add_remove(
+            obscured + "\n")
+        result = self._scrub(
+            "--range", "%s..%s" % (base, removing_merge),
+            "--max-commits", "2", denylist=self._deny(self.TERM + "\n"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        history = [line for line in result.stdout.splitlines()
+                   if line.startswith("HISTORY hit:")]
+        self.assertEqual(
+            {line.split()[3] for line in history},
+            {adding_merge[:12], removing_merge[:12]}, result.stdout)
+        self.assertEqual(len(history), 2,
+                         "multi-parent frames must not consume duplicate slots")
 
     def test_range_bare_sha_excludes_only_target_remote_history(self):
         # New branch to `public`: commits already tracked by the unrelated
