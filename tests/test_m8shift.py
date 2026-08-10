@@ -12499,6 +12499,36 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(payload["probed"][0]["measurement"], doc["measurement"])
         self.assertIn("usage.degraded", {f["check"] for f in payload["findings"]})
 
+    def test_legacy_measurement_omission_is_named_but_remains_successful(self):
+        """#313 follow-up: compatibility stays fail-open, but a silent legacy
+        adapter is visible in both the snapshot and live-probe surfaces."""
+        doc = self.usage_doc(used=None, limit=None, captured_at=self.fresh_iso(), windows=[])
+        rel = self.write_fixture(doc)
+        self.write_adapters([self.fixture_adapter(path=rel)])
+
+        snapshot_result = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(snapshot_result.returncode, 0,
+                         snapshot_result.stdout + snapshot_result.stderr)
+        snapshot_payload = json.loads(snapshot_result.stdout)
+        self.assertNotIn("measurement", snapshot_payload["snapshots"][0]["snapshot"])
+        snapshot_finding = next(
+            f for f in snapshot_payload["findings"]
+            if f["check"] == "usage.normalize"
+            and "measurement is not declared" in f["message"])
+        self.assertIn("claude-fx", snapshot_finding["message"])
+
+        check_result = self.rt("usage", "adapters", "check", "--json")
+        self.assertEqual(check_result.returncode, 0,
+                         check_result.stdout + check_result.stderr)
+        check_payload = json.loads(check_result.stdout)
+        self.assertEqual(check_payload["probed"], [{"name": "claude-fx", "ok": True}])
+        check_finding = next(
+            f for f in check_payload["findings"]
+            if f["check"] == "usage.normalize"
+            and "measurement is not declared" in f["message"])
+        self.assertEqual(check_finding["severity"], "warning")
+        self.assertIn("claude-fx", check_finding["message"])
+
     def test_invalid_measurement_metadata_is_not_copied(self):
         doc = self.usage_doc(captured_at=self.fresh_iso())
         doc["measurement"] = {"state": "degraded", "reason": "SECRET with spaces"}

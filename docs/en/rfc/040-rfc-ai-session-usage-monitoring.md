@@ -934,14 +934,17 @@ decoded, `degraded` means the provider answered but no usable expected window
 could be decoded, and `unavailable` means the provider or credential could not
 be observed. Reasons are identifiers such as `no_usable_windows`, never raw
 exception text, response content, or credential data. Legacy fixtures omit the
-object and retain their byte-identical schema. All non-measured states remain
-fail-open for gating, but `usage status` preserves the state and emits a named
-finding instead of collapsing every case into an undifferentiated empty
-official fixture. They are not healthy watcher reads: `usage adapters check`
-fails its live probe, and each managed watcher tick increments
-`consecutive_unknown`. The existing lifecycle threshold therefore degrades the
-watcher after three consecutive non-measured reads and requires reconciliation;
-legacy snapshots retain their pre-amendment watcher semantics.
+object and retain their byte-identical schema. Their omission is nevertheless
+surfaced as a named `usage.normalize` warning (including the adapter name) by
+`usage snapshot` and `usage adapters check`; the live probe remains successful,
+so this disclosure does not turn compatibility into a blocking error. All
+declared non-measured states remain fail-open for gating, but `usage status`
+preserves the state and emits a named finding instead of collapsing every case
+into an undifferentiated empty official fixture. They are not healthy watcher
+reads: `usage adapters check` fails its live probe, and each managed watcher tick
+increments `consecutive_unknown`. The existing lifecycle threshold therefore
+degrades the watcher after three consecutive non-measured reads and requires
+reconciliation; legacy snapshots retain their pre-amendment watcher semantics.
 
 #### PR A exit codes (read-only commands only)
 

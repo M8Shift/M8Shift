@@ -9836,6 +9836,7 @@ def _usage_measurement_or_none(value, warnings):
     machine tokens, never exception text or provider response content.
     """
     if value is None:
+        warnings.append("measurement is not declared; legacy success semantics retained")
         return None
     if not isinstance(value, dict):
         warnings.append("measurement must be an object; ignored")
