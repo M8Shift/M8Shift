@@ -139,7 +139,8 @@ alias m8w='python3 m8shift.py watch --interval 5 --for'
 **Already shipped:**
 
 - `--once` for testable/supervised single-turn execution;
-- `M8SHIFT_RUN_ID` passed to the child process so agents can append `x_run_id`;
+- `M8SHIFT_RUN_ID` passed to the child process so core `append` can stamp
+  `x_run_id` automatically when `M8SHIFT_AGENT` matches;
 - append-only `.m8shift/runtime/runs.jsonl` lifecycle events;
 - heartbeat TTL refresh while the child process runs.
 

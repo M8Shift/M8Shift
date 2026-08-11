@@ -135,6 +135,13 @@ ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 TURN_BEGIN_RE = re.compile(r"<!-- M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN -->")
 TURN_END_RE = re.compile(r"<!-- M8SHIFT:TURN \d+ [a-z][a-z0-9_-]* END -->")
+TURN_BLOCK_RE = re.compile(
+    r"<!-- M8SHIFT:TURN (?P<number>\d+) (?P<agent>[a-z][a-z0-9_-]*) BEGIN -->\r?\n"
+    r"(?P<body>.*?)"
+    r"<!-- M8SHIFT:TURN (?P=number) (?P=agent) END -->",
+    re.DOTALL,
+)
+TURN_FIELD_RE = re.compile(r"^- ([a-z_][a-z0-9_]*):\s*(.*?)\s*$")
 # RFC 047 total classification vocabulary (verify_post_run status values).
 SUCCESS_STATUSES = ("completed", "advanced", "not_required")
 FAILURE_STATUSES = ("non_completion", "stuck_working", "invalid_relay")
@@ -452,13 +459,36 @@ def read_lock(m8shift_path):
 
 
 def parse_turn_authors(text):
-    """Return [(n, agent), ...] for every closed-turn BEGIN marker in the relay text."""
-    return [(int(m.group(1)), m.group(2)) for m in TURN_BEGIN_RE.finditer(text)]
+    """Return [(n, agent), ...] for every structurally closed relay turn."""
+    return [(record["number"], record["agent"]) for record in parse_turn_records(text)]
 
 
-def authored_by_me(m8shift_text_or_path, me, pre_turn):
+def parse_turn_records(text):
+    """Return closed-turn authors plus their machine-readable header fields.
+
+    Only the field block before the first blank line is authoritative. A body that
+    merely quotes ``- x_run_id: ...`` therefore cannot claim a runner execution.
+    """
+    records = []
+    for match in TURN_BLOCK_RE.finditer(text):
+        header = re.split(r"\r?\n\r?\n", match.group("body"), maxsplit=1)[0]
+        fields = {}
+        for line in header.splitlines():
+            field = TURN_FIELD_RE.fullmatch(line)
+            if field:
+                fields[field.group(1)] = field.group(2)
+        records.append({
+            "number": int(match.group("number")),
+            "agent": match.group("agent"),
+            "fields": fields,
+        })
+    return records
+
+
+def authored_by_me(m8shift_text_or_path, me, pre_turn, run_id=""):
     """RFC 047 authorship rule: True iff the transcript contains a turn authored by
-    `me` with int(n) > int(pre_turn).
+    `me` with int(n) > int(pre_turn). When ``run_id`` is supplied, that closed turn
+    must also carry the exact ``x_run_id`` field exported to this runner child.
 
     Accepts either the relay text or a path to it. `pre_turn` is parsed defensively:
     a non-integer pre-turn means authorship can never be established (the caller's
@@ -477,7 +507,12 @@ def authored_by_me(m8shift_text_or_path, me, pre_turn):
         pre = int(str(pre_turn).strip())
     except (TypeError, ValueError):
         return False
-    return any(agent == me and n > pre for n, agent in parse_turn_authors(text))
+    return any(
+        record["agent"] == me
+        and record["number"] > pre
+        and (not run_id or record["fields"].get("x_run_id") == run_id)
+        for record in parse_turn_records(text)
+    )
 
 
 def read_relay_post_run(m8shift_path, attempts=3, delay=0.5):
@@ -632,16 +667,18 @@ def validate_run_plan(plan):
     return True
 
 
-def expected_post_run(me, lk):
+def expected_post_run(me, lk, run_id=""):
     return {
         "type": "core_state_advanced",
         "pre_state": lk.get("state", ""),
         "pre_holder": lk.get("holder", ""),
         "pre_turn": lk.get("turn", ""),
         "agent": me,
+        "run_id": run_id,
         "stuck_state": f"WORKING_{me.upper()}",
         "success_rule": ("post relay is DONE OR the transcript contains a turn authored "
-                         "by this agent with n > pre_turn (RFC 047)"),
+                         "by this agent with n > pre_turn and x_run_id matching this run "
+                         "(RFC 047)"),
     }
 
 
@@ -659,7 +696,7 @@ def make_run_plan(args, run_id, me, lk, resumed=False):
     cwd = os.path.abspath(args.cwd)
     if not os.path.isdir(cwd):
         raise SystemExit(f"--cwd is not a directory: {args.cwd}")
-    expected = expected_post_run(me, lk)
+    expected = expected_post_run(me, lk, run_id)
     if args.expected_transition == "none":
         expected = {
             "type": "none",
@@ -733,8 +770,9 @@ def classify_post_run(expected, after, post_text):
     state = after.get("state", "")
     if state == "DONE":
         return "completed", "relay session is DONE"
-    if authored_by_me(post_text, me, expected.get("pre_turn", "")):
-        return "advanced", "this agent authored a turn newer than the pre-run turn"
+    if authored_by_me(post_text, me, expected.get("pre_turn", ""),
+                      expected.get("run_id", "")):
+        return "advanced", "this run authored a turn newer than the pre-run turn"
     pre_turn = _turn_int(expected.get("pre_turn"))
     post_turn = _turn_int(after.get("turn"))
     same = pre_turn is not None and post_turn == pre_turn
