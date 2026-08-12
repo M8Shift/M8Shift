@@ -3,7 +3,8 @@
 - **Status:** accepted / implemented (#72; finalization #74)
 - **Date:** 2026-07-14
 - **Scope:** repository contribution and delivery discipline for every agent;
-  documentation and advisory local checks only, with no network authority in the core.
+  no network authority in the core; explicit runtime-companion transport only under
+  one immutable scoped mandate created by the live holder.
 - **Builds on:** [RFC 006](006-rfc-tasks.md),
   [RFC 031](031-rfc-decision-traceability.md),
   [RFC 048](048-rfc-adoption-discipline-pack-update-health.md),
@@ -117,15 +118,17 @@ When policy or sandboxing blocks the author's forge network access:
 1. **Author:** works in an isolated branch, validates, commits, and checks worktree
    state.
 2. **Author:** hands off the relay task, branch, full local SHA, files, verification,
-   named gateway, and requested remote action. It labels delivery **gateway pending**,
-   not remotely delivered.
+   named gateway, and requested remote action. While still holding the pen it creates
+   the exact short-lived gateway mandate for the reviewed shell-free argv. It labels
+   delivery **gateway pending**, not remotely delivered.
 3. **Gateway:** claims and reads the pending turn, then reviews that exact commit. If
    changes are needed it returns a bounded ask; the author makes a new commit and
    repeats the handoff.
 4. **Gateway:** creates or reconciles the structured forge ticket before first push,
    linking the relay task and local SHA without copying sensitive relay output.
-5. **Gateway:** pushes the reviewed history without rewriting it, opens/updates the
-   linked PR, and records remote branch and SHA.
+5. **Gateway:** atomically consumes the exact mandate, pushes the reviewed history
+   without rewriting it, opens/updates the linked PR under separately scoped mandates,
+   and records remote branch and SHA.
 6. **Gateway:** merges only after normal validation/review, closes the ticket with the
    structured template, and reports remote evidence through the relay.
 
@@ -148,7 +151,8 @@ The helper appends `m8shift.gateway.event.v1` records to
 `.m8shift/runtime/gateway.jsonl`. It does not inspect or mutate the relay pen and it
 does not perform a forge action itself. Each record has UTC time, actor, one action
 (`push`, `pr_open`, `pr_merge`, `pr_close`, `tag`, `branch_delete`,
-`merge_resolve`, or `publish_mirror`), one outcome (`ok`, `refused`, `retrying`, or
+`merge_resolve`, `publish_mirror`, `issue_create`, `issue_comment`, `issue_close`, or
+`pr_comment`), one outcome (`ok`, `refused`, `retrying`, or
 `failed`), repo-relative refs/ids, and optional SHA-256 digests. A non-`ok` outcome
 requires a stable machine-readable cause. URLs, absolute paths, parent traversal,
 multiline/raw command output, credentials, and non-digest content evidence are
@@ -162,6 +166,65 @@ as a compact `GATEWAY` line in TOP even while the relay is `PAUSED`, so the oper
 drill “what was the gateway doing during the pause?” is answerable from this ledger
 alone. Gateway shell automation calls the helper explicitly; there is no implicit
 push/merge instrumentation in the passive core.
+
+### 3.4 One-shot gateway transport authority (#281 P2)
+
+Gateway role membership is never an exemption from the pen. A gateway may write while
+it does not hold the author's pen only through this two-command runtime flow:
+
+```bash
+python3 m8shift-runtime.py gateway-mandate create \
+  --by codex --actor m8shift-gateway --action push \
+  --target remote=origin --target branch=feat/example \
+  --target commit=<exact-full-sha> \
+  --ttl-seconds 300 -- git push origin <exact-full-sha>:refs/heads/feat/example
+
+python3 m8shift-runtime.py gateway-exec \
+  --actor m8shift-gateway --mandate gm-<32-lowercase-hex> --action push \
+  --target remote=origin --target branch=feat/example \
+  --target commit=<same-exact-full-sha> \
+  -- git push origin <same-exact-full-sha>:refs/heads/feat/example
+```
+
+Creation requires `--by` to hold a live, unexpired pen and requires `--actor` to be a
+different named identity. The immutable `m8shift.gateway.mandate.v1` record binds:
+
+- issuer and named gateway actor;
+- one allowlisted non-integration action (`push`, `issue_comment`, `pr_open`, or
+  `pr_comment`);
+- an action-specific exact target set (a push/PR open requires both branch/ref and a
+  full 40/64-hex Git object id; PR open also requires the exact base; a comment
+  requires its issue/ticket/PR id; alternate or extra target keys are refused);
+- physical project and invocation working directory digests;
+- issue time and a 30–900 second expiry (300 seconds by default);
+- SHA-256 of the canonical bounded argv array and of the resolved executable bytes.
+
+The reference executor also verifies that the action label describes the command:
+`push` is exactly `git push <remote> <full-sha>:refs/heads/<branch>` (so force,
+deletion, mirror, prune, option smuggling, and symbolic moving heads are inexpressible),
+while forge-record actions use the matching `tea comments add` or
+`tea pulls create` shape with the mandated repo/id/head/base options. Those are
+closed canonical argv grammars: aliases, `--option=value`, duplicate or extra flags,
+alternate login/remote selection, and option smuggling are refused. Arbitrary
+programs cannot hide behind an allowlisted action label.
+
+The argv and any comment body are never stored. Credential-shaped argv is refused;
+credentials, if the chosen forge client needs them, remain caller-owned inherited
+process state. `gateway-exec` recomputes every binding (including executable drift),
+opens and hashes the resolved executable, copies the already-open bytes into a
+create-exclusive private launch snapshot, re-hashes that snapshot, and removes it
+after the child exits. Replacing the original executable path after verification
+therefore cannot change the bytes launched. It refuses expiry or mismatch, then
+creates `m8shift.gateway.mandate-consumption.v1` with
+`O_CREAT|O_EXCL|O_NOFOLLOW` **before** launching the child without a shell. Existing
+consumption is a replay refusal. A process crash after consumption therefore strands
+the mandate safely instead of re-running an uncertain remote mutation. The immutable
+result and gateway-event rows link the mandate SHA-256 without storing command output.
+
+Mandates deliberately exclude merge, close, tag, branch deletion, mirror, force push,
+and every other destructive/integration action. Human exact-head merge authorization
+remains mandatory and cannot be encoded as, inferred from, or delegated by a mandate.
+Deleting runtime evidence can revoke/strand pending capability but cannot grant one.
 
 ## 4. Evidence and completion language
 
@@ -197,7 +260,8 @@ Acceptance amends these surfaces in the implementation change:
 - RFC 053: clarify that a directly approved repository policy does not await learned-
   rule evidence or companion promotion.
 
-Local tooling remains advisory and offline:
+Local delivery reminders remain advisory and offline. Direct-holder authority
+checks are separate and fail closed only when an agent identity is configured:
 
 1. **Pre-commit reminder:** for a non-empty staged repository change, print one stable
    reminder to confirm its forge ticket and push the completed checkpoint before
@@ -207,11 +271,23 @@ Local tooling remains advisory and offline:
    `delivery.no_upstream` for a non-default branch without an upstream and
    `delivery.unpushed` when `HEAD` is ahead of its local upstream ref. It labels this
    local evidence and never claims the remote is current.
+3. **Direct mutation guard (#281 P1):** `guard-exec <agent> -- <argv...>` checks
+   `may-i-write` immediately before one shell-free command. The pre-push hook applies
+   the same rule at Git publication time. With `M8SHIFT_AGENT` configured, missing or
+   invalid pen evidence blocks; without it, the hook warns and preserves the explicit
+   human/unconfigured path. Both narrow the documented TOCTOU window without claiming
+   to eliminate it.
+4. **Named gateway mandate (#281 P2):** a live holder creates one exact expiring
+   runtime capability; only a matching `gateway-exec` invocation can consume it once.
+   It is transport authority only and cannot authorize integration/destructive actions.
 
 Ticket existence is reviewed on the forge. The hook therefore warns every staged
 change unit to confirm linkage instead of treating `#123`, a branch name, or commit
 prose as proof. Doctor's upstream findings are local-ref evidence only. No core command
-receives credentials or network access.
+implicitly receives network authority or inspects credentials; `guard-exec` and
+`gateway-exec` are explicit shell-free delegations of caller-owned argv and inherited
+child environment. Only `gateway-exec` can act outside the pen, and only after exact
+one-shot mandate consumption.
 
 ## 6. Safety and failure handling
 
@@ -267,6 +343,10 @@ The gateway applies these incident-derived recovery rules in order:
    `x_merge_authorized_by`, `x_merge_authorized_pr`, and `x_merge_authorized_head` and
    is reconciled to the MR before delivery is complete. Without authorization, agents
    wait.
+6. **Scoped gateway authority (#281 P2):** immutable mandate, consumption, and result
+   records implement the actor/action/target/expiry/argv-digest capability. Atomic
+   consumption precedes shell-free execution; replay, mismatch, malformed evidence,
+   and expiry fail closed. The gateway ledger links the mandate digest and outcome.
 
 ## 8. Acceptance criteria
 
@@ -284,12 +364,27 @@ The gateway applies these incident-derived recovery rules in order:
    or unclosed integration record by itself.
 9. Independent review and human merge authorization are both discoverable and refer to
    the exact MR/head; peer approval alone never authorizes publication to `main`.
+10. An out-of-pen gateway transport runs only from a live-holder-issued, unexpired,
+    exact one-shot mandate; no mismatch/replay reaches the child and no mandate can
+    authorize merge or another destructive/integration action.
 
 ## 9. Non-goals
 
-- forge credentials/network access in the core relay;
-- automatic ticket creation, push, PR, merge, or close;
+- core inspection/storage of forge credentials or implicit network access (the
+  explicit shell-free execution wrappers merely delegate caller-owned argv/env);
+- automatic or ambient ticket/push/PR authority (only an explicitly created and
+  consumed one-shot transport mandate may launch its exact argv); automatic merge or
+  close remains excluded;
 - local refs or hooks presented as proof of forge state;
 - commits for transient relay state or each editor save;
 - replacement of independent review or the structured issue lifecycle;
 - hard-coding Claude/Codex into the portable policy.
+
+## 10. Completed gateway authority (#281 P2)
+
+The gateway ledger remains result evidence, not authorization. Authority comes only
+from the live-holder-issued `m8shift.gateway.mandate.v1` capability and ends at atomic
+one-shot consumption or expiry. There is no ambient gateway-role exemption. The
+implementation covers actor, action, exact target, physical context, argv digest,
+bounded lifetime, replay refusal, crash-safe fail-closed consumption, and audit linkage;
+destructive/integration actions remain deliberately outside this capability.

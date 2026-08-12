@@ -191,6 +191,7 @@ PRESENCE = os.path.join(RUNTIME_DIR, "presence.json")
 RUNS = os.path.join(RUNTIME_DIR, "runs.jsonl")
 CONSULTS = os.path.join(RUNTIME_DIR, "consults.jsonl")
 GATEWAY = os.path.join(RUNTIME_DIR, "gateway.jsonl")
+GATEWAY_MANDATES_DIR = os.path.join(RUNTIME_DIR, "gateway-mandates")
 PROGRESS = os.path.join(RUNTIME_DIR, "progress.jsonl")
 IDEMPOTENCY = os.path.join(RUNTIME_DIR, "idempotency.jsonl")
 APPROVALS = os.path.join(RUNTIME_DIR, "approvals.jsonl")
@@ -198,8 +199,25 @@ CONSULT_SCHEMA = "m8shift.consult.exchange.v1"
 GATEWAY_EVENT_SCHEMA = "m8shift.gateway.event.v1"
 GATEWAY_ACTIONS = frozenset((
     "push", "pr_open", "pr_merge", "pr_close", "tag", "branch_delete",
-    "merge_resolve", "publish_mirror",
+    "merge_resolve", "publish_mirror", "issue_create", "issue_comment",
+    "issue_close", "pr_comment",
 ))
+GATEWAY_MANDATE_SCHEMA = "m8shift.gateway.mandate.v1"
+GATEWAY_MANDATE_CONSUMPTION_SCHEMA = "m8shift.gateway.mandate-consumption.v1"
+GATEWAY_MANDATE_RESULT_SCHEMA = "m8shift.gateway.mandate-result.v1"
+# A mandate is transport authority, never integration/destructive authority.  Merge,
+# close, tag, delete and mirror actions retain their existing human/operator gates.
+GATEWAY_MANDATE_ACTIONS = frozenset((
+    "push", "issue_comment", "pr_open", "pr_comment",
+))
+GATEWAY_MANDATE_ID_RE = re.compile(r"gm-[0-9a-f]{32}\Z")
+GATEWAY_MANDATE_TTL_DEFAULT_S = 300
+GATEWAY_MANDATE_TTL_MIN_S = 30
+GATEWAY_MANDATE_TTL_MAX_S = 900
+GATEWAY_MANDATE_MAX_ARGV = 128
+GATEWAY_MANDATE_MAX_ARG_BYTES = 4096
+GATEWAY_MANDATE_MAX_ARGV_BYTES = 64 * 1024
+GATEWAY_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 GATEWAY_OUTCOMES = frozenset(("ok", "refused", "retrying", "failed"))
 GATEWAY_KEY_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 GATEWAY_CAUSE_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
@@ -2728,6 +2746,575 @@ def cmd_gateway_event(args):
         print("gateway event recorded: %s %s (%s)" % (
             row["action"], row["outcome"], os.path.relpath(GATEWAY, HERE)))
     return 0
+
+
+def _gateway_mandate_argv(raw):
+    """Return one bounded shell-free argv and its content digest.
+
+    The argv itself is deliberately never persisted: forge comment bodies and local
+    command details are not durable authority evidence.  The canonical digest is.
+    """
+    argv = list(raw or [])
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv or len(argv) > GATEWAY_MANDATE_MAX_ARGV:
+        raise ValueError("gateway mandate requires 1..%d argv items after --" %
+                         GATEWAY_MANDATE_MAX_ARGV)
+    total = 0
+    for item in argv:
+        if not isinstance(item, str) or not item or "\x00" in item:
+            raise ValueError("gateway mandate argv items must be non-empty strings")
+        size = len(item.encode("utf-8"))
+        if size > GATEWAY_MANDATE_MAX_ARG_BYTES:
+            raise ValueError("gateway mandate argv item exceeds %d bytes" %
+                             GATEWAY_MANDATE_MAX_ARG_BYTES)
+        total += size
+    if total > GATEWAY_MANDATE_MAX_ARGV_BYTES:
+        raise ValueError("gateway mandate argv exceeds %d bytes" %
+                         GATEWAY_MANDATE_MAX_ARGV_BYTES)
+    # Refuse the credential shapes that would also be unsafe in a process list.
+    # Do not use the broad opaque-blob redactor here: exact Git SHAs are legitimate
+    # command arguments and are separately bound as targets.
+    credential_patterns = CONSULT_SECRET_PATTERNS[:3]
+    if any(pattern.search(item) for item in argv for pattern in credential_patterns) \
+            or any(GATEWAY_USERINFO_RE.search(item) for item in argv):
+        raise ValueError("gateway mandate argv must not contain credential-shaped data")
+    digest = "sha256:" + hashlib.sha256(canonical_json_bytes(argv)).hexdigest()
+    return argv, digest
+
+
+def _gateway_mandate_targets(values):
+    """Validate exact, inspectable target identifiers without lossy redaction."""
+    values = values or []
+    if not values or len(values) > GATEWAY_MAX_PAIRS_PER_OPTION:
+        raise ValueError("--target requires 1..%d key=value entries" %
+                         GATEWAY_MAX_PAIRS_PER_OPTION)
+    out = {}
+    for item in values:
+        if not isinstance(item, str) or "=" not in item:
+            raise ValueError("--target requires key=value")
+        key, value = item.split("=", 1)
+        value = value.strip()
+        if not GATEWAY_KEY_RE.fullmatch(key) or key in out:
+            raise ValueError("--target keys must be unique safe identifiers")
+        is_exact_sha = key in {"commit", "head", "sha", "source"} \
+            and GATEWAY_GIT_SHA_RE.fullmatch(value)
+        if not is_exact_sha:
+            if redact_consult_brief(value) != value:
+                raise ValueError("--target values must not contain secret-shaped data")
+            if (not GATEWAY_VALUE_RE.fullmatch(value) or "\n" in value or "\r" in value
+                    or "://" in value or os.path.isabs(value)
+                    or ".." in value.replace("\\", "/").split("/")):
+                raise ValueError("--target values must be bounded repo-relative identifiers")
+        out[key] = value
+    return {key: out[key] for key in sorted(out)}
+
+
+def _validate_gateway_action_targets(action, targets):
+    keys = set(targets)
+    sha_keys = keys & {"commit", "head", "sha", "source"}
+    ref_keys = keys & {"branch", "ref"}
+    if action == "push":
+        if keys - {"remote", "commit", "head", "sha", "source", "branch", "ref"} \
+                or len(sha_keys) != 1 or len(ref_keys) != 1 or "remote" not in keys:
+            raise ValueError(
+                "push mandates require only remote, one exact commit/head SHA, "
+                "and one branch/ref")
+        return
+    if action == "issue_comment":
+        ids = keys & {"issue", "ticket"}
+        if keys - {"repo", "issue", "ticket"} or len(ids) != 1 or "repo" not in keys:
+            raise ValueError(
+                "issue_comment mandates require only repo and one issue/ticket id")
+        return
+    if action == "pr_open":
+        if keys - {"repo", "base", "commit", "head", "sha", "source",
+                   "branch", "ref"} \
+                or len(sha_keys) != 1 or len(ref_keys) != 1 \
+                or not {"repo", "base"} <= keys:
+            raise ValueError(
+                "pr_open mandates require only repo, base, one exact head SHA, "
+                "and one branch/ref")
+        return
+    if action == "pr_comment":
+        if keys != {"repo", "pr"}:
+            raise ValueError("pr_comment mandates require only repo and pr=<id>")
+        return
+    raise ValueError("gateway action has no safe target binding")
+
+
+def _gateway_target_value(targets, names):
+    values = [targets[name] for name in names if name in targets]
+    if len(values) != 1:
+        raise ValueError("gateway target must name exactly one of %s" % "/".join(names))
+    return values[0]
+
+
+def _gateway_program_name(argv):
+    name = os.path.basename(argv[0]).lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _gateway_open_executable(argv):
+    """Open and hash the executable inode that gateway-exec will later launch."""
+    candidate = argv[0]
+    resolved = candidate if os.path.isabs(candidate) or os.sep in candidate \
+        else shutil.which(candidate)
+    if not resolved:
+        raise ValueError("gateway argv executable cannot be resolved")
+    resolved = os.path.realpath(os.path.abspath(resolved))
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
+    try:
+        fd = os.open(resolved, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111:
+            raise ValueError("gateway argv executable is not a regular executable file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        os.lseek(fd, 0, os.SEEK_SET)
+        return "sha256:" + digest.hexdigest(), resolved, fd
+    except ValueError:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    except OSError as exc:
+        if fd >= 0:
+            os.close(fd)
+        raise ValueError("gateway argv executable cannot be hashed (%s)" %
+                         exc.__class__.__name__) from None
+
+
+def _gateway_executable_digest(argv):
+    digest, resolved, fd = _gateway_open_executable(argv)
+    os.close(fd)
+    return digest, resolved
+
+
+def _gateway_executable_snapshot(fd, directory):
+    """Materialize the already-open executable bytes into one private launch path.
+
+    macOS mounts /dev/fd as non-executable and exposes no fexecve.  Copying from the
+    verified descriptor into a create-exclusive file under the private mandate
+    directory removes the attacker-controlled original path from the launch.  The
+    caller verifies this second digest and deletes the snapshot after the child exits.
+    """
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    reject_symlinked_runtime_path(directory, ValueError)
+    directory_info = os.stat(directory, follow_symlinks=False)
+    if not stat.S_ISDIR(directory_info.st_mode) \
+            or (os.name == "posix" and stat.S_IMODE(directory_info.st_mode) & 0o077):
+        raise ValueError("gateway executable snapshot directory is not private")
+    snapshot = os.path.join(directory, ".exec-" + uuid.uuid4().hex)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    out_fd = -1
+    try:
+        out_fd = os.open(snapshot, flags, 0o500)
+        os.lseek(fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(out_fd, view)
+                view = view[written:]
+        os.fsync(out_fd)
+        os.close(out_fd)
+        out_fd = -1
+        return snapshot, "sha256:" + digest.hexdigest()
+    except OSError as exc:
+        if out_fd >= 0:
+            os.close(out_fd)
+        try:
+            os.unlink(snapshot)
+        except OSError:
+            pass
+        raise ValueError("gateway executable snapshot failed (%s)" %
+                         exc.__class__.__name__) from None
+
+
+def _validate_gateway_command_binding(action, targets, argv, *, verify_live_ref=False):
+    """Make the declared action a verified command family, not a free-form label."""
+    program = _gateway_program_name(argv)
+    if action == "push":
+        sha = _gateway_target_value(targets, ("commit", "head", "sha", "source"))
+        branch = _gateway_target_value(targets, ("branch", "ref"))
+        branch_ref = branch if branch.startswith("refs/heads/") else "refs/heads/" + branch
+        expected = [argv[0], "push", targets["remote"], sha + ":" + branch_ref]
+        if program != "git" or argv != expected:
+            raise ValueError(
+                "push mandate argv must be exactly: git push <remote> <sha>:refs/heads/<branch>")
+        return
+    if program != "tea":
+        raise ValueError("forge record mandates require the tea CLI")
+    if action in {"issue_comment", "pr_comment"}:
+        expected_id = _gateway_target_value(
+            targets, ("issue", "ticket") if action == "issue_comment" else ("pr",))
+        if len(argv) != 8 or argv[1:7] != [
+                "comments", "add", expected_id,
+                "--repo", targets["repo"], "--description",
+        ] or argv[7].startswith("-"):
+            raise ValueError(
+                "%s mandate argv must be exactly: tea comments add <id> "
+                "--repo <repo> --description <body>" % action)
+        return
+    if action == "pr_open":
+        branch = _gateway_target_value(targets, ("branch", "ref"))
+        sha = _gateway_target_value(targets, ("commit", "head", "sha", "source"))
+        prefix = [
+            argv[0], "pulls", "create", "--repo", targets["repo"],
+            "--head", branch, "--base", targets["base"], "--title",
+        ]
+        if len(argv) not in {11, 13} or argv[:10] != prefix \
+                or argv[10].startswith("-") \
+                or (len(argv) == 13 and
+                    (argv[11] != "--description" or argv[12].startswith("-"))):
+            raise ValueError(
+                "pr_open mandate argv must be exactly: tea pulls create --repo <repo> "
+                "--head <branch> --base <base> --title <title> "
+                "[--description <body>]")
+        if verify_live_ref:
+            checked = subprocess.run(
+                ["git", "rev-parse", "--verify", branch + "^{commit}"],
+                cwd=os.getcwd(), capture_output=True, text=True,
+            )
+            if checked.returncode != 0 or checked.stdout.strip().lower() != sha:
+                raise ValueError("pr_open local head no longer matches the mandated SHA")
+        return
+    raise ValueError("gateway action has no safe command binding")
+
+
+def _gateway_mandate_path(mandate_id, name="mandate.json"):
+    if not isinstance(mandate_id, str) or not GATEWAY_MANDATE_ID_RE.fullmatch(mandate_id):
+        raise ValueError("gateway mandate id is invalid")
+    return os.path.join(GATEWAY_MANDATES_DIR, mandate_id, name)
+
+
+def _read_gateway_mandate_json(path):
+    reject_symlinked_runtime_path(path, ValueError)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        raise ValueError("unknown gateway mandate") from None
+    except OSError as exc:
+        raise ValueError("cannot read gateway mandate (%s)" % exc.__class__.__name__) from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("gateway mandate record is not a regular file")
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            fd = -1
+            doc = json.load(fh)
+    except (UnicodeError, json.JSONDecodeError, RecursionError, OSError, ValueError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("gateway mandate record"):
+            raise
+        raise ValueError("gateway mandate record is malformed") from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return doc
+
+
+def _gateway_mandate_project_ref():
+    return "sha256:" + hashlib.sha256(os.path.realpath(HERE).encode("utf-8")).hexdigest()
+
+
+def _gateway_mandate_cwd_ref():
+    return "sha256:" + hashlib.sha256(os.path.realpath(os.getcwd()).encode("utf-8")).hexdigest()
+
+
+def _load_gateway_mandate(mandate_id, *, require_cwd):
+    path = _gateway_mandate_path(mandate_id)
+    doc = _read_gateway_mandate_json(path)
+    fields = {"schema", "id", "issued_at", "expires_at", "issuer", "actor",
+              "action", "targets", "argv_sha256", "executable_sha256",
+              "project_ref", "cwd_ref", "relay", "source"}
+    relay_fields = {"state", "holder", "turn"}
+    source_fields = {"tool", "version"}
+    if not isinstance(doc, dict) or set(doc) != fields \
+            or doc.get("schema") != GATEWAY_MANDATE_SCHEMA \
+            or doc.get("id") != mandate_id \
+            or not isinstance(doc.get("relay"), dict) \
+            or set(doc["relay"]) != relay_fields \
+            or not isinstance(doc.get("source"), dict) \
+            or set(doc["source"]) != source_fields:
+        raise ValueError("gateway mandate record is malformed")
+    issuer = doc.get("issuer")
+    actor = doc.get("actor")
+    issued_at = doc.get("issued_at")
+    expires_at = doc.get("expires_at")
+    try:
+        stored_targets = _gateway_mandate_targets(
+            ["%s=%s" % item for item in sorted(doc.get("targets", {}).items())]
+        ) if isinstance(doc.get("targets"), dict) else None
+    except (TypeError, ValueError):
+        stored_targets = None
+    issued_dt = parse_utc(issued_at) if isinstance(issued_at, str) else None
+    expires_dt = parse_utc(expires_at) if isinstance(expires_at, str) else None
+    lifetime = (expires_dt - issued_dt).total_seconds() if issued_dt and expires_dt else -1
+    if not isinstance(issuer, str) or not AGENT_RE.fullmatch(issuer) \
+            or not isinstance(actor, str) or not AGENT_RE.fullmatch(actor) \
+            or issuer == actor \
+            or doc.get("action") not in GATEWAY_MANDATE_ACTIONS \
+            or not isinstance(doc.get("argv_sha256"), str) \
+            or not GATEWAY_DIGEST_RE.fullmatch(doc["argv_sha256"]) \
+            or not isinstance(doc.get("executable_sha256"), str) \
+            or not GATEWAY_DIGEST_RE.fullmatch(doc["executable_sha256"]) \
+            or not isinstance(doc.get("project_ref"), str) \
+            or not GATEWAY_DIGEST_RE.fullmatch(doc["project_ref"]) \
+            or not isinstance(doc.get("cwd_ref"), str) \
+            or not GATEWAY_DIGEST_RE.fullmatch(doc["cwd_ref"]) \
+            or issued_dt is None or expires_dt is None \
+            or not GATEWAY_MANDATE_TTL_MIN_S <= lifetime <= GATEWAY_MANDATE_TTL_MAX_S \
+            or not isinstance(doc.get("targets"), dict) \
+            or stored_targets != doc.get("targets"):
+        raise ValueError("gateway mandate record is malformed")
+    if doc["relay"].get("holder") != issuer \
+            or doc["relay"].get("state") != "WORKING_" + issuer.upper() \
+            or not isinstance(doc["source"].get("tool"), str) \
+            or doc["source"].get("tool") != "m8shift-runtime.py" \
+            or not isinstance(doc["source"].get("version"), str):
+        raise ValueError("gateway mandate record is malformed")
+    _validate_gateway_action_targets(doc["action"], stored_targets)
+    if doc["project_ref"] != _gateway_mandate_project_ref():
+        raise ValueError("gateway mandate belongs to another project root")
+    if require_cwd and doc["cwd_ref"] != _gateway_mandate_cwd_ref():
+        raise ValueError("gateway mandate belongs to another working directory")
+    return doc
+
+
+def _write_gateway_consumption_once(path, row):
+    """Atomically claim a mandate; unlike immutable specs, retries always refuse."""
+    reject_symlinked_runtime_path(path, ValueError)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    reject_symlinked_runtime_path(path, ValueError)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        raise ValueError("gateway mandate was already consumed; replay refused") from None
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(canonical_json_bytes(row))
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def _gateway_record_present(path):
+    reject_symlinked_runtime_path(path, ValueError)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ValueError("gateway mandate state cannot be inspected (%s)" %
+                         exc.__class__.__name__) from None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("gateway mandate state is not a regular file")
+    return True
+
+
+def cmd_gateway_mandate_create(args):
+    try:
+        issuer = fleet_holder_preflight(args.by)
+        actor = (args.actor or "").strip()
+        if not AGENT_RE.fullmatch(actor):
+            raise ValueError("--actor must be a safe named gateway identity")
+        if actor == issuer:
+            raise ValueError("gateway actor must differ from the live pen holder")
+        if args.action not in GATEWAY_MANDATE_ACTIONS:
+            raise ValueError("gateway mandates do not authorize integration or destructive actions")
+        if not GATEWAY_MANDATE_TTL_MIN_S <= args.ttl_seconds <= GATEWAY_MANDATE_TTL_MAX_S:
+            raise ValueError("--ttl-seconds must be %d..%d" % (
+                GATEWAY_MANDATE_TTL_MIN_S, GATEWAY_MANDATE_TTL_MAX_S))
+        targets = _gateway_mandate_targets(args.target)
+        _validate_gateway_action_targets(args.action, targets)
+        mandate_argv, argv_digest = _gateway_mandate_argv(args.command)
+        _validate_gateway_command_binding(
+            args.action, targets, mandate_argv, verify_live_ref=args.action == "pr_open")
+        executable_digest, _resolved_executable = _gateway_executable_digest(mandate_argv)
+        issued = now()
+        relay = safe_relay_snapshot()
+        if relay.get("holder") != issuer or relay.get("state") != "WORKING_" + issuer.upper():
+            raise ValueError("live relay holder changed before mandate creation")
+        mandate_id = "gm-" + uuid.uuid4().hex
+        row = {
+            "schema": GATEWAY_MANDATE_SCHEMA,
+            "id": mandate_id,
+            "issued_at": iso(issued),
+            "expires_at": iso(issued + dt.timedelta(seconds=args.ttl_seconds)),
+            "issuer": issuer,
+            "actor": actor,
+            "action": args.action,
+            "targets": targets,
+            "argv_sha256": argv_digest,
+            "executable_sha256": executable_digest,
+            "project_ref": _gateway_mandate_project_ref(),
+            "cwd_ref": _gateway_mandate_cwd_ref(),
+            "relay": relay,
+            "source": {"tool": "m8shift-runtime.py", "version": VERSION},
+        }
+        mandate_path = _gateway_mandate_path(mandate_id)
+        os.makedirs(os.path.dirname(mandate_path), mode=0o700)
+        write_json_immutable(mandate_path, row)
+        ensure_runtime_gitignore()
+    except (OSError, ValueError) as exc:
+        sys.exit("m8shift-runtime: %s" % exc)
+    payload = {"ok": True, "mandate": row, "command_persisted": False}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print("gateway mandate created: %s action=%s actor=%s expires=%s" % (
+            mandate_id, row["action"], row["actor"], row["expires_at"]))
+    return 0
+
+
+def cmd_gateway_mandate_show(args):
+    try:
+        row = _load_gateway_mandate(args.id, require_cwd=False)
+        consumed_path = _gateway_mandate_path(args.id, "consumption.json")
+        result_path = _gateway_mandate_path(args.id, "result.json")
+        consumed = _gateway_record_present(consumed_path)
+        completed = _gateway_record_present(result_path)
+        expired = now() >= parse_utc(row["expires_at"])
+        status = "completed" if completed else "consumed" if consumed else \
+            "expired" if expired else "pending"
+    except (OSError, ValueError) as exc:
+        sys.exit("m8shift-runtime: %s" % exc)
+    payload = {"ok": True, "status": status, "mandate": row}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print("gateway mandate %s: %s action=%s actor=%s expires=%s" % (
+            args.id, status, row["action"], row["actor"], row["expires_at"]))
+    return 0
+
+
+def _gateway_child_returncode(returncode):
+    return 128 + (-returncode) if returncode < 0 else returncode
+
+
+def cmd_gateway_exec(args):
+    executable_fd = -1
+    executable_snapshot = ""
+    try:
+        row = _load_gateway_mandate(args.mandate, require_cwd=True)
+        actor = (args.actor or "").strip()
+        if not AGENT_RE.fullmatch(actor) or actor != row["actor"]:
+            raise ValueError("gateway actor does not match the mandate")
+        if args.action != row["action"]:
+            raise ValueError("gateway action does not match the mandate")
+        targets = _gateway_mandate_targets(args.target)
+        _validate_gateway_action_targets(args.action, targets)
+        if targets != row["targets"]:
+            raise ValueError("gateway target does not match the mandate")
+        argv, argv_digest = _gateway_mandate_argv(args.command)
+        if argv_digest != row["argv_sha256"]:
+            raise ValueError("gateway argv does not match the mandate")
+        _validate_gateway_command_binding(
+            args.action, targets, argv, verify_live_ref=args.action == "pr_open")
+        executable_digest, _resolved_executable, executable_fd = \
+            _gateway_open_executable(argv)
+        if executable_digest != row["executable_sha256"]:
+            raise ValueError("gateway executable bytes no longer match the mandate")
+        consumed_dt = now()
+        if consumed_dt >= parse_utc(row["expires_at"]):
+            raise ValueError("gateway mandate expired before consumption")
+        executable_snapshot, snapshot_digest = _gateway_executable_snapshot(
+            executable_fd, os.path.dirname(_gateway_mandate_path(args.mandate)))
+        os.close(executable_fd)
+        executable_fd = -1
+        if snapshot_digest != executable_digest:
+            raise ValueError("gateway executable snapshot digest mismatch")
+        mandate_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(row)).hexdigest()
+        consumed_at = iso(consumed_dt)
+        consumption = {
+            "schema": GATEWAY_MANDATE_CONSUMPTION_SCHEMA,
+            "mandate": args.mandate,
+            "consumed_at": consumed_at,
+            "actor": actor,
+            "action": args.action,
+            "mandate_sha256": mandate_digest,
+            "project_ref": row["project_ref"],
+            "cwd_ref": row["cwd_ref"],
+        }
+        _write_gateway_consumption_once(
+            _gateway_mandate_path(args.mandate, "consumption.json"), consumption)
+    except (OSError, ValueError) as exc:
+        if executable_fd >= 0:
+            os.close(executable_fd)
+        if executable_snapshot:
+            try:
+                os.unlink(executable_snapshot)
+            except OSError:
+                pass
+        sys.exit("m8shift-runtime: %s" % exc)
+
+    cause = ""
+    try:
+        exec_argv = [executable_snapshot] + argv[1:]
+        completed = subprocess.run(exec_argv, cwd=os.getcwd()).returncode
+        exit_code = _gateway_child_returncode(completed)
+        if exit_code != 0:
+            cause = "command_exit"
+    except FileNotFoundError:
+        exit_code, cause = 127, "command_not_found"
+    except (PermissionError, OSError):
+        exit_code, cause = 126, "command_not_executable"
+    finally:
+        try:
+            os.unlink(executable_snapshot)
+        except OSError:
+            pass
+
+    result = {
+        "schema": GATEWAY_MANDATE_RESULT_SCHEMA,
+        "mandate": args.mandate,
+        "completed_at": iso(),
+        "actor": actor,
+        "action": args.action,
+        "exit_code": exit_code,
+        "outcome": "ok" if exit_code == 0 else "failed",
+        "cause": cause,
+        "mandate_sha256": mandate_digest,
+    }
+    try:
+        write_json_immutable(_gateway_mandate_path(args.mandate, "result.json"), result)
+        event = {
+            "schema": GATEWAY_EVENT_SCHEMA,
+            "ts": result["completed_at"],
+            "actor": actor,
+            "action": args.action,
+            "outcome": result["outcome"],
+            "cause": cause,
+            "refs": {},
+            "ids": {"mandate": args.mandate},
+            "digests": {"mandate": mandate_digest},
+            "source": {"tool": "m8shift-runtime.py", "version": VERSION},
+        }
+        append_jsonl(GATEWAY, event)
+        ensure_runtime_gitignore()
+    except (OSError, ValueError) as exc:
+        print("m8shift-runtime: gateway command completed but audit persistence failed (%s)" %
+              exc.__class__.__name__, file=sys.stderr)
+        return 1
+    print("gateway mandate consumed: %s outcome=%s exit=%d" % (
+        args.mandate, result["outcome"], exit_code), file=sys.stderr)
+    return exit_code
 
 
 def idempotency_seen(key):
@@ -12115,8 +12702,11 @@ def _runtime_is_mutating(args):
     --pause-on/config-changing notify options) IS gated."""
     cmd = getattr(args, "cmd", "")
     verb = getattr(args, "verb", "") or ""
-    if cmd in ("init", "watch", "operator", "progress", "approve", "gateway-event"):
+    if cmd in ("init", "watch", "operator", "progress", "approve", "gateway-event",
+               "gateway-exec"):
         return True
+    if cmd == "gateway-mandate":
+        return getattr(args, "mandate_verb", "") == "create"
     if (cmd, verb) in (("providers", "init"), ("retention", "prune"),
                        ("listener", "stop"), ("usage", "init"),
                        ("usage", "snapshot"), ("usage", "watch"),
@@ -12275,6 +12865,48 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
     ge.add_argument("--json", action="store_true",
                     help="emit the stored event as machine-readable JSON")
     ge.set_defaults(fn=cmd_gateway_event)
+
+    gm = sub.add_parser(
+        "gateway-mandate",
+        help="create or inspect an immutable expiring one-shot forge-gateway mandate")
+    gm_sub = gm.add_subparsers(dest="mandate_verb", required=True)
+    gmc = gm_sub.add_parser(
+        "create", help="bind one named gateway to one exact action, target and argv digest")
+    gmc.add_argument("--by", required=True,
+                     help="current live pen holder issuing the bounded mandate")
+    gmc.add_argument("--actor", required=True,
+                     help="named gateway identity that alone may consume the mandate")
+    gmc.add_argument("--action", required=True,
+                     choices=tuple(sorted(GATEWAY_MANDATE_ACTIONS)),
+                     help="non-integration transport action")
+    gmc.add_argument("--target", action="append", default=[], metavar="KEY=VALUE",
+                     help="exact repo-relative target identifier (repeatable)")
+    gmc.add_argument("--ttl-seconds", type=int, default=GATEWAY_MANDATE_TTL_DEFAULT_S,
+                     help="short expiry in seconds (default: 300; min: 30; max: 900)")
+    gmc.add_argument("--json", action="store_true",
+                     help="emit the mandate metadata as machine-readable JSON")
+    gmc.add_argument("command", nargs=argparse.REMAINDER,
+                     help="exact shell-free argv after --; only its SHA-256 is persisted")
+    gmc.set_defaults(fn=cmd_gateway_mandate_create)
+    gms = gm_sub.add_parser("show", help="inspect mandate metadata and one-shot state")
+    gms.add_argument("id", help="gateway mandate id")
+    gms.add_argument("--json", action="store_true",
+                     help="emit machine-readable metadata")
+    gms.set_defaults(fn=cmd_gateway_mandate_show)
+
+    gx = sub.add_parser(
+        "gateway-exec",
+        help="atomically consume one exact gateway mandate, then exec its shell-free argv")
+    gx.add_argument("--actor", required=True,
+                    help="named gateway identity bound into the mandate")
+    gx.add_argument("--mandate", required=True, help="one-shot gateway mandate id")
+    gx.add_argument("--action", required=True, choices=tuple(sorted(GATEWAY_MANDATE_ACTIONS)),
+                    help="exact action bound into the mandate")
+    gx.add_argument("--target", action="append", default=[], metavar="KEY=VALUE",
+                    help="exact target set bound into the mandate (repeatable)")
+    gx.add_argument("command", nargs=argparse.REMAINDER,
+                    help="exact shell-free argv after --; must match the stored digest")
+    gx.set_defaults(fn=cmd_gateway_exec)
 
     op = sub.add_parser("operator", help="queue an operator message for one agent lane")
     op.add_argument("agent", help="agent lane the message is queued for")

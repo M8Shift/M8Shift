@@ -393,7 +393,7 @@ published site, or use the repository-local docs when working from a clone.
 | 062 | [Listening ends only at DONE](docs/en/rfc/062-rfc-listening-ends-only-at-done.md) | Any halt (incl. holding the pen, PAUSED, a denied action) suspends acting, never listening | implemented | 2026-07-14 | keep a waiter armed until DONE; DONE is the only state that ends listening |
 | 063 | [On-demand expanded activity reader](docs/en/rfc/063-rfc-on-demand-expanded-activity-reader.md) | Toggleable, word-wrapped full done-text blocks fetched by immutable turn number | implemented | 2026-07-14 | `e` toggles; ↑/↓ selects blocks; ←/→ pages text; status snapshot stays lean |
 | 064 | [Effective-work and non-work time accounting](docs/en/rfc/064-rfc-effective-time-accounting.md) | State-duration accounting for effective work vs awaiting, paused, idle, and unknown time | accepted for implementation | 2026-07-14 | `WORKING` proxy; honest partial retroactivity; one primary work item per window; permanent global TIME strip |
-| 065 | [Ticketed, committed, and pushed delivery](docs/en/rfc/065-rfc-ticketed-committed-pushed-delivery.md) | One forge ticket and remotely recoverable Git history for every intentional change | accepted / implemented | 2026-07-14 | advisory offline reminders; named role-based forge gateway |
+| 065 | [Ticketed, committed, and pushed delivery](docs/en/rfc/065-rfc-ticketed-committed-pushed-delivery.md) | One forge ticket and remotely recoverable Git history for every intentional change | accepted / implemented | 2026-07-14 · #281 P2 2026-08-12 | advisory reminders; direct-holder guards; immutable one-shot gateway transport mandates |
 | 066 | [Asymmetric solo advance](docs/en/rfc/066-rfc-asymmetric-solo-advance.md) | Bounded solo progress during an explicit peer absence, followed by mandatory deferred reconciliation | accepted / design-only | — | signed project policy; reversible branch-local work; returning peer may require follow-up corrections; implementation deferred |
 | 067 | [Detached, vendor-neutral CLI agent orchestration](docs/en/rfc/067-rfc-detached-vendor-neutral-cli-orchestration.md) | Passive relay + runtime control plane + generic runner + per-CLI adapters (launch/stop/resume/health) surviving an IDE crash; Codex/Claude phase 1, Gemini/Mistral Vibe later | accepted / design-only | — | no behavior active; relay stays degree-1 and passive; D1-D16 accepted; phased implementation deferred |
 | 068 | [Zero-downtime forge token rotation](docs/en/rfc/068-rfc-forge-token-rotation.md) | Least-privilege token generation overlap, environment-only helper transport, consumer cutover, revocation, and re-entrant operator recovery | draft / design-only | — | operator-only runbook; no live credential action or direct-forge authorization |
@@ -455,8 +455,9 @@ Verified by the tests and by multi-agent review:
   `WORKING_<you>`. You work only after a successful `claim`, so no two agents ever
   modify the repository at the same time. `--to` ≠ self (strict alternation).
 - **Stale-lock recovery** — `claim --force` reclaims **only a stale lock** (refused
-  on an active one); the holder can refresh its own lock. Long-running wrappers
-  should refresh at least 5 minutes before `expires`.
+  on an active one); the holder can refresh its own lock. Run long interactive
+  commands through `lease-keeper <agent> -- <argv...>` so refresh and protective
+  heartbeat continue concurrently until the child exits.
 - **Guardrails** — `release` / `done` are baton-owner ops (the `holder`: pen holder in WORKING / awaited agent in AWAITING); only `append` requires the pen. `--force --reason TEXT` = audited recovery.
 - **Serialized concurrency** — an inter-process lock `.m8shift.lock` (`O_EXCL`, with
   an ownership token) plus atomic writes (unique temp file + `os.replace`, mode
@@ -491,6 +492,18 @@ Verified by the tests and by multi-agent review:
 > lifecycle/finding events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
 > companion adds local presence, operator inbox, progress, and runtime diagnostics
 > under `.m8shift/runtime/`.
+
+For a long interactive process that already owns the pen, use the stdlib-only
+keeper instead of a bare launch:
+
+```bash
+./m8shift.py lease-keeper codex -- codex
+```
+
+It exports `M8SHIFT_AGENT`, the binding-resolved `M8SHIFT_ROOT`, and the exact
+`M8SHIFT_BIN`; refreshes the pen and emits `heartbeat --source wrapper` (default
+cadence 300 seconds, never later than TTL/2); and stops the child visibly if either
+control call fails. It does not claim a new turn or wake an interactive UI.
 
 > [!TIP]
 > **You no longer hand-build that loop.** Since RFC 047 the runtime companion ships a
@@ -585,6 +598,7 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 | Local integration layer | ✅ Shipped | installers, checksums, version surfaces, `examples/headless_runner.py`, `m8shift-runtime.py` | local convenience layer; no provider SDK in the core |
 | Degree-2 parallel work | ✅ Shipped, opt-in | [`m8shift-worktree.py`](docs/en/rfc/008-rfc-worktree-companion.md) | isolated git worktrees; serialized integration pen; core remains degree-1 |
 | Provider/runtime companion | ✅ Shipped v1 | `m8shift-runtime.py init/providers/roles/workflows/approve/report` | host-side config and reports; no secrets, no second routing authority |
+| Scoped forge-gateway transport | ✅ Shipped, opt-in | `gateway-mandate create/show`, `gateway-exec` | live holder issues one expiring exact capability; closed command grammar plus verified executable snapshot; named gateway consumes once; no merge/destructive authority |
 | Local notifications | ✅ Shipped | `m8shift-runtime.py notify`, `watch` notification path | stdout/file/bell/OS/hook tiers; advisory only, no daemon, no network in M8Shift |
 | `subturn` provenance ledger | ❌ Rejected | [rationale](docs/en/rfc/007-rfc-subturn.md) | redundant with advisory fields and `remember` |
 | Hosted control plane / IDE integrations | 🔭 Future companion | [RFC](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | optional layer outside the passive core |

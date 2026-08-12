@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Managed interactive and gateway authority (#280/#281).** `lease-keeper` now wraps one
+  shell-free interactive argv, exports the resolved relay identity, refreshes the
+  holder's pen and emits a protective wrapper heartbeat at a real bounded cadence,
+  and stops the child if either guarantee is lost. `guard-exec` performs the
+  point-in-time pen check immediately before one shell-free external command, and
+  the shipped pre-push hook now applies the same configured-agent fail-closed /
+  unconfigured warning contract as pre-commit. The runtime companion now completes
+  P2 with an immutable, expiring, actor/action/target/working-directory/argv-digest
+  mandate created by the live pen holder. `gateway-exec` atomically consumes it
+  before one shell-free transport action, accepts only closed canonical `git`/`tea`
+  argv grammars, refuses replay, mismatch, and option smuggling, and launches a
+  private re-hashed snapshot copied from the verified executable descriptor so an
+  original-path swap cannot change the bytes run. It persists no command,
+  credential, or output and links the result to the existing gateway ledger.
+  Merge, close, tag, deletion, mirror, and other integration/destructive actions
+  remain outside mandate authority and retain explicit human authorization.
+
 - Fix the disabled tokscale adapter to consume the quota data returned by its
   actual `tokscale usage --json` command (#316): a redacted live v4.13.0 shape is
   pinned in tests, Claude/Codex percentages become ratio-native

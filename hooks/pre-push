@@ -16,6 +16,9 @@
 # `git push --no-verify` bypasses this hook entirely, by design (git semantics).
 #
 # What runs:
+#   0. Pen guard (#281): with M8SHIFT_AGENT set, require may-i-write immediately
+#      before the publication checks; fail closed when authority cannot be proven.
+#      With no configured agent, warn and keep the human/unconfigured path open.
 #   1. `m8shift.py doctor --hygiene-only --lint` — the RFC 052 C1+C3 data-hygiene
 #      lint (real home paths + operator-confidential denylist, redacted output).
 #   2. `checksums.sha256` (when the repository ships one) — verifies that shipped
@@ -177,6 +180,23 @@ elif command -v m8shift.py >/dev/null 2>&1; then
 	m8shift="m8shift.py"
 elif [ -x "${repo_root}/m8shift.py" ]; then
 	m8shift="${repo_root}/m8shift.py"
+fi
+
+# --- Pen guard (#281) -----------------------------------------------------------
+# Keep the same configured/unconfigured contract as pre-commit.  This runs before
+# any publish-range processing: a configured agent without a live pen cannot turn
+# a scrub result into permission to mutate the remote.
+if [ -n "${M8SHIFT_AGENT:-}" ]; then
+	if [ -z "${m8shift}" ]; then
+		printf '%s\n' "m8shift pre-push: cannot find m8shift.py (set \$M8SHIFT_BIN or add it to \$PATH); refusing to push as agent '${M8SHIFT_AGENT}'." >&2
+		exit 1
+	fi
+	if ! "${m8shift}" may-i-write "${M8SHIFT_AGENT}" >&2; then
+		printf '%s\n' "m8shift pre-push: '${M8SHIFT_AGENT}' does not hold a valid write pen — push blocked. Acquire/refresh the pen or use m8shift.py guard-exec ${M8SHIFT_AGENT} -- git push … from a managed holder." >&2
+		exit 1
+	fi
+else
+	printf '%s\n' "m8shift pre-push: pen guard skipped: M8SHIFT_AGENT unset; relay authority was not checked" >&2
 fi
 
 # Two bits, deliberately NOT collapsed into one (#264). `findings` means a stage

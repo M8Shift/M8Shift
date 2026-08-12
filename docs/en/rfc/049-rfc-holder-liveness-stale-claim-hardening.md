@@ -490,3 +490,26 @@ Worktree companion doctor findings:
 - **Orphan heartbeat cleanup**: best-effort removal on `release`/`done`
   (suppressed errors — the sidecar is never authority), plus the existing
   doctor info finding; no separate prune command in this RFC.
+
+## Amendment — managed interactive producer (#280, shipped)
+
+An interactive holder can now opt into the same honest managed-liveness contract:
+
+```bash
+python3 m8shift.py lease-keeper <agent> [--cadence-seconds N] -- <argv...>
+```
+
+The keeper requires an already-valid pen, exports `M8SHIFT_AGENT`, the
+binding-resolved `M8SHIFT_ROOT`, and the exact running `M8SHIFT_BIN` to the child,
+and invokes no shell. Before launch it runs `claim <agent> --refresh`; only after
+the child exists does it emit the first protective
+`heartbeat <agent> --source wrapper`. At each real cadence it refreshes first and
+then beats, because the refresh preserves write authority while the beat protects
+against unsafe stale takeover. The cadence defaults to 300 seconds and is refused
+above TTL/2.
+
+If either control operation fails while the child lives, the keeper terminates the
+child and exits nonzero with the failed stage visible. When the child exits, no
+background loop remains. This does not make `may-i-write` mutating, does not prove
+liveness for a bare interactive process, does not claim a fresh turn, and does not
+wake or daemonize an interactive UI.

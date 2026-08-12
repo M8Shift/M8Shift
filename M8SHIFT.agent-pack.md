@@ -150,9 +150,14 @@ authorization (`--live-override --reason`).
 
 ## Companion boundaries
 
-Companions (runtime, worktree, context, headroom, i18n) are advisory: they
-never take the pen, never rewrite `M8SHIFT.md`, never touch the network, and
-never auto-force. The single-file core is the only authority on turns.
+Companions (runtime, worktree, context, headroom, i18n) never take the pen,
+never rewrite `M8SHIFT.md`, and never auto-force. They are local/advisory except
+for the explicit RFC 065 gateway transport seam: `gateway-exec` may run one exact
+shell-free forge argv only after atomic consumption of a short-lived mandate created
+by the live holder. Closed canonical command grammars reject alternate/extra options,
+and a private re-hashed snapshot of already-open executable bytes removes original
+path replacement from launch. That capability is not routing, pen, merge, or
+destructive authority. The single-file core remains the only authority on turns.
 
 ## Delivery discipline (incident #99)
 
@@ -160,7 +165,8 @@ Every intentional change unit has one structured forge ticket and reaches review
 as validated, committed, pushed history. An issue, branch, PR, or MR being opened
 is not "done" by itself. A network-isolated author commits locally and records a
 named role-based gateway handoff as **gateway pending**; the gateway reviews and
-pushes that exact SHA before anyone claims remote delivery. Never report "done"
+pushes that exact SHA through a matching one-shot mandate before anyone claims remote
+delivery. Never report "done"
 for an opened ticket, local-only commit, unpushed branch, or unreviewed draft.
 
 ## Operational disciplines (extract)

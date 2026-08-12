@@ -29,9 +29,12 @@ long-term-support branch. `X.Y.Z` releases are cut from `main`; fixes land on
 M8Shift's charter bounds the surface — several classes of vulnerability are
 out of scope by construction:
 
-- **No network in the core and standard companions.** `m8shift.py` and the
-  shipped companions never open a socket, call a provider API, or fetch
-  anything. The **runtime boundary** is the operator's opt-in, disabled-by-
+- **No implicit network in the core or companions.** `m8shift.py` never opens a
+  socket, calls a provider API, or fetches anything. Companions do not gain ambient
+  network authority. The sole explicit write seam is RFC 065 `gateway-exec`: it
+  delegates one caller-owned shell-free forge argv after atomic consumption of an
+  exact one-shot mandate issued by the live pen holder; it neither stores nor
+  supplies credentials. The other **runtime boundary** is the operator's opt-in, disabled-by-
   default reference adapters under `examples/usage-adapters/`: one of them
   (`claude-oauth-usage.py`) *does* make an HTTPS call to the provider's own
   quota endpoint with the operator's credential — read in memory, emitted only
@@ -48,6 +51,8 @@ out of scope by construction:
 - **Advisory companions.** Everything outside `m8shift.py`'s lock/pen is
   advisory: doctor findings, usage guards, worktree ownership, and the
   compression/context companions never gain write authority over the relay.
+  `gateway-exec` is a deliberately narrow transport capability, not pen, routing,
+  authorship, or merge authority.
 
 ## Untrusted data (the real surface)
 
@@ -120,6 +125,35 @@ new-ref history is compared only with the target remote's tracking refs;
 annotated tag messages are inspected directly; deletion-only pushes skip the
 scan). The full-history walk stays a CI/audit tool (`scrub-check.py --all`), not
 a per-push tax. Install with:
+
+When `M8SHIFT_AGENT` is configured, both hooks also require that identity's live
+write pen; failure is closed before commit/push. With no configured identity they
+emit a stable unverified warning and keep the human/unconfigured path open. For a
+direct forge mutation outside Git hooks, use
+`m8shift.py guard-exec <agent> -- <argv...>`; it narrows but cannot eliminate the
+cooperative point-in-time race.
+
+A named forge gateway acting without the author's pen must use
+`m8shift-runtime.py gateway-mandate create` followed by `gateway-exec`. Creation
+requires the live pen holder and binds a different named actor, one allowlisted
+non-integration action (`push`, issue/PR comment, or PR open), exact target set,
+physical project and working directory, 30–900 second expiry, and the SHA-256 of
+one bounded shell-free argv plus its resolved executable bytes. The command is never
+persisted. Before consumption, the implementation opens and hashes the executable,
+copies those already-open bytes into a create-exclusive private launch snapshot,
+re-hashes the snapshot, and later removes it; replacing the original path cannot
+change the bytes launched. Consumption uses
+`O_CREAT|O_EXCL|O_NOFOLLOW` before launch: replay, mismatch, expiry, malformed or
+symlinked evidence all refuse without executing, while a crash after consumption
+cannot retry. Mandates cannot authorize merge, close, tag, branch deletion, mirror,
+force push, or another destructive/integration action and never replace the
+operator's exact-head merge authorization. Caller-owned credentials may be inherited
+at execution time, but credential-shaped argv is refused and no credential is stored.
+Action labels are checked against concrete command shapes: an exact full-SHA Git
+refspec for `push`, and closed canonical `tea` comment/PR-create argv for forge
+records. Alternate/combined option spellings, aliases, extra flags, alternate login
+or remote selection, and action-specific extra targets are refused. An arbitrary
+program or force/delete/mirror push cannot masquerade as an allowlisted action.
 
     git config core.hooksPath hooks
 
