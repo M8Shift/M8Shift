@@ -1,6 +1,6 @@
 # RFC 078 — Freshness is a first-class property of every derived value
 
-- **Status:** draft / design-only, with one shipped instrument
+- **Status:** draft / design-only, with two shipped instruments
 - **Date:** 2026-07-27
 - **Issue:** #273
 - **Scope:** every surface that renders, or decides on, a value carrying a
@@ -210,6 +210,23 @@ Stated so the test is not mistaken for full coverage of the rule:
   drawn output. A regression that appears purely in the drawing code would pass.
 
 Each of these is a gap in the *instrument*, not an exception to the rule.
+
+### 4.3 Shipped publication-gate drift detector (#312)
+
+`doctor` now reports the warning-level but explicitly non-gating
+`delivery.publish_gate_drift` finding when the
+`pre-push` bytes executed through this worktree's relative `core.hooksPath` differ from
+the same path in the locally cached published-main ref. The finding carries the current
+worktree HEAD and says “behind” only when that HEAD is an ancestor of the cached main;
+ordinary branch divergence is reported as a difference because it may be intentional.
+
+This detector is deliberately honest about Corollary 2.2: it does not fetch, and calls
+the comparison ref locally cached evidence rather than current forge state. It neither
+blocks `doctor --lint` nor cleans stale worktrees. The latter mixes a legitimate branch
+lifecycle with abandoned-worktree cleanup and remains separate work. The detector makes
+“gate exists on published main” distinguishable from “this worktree would execute those
+same bytes”; it does not claim to deploy the new detector retroactively into an older
+worktree whose own `m8shift.py` predates #312.
 
 ## 5. Acceptance
 

@@ -2219,6 +2219,83 @@ class TestRFC065DeliveryAdvisories(unittest.TestCase):
         self.git("switch", "-q", "--detach", "HEAD")
         self.assertEqual(cowork._delivery_git_findings(self.d), [])
 
+    def _install_worktree_gate(self, content="gate-v1\n"):
+        os.makedirs(os.path.join(self.d, "hooks"), exist_ok=True)
+        with open(os.path.join(self.d, "hooks", "pre-push"), "w", encoding="utf-8") as f:
+            f.write(content)
+        self.git("add", "hooks/pre-push")
+        self.git("commit", "-q", "-m", "gate")
+        self.git("config", "core.hooksPath", "hooks")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    def test_publish_gate_matching_cached_main_is_clean(self):
+        self.init_repo()
+        self._install_worktree_gate()
+        self.assertEqual(cowork._publish_gate_git_findings(self.d), [])
+
+    def test_publish_gate_worktree_drift_is_visible_and_advisory(self):
+        self.init_repo()
+        self._install_worktree_gate()
+        with open(os.path.join(self.d, "hooks", "pre-push"), "w", encoding="utf-8") as f:
+            f.write("branch-specific-gate\n")
+        findings = cowork._publish_gate_git_findings(self.d)
+        self.assertEqual([f["check"] for f in findings], ["delivery.publish_gate_drift"])
+        self.assertEqual(findings[0]["severity"], "warning")
+        self.assertIn("worktree HEAD", findings[0]["message"])
+        self.assertIn("origin/main", findings[0]["message"])
+        self.assertIn("different gate bytes", findings[0]["message"])
+
+    def test_publish_gate_default_probe_resolves_invoking_worktree_root(self):
+        self.init_repo()
+        self._install_worktree_gate()
+        with open(os.path.join(self.d, "hooks", "pre-push"), "w", encoding="utf-8") as f:
+            f.write("branch-specific-gate\n")
+        nested = os.path.join(self.d, "docs", "nested")
+        os.makedirs(nested)
+
+        with mock.patch.object(cowork.os, "getcwd", return_value=nested):
+            findings = cowork._publish_gate_git_findings()
+
+        self.assertEqual([f["check"] for f in findings], ["delivery.publish_gate_drift"])
+        self.assertEqual(findings[0]["path"], "hooks/pre-push")
+
+    def test_publish_gate_reports_when_worktree_head_is_behind_main(self):
+        self.init_repo()
+        self._install_worktree_gate("gate-old\n")
+        self.git("switch", "-q", "-c", "old-worktree")
+        old_head = self.git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self.git("switch", "-q", "main")
+        with open(os.path.join(self.d, "hooks", "pre-push"), "w", encoding="utf-8") as f:
+            f.write("gate-new\n")
+        self.git("add", "hooks/pre-push")
+        self.git("commit", "-q", "-m", "published gate update")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("switch", "-q", "old-worktree")
+
+        findings = cowork._publish_gate_git_findings(self.d)
+        self.assertEqual(len(findings), 1)
+        self.assertIn(old_head, findings[0]["message"])
+        self.assertIn("is behind", findings[0]["message"])
+
+    def test_doctor_json_surfaces_publish_gate_drift(self):
+        self.init_repo()
+        shutil.copyfile(SCRIPT, os.path.join(self.d, "m8shift.py"))
+        self._install_worktree_gate()
+        init = subprocess.run(
+            [sys.executable, "m8shift.py", "init"], cwd=self.d,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(init.returncode, 0, init.stderr)
+        with open(os.path.join(self.d, "hooks", "pre-push"), "w", encoding="utf-8") as f:
+            f.write("locally-old-gate\n")
+        result = subprocess.run(
+            [sys.executable, "m8shift.py", "doctor", "--lint", "--json"], cwd=self.d,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checks = {finding["check"] for finding in json.loads(result.stdout)["findings"]}
+        self.assertIn("delivery.publish_gate_drift", checks)
+
 
 # ───────────────────────────── robustness / inputs ─────────────────────────
 

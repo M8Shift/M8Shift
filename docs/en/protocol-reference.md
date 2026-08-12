@@ -233,8 +233,11 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   before an update lands generated writes in a shared checkout — never clear
   the state with destructive git operations without explicit human authorization).
   RFC 065 also adds local-only `delivery.no_upstream` and `delivery.unpushed`
-  reminders. They use bounded Git reads, never contact a forge, and never present
-  local refs as proof of remote delivery.
+  reminders. `delivery.publish_gate_drift` (#312) compares the active worktree's
+  relative `core.hooksPath` pre-push bytes with the same path in the locally cached
+  published-main ref and includes the worktree HEAD; it is advisory because branch
+  drift can be intentional. These probes use bounded Git reads, never fetch/contact
+  a forge, never clean worktrees, and never present local refs as live remote proof.
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
