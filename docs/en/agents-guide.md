@@ -314,12 +314,13 @@ releasable at all times.
 - **Dogfooding provenance — model *and* engine, on every commit.** Each commit
   records the full processing chain, so the forge history shows *who* did the work and
   *with which engine version*:
+  - `M8Shift-Agent: <agent>` — which runner/relay agent authored the commit;
   - `Agent-Model: <model-id>` — which model produced the work (e.g.
     `claude-opus-4-8`, `claude-haiku-4-5`, the Codex model id);
   - `Coordinated-With: M8Shift vX.Y.Z` — which engine version coordinated it.
 
-  `Agent-Model` is self-declared and can be stamped on its own when
-  `M8SHIFT_AGENT_MODEL` is set; `Coordinated-With` is stamped only when the hook can
+  `M8Shift-Agent` and `Agent-Model` are self-declared and can be stamped on their own
+  when `M8SHIFT_AGENT` / `M8SHIFT_AGENT_MODEL` are set; `Coordinated-With` is stamped only when the hook can
   read a relay/local `m8shift.py --version`. Use the generated
   `.m8shift/hooks/commit-msg` template and set `M8SHIFT_ROOT` when the relay lives
   outside the repo being changed; it stamps the final saved message (never an aborted

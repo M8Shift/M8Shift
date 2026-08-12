@@ -160,6 +160,7 @@ ROSTER = AGENTS                  # current ACTIVE roster (>=2 agents) — refine
 AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
 FIELD_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")   # advisory turn-field key: snake_case / x_*
 MODEL_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
+RUN_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 AGENT_EFFORTS = frozenset(("minimal", "low", "medium", "high", "xhigh", "max", "ultra"))
 # Turn fields the engine writes itself (routing) — an advisory field may not shadow them.
 ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff",
@@ -818,6 +819,8 @@ hint; it never runs force recovery automatically.
 - writes `.m8shift/hooks/commit-msg`, a Git hook template that adds the
   `Coordinated-With: M8Shift vX.Y.Z` trailer by reading the active relay version from
   `$M8SHIFT_ROOT` (or the current directory when it contains a relay). If
+  `M8SHIFT_AGENT` is set to a safe roster-style agent id, the hook stamps
+  `M8Shift-Agent: <agent>`; if
   `M8SHIFT_AGENT_MODEL` is set to a safe self-declared model id, the hook also stamps
   `Agent-Model: <id>` even without a readable relay. If neither a safe model id nor
   a relay version is available, it exits 0 without changing the commit message. It is a `commit-msg`
@@ -1151,10 +1154,11 @@ COMMIT_MSG_HOOK_EN = r'''#!/usr/bin/env python3
 
 Install this template as `.git/hooks/commit-msg` (or call it from an existing hook).
 It adds `Coordinated-With: M8Shift vX.Y.Z` by reading the active relay's
-`m8shift.py --version`. If M8SHIFT_AGENT_MODEL is set to a safe model id, it also
-adds `Agent-Model: <id>`. Configure an external relay with M8SHIFT_ROOT=/path/to/relay.
-If no relay is configured or readable, a safe Agent-Model can still be stamped on
-its own. If neither a relay version nor a safe Agent-Model is available, the hook
+`m8shift.py --version`. If M8SHIFT_AGENT and M8SHIFT_AGENT_MODEL are set to safe
+ids, it also adds `M8Shift-Agent: <agent>` and `Agent-Model: <id>`. Configure an
+external relay with M8SHIFT_ROOT=/path/to/relay.
+If no relay is configured or readable, safe agent and Agent-Model declarations can
+still be stamped on their own. If no safe provenance value is available, the hook
 exits 0 and leaves the message alone.
 
 Why `commit-msg` and not `prepare-commit-msg`: the trailer records the relay that
@@ -1174,11 +1178,14 @@ import sys
 
 TRAILER_KEY = "Coordinated-With"
 AGENT_MODEL_KEY = "Agent-Model"
+AGENT_KEY = "M8Shift-Agent"
 TRAILER_RE = re.compile(r"(?im)^Coordinated-With:\s*M8Shift\s+v\S+\s*$")
 AGENT_MODEL_TRAILER_RE = re.compile(r"(?im)^Agent-Model:\s*[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\s*$")
+AGENT_TRAILER_RE = re.compile(r"(?im)^M8Shift-Agent:\s*[a-z][a-z0-9_-]*\s*$")
 TRAILER_LINE_RE = re.compile(r"^[A-Za-z0-9-]+(?:-[A-Za-z0-9-]+)*:\s+\S")
 VERSION_RE = re.compile(r"\bm8shift\.py\s+(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)\b")
 MODEL_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
+AGENT_ID_RE = re.compile(r"\A[a-z][a-z0-9_-]*\Z")
 # Git's verbose/scissors marker: a comment line carrying the " >8 " cut mark.
 SCISSORS_RE = re.compile(r"^#.*\s>8\s")
 
@@ -1231,6 +1238,13 @@ def declared_agent_model():
     if not value:
         return ""
     return value if MODEL_ID_RE.fullmatch(value) else ""
+
+
+def declared_agent():
+    value = (os.environ.get("M8SHIFT_AGENT", "") or "").strip()
+    if not value:
+        return ""
+    return value if AGENT_ID_RE.fullmatch(value) else ""
 
 
 def split_at_scissors(lines):
@@ -1311,8 +1325,9 @@ def main(argv):
         return 0
     msg_path = argv[1]
     model_id = declared_agent_model()
+    agent_id = declared_agent()
     version = relay_version()
-    if not (model_id or version):
+    if not (agent_id or model_id or version):
         return 0
     try:
         with open(msg_path, encoding="utf-8") as f:
@@ -1321,6 +1336,8 @@ def main(argv):
         return 0
     comment = comment_char()
     trailers = []
+    if agent_id and not has_trailer(message, AGENT_TRAILER_RE):
+        trailers.append(f"{AGENT_KEY}: {agent_id}")
     if model_id and not has_trailer(message, AGENT_MODEL_TRAILER_RE):
         trailers.append(f"{AGENT_MODEL_KEY}: {model_id}")
     if version and not has_trailer(message, TRAILER_RE):
@@ -11299,6 +11316,27 @@ def collect_advisory_fields(args):
     return out
 
 
+def bind_runner_run_id(advisory, agent):
+    """Bind a runner-launched append to the invocation that authored it.
+
+    The headless runner injects both variables into the provider child. Stamping
+    here, at the append boundary, makes attribution independent of whether the
+    provider remembers to repeat the run id on its command line. An ambient id
+    for another agent is ignored so ordinary interactive turns are unaffected;
+    a contradictory explicit field from this run is refused.
+    """
+    run_id = (os.environ.get("M8SHIFT_RUN_ID", "") or "").strip()
+    run_agent = (os.environ.get("M8SHIFT_AGENT", "") or "").strip()
+    if run_agent != agent or not RUN_ID_RE.fullmatch(run_id):
+        return advisory
+    for key, value in advisory:
+        if key == "x_run_id":
+            if value != run_id:
+                sys.exit("refused: x_run_id conflicts with the active M8SHIFT_RUN_ID.")
+            return advisory
+    return [*advisory, ("x_run_id", run_id)]
+
+
 def render_turn(n, agent, to, *, ask="—", done="—", files="—", body="", advisory=(), at=None,
                 model=None, effort=None):
     """Render ONE append-only journal turn block — the single shared format used by cmd_append and
@@ -11515,6 +11553,7 @@ def cmd_append(args):
         # journal write: you cannot work+append from IDLE.
         if st != f"WORKING_{agent.upper()}":
             sys.exit(tr("append_need_claim", st=st, agent=agent))
+        advisory = bind_runner_run_id(advisory, agent)
         n = int(lk.get("turn", "0")) + 1
         model = capture_agent_model(lk, agent)
         effort = capture_agent_effort(lk, agent)
