@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Honest usage-observation state (#313).** The official Claude and Codex
+  quota examples now distinguish a measured reading, a provider response with
+  no usable quota window, and an unavailable provider or credential. The
+  additive bounded `measurement` object survives normalization and `usage
+  status`, while legacy fixtures remain byte-identical and every degraded or
+  unavailable reading stays fail-open for quota gating. A non-measured official
+  result is nevertheless operationally consequential: adapter checks fail it,
+  managed watchers count it as an unsuccessful read, and three consecutive
+  failures degrade the watcher for reconciliation instead of reporting a
+  healthy quota feed. An undeclared legacy measurement is disclosed through its
+  own `usage.measurement_undeclared` finding, so older schema-less fixtures cannot
+  hide the contract warning behind an ordinary normalization diagnostic.
+
 ## v4.0.0 — 2026-08-08
 
 - **Run-bound relay and commit attribution (#317).** A headless run now earns

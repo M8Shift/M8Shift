@@ -21,9 +21,10 @@ Non-macOS / test override:
 Honesty / safety:
   - a percent is a ratio; it is emitted as `used_ratio`, never as `used`/`limit`
     tokens;
-  - it is fail-open: ANY error (missing/expired credential, Keychain ACL prompt
-    timeout/denial, network failure, unexpected shape) prints an empty official
-    fixture so M8Shift records "unknown" and never pauses on a bad read;
+  - it is fail-open: ANY error still prints an official fixture so M8Shift
+    records "unknown" and never pauses on a bad read, but the additive
+    `measurement` field distinguishes a real reading from a degraded response
+    or an unavailable provider/credential;
   - it prints ONLY aggregate ratio + reset instant — no access token, refresh
     token, raw credential JSON, account identity, or endpoint response body.
 
@@ -154,15 +155,18 @@ def build_fixture(payload, now_iso):
         "used_tokens": None,
         "limit_tokens": None,
         "windows": windows,
+        "measurement": ({"state": "measured", "reason": None}
+                        if windows else
+                        {"state": "degraded", "reason": "no_usable_windows"}),
     }
 
 
-def _empty_fixture(now_iso):
-    """Fail-open: an official fixture with no windows -> decision_ratio null ->
-    M8Shift records 'unknown' and never pauses."""
+def _empty_fixture(now_iso, reason="provider_unavailable"):
+    """Fail-open unavailable read with a bounded, non-secret reason token."""
     return {"schema": "m8shift.usage.fixture.v1", "agent": "claude",
             "provenance": "official", "captured_at": now_iso,
-            "used_tokens": None, "limit_tokens": None, "windows": []}
+            "used_tokens": None, "limit_tokens": None, "windows": [],
+            "measurement": {"state": "unavailable", "reason": reason}}
 
 
 def _parse_credentials_blob(text, now_ms):
@@ -245,7 +249,7 @@ def main(env=None, fetch=_fetch, token_loader=_load_access_token, out=None, now=
     try:
         token = token_loader(env=env, now_ms=int(now.timestamp() * 1000))
         if not token:
-            fixture = _empty_fixture(now_iso)
+            fixture = _empty_fixture(now_iso, "credential_unavailable")
         else:
             fixture = build_fixture(fetch(token), now_iso)
     except Exception:

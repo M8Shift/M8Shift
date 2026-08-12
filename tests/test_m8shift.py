@@ -294,6 +294,45 @@ class TestPureFunctions(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(findings[0]["check"], "usage.no_adapter")
 
+    def test_usage_watch_observation_state_drives_read_health(self):
+        """#313: a normalized snapshot is not a successful watcher read merely
+        because the adapter process returned JSON."""
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_measurement_health_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        args = argparse.Namespace(tick_timeout=1.0, interval=60,
+                                  warn_threshold=0.8, limit_threshold=1.0)
+
+        def tick(measurement):
+            snapshot = {"schema": "m8shift.usage.snapshot.v1", "agent": "claude"}
+            if measurement is not None:
+                snapshot["measurement"] = measurement
+            payload = {"ok": True, "snapshots": [{"snapshot": snapshot}],
+                       "findings": []}
+            with mock.patch.object(runtime, "run_usage_watch_probe",
+                                   return_value=(payload, "")):
+                return runtime.usage_watch_tick_probe(args, "claude")
+
+        measured, measured_findings = tick({"state": "measured", "reason": None})
+        legacy, legacy_findings = tick(None)
+        self.assertTrue(measured)
+        self.assertTrue(legacy)
+        self.assertFalse(measured_findings)
+        self.assertFalse(legacy_findings)
+
+        for measurement in (
+                {"state": "degraded", "reason": "no_usable_windows"},
+                {"state": "unavailable", "reason": "credential_unavailable"}):
+            with self.subTest(measurement=measurement):
+                success, findings = tick(measurement)
+                self.assertFalse(success)
+                self.assertIn("usage.watch_measurement",
+                              {row["check"] for row in findings})
+                self.assertIn("usage.watch_read_unknown",
+                              {row["check"] for row in findings})
+
     def test_usage_watch_whole_tick_probe_timeout_is_a_failed_tick(self):
         path = os.path.join(REPO, "m8shift-runtime.py")
         spec = importlib.util.spec_from_file_location("m8shift_runtime_tick_test", path)
@@ -12556,6 +12595,80 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertEqual(json.dumps(event["payload"]["snapshot"], sort_keys=True),
                          json.dumps(expected, sort_keys=True))
 
+    def test_measurement_state_survives_normalization_and_status(self):
+        """#313: an adapter that could not decode a usable provider response is
+        no longer indistinguishable from a legacy/empty successful fixture."""
+        doc = self.usage_doc(used=None, limit=None, captured_at=self.fresh_iso())
+        doc["measurement"] = {"state": "degraded", "reason": "no_usable_windows"}
+        result = self.snapshot_for(doc)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        snapshot = json.loads(result.stdout)["snapshots"][0]["snapshot"]
+        self.assertEqual(snapshot["measurement"], doc["measurement"])
+
+        status = json.loads(self.rt("usage", "status", "--json").stdout)
+        self.assertEqual(status["agents"][0]["measurement"], doc["measurement"])
+        self.assertIn("usage.degraded", {f["check"] for f in status["findings"]})
+
+    def test_adapters_check_rejects_non_measured_official_reading(self):
+        doc = self.usage_doc(used=None, limit=None, captured_at=self.fresh_iso())
+        doc["measurement"] = {"state": "degraded", "reason": "no_usable_windows"}
+        rel = self.write_fixture(doc)
+        self.write_adapters([self.fixture_adapter(path=rel)])
+        result = self.rt("usage", "adapters", "check", "--json")
+        self.assertEqual(result.returncode, 12, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["probed"][0]["measurement"], doc["measurement"])
+        self.assertIn("usage.degraded", {f["check"] for f in payload["findings"]})
+
+    def test_legacy_measurement_omission_is_named_but_remains_successful(self):
+        """#313 follow-up: compatibility stays fail-open, but a silent legacy
+        adapter is visible in both the snapshot and live-probe surfaces even
+        when an older fixture also omits its schema declaration."""
+        doc = self.usage_doc(used=None, limit=None, captured_at=self.fresh_iso(), windows=[])
+        del doc["schema"]
+        rel = self.write_fixture(doc)
+        self.write_adapters([self.fixture_adapter(path=rel)])
+
+        snapshot_result = self.rt("usage", "snapshot", "--json")
+        self.assertEqual(snapshot_result.returncode, 0,
+                         snapshot_result.stdout + snapshot_result.stderr)
+        snapshot_payload = json.loads(snapshot_result.stdout)
+        self.assertNotIn("measurement", snapshot_payload["snapshots"][0]["snapshot"])
+        schema_index = next(
+            i for i, finding in enumerate(snapshot_payload["findings"])
+            if finding["check"] == "usage.normalize"
+            and "does not declare schema" in finding["message"])
+        measurement_index = next(
+            i for i, finding in enumerate(snapshot_payload["findings"])
+            if finding["check"] == "usage.measurement_undeclared")
+        self.assertLess(schema_index, measurement_index)
+        snapshot_finding = next(
+            f for f in snapshot_payload["findings"]
+            if f["check"] == "usage.measurement_undeclared")
+        self.assertIn("measurement is not declared", snapshot_finding["message"])
+        self.assertIn("claude-fx", snapshot_finding["message"])
+
+        check_result = self.rt("usage", "adapters", "check", "--json")
+        self.assertEqual(check_result.returncode, 0,
+                         check_result.stdout + check_result.stderr)
+        check_payload = json.loads(check_result.stdout)
+        self.assertEqual(check_payload["probed"], [{"name": "claude-fx", "ok": True}])
+        check_finding = next(
+            f for f in check_payload["findings"]
+            if f["check"] == "usage.measurement_undeclared")
+        self.assertEqual(check_finding["severity"], "warning")
+        self.assertIn("measurement is not declared", check_finding["message"])
+        self.assertIn("claude-fx", check_finding["message"])
+
+    def test_invalid_measurement_metadata_is_not_copied(self):
+        doc = self.usage_doc(captured_at=self.fresh_iso())
+        doc["measurement"] = {"state": "degraded", "reason": "SECRET with spaces"}
+        payload = json.loads(self.snapshot_for(doc).stdout)
+        self.assertNotIn("measurement", payload["snapshots"][0]["snapshot"])
+        self.assertIn("bounded machine token",
+                      " ".join(f["message"] for f in payload["findings"]))
+
     # ── RFC 051 Part A: additive `decision_window` attribution of the argmax ─────
 
     def test_decision_window_records_driving_window_with_resets_at(self):
@@ -13465,6 +13578,8 @@ class TestRFC040UsageQuota(CLIBase):
         fx = json.loads(r.stdout)                                 # valid JSON, no NaN
         self.assertEqual(fx["provenance"], "official")
         self.assertEqual(fx["windows"], [])                       # fail-open, no gating
+        self.assertEqual(fx["measurement"], {
+            "state": "unavailable", "reason": "credential_unavailable"})
 
     def test_example_is_fail_open_on_malformed_credential_shape(self):
         """Codex PR #51 blocker 1: a valid-JSON-but-wrong-shape credentials file
@@ -13603,6 +13718,8 @@ class TestRFC040UsageQuota(CLIBase):
             self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
             self.assertEqual(fx["provenance"], "official")
             self.assertEqual(fx["windows"], [])
+            self.assertEqual(fx["measurement"], {
+                "state": "unavailable", "reason": "provider_unavailable"})
 
     def test_example_main_suppresses_broken_stdout_and_returns_zero(self):
         mod = self._example()
@@ -13669,8 +13786,9 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertIsNone(fx["limit_tokens"])
         self.assertEqual(set(fx), {
             "schema", "agent", "provenance", "captured_at",
-            "used_tokens", "limit_tokens", "windows",
+            "used_tokens", "limit_tokens", "windows", "measurement",
         })
+        self.assertEqual(fx["measurement"], {"state": "measured", "reason": None})
         by = {w["kind"]: w for w in fx["windows"]}
         self.assertEqual(by["session_5h"]["used_ratio"], 0.65)   # bucket wins over top 0.80
         self.assertEqual(by["weekly"]["used_ratio"], 0.4)
@@ -13974,11 +14092,25 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertEqual(fx["captured_at"], "2026-01-01T00:00:00Z")
         self.assertEqual(set(fx), {
             "schema", "agent", "provenance", "captured_at",
-            "used_tokens", "limit_tokens", "windows",
+            "used_tokens", "limit_tokens", "windows", "measurement",
         })
+        self.assertEqual(fx["measurement"], {"state": "measured", "reason": None})
         for win in fx["windows"]:
             self.assertEqual(set(win), {"kind", "used_ratio", "resets_at"})
         self.assertEqual(fx["windows"][0]["kind"], "session_5h")
+
+    def test_main_marks_unavailable_app_server_separately_from_empty_read(self):
+        mod = self._example()
+        out = io.StringIO()
+        self.assertEqual(mod.main(out=out, read_limits=lambda: None), 0)
+        unavailable = json.loads(out.getvalue())
+        self.assertEqual(unavailable["measurement"], {
+            "state": "unavailable", "reason": "app_server_unavailable"})
+
+        degraded = mod.build_fixture({"id": 2, "result": {}},
+                                     "2026-01-01T00:00:00Z")
+        self.assertEqual(degraded["measurement"], {
+            "state": "degraded", "reason": "no_usable_windows"})
 
     def test_main_suppresses_broken_stdout_and_returns_zero(self):
         mod = self._example()
@@ -14752,6 +14884,27 @@ class TestRFC040UsagePRB(CLIBase):
             self.assertEqual(self.lock()["state"], "IDLE")
 
     # ── watch ──
+
+    def test_watch_non_measured_tick_degrades_managed_health(self):
+        doc = self.ok_fixture_doc()
+        doc.update({"used_tokens": None, "limit_tokens": None, "windows": [],
+                    "measurement": {"state": "degraded",
+                                    "reason": "no_usable_windows"}})
+        self.write_fixture_adapter(doc)
+        result = self.rt("usage", "watch", "--agent", "claude",
+                         "--interval", "0.01", "--max-ticks", "1", "--json")
+        self.assertEqual(result.returncode, 30, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["watch_health"]["consecutive_unknown"], 1)
+        self.assertEqual(payload["watch_health"]["successful_ticks"], 0)
+        self.assertIn("usage.watch_measurement",
+                      {row["check"] for row in payload["findings"]})
+        path = os.path.join(self.d, ".m8shift", "runtime",
+                            "usage-watchers", "claude.json")
+        with open(path, encoding="utf-8") as fh:
+            watcher = json.load(fh)
+        self.assertEqual(watcher["consecutive_unknown"], 1)
+        self.assertEqual(watcher["successful_ticks"], 0)
 
     def test_watch_max_ticks_and_fractional_interval_seam(self):
         self.write_fixture_adapter(self.ok_fixture_doc())

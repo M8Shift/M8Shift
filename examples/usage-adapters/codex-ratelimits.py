@@ -18,8 +18,9 @@ Verified local protocol shape:
 Honesty / safety:
   - provider `usedPercent` is emitted as `used_ratio`, never as token counts;
   - only the known 5-hour (300 min) and weekly (10080 min) windows are mapped;
-  - it is fail-open: ANY error prints an empty official fixture so M8Shift records
-    "unknown" and never pauses on a bad read;
+  - it is fail-open: ANY error still prints an official fixture so M8Shift
+    records "unknown" and never pauses, while the additive `measurement` field
+    distinguishes a real reading from degraded or unavailable observation;
   - it prints ONLY aggregate ratio + reset instant — no account identity, credits,
     plan type, raw response body, stderr, or provider bucket names.
 
@@ -63,8 +64,8 @@ def _iso_epoch_seconds(value):
         return None
 
 
-def _empty_fixture(now_iso):
-    """Fail-open: no windows -> decision_ratio null -> unknown, never a pause."""
+def _empty_fixture(now_iso, *, state="unavailable", reason="app_server_unavailable"):
+    """Fail-open fixture with bounded observation state, never exception text."""
     return {
         "schema": "m8shift.usage.fixture.v1",
         "agent": "codex",
@@ -73,6 +74,7 @@ def _empty_fixture(now_iso):
         "used_tokens": None,
         "limit_tokens": None,
         "windows": [],
+        "measurement": {"state": state, "reason": reason},
     }
 
 
@@ -158,8 +160,11 @@ def build_fixture(payload, now_iso):
                     # model rows would duplicate the aggregate 5h/weekly display.
                     if win is not None and win["used_ratio"] == 1.0:
                         windows.append(win)
-        fixture = _empty_fixture(now_iso)
+        fixture = _empty_fixture(now_iso, state="degraded",
+                                 reason="no_usable_windows")
         fixture["windows"] = windows
+        if windows:
+            fixture["measurement"] = {"state": "measured", "reason": None}
         return fixture
     except Exception:
         return _empty_fixture(now_iso)
