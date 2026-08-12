@@ -233,8 +233,17 @@ Every change follows the same branch-based flow.
    remote delivery.
 7. **Independent review** (the other agent): hygiene, tests green, docs updated, links
    valid, scope clean. The reviewer approves or returns ranked findings.
-8. **Stabilize, then merge.** `main` receives the change **only once the version is
-   stable and reviewed**, via the merge request. Tag the release if it is a version
+8. **Stabilize, authorize, then merge.** `main` receives the change **only once the
+   version is stable, independently reviewed, and explicitly authorized for merge by
+   the human operator/maintainer**, via the merge request. Peer approval is review
+   evidence, never publication consent, and an agent must wait when the human
+   authorization is absent. This rule is identical for a routine Correction, a
+   Revision, and a Generation; the latter two add release obligations but do not
+   delegate merge authority. Record the authorization against the exact MR and head
+   SHA in its forge timeline before merging. During a forge outage, record it in a
+   relay turn with `x_merge_authorized_by`, `x_merge_authorized_pr`, and
+   `x_merge_authorized_head`, then reconcile that evidence to the MR before claiming
+   delivery complete. Tag the release if it is a version
    bump. **At every release/tag the docs and the site are refreshed in the same cycle** — a tag is
    not complete until they reflect it:
    (a) **exhaustively update the specification docs** from the implemented RFCs — schemas, features,
@@ -592,8 +601,11 @@ cp hooks/pre-commit .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 ```
 
-- **`$M8SHIFT_AGENT` unset** → the hook exits 0 (skip). Humans and unconfigured
-  checkouts skip the pen guard; checksum refresh still runs.
+- **`$M8SHIFT_AGENT` unset** → the hook prints the stable
+  `pen guard skipped: M8SHIFT_AGENT unset; relay authority was not checked` warning
+  and exits 0. Humans and unconfigured checkouts remain non-blocking, but the commit
+  is explicitly **unverified by the relay**, not a clean pen-guard result; checksum
+  refresh still runs.
 - **`$M8SHIFT_AGENT` set** → it runs `m8shift.py may-i-write "$M8SHIFT_AGENT"` and, on
   any non-zero rc, prints why and **blocks the commit** — fail *closed* for a configured
   agent. The relay root is resolved by `m8shift.py` via `$M8SHIFT_ROOT`; the program is
@@ -613,11 +625,12 @@ its configured local upstream ref. Detached, default-branch, non-Git, and probe-
 cases fail open. These findings never contact a forge and never prove remote state.
 
 > [!NOTE]
-> **Zero-memory by design.** A fresh agent does not have to *remember* the write rule:
-> it lives in the program. The `init`-generated anchors (`CLAUDE.md` / `AGENTS.md`)
-> instruct the agent to set `$M8SHIFT_AGENT` and run `may-i-write`; the installed hook
-> then enforces it at commit time. The hook + `may-i-write` + the anchors are
-> self-contained.
+> **Zero-memory when configured.** A fresh agent does not have to *remember* the write
+> rule: the `init`-generated anchors (`CLAUDE.md` / `AGENTS.md`) instruct it to set
+> `$M8SHIFT_AGENT` and run `may-i-write`, and the installed hook then enforces the pen
+> at commit time. If that identity setup is missed, the hook cannot distinguish the
+> agent from a human and therefore warns without blocking; the result is visible but
+> unverified, not fully self-enforcing.
 
 The hook is **advisory and local** — not a security boundary, no network. It narrows but
 does not fully close the check-then-commit race; see the SEC-7 / TOCTOU note in

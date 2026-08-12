@@ -1914,9 +1914,13 @@ class TestPreCommitHook(unittest.TestCase):
                        env=self._local_env())
 
     def test_unset_agent_skips(self):
-        """No $M8SHIFT_AGENT: a human/unconfigured commit is never blocked."""
+        """No identity stays non-blocking but is visibly unverified (#279)."""
         r = self._commit("human\n", agent=None)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            "pen guard skipped: M8SHIFT_AGENT unset; relay authority was not checked",
+            r.stderr,
+        )
 
     def test_delivery_reminder_is_stable_advisory_and_offline(self):
         """Every staged change gets the RFC 065 reminder without blocking commit."""
@@ -1940,6 +1944,7 @@ class TestPreCommitHook(unittest.TestCase):
         self.assertEqual(c.returncode, 0, c.stderr)
         r = self._commit("b\n", agent="claude")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("pen guard skipped", r.stderr)
 
     def test_blocks_when_other_agent_holds_pen(self):
         """Holder=claude, committer configured as codex → blocked."""

@@ -180,7 +180,9 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
   A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
   advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
-  valid pen, and with it unset it skips that pen gate (humans are never blocked).
+  valid pen; with it unset it keeps humans/unconfigured checkouts non-blocking but
+  prints a stable warning that relay authority was not checked. Such a commit is
+  unverified by the pen guard, never equivalent to a clean guard result.
   Every non-empty staged change also gets a non-blocking, offline RFC 065 reminder
   to confirm its forge ticket and push/gateway-pending path. See the agents guide
   and `CONTRIBUTING.md` for install instructions.

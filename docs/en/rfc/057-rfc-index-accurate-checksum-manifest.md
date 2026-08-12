@@ -21,8 +21,10 @@ index blob entering the commit — rewrites the manifest atomically, and stages 
 manifest. A staged deletion removes the obsolete row.
 
 For configured agents, `may-i-write` runs first so a failed pen guard cannot mutate the
-index. Human/unconfigured commits skip only the pen guard; checksum maintenance still
-runs. The hook refuses to absorb an unstaged manifest edit and fails closed on missing
+index. Human/unconfigured commits skip only the pen guard and remain non-blocking, but
+the hook now emits one stable warning that `M8SHIFT_AGENT` is unset and relay authority
+was not checked (#279). The result is an unverified commit, not a clean guard result;
+checksum maintenance still runs. The hook refuses to absorb an unstaged manifest edit and fails closed on missing
 Python, malformed staged-path data, hashing, rewrite, or staging failure. Pre-push
 verification remains the independent backstop.
 
@@ -38,3 +40,5 @@ release scope.
 4. An unstaged manifest edit is preserved and blocks automatic refresh.
 5. A configured agent without the pen is refused before any index mutation.
 6. Pre-push verification still detects any stale or corrupt manifest.
+7. An unset `M8SHIFT_AGENT` emits the stable unverified-authority warning, while a set
+   identity never emits that skip warning and preserves the existing fail-closed guard.
