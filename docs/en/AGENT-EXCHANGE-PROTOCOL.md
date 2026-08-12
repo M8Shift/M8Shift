@@ -15,7 +15,7 @@ and passes the conformance profile in section 13.
 The normative body ends before Appendix A. Product-specific commands and file
 formats appear only in the appendix.
 
-<!-- m8shift-exchange-lockstep: protocol=d68fbaa829f703202a01714b4910718a1b432f831febf356b66cece654bdc2ba; stanza=34075b5d403a5f925790c51e79b1bd12ff94a6c74140a15944643baf45c463c9; pack=9b9ad235985cf4a24fc86e23569bb98aa8e76c49dedffede4aa321325ad18450; rfc074=5873caa11d7047a04892c55a96c76611c278526fe4b5ffa85ed721f4523e6914 -->
+<!-- m8shift-exchange-lockstep: protocol=d68fbaa829f703202a01714b4910718a1b432f831febf356b66cece654bdc2ba; stanza=34075b5d403a5f925790c51e79b1bd12ff94a6c74140a15944643baf45c463c9; pack=abc2688fa8a52a30813405d0ae0f6b0ba490d8b04fe50d655feaebc41bb7e284; rfc074=5873caa11d7047a04892c55a96c76611c278526fe4b5ffa85ed721f4523e6914 -->
 
 ## 1. Scope, authority, and terminology
 

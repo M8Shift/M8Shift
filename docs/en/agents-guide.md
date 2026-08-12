@@ -229,8 +229,10 @@ Every change follows the same branch-based flow.
 6. **Push the exact branch head to the forge** and open a **merge request** to `main`.
    The MR description links the issue and lists the logical commits. A network-isolated
    author instead hands the committed SHA to the named forge-gateway role and labels it
-   **gateway pending**; the gateway reviews and pushes that exact history before claiming
-   remote delivery.
+   **gateway pending**; while still holding the pen, the author creates the exact
+   expiring RFC 065 gateway mandate for the reviewed transport argv. The named gateway
+   atomically consumes it once and pushes that exact history before claiming remote
+   delivery. Merge remains a separate human-authorized action and is never mandateable.
 7. **Independent review** (the other agent): hygiene, tests green, docs updated, links
    valid, scope clean. The reviewer approves or returns ranked findings.
 8. **Stabilize, authorize, then merge.** `main` receives the change **only once the

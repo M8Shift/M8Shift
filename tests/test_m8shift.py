@@ -9834,6 +9834,271 @@ class TestRuntimeCompanion(CLIBase):
         self.assertNotIn("sk-placeholder", json.dumps(row))
         self.assertIn("[REDACTED]", row["ids"]["diagnostic"])
 
+    def gateway_mandate_create(self, command, *, actor="m8shift-gateway",
+                               action="issue_comment",
+                               targets=("ticket=281", "repo=owner/repo")):
+        target_args = tuple(
+            part for target in targets for part in ("--target", target))
+        return self.rt(
+            "gateway-mandate", "create", "--by", "codex", "--actor", actor,
+            "--action", action, *target_args, "--ttl-seconds", "30",
+            "--json", "--", *command)
+
+    def gateway_mandate_exec(self, mandate, command, *, actor="m8shift-gateway",
+                             action="issue_comment",
+                             targets=("ticket=281", "repo=owner/repo")):
+        target_args = tuple(
+            part for target in targets for part in ("--target", target))
+        return self.rt(
+            "gateway-exec", "--actor", actor, "--mandate", mandate,
+            "--action", action, *target_args, "--", *command)
+
+    def gateway_fake_tea(self, body="raise SystemExit(0)"):
+        path = os.path.join(self.d, "tea")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("#!%s\n%s\n" % (sys.executable, body))
+        os.chmod(path, 0o755)
+        return path
+
+    def gateway_comment_command(self, body="raise SystemExit(0)"):
+        return [self.gateway_fake_tea(body), "comments", "add", "281",
+                "--repo", "owner/repo", "--description", "reviewed"]
+
+    def test_gateway_mandate_binds_exact_scope_executes_once_and_hides_argv(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        marker = os.path.join(self.d, "gateway-ran.txt")
+        command = self.gateway_comment_command(
+            "open(%r, 'a', encoding='utf-8').write('x')" % marker)
+        created = self.gateway_mandate_create(command)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        payload = json.loads(created.stdout)
+        mandate = payload["mandate"]
+        mandate_id = mandate["id"]
+        self.assertEqual(mandate["schema"], "m8shift.gateway.mandate.v1")
+        self.assertEqual(mandate["targets"], {
+            "repo": "owner/repo", "ticket": "281"})
+        self.assertRegex(mandate["argv_sha256"], r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(mandate["executable_sha256"], r"^sha256:[0-9a-f]{64}$")
+        self.assertFalse(payload["command_persisted"])
+        record_path = os.path.join(
+            self.d, ".m8shift", "runtime", "gateway-mandates", mandate_id,
+            "mandate.json")
+        with open(record_path, encoding="utf-8") as fh:
+            stored = fh.read()
+        self.assertNotIn("gateway-ran", stored)
+
+        ran = self.gateway_mandate_exec(mandate_id, command)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "x")
+        replay = self.gateway_mandate_exec(mandate_id, command)
+        self.assertNotEqual(replay.returncode, 0)
+        self.assertIn("replay refused", replay.stderr)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "x")
+        result_path = os.path.join(os.path.dirname(record_path), "result.json")
+        with open(result_path, encoding="utf-8") as fh:
+            result = json.load(fh)
+        self.assertEqual(result["outcome"], "ok")
+        events = self.read_runtime_rows("gateway.jsonl")
+        self.assertEqual(events[-1]["ids"], {"mandate": mandate_id})
+
+    def test_gateway_mandate_mismatch_and_expiry_refuse_before_consumption(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        command = self.gateway_comment_command()
+        created = self.gateway_mandate_create(command)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        mandate_id = json.loads(created.stdout)["mandate"]["id"]
+        mandate_dir = os.path.join(
+            self.d, ".m8shift", "runtime", "gateway-mandates", mandate_id)
+
+        wrong_actor = self.gateway_mandate_exec(
+            mandate_id, command, actor="another-gateway")
+        self.assertNotEqual(wrong_actor.returncode, 0)
+        wrong_target = self.gateway_mandate_exec(
+            mandate_id, command, targets=("ticket=282", "repo=owner/repo"))
+        self.assertNotEqual(wrong_target.returncode, 0)
+        wrong_argv = self.gateway_mandate_exec(
+            mandate_id, command[:-1] + ["different"])
+        self.assertNotEqual(wrong_argv.returncode, 0)
+        with open(command[0], "rb") as fh:
+            original_executable = fh.read()
+        with open(command[0], "w", encoding="utf-8") as fh:
+            fh.write("#!%s\nraise SystemExit(0)\n# replaced\n" % sys.executable)
+        os.chmod(command[0], 0o755)
+        replaced = self.gateway_mandate_exec(mandate_id, command)
+        self.assertNotEqual(replaced.returncode, 0)
+        self.assertIn("executable bytes", replaced.stderr)
+        with open(command[0], "wb") as fh:
+            fh.write(original_executable)
+        os.chmod(command[0], 0o755)
+        self.assertFalse(os.path.exists(os.path.join(mandate_dir, "consumption.json")))
+
+        mandate_path = os.path.join(mandate_dir, "mandate.json")
+        with open(mandate_path, encoding="utf-8") as fh:
+            record = json.load(fh)
+        record["issued_at"] = "2020-01-01T00:00:00Z"
+        record["expires_at"] = "2020-01-01T00:00:30Z"
+        with open(mandate_path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"))
+            fh.write("\n")
+        expired = self.gateway_mandate_exec(mandate_id, command)
+        self.assertNotEqual(expired.returncode, 0)
+        self.assertIn("expired", expired.stderr)
+        self.assertFalse(os.path.exists(os.path.join(mandate_dir, "consumption.json")))
+        shown = self.rt("gateway-mandate", "show", mandate_id, "--json")
+        self.assertEqual(json.loads(shown.stdout)["status"], "expired")
+
+    def test_gateway_mandate_requires_live_distinct_holder_and_safe_action(self):
+        self.init()
+        command = self.gateway_comment_command()
+        no_pen = self.gateway_mandate_create(command)
+        self.assertNotEqual(no_pen.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "gateway-mandates")))
+
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        self_actor = self.gateway_mandate_create(command, actor="codex")
+        self.assertNotEqual(self_actor.returncode, 0)
+        destructive = self.gateway_mandate_create(command, action="pr_merge")
+        self.assertNotEqual(destructive.returncode, 0)
+        arbitrary = self.gateway_mandate_create(
+            [sys.executable, "-c", "raise SystemExit(0)"])
+        self.assertNotEqual(arbitrary.returncode, 0)
+        self.assertIn("tea CLI", arbitrary.stderr)
+        credential = self.gateway_mandate_create(
+            command[:-1] + ["token=supersecretvalue"])
+        self.assertNotEqual(credential.returncode, 0)
+
+    def test_gateway_push_mandate_requires_exact_non_force_sha_refspec(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        fake_git = os.path.join(self.d, "git")
+        with open(fake_git, "w", encoding="utf-8") as fh:
+            fh.write("#!%s\nraise SystemExit(0)\n" % sys.executable)
+        os.chmod(fake_git, 0o755)
+        sha = "a" * 40
+        targets = ("remote=origin", "branch=feat/exact", "commit=" + sha)
+        exact = [fake_git, "push", "origin", sha + ":refs/heads/feat/exact"]
+        created = self.gateway_mandate_create(
+            exact, action="push", targets=targets)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        force = self.gateway_mandate_create(
+            [fake_git, "push", "--force", "origin",
+             sha + ":refs/heads/feat/exact"], action="push", targets=targets)
+        self.assertNotEqual(force.returncode, 0)
+        self.assertIn("must be exactly", force.stderr)
+
+    def test_gateway_exec_preserves_failure_and_consumes_permanently(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        command = self.gateway_comment_command("raise SystemExit(7)")
+        created = self.gateway_mandate_create(command)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        mandate_id = json.loads(created.stdout)["mandate"]["id"]
+        failed = self.gateway_mandate_exec(mandate_id, command)
+        self.assertEqual(failed.returncode, 7, failed.stderr)
+        result_path = os.path.join(
+            self.d, ".m8shift", "runtime", "gateway-mandates", mandate_id,
+            "result.json")
+        with open(result_path, encoding="utf-8") as fh:
+            result = json.load(fh)
+        self.assertEqual((result["outcome"], result["cause"], result["exit_code"]),
+                         ("failed", "command_exit", 7))
+        replay = self.gateway_mandate_exec(mandate_id, command)
+        self.assertNotEqual(replay.returncode, 0)
+        self.assertIn("replay refused", replay.stderr)
+
+    def test_gateway_pr_open_refuses_when_local_head_moves(self):
+        self.init()
+        subprocess.run(["git", "init", "-q"], cwd=self.d, check=True)
+        subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=self.d, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=self.d, check=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "feat/pr"], cwd=self.d, check=True)
+        source = os.path.join(self.d, "pr-source.txt")
+        with open(source, "w", encoding="utf-8") as fh:
+            fh.write("one\n")
+        subprocess.run(["git", "add", "pr-source.txt"], cwd=self.d, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "one"], cwd=self.d, check=True)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.d, check=True,
+            capture_output=True, text=True).stdout.strip()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        fake_tea = self.gateway_fake_tea()
+        command = [fake_tea, "pulls", "create", "--repo", "owner/repo",
+                   "--head", "feat/pr", "--base", "main", "--title", "review"]
+        targets = ("repo=owner/repo", "branch=feat/pr", "head=" + head)
+        created = self.gateway_mandate_create(
+            command, action="pr_open", targets=targets)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        mandate_id = json.loads(created.stdout)["mandate"]["id"]
+
+        with open(source, "a", encoding="utf-8") as fh:
+            fh.write("two\n")
+        subprocess.run(["git", "add", "pr-source.txt"], cwd=self.d, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "two"], cwd=self.d, check=True)
+        refused = self.gateway_mandate_exec(
+            mandate_id, command, action="pr_open", targets=targets)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("local head no longer matches", refused.stderr)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "gateway-mandates", mandate_id,
+            "consumption.json")))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink not available")
+    def test_gateway_mandate_refuses_symlinked_consumption_before_exec(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        marker = os.path.join(self.d, "gateway-symlink-ran.txt")
+        command = self.gateway_comment_command(
+            "open(%r, 'w', encoding='utf-8').write('bad')" % marker)
+        created = self.gateway_mandate_create(command)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        mandate_id = json.loads(created.stdout)["mandate"]["id"]
+        mandate_dir = os.path.join(
+            self.d, ".m8shift", "runtime", "gateway-mandates", mandate_id)
+        outside = os.path.join(self.d, "outside.json")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("sentinel\n")
+        os.symlink(outside, os.path.join(mandate_dir, "consumption.json"))
+        refused = self.gateway_mandate_exec(mandate_id, command)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("symlink", refused.stderr)
+        self.assertFalse(os.path.exists(marker))
+        shown = self.rt("gateway-mandate", "show", mandate_id)
+        self.assertNotEqual(shown.returncode, 0)
+        self.assertIn("symlink", shown.stderr)
+        with open(outside, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "sentinel\n")
+
+    def test_gateway_mandate_consumption_is_atomic_under_race(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        marker = os.path.join(self.d, "gateway-race.txt")
+        command = self.gateway_comment_command(
+            "import time; time.sleep(.2); "
+            "open(%r, 'a', encoding='utf-8').write('x')" % marker)
+        created = self.gateway_mandate_create(command)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        mandate_id = json.loads(created.stdout)["mandate"]["id"]
+        argv = [
+            sys.executable, "m8shift-runtime.py", "gateway-exec",
+            "--actor", "m8shift-gateway", "--mandate", mandate_id,
+            "--action", "issue_comment", "--target", "ticket=281",
+            "--target", "repo=owner/repo", "--",
+            *command,
+        ]
+        procs = [subprocess.Popen(
+            argv, cwd=self.d, env=self.clean_env(), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        outputs = [proc.communicate(timeout=10) for proc in procs]
+        self.assertEqual(sorted(proc.returncode for proc in procs), [0, 1], outputs)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "x")
+
     def test_runtime_init_providers_roles_workflows_and_report(self):
         self.init("--agents", "claude,codex,gemini")
         r = self.rt("init", "--json")

@@ -218,6 +218,7 @@ sequenceDiagram
 | EF-45 | **Mistral Vibe source-validated stub**: upstream 2.20.0 source establishes `vibe -p PROMPT`, `MISTRAL_API_KEY`, and trusted project `AGENTS.md` loading. The runtime registry dispatches declarative argv through `mistral-vibe`; resume fails closed and health stays unknown until a separately accepted local probe promotes it. Core anchor mapping adds the confirmed `vibe` name while retaining `lechat`/`mistral` aliases. | `test_agent_cli_adapter_registry_dispatch_and_live_gemini`, `test_vibe_uses_confirmed_agents_anchor`, `test_runtime_init_providers_roles_workflows_and_report` |
 | EF-46 | **Reentrant bootstrap runbook and shared scaffold write gate (#207/#215).** Init capability, gitignore, companion, runner, and generated runbook writes pass the same physical-root gate before mutation. Headless/full profiles provision a version-locked runner and render a marker-owned `.m8shift/BOOTSTRAP.md` containing version authority, self-documenting usage/listener/handshake/dashboard commands, and halted-lane recovery. Re-init replaces only one well-ordered generated block and preserves operator prose; missing/duplicate/reversed markers refuse cleanly, and the exact pre-marker `# Bootstrap plan` renderer is migrated once. | `test_bootstrap_runbook_is_reentrant_and_preserves_operator_prose`, `test_bootstrap_runbook_refuses_reversed_markers_cleanly`, `test_bootstrap_runbook_replaces_exact_legacy_renderer_once`, `test_headless_init_provisions_a_compatible_runner_without_host_source_path` |
 | EF-47 | **Advisory forge-gateway lifecycle ledger (#229).** `m8shift-runtime.py gateway-event` explicitly appends one bounded `m8shift.gateway.event.v1` record to `.m8shift/runtime/gateway.jsonl`; it records a safe actor, allowlisted action/outcome, required stable cause for non-`ok`, bounded repo-relative refs/ids, optional SHA-256 digests, and tool/version source. URLs, absolute/parent paths, userinfo, raw multiline output, duplicate keys, non-digest evidence, and records over 8 KiB are refused or denylist-redacted. The helper performs no forge action and never reads or mutates relay ownership. Core status projects only recent valid events, and TOP renders the advisory `GATEWAY` line even while `PAUSED`. | `test_gateway_event_appends_validated_side_ledger_without_touching_relay`, `test_gateway_event_refuses_unsafe_or_ambiguous_evidence`, `test_gateway_event_bounds_records_and_concurrent_appends`, `test_status_snapshot_projects_only_recent_valid_gateway_events`, `test_recent_gateway_event_remains_visible_while_paused` |
+| EF-47b | **Immutable one-shot forge-gateway transport authority (#281 P2 / RFC 065).** `gateway-mandate create` requires a live pen holder and persists one immutable, 30–900 second capability for a different named gateway, one non-integration action, exact action-specific targets, physical project/cwd digests, a canonical shell-free argv SHA-256, and resolved executable-byte SHA-256; argv and credentials are never stored. `gateway-exec` requires every exact binding, atomically consumes with create-exclusive/no-follow semantics before launch, refuses replay/expiry/mismatch/drift, preserves child exit codes, and links an immutable result plus gateway event to the mandate digest. Merge, close, tag, deletion, mirror, force-push, and other integration/destructive actions cannot be mandated. | `test_gateway_mandate_binds_exact_scope_executes_once_and_hides_argv`, `test_gateway_mandate_mismatch_and_expiry_refuse_before_consumption`, `test_gateway_mandate_requires_live_distinct_holder_and_safe_action`, `test_gateway_push_mandate_requires_exact_non_force_sha_refspec`, `test_gateway_exec_preserves_failure_and_consumes_permanently`, `test_gateway_pr_open_refuses_when_local_head_moves`, `test_gateway_mandate_refuses_symlinked_consumption_before_exec`, `test_gateway_mandate_consumption_is_atomic_under_race` |
 | EF-48 | **Managed usage-watcher lifecycle (#214).** `usage watch --agent AGENT` owns one lease-bound `m8shift.usage-watch.lifecycle.v1` registry under `usage-watchers/<agent>.json`, serialized by a short `O_EXCL` transaction. Whole ticks run in bounded subprocess groups; health treats process life, tick freshness, and successful adapter reads independently, so dead, stale-tick, degraded-read, and legacy pre-lease states are not reported healthy. `usage watch stop` records durable stopped intent; `usage watch reconcile` keeps stopped/healthy epochs, starts a dead desired-running watcher, and recycles stale/degraded/legacy state only under the documented probe and identity gates. Malformed state is quarantined to stopped. PID plus lease ownership prevents an old finalizer from overwriting an adopted epoch, and exact start identity or matching watcher argv is required before signalling; unverifiable identity fails closed to `investigate`. Reconciliation never clears a usage hold or resumes the relay. | `test_usage_watch_incident_variants_detect_and_converge`, `test_usage_watch_legacy_identity_fails_closed_before_signal`, `test_usage_watch_whole_tick_probe_timeout_is_a_failed_tick`, `test_usage_watch_singleton_refuses_duplicate_and_stop_manages_registry`, `test_usage_watch_reconcile_quarantines_malformed_registry` |
 | EF-49 | **Pure safe-boundary model-line route policy (RFC 077 Slice C, #212).** The external fixture package consumes an operator policy, validated same-provider/mode/auth RFC 070 pins, normalized `m8shift.model-line.evidence.v1` rows, invocation effects, switch count, and a durable non-`WORKING` checkpoint. Usage hold active/corrupt is priority zero and returns before evidence inspection; only explicit `usage resume` can clear a hold. The eight ordered rules distinguish available/drain/exhausted/unknown/stale evidence, safe refusal, partial output/tool effects, subscription CLI limits, target applicability, missing checkpoints, and the default one-switch cap, producing only `continue`, `observe_only`, `route_next_invocation`, or `clean_halt` with stable reasons. Dry-run compiles requested/selected pins for the next invocation with `replay=false`, launches nothing, and emits a canonical create-exclusive `m8shift.route-decision.v1` record whose checkpoint hashes reconstruct the boundary. No listener integration, credential access, provider process, live switch, hold mutation, or relay write ships in Slice C. | `test_rule_zero_active_and_corrupt_holds_precede_evidence`, `test_rule_three_exhaustion_and_safe_refusal_route_next_only`, `test_rule_four_partial_effect_ambiguity_and_unsafe_refusal_halt`, `test_rule_five_unknown_stale_and_console_targets_never_route`, `test_rule_eight_cap_and_all_rejected_have_stable_causes`, `test_dry_run_compiles_rfc070_pins_without_launch_or_replay`, `test_record_matches_checked_in_schema_shape`, `test_immutable_writer_is_create_exclusive_and_canonical`, `test_blank_agent_reconstructs_boundary_from_durable_bytes` |
 
@@ -369,13 +370,47 @@ Every row has exactly the following contract shape (maps may be empty):
 ```
 
 Actions are `push`, `pr_open`, `pr_merge`, `pr_close`, `tag`,
-`branch_delete`, `merge_resolve`, or `publish_mirror`; outcomes are `ok`,
+`branch_delete`, `merge_resolve`, `publish_mirror`, `issue_create`,
+`issue_comment`, `issue_close`, or `pr_comment`; outcomes are `ok`,
 `refused`, `retrying`, or `failed`. A non-`ok` row requires a stable cause.
 The row is local advisory evidence: it neither proves remote state nor grants
 forge or relay authority. Core status reads only a recent valid row for display,
 and TOP may render that projection while the mutex remains `PAUSED`.
 
-### 6.3 Managed usage-watcher registry
+### 6.3 One-shot gateway mandates
+
+The runtime companion exposes an explicit capability pair:
+
+```text
+gateway-mandate create --by HOLDER --actor GATEWAY --action ACTION
+  --target KEY=VALUE [--target ...] [--ttl-seconds 30..900] [--json]
+  -- <exact argv...>
+gateway-mandate show ID [--json]
+gateway-exec --actor GATEWAY --mandate ID --action ACTION
+  --target KEY=VALUE [--target ...] -- <same exact argv...>
+```
+
+`create` succeeds only for the current live pen holder and a different safe actor.
+It writes an immutable `m8shift.gateway.mandate.v1` under
+`.m8shift/runtime/gateway-mandates/<id>/` with timestamps, exact targets,
+project/cwd SHA-256 bindings, argv SHA-256, and resolved executable-byte SHA-256. It
+stores no argv or output.
+Allowlisted actions are `push`, `issue_comment`, `pr_open`, and `pr_comment`;
+action-specific required targets prevent an unscoped capability.
+The action is not merely metadata: `push` accepts only the exact
+`git push REMOTE SHA:refs/heads/BRANCH` argv; issue/PR records accept only their
+matching `tea comments add` or `tea pulls create` shape and exact repo/id/head
+options. Arbitrary commands and force/deletion/mirror push shapes are refused.
+
+`gateway-exec` revalidates all fields, physical bindings, expiry and canonical argv,
+then create-exclusively writes `m8shift.gateway.mandate-consumption.v1` before an
+ordinary shell-free child launch. Existing consumption is replay, including after a
+crash with an uncertain remote outcome. The result uses
+`m8shift.gateway.mandate-result.v1` and links the mandate digest into
+`m8shift.gateway.event.v1`. The surface cannot express merge, close, tag, deletion,
+mirror, force-push, or any other destructive/integration authorization.
+
+### 6.4 Managed usage-watcher registry
 
 Each agent has at most one durable watcher registry:
 
@@ -411,7 +446,7 @@ guards every update/finalizer. If process identity cannot be proven, the action
 is `investigate`: no signal and no duplicate launch. A residual usage hold is a
 separate finding with `usage resume --agent AGENT` as its only remedy.
 
-### 6.4 Safe-boundary model-line route records
+### 6.5 Safe-boundary model-line route records
 
 RFC 077's fixture-safe schemas are checked in at:
 
@@ -565,6 +600,9 @@ the core:
 
 Other runtime-companion verbs added to the normative surface are:
 `gateway-event --actor ACTOR --action ACTION --outcome OUTCOME [evidence flags] [--json]` ·
+`gateway-mandate create --by HOLDER --actor GATEWAY --action ACTION --target KEY=VALUE [--ttl-seconds N] [--json] -- <argv...>` ·
+`gateway-mandate show ID [--json]` ·
+`gateway-exec --actor GATEWAY --mandate ID --action ACTION --target KEY=VALUE -- <argv...>` ·
 `usage watch --agent AGENT [--replace] [--tick-timeout N]` ·
 `usage watch stop --agent AGENT [--json]` ·
 `usage watch reconcile [--agent AGENT] [--json]`.

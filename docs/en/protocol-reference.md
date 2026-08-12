@@ -197,6 +197,16 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   `heartbeat --source wrapper` while its shell-free child lives, stopping the child
   if either operation fails. The single-writer invariant still rests on the
   `claim`/`append` mutex, not on a wrapper.
+- **Named gateway exception:** a gateway outside the pen may run only
+  `m8shift-runtime.py gateway-exec` against an unexpired
+  `m8shift.gateway.mandate.v1` created by the live holder for a different named
+  actor. The mandate binds one non-integration action, exact target set, physical
+  project/working-directory digests, one shell-free argv SHA-256, and the resolved
+  executable-byte SHA-256; consumption is
+  atomic and one-shot before launch. Mismatch, expiry, replay, malformed/symlinked
+  evidence refuse without executing. Merge, close, tag, deletion, mirror, force push,
+  and other destructive/integration actions cannot be mandated, and human exact-head
+  merge authorization remains separate.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB
