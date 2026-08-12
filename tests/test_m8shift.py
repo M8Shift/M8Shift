@@ -3896,6 +3896,31 @@ class TestAdvisoryFields(CLIBase):
         self.assertIn("x_jira=PROJ-7", peek)
         self.assertIn("branch=feat/x", peek)
 
+    def test_runner_identity_is_stamped_automatically_at_append(self):
+        self.init()
+        self.assertEqual(0, self.cw("claim", "claude").returncode)
+        env = dict(os.environ, M8SHIFT_AGENT="claude", M8SHIFT_RUN_ID="run-317")
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
+             "--ask", "review", "--done", "runner turn"],
+            cwd=self.d, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("- x_run_id: run-317", self.md())
+
+    def test_runner_identity_refuses_a_conflicting_explicit_field(self):
+        self.init()
+        self.assertEqual(0, self.cw("claim", "claude").returncode)
+        env = dict(os.environ, M8SHIFT_AGENT="claude", M8SHIFT_RUN_ID="run-317")
+        r = subprocess.run(
+            [sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
+             "--field", "x_run_id=another-run"],
+            cwd=self.d, capture_output=True, text=True, env=env,
+        )
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("conflicts with the active M8SHIFT_RUN_ID", r.stderr)
+        self.assertEqual(self.lock()["state"], "WORKING_CLAUDE")
+
     def test_ambient_isolation_covers_every_name_in_tracked_sources(self):
         """#288: discovered by NAME, because classifying reads was wrong four times.
 
@@ -5080,6 +5105,56 @@ class TestAuditFixes(CLIBase):
         finally:
             shutil.rmtree(app, ignore_errors=True)
 
+    def test_commit_msg_hook_stamps_runner_agent_when_declared(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject\n")
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env["M8SHIFT_AGENT"] = "codex"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("M8Shift-Agent: codex", body)
+            self.assertIn(f"Coordinated-With: M8Shift v{cowork.VERSION}", body)
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                self.assertEqual(f.read().count("M8Shift-Agent:"), 1)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    def test_commit_msg_hook_rejects_malformed_runner_agent_fail_open(self):
+        self.init()
+        hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
+        app = tempfile.mkdtemp(prefix="m8shift-app-")
+        try:
+            msg = os.path.join(app, "COMMIT_EDITMSG")
+            with open(msg, "w", encoding="utf-8") as f:
+                f.write("subject\n")
+            env = os.environ.copy()
+            env["M8SHIFT_ROOT"] = self.d
+            env["M8SHIFT_AGENT"] = "bad\nM8Shift-Agent: forged"
+
+            r = subprocess.run([sys.executable, hook, msg], cwd=app, env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            with open(msg, encoding="utf-8") as f:
+                body = f.read()
+            self.assertNotIn("M8Shift-Agent:", body)
+            self.assertIn(f"Coordinated-With: M8Shift v{cowork.VERSION}", body)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
     def test_commit_msg_hook_skips_absent_agent_model(self):
         self.init()
         hook = os.path.join(self.d, ".m8shift", "hooks", "commit-msg")
@@ -5320,7 +5395,7 @@ with open("runner-model.txt", "w", encoding="utf-8") as f:
 subprocess.check_call([sys.executable, "m8shift.py", "claim", "claude"])
 subprocess.check_call([
     sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
-    "--ask", "review", "--done", "runner ok", "--field", "x_run_id=" + run_id,
+    "--ask", "review", "--done", "runner ok",
 ])
 """
         r = subprocess.run(
@@ -5369,6 +5444,36 @@ subprocess.check_call([
         self.assertEqual(plan["command"]["argv"][0], sys.executable)
         self.assertEqual(plan["expected_transition"]["type"], "core_state_advanced")
         self.assertEqual(plan["expected_post_run"]["type"], "core_state_advanced")
+
+    def test_headless_runner_rejects_same_agent_turn_from_another_run(self):
+        self.init()
+        runner = os.path.join(REPO, "examples", "headless_runner.py")
+        code = """
+import os
+import subprocess
+import sys
+subprocess.check_call([sys.executable, "m8shift.py", "claim", "claude"])
+other_run = dict(os.environ, M8SHIFT_RUN_ID="another-run")
+subprocess.check_call([
+    sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
+    "--ask", "review", "--done", "parallel turn",
+], env=other_run)
+"""
+        r = subprocess.run(
+            [sys.executable, runner, "claude", "--m8shift", "M8SHIFT.md",
+             "--m8shift-py", "m8shift.py", "--start-on-idle", "--once",
+             "--interval", "1", "--max-retries", "1",
+             "--cmd", sys.executable, "-c", code],
+            cwd=self.d, capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        ended = [row for row in rows if row["event"] == "run.ended"][-1]
+        self.assertEqual(ended["status"], "external_transition")
+        self.assertEqual(ended["verification_status"], "external_transition")
+        self.assertFalse(ended["success"])
 
     def test_done_release_are_baton_owner_ops(self):
         # #4: in AWAITING_*, `holder` is the baton owner; done/release act for them WITHOUT an
@@ -5526,12 +5631,14 @@ subprocess.check_call([
 
         self.init("--force")
         nonzero = """
+import os
 import subprocess
 import sys
 subprocess.check_call([sys.executable, "m8shift.py", "claim", "claude"])
 subprocess.check_call([
     sys.executable, "m8shift.py", "append", "claude", "--to", "codex",
     "--ask", "review", "--done", "progressed then failed",
+    "--field", "x_run_id=" + os.environ["M8SHIFT_RUN_ID"],
 ])
 sys.exit(7)
 """
@@ -5764,11 +5871,12 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(self.ended()["status"], "non_completion")
 
         advanced = self.runner_once(
-            "import subprocess, sys\n"
+            "import os, subprocess, sys\n"
             "m = [sys.executable, 'm8shift.py']\n"
             "subprocess.check_call(m + ['claim', 'claude'])\n"
             "subprocess.check_call(m + ['append', 'claude', '--to', 'codex', "
-            "'--ask', 'review', '--done', 'complete'])\n"
+            "'--ask', 'review', '--done', 'complete', '--field', "
+            "'x_run_id=' + os.environ['M8SHIFT_RUN_ID']])\n"
             "print(%r, file=sys.stderr)\n"
             "sys.exit(7)\n" % message,
             "--provider", "openai-codex")
@@ -5803,11 +5911,13 @@ class TestRFC047PhaseA(CLIBase):
         # RFC 047 test 3: an authored newer turn is success even though the relay is open.
         self.awaiting_me()
         r = self.runner_once(
-            "import subprocess, sys\n"
+            "import os, subprocess, sys\n"
             "m = [sys.executable, 'm8shift.py']\n"
             "subprocess.check_call(m + ['claim', 'claude'])\n"
             "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',\n"
-            "                          '--ask', 'review', '--done', 'one turn'])\n")
+            "                          '--ask', 'review', '--done', 'one turn',\n"
+            "                          '--field', 'x_run_id=' + "
+            "os.environ['M8SHIFT_RUN_ID']])\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         ended = self.ended()
         self.assertEqual(ended["status"], "advanced")
@@ -5860,11 +5970,13 @@ class TestRFC047PhaseA(CLIBase):
         # authors n+2, post state is AWAITING_<me> again — success, not non_completion.
         self.awaiting_me()
         r = self.runner_once(
-            "import subprocess, sys\n"
+            "import os, subprocess, sys\n"
             "m = [sys.executable, 'm8shift.py']\n"
             "subprocess.check_call(m + ['claim', 'claude'])\n"
             "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',\n"
-            "                          '--ask', 'peer turn', '--done', 'mine'])\n"
+            "                          '--ask', 'peer turn', '--done', 'mine',\n"
+            "                          '--field', 'x_run_id=' + "
+            "os.environ['M8SHIFT_RUN_ID']])\n"
             "subprocess.check_call(m + ['claim', 'codex'])\n"
             "subprocess.check_call(m + ['append', 'codex', '--to', 'claude',\n"
             "                          '--ask', 'back to you', '--done', 'peer'])\n")
@@ -5973,6 +6085,16 @@ class TestRFC047PhaseA(CLIBase):
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         self.assertTrue(hr.authored_by_me(path, "claude", "1"))        # path form
+        run_text = (
+            "<!-- M8SHIFT:TURN 2 claude BEGIN -->\n"
+            "- from:    claude\n- x_run_id: run-2\n\nbody\n"
+            "<!-- M8SHIFT:TURN 2 claude END -->\n"
+        )
+        self.assertTrue(hr.authored_by_me(run_text, "claude", "1", "run-2"))
+        self.assertFalse(hr.authored_by_me(run_text, "claude", "1", "run-other"))
+        quoted = run_text.replace("- x_run_id: run-2\n\nbody",
+                                  "\nbody quotes:\n- x_run_id: run-2")
+        self.assertFalse(hr.authored_by_me(quoted, "claude", "1", "run-2"))
 
     def test_t8_claim_refresh_guard(self):
         # Core RFC 047 prerequisite: --refresh only EXTENDS an already-held WORKING lock.

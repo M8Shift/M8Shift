@@ -17,6 +17,17 @@
 
 ## v4.0.0 — 2026-08-08
 
+- **Run-bound relay and commit attribution (#317).** A headless run now earns
+  `advanced` only from a newer closed turn by its agent whose `x_run_id` exactly
+  matches the runner-exported `M8SHIFT_RUN_ID`; a parallel/manual turn by the
+  same agent is classified as an external transition instead of another run's
+  success. `m8shift.py append` stamps that field automatically when the runner's
+  matching `M8SHIFT_AGENT` / `M8SHIFT_RUN_ID` environment is present, so the
+  guarantee does not depend on provider cooperation. The generated `commit-msg`
+  hook also stamps the validated
+  `M8Shift-Agent: <agent>` trailer from `M8SHIFT_AGENT`, idempotently and
+  fail-open, alongside the existing model and engine provenance.
+
 - **Merge-resolution content at the publish boundary (#263).** History scans now
   compare every merge against each parent, so a denied identifier introduced by
   one merge resolution and removed by another cannot cross the gate merely
