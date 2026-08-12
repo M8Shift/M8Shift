@@ -14211,11 +14211,13 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
 
 
 class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
-    """#103 — disabled tokscale local SPEND adapter: used_tokens only, no
-    invented windows/limits, provenance local_estimate, fail-open everywhere,
-    and a hard never-submit guard (RFC 052 boundary)."""
+    """#103/#316 — disabled tokscale quota relay with legacy spend fallback,
+    honest provenance, fail-open observation state, privacy filtering, and the
+    hard never-submit guard (RFC 052 boundary)."""
 
     EXAMPLE_REL = os.path.join("examples", "usage-adapters", "tokscale-spend.py")
+    FIXTURE_REL = os.path.join(
+        "tests", "fixtures", "usage", "tokscale-v4.13.0-quota-redacted.json")
 
     def _example(self):
         import importlib.util
@@ -14226,6 +14228,86 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
         return mod
 
     NOW = "2026-07-11T12:00:00Z"
+
+    def _quota_payload(self):
+        with open(os.path.join(REPO, self.FIXTURE_REL), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_live_v413_shape_maps_claude_quota_without_identity_fields(self):
+        mod = self._example()
+        fx = mod.build_fixture(self._quota_payload(), "claude", self.NOW)
+        self.assertEqual(fx["provenance"], "proxy_reported")
+        self.assertEqual(fx["measurement"], {"state": "measured"})
+        self.assertIsNone(fx["used_tokens"])
+        self.assertIsNone(fx["limit_tokens"])
+        self.assertEqual(fx["windows"], [
+            {"kind": "session_5h", "used_ratio": 0.27,
+             "resets_at": "2026-08-12T13:00:00Z"},
+            {"kind": "weekly", "used_ratio": 0.99,
+             "resets_at": "2026-08-17T00:00:00Z"},
+        ])
+        serialized = json.dumps(fx)
+        for secret_or_metadata in ("redacted@example.invalid", "redacted-account",
+                                   "plan", "remaining_label", "credit_status"):
+            self.assertNotIn(secret_or_metadata, serialized)
+
+    def test_live_v413_shape_keeps_codex_model_window(self):
+        mod = self._example()
+        fx = mod.build_fixture(self._quota_payload(), "codex", self.NOW)
+        self.assertEqual(fx["measurement"], {"state": "measured"})
+        self.assertEqual(fx["windows"], [
+            {"kind": "weekly", "used_ratio": 0.45,
+             "resets_at": "2026-08-18T09:30:00Z"},
+            {"kind": "weekly", "model": "GPT-5.3-Codex-Spark",
+             "used_ratio": 0.0, "resets_at": "2026-08-18T09:30:00Z"},
+        ])
+
+    def test_proxy_quota_normalizes_to_actionable_ratio_without_official_label(self):
+        mod = self._example()
+        fixture = mod.build_fixture(self._quota_payload(), "claude", self.NOW)
+        runtime_path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("tokscale_runtime", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+
+        snapshot, warnings = runtime.normalize_usage_snapshot(
+            fixture, agent="claude", adapter_name="tokscale-spend", kind="cli_json")
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(snapshot["source"]["provenance"], "proxy_reported")
+        self.assertEqual(snapshot["decision_ratio"], 0.99)
+        self.assertEqual(snapshot["decision_window"]["kind"], "weekly")
+        self.assertEqual(snapshot["remaining_ratio"], 0.01)
+
+    def test_quota_unavailable_and_schema_drift_are_explicit(self):
+        mod = self._example()
+        unavailable = mod.build_fixture(self._quota_payload(), "agy", self.NOW)
+        self.assertEqual(unavailable["measurement"], {
+            "state": "unavailable", "reason": "provider_unavailable"})
+        self.assertEqual(unavailable["windows"], [])
+
+        malformed = [{"provider": "Claude", "metrics": [
+            {"label": "Session", "used_percent": True,
+             "remaining_percent": 101, "resets_at": "not-a-date"},
+            {"label": "Weekly", "used_percent": 10,
+             "remaining_percent": 10, "resets_at": "2026-08-17T00:00:00Z"},
+            {"label": "Chat", "used_percent": 50,
+             "remaining_percent": 50, "resets_at": "2026-08-17T00:00:00Z"},
+        ]}]
+        degraded = mod.build_fixture(malformed, "claude", self.NOW)
+        self.assertEqual(degraded["measurement"], {
+            "state": "degraded", "reason": "no_usable_windows"})
+        self.assertEqual(degraded["windows"], [])
+
+    def test_remaining_percent_only_is_accepted_but_never_becomes_tokens(self):
+        mod = self._example()
+        fx = mod.build_fixture([{"provider": "Claude", "metrics": [{
+            "label": "Session", "remaining_percent": 73,
+            "resets_at": "2026-08-12T13:00:00Z",
+        }]}], "claude", self.NOW)
+        self.assertEqual(fx["windows"][0]["used_ratio"], 0.27)
+        self.assertIsNone(fx["used_tokens"])
+        self.assertIsNone(fx["limit_tokens"])
 
     def test_build_fixture_prefers_explicit_total_no_double_count(self):
         mod = self._example()
@@ -14247,6 +14329,15 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
         self.assertEqual(fx["used_tokens"], 350)
         self.assertNotIn("SECRET_SHOULD_NOT_LEAK", json.dumps(fx))
         self.assertNotIn("9.99", json.dumps(fx))               # costs never copied
+
+    def test_legacy_list_shaped_spend_falls_through_to_token_sum(self):
+        mod = self._example()
+        fx = mod.build_fixture([{"totalTokens": 100}, {"inputTokens": 25}],
+                               "claude", self.NOW)
+        self.assertEqual(fx["provenance"], "local_estimate")
+        self.assertEqual(fx["used_tokens"], 125)
+        self.assertEqual(fx["windows"], [])
+        self.assertNotIn("measurement", fx)
 
     def test_build_fixture_malformed_and_empty_fail_open(self):
         mod = self._example()
@@ -14384,6 +14475,9 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
         self.assertEqual(mod.main(out=out, read_spend=explode), 0)
         fx = json.loads(out.getvalue())
         self.assertIsNone(fx["used_tokens"])
+        self.assertEqual(fx["measurement"], {
+            "state": "unavailable", "reason": "adapter_unavailable"})
+        self.assertEqual(fx["provenance"], "proxy_reported")
         self.assertNotIn("SECRET_IN_ERROR", out.getvalue())
 
 

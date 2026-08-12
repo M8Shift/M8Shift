@@ -1,0 +1,68 @@
+[
+  {
+    "provider": "Claude",
+    "plan": "redacted",
+    "email": "redacted@example.invalid",
+    "metrics": [
+      {
+        "label": "Session",
+        "used_percent": 27.0,
+        "remaining_percent": 73.0,
+        "remaining_label": "redacted",
+        "resets_at": "2026-08-12T15:00:00+02:00"
+      },
+      {
+        "label": "Weekly",
+        "used_percent": 99.0,
+        "remaining_percent": 1.0,
+        "remaining_label": "redacted",
+        "resets_at": "2026-08-17T00:00:00Z"
+      }
+    ]
+  },
+  {
+    "provider": "Codex",
+    "account": {
+      "id": "redacted-account",
+      "is_active": true
+    },
+    "plan": "redacted",
+    "email": "redacted@example.invalid",
+    "metrics": [
+      {
+        "label": "Weekly",
+        "used_percent": 45.0,
+        "remaining_percent": 55.0,
+        "remaining_label": "redacted",
+        "resets_at": "2026-08-18T09:30:00Z"
+      },
+      {
+        "label": "GPT-5.3-Codex-Spark weekly",
+        "used_percent": 0.0,
+        "remaining_percent": 100.0,
+        "remaining_label": "redacted",
+        "resets_at": "2026-08-18T09:30:00Z"
+      }
+    ],
+    "reset_credits": {
+      "available_count": 0
+    },
+    "credit_status": {
+      "balance": "redacted"
+    }
+  },
+  {
+    "provider": "Copilot",
+    "plan": "redacted",
+    "email": "redacted@example.invalid",
+    "metrics": [
+      {
+        "label": "Chat",
+        "used_percent": 0.1,
+        "remaining_percent": 99.9,
+        "remaining_label": "redacted",
+        "resets_at": "redacted-non-iso"
+      }
+    ]
+  }
+]
