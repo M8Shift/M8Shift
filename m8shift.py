@@ -755,8 +755,11 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   before an update lands generated writes in a shared checkout — never clear
   the state with destructive git operations without explicit human authorization).
   RFC 065 also adds local-only `delivery.no_upstream` and `delivery.unpushed`
-  reminders. They use bounded Git reads, never contact a forge, and never present
-  local refs as proof of remote delivery.
+  reminders. `delivery.publish_gate_drift` (#312) compares the active worktree's
+  relative `core.hooksPath` pre-push bytes with the same path in the locally cached
+  published-main ref and includes the worktree HEAD; it is advisory because branch
+  drift can be intentional. These probes use bounded Git reads, never fetch/contact
+  a forge, never clean worktrees, and never present local refs as live remote proof.
 - **Local update (RFC 048)**: `update` is driven by the **new source copy**
   (`python3 /path/to/new/m8shift.py update --target . --source /path/to/new`),
   so projects created before the command existed can still be upgraded
@@ -8625,6 +8628,102 @@ def _delivery_git_findings(root=None):
     )]
 
 
+def _publish_gate_git_findings(root=None):
+    """Compare the active worktree pre-push gate with local published-main evidence.
+
+    ``core.hooksPath`` is often worktree-relative, so two worktrees of one Git store
+    can execute materially different publication gates.  This probe is deliberately
+    local and advisory: it never fetches, never claims that a remote-tracking ref is
+    live forge state, and never cleans a worktree.  It hashes the bytes Git would
+    execute from this worktree and compares them with the same path in the locally
+    available default-remote main ref.
+    """
+    # Canonicalize before deriving a Git-relative hook path.  On macOS /tmp is a
+    # symlink to /private/tmp; mixing those spellings would manufacture a `..` path
+    # and make the otherwise valid hash-object probe fail open.
+    root = os.path.realpath(os.path.abspath(root or os.getcwd()))
+    inside = _delivery_git_probe(root, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
+        return []
+
+    # Keep the invoking checkout as the authority, but normalize a caller launched
+    # from one of its subdirectories to Git's worktree root.  Falling back to the
+    # relay/script root would inspect the wrong checkout for worktree companions.
+    top = _delivery_git_probe(root, "rev-parse", "--show-toplevel")
+    if top is None or top.returncode != 0 or not top.stdout.strip():
+        return []
+    root = os.path.realpath(os.path.abspath(top.stdout.strip()))
+
+    configured = _delivery_git_probe(root, "config", "--path", "--get", "core.hooksPath")
+    if configured is None or configured.returncode != 0 or not configured.stdout.strip():
+        return []
+    hooks_dir = configured.stdout.strip()
+    if os.path.isabs(hooks_dir):
+        # An external/shared hook is not worktree-carried and therefore cannot have
+        # the drift #312 measures.
+        return []
+    active_path = os.path.realpath(os.path.join(root, hooks_dir, "pre-push"))
+    try:
+        if os.path.commonpath((root, active_path)) != root:
+            return []
+    except ValueError:
+        return []
+    if not os.path.isfile(active_path):
+        return []
+    rel = os.path.relpath(active_path, root).replace(os.sep, "/")
+
+    # Prefer the project's conventional origin/main, then any locally recorded
+    # remote-default symref.  These are cached observations, named honestly below.
+    candidates = ["origin/main"]
+    remote_defaults = _delivery_git_probe(
+        root, "for-each-ref", "--format=%(symref:short)", "refs/remotes/*/HEAD",
+    )
+    if remote_defaults is not None and remote_defaults.returncode == 0:
+        for ref in remote_defaults.stdout.splitlines():
+            ref = ref.strip()
+            if ref and ref not in candidates:
+                candidates.append(ref)
+
+    published_ref = ""
+    published_blob = ""
+    for ref in candidates:
+        blob = _delivery_git_probe(root, "rev-parse", "--verify", ref + ":" + rel)
+        if blob is not None and blob.returncode == 0 and blob.stdout.strip():
+            published_ref = ref
+            published_blob = blob.stdout.strip()
+            break
+    if not published_ref:
+        return []
+
+    active_blob = _delivery_git_probe(root, "hash-object", "--no-filters", "--", rel)
+    if active_blob is None or active_blob.returncode != 0 or not active_blob.stdout.strip():
+        return []
+    if active_blob.stdout.strip() == published_blob:
+        return []
+
+    head = _delivery_git_probe(root, "rev-parse", "--short=12", "HEAD")
+    head_label = head.stdout.strip() if head is not None and head.returncode == 0 else "unknown"
+    relation = "differs from"
+    behind = _delivery_git_probe(root, "merge-base", "--is-ancestor", "HEAD", published_ref)
+    same_head = _delivery_git_probe(root, "rev-parse", "--verify", published_ref + "^{commit}")
+    local_head = _delivery_git_probe(root, "rev-parse", "--verify", "HEAD^{commit}")
+    if (behind is not None and behind.returncode == 0
+            and same_head is not None and same_head.returncode == 0
+            and local_head is not None and local_head.returncode == 0
+            and same_head.stdout.strip() != local_head.stdout.strip()):
+        relation = "is behind"
+
+    return [doctor_finding(
+        "delivery.publish_gate_drift", "warning",
+        "active %s at worktree HEAD %s %s the locally cached published-main gate at %s; "
+        "a push from this worktree would use different gate bytes." %
+        (rel, head_label, relation, published_ref),
+        rel,
+        "review the hook diff; refresh/rebase this worktree if stale, or keep an "
+        "intentional branch-specific gate explicitly",
+    )]
+
+
 def collect_doctor_findings(security=False, contracts=False, update_source="",
                             install_report=None, hygiene=False,
                             hygiene_verbose=False, hygiene_anchors=False):
@@ -8655,6 +8754,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
         out.extend(_rfc_governance_findings())
         out.extend(_agent_exchange_protocol_findings())
         out.extend(_delivery_git_findings())
+        out.extend(_publish_gate_git_findings())
         return out
     try:
         text = read()
@@ -9013,6 +9113,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
     findings.extend(_rfc_governance_findings())
     findings.extend(_agent_exchange_protocol_findings())
     findings.extend(_delivery_git_findings())
+    findings.extend(_publish_gate_git_findings())
     return findings
 
 
@@ -9113,7 +9214,7 @@ def cmd_doctor(args):
     # `enforce` was resolved at entry, before any output — see the top of this
     # function for why the refusal cannot live here.
     advisory_checks = ("hygiene.denylist", "hygiene.anchor_foreign_path",
-                       "hygiene.anchor_roots_unset")
+                       "hygiene.anchor_roots_unset", "delivery.publish_gate_drift")
     # RFC 050/058: skills.* and rfc.* findings are advisory ALWAYS — they never flip the
     # --lint exit code, even under M8SHIFT_SCRUB_ENFORCE (rc 0 contract).
     gating = [f for f in visible

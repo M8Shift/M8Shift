@@ -623,6 +623,13 @@ chmod +x .git/hooks/pre-commit
 non-default branch without an upstream, and `delivery.unpushed` when `HEAD` is ahead of
 its configured local upstream ref. Detached, default-branch, non-Git, and probe-error
 cases fail open. These findings never contact a forge and never prove remote state.
+It also emits the visible warning-level but non-gating
+`delivery.publish_gate_drift` finding when a relative
+`core.hooksPath` makes this worktree execute pre-push bytes different from the same path
+in the locally cached published-main ref. The message includes this worktree's HEAD and
+distinguishes an ancestor HEAD (“behind”) from ordinary divergence. This is visibility,
+not cleanup or a lint block: legitimate branch drift is allowed, abandoned worktrees remain
+a separate lifecycle concern, and `doctor` never fetches to refresh the remote ref.
 
 > [!NOTE]
 > **Zero-memory when configured.** A fresh agent does not have to *remember* the write

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Visible worktree publication-gate drift (#312).** `doctor` now compares the
+  active relative `core.hooksPath` pre-push bytes with the same path in the locally
+  cached published-main ref. A visible warning-level but non-gating finding includes
+  the worktree HEAD and distinguishes a definitely behind ancestor from ordinary
+  branch divergence. The probe remains local, fail-open, non-blocking, and never
+  fetches or cleans worktrees.
+
 - **Explicit merge authority (#302).** The delivery workflow now separates
   independent review from publication consent: only the human operator/maintainer
   authorizes each merge to `main`, for Corrections, Revisions, and Generations alike.
