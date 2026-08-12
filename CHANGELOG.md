@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v4.1.0 — 2026-08-12
 
 - **Managed interactive and gateway authority (#280/#281).** `lease-keeper` now wraps one
   shell-free interactive argv, exports the resolved relay identity, refreshes the
@@ -57,8 +57,6 @@
   own `usage.measurement_undeclared` finding, so older schema-less fixtures cannot
   hide the contract warning behind an ordinary normalization diagnostic.
 
-## v4.0.0 — 2026-08-08
-
 - **Run-bound relay and commit attribution (#317).** A headless run now earns
   `advanced` only from a newer closed turn by its agent whose `x_run_id` exactly
   matches the runner-exported `M8SHIFT_RUN_ID`; a parallel/manual turn by the
@@ -80,6 +78,58 @@
   pre-existing downgrade. On a real 12-commit, 3-merge range, the exact walk's
   median rose from 366 ms to 483 ms and the normalized walk from 24.4 ms to
   25.7 ms (nine warm runs).
+
+- **Destination-bound public-push enforcement (#306).** The pre-push gate no
+  longer treats a remote name or the ambient advisory default as publication
+  policy. Operators bind a public declaration to the SHA-256 fingerprint of
+  one canonical resolved push endpoint; every declaration is matched by value,
+  so a second remote name or `pushInsteadOf` rewrite to that destination cannot
+  restore advisory mode. A matching declaration or endpoint proof that a
+  non-zero destination base is not an ancestor of the source line makes findings
+  and incomplete stages mandatory. New refs have no such ancestry evidence and
+  require a declaration. Endpoint changes, direct URLs, multiple push URLs and
+  unavailable ancestry evidence fail closed for publication. Deletion-only
+  containment stays open; mixed batches do not.
+
+- **Published-base attestation for clean new refs (#300).** A short-lived,
+  single-use receipt may now prove that a new branch or tag lies on the same
+  history line as an exact ref observed live at the destination. The hook
+  re-observes that endpoint immediately before consuming the receipt, then scans
+  only the unpublished range plus the pushed tag object; it never turns a dirty
+  tag, divergent history, moved endpoint, replay, ambiguous push URL, symlinked
+  state, or malformed receipt into permission. The network-capable helper remains
+  isolated from the local-only scanner and stores endpoint fingerprints rather
+  than URLs or credentials.
+
+- **Fail-closed and faithful publish matching (#264/#265/#266).** The pre-push
+  gate now treats every configured stage that did not run as visibly incomplete,
+  accepts only the documented closed enforcement spellings, blocks a missing
+  scanner on object-publishing pushes, and builds scanner argv without ambient
+  `IFS` splitting. Denylist comparison now normalizes NFC plus the bounded
+  separator set without widening to NFKC, rejects unusable word-rule edges,
+  preserves overlapping labels, and keeps production batch/object bounds inside
+  the test seam. `allow:` entries now obey the same three-character minimum as
+  denied terms, closing the one-character exception that could suppress every
+  textual finding; path and tree-name policy remains unsuppressible.
+
+- **Operational governance made executable (#301/#307).** The contributor guide
+  now defines the safe `pause -> update -> verify -> resume` ownership window for
+  upgrading an adopted live relay, records that `M8SHIFT.md` and its immutable
+  turns survive update, and identifies companions that installers do not carry
+  automatically. RFC 067's governed headless continuation is frozen as bounded,
+  explicit, locally attested policy: it documents filesystem/network capability
+  envelopes without granting ambient automation or changing the passive core.
+  The v4.0 publish-boundary specification and security prose were reconciled with
+  the behavior already shipped.
+
+- **Agent-first protocol surface back in lockstep.** The generated
+  `protocol.m8shift.ai` Markdown, HTML and dependency-free Worker now match the
+  canonical Agent Exchange Protocol again. The embedded copy includes the
+  bounded carrier-vs-release-audit distinction and the new direct-holder
+  `guard-exec` / `lease-keeper` mappings; generator check and Worker contract
+  test both pass before release.
+
+## v4.0.0 — 2026-08-08
 
 - **Path names as publish-gate scan input (#291).** No scan input had ever
   contained a path, so a denied term carried only by a filename or directory
@@ -141,18 +191,6 @@
   cannot present as deletion-only. The diagnostic names neither a path, a
   term, nor Git stderr. The bound is a completeness contract, not a resource
   control: 0.14 s complete against 0.12 s bounded over 2000 commits.
-
-- **Destination-bound public-push enforcement (#306).** The pre-push gate no
-  longer treats a remote name or the ambient advisory default as publication
-  policy. Operators bind a public declaration to the SHA-256 fingerprint of
-  one canonical resolved push endpoint; every declaration is matched by value,
-  so a second remote name or `pushInsteadOf` rewrite to that destination cannot
-  restore advisory mode. A matching declaration or endpoint proof that a
-  non-zero destination base is not an ancestor of the source line makes findings
-  and incomplete stages mandatory. New refs have no such ancestry evidence and
-  require a declaration. Endpoint changes, direct URLs, multiple push URLs and
-  unavailable ancestry evidence fail closed for publication. Deletion-only
-  containment stays open; mixed batches do not.
 
 - **Endpoint-proof publish classification (#262).** The gate no longer
   excludes history from local remote-tracking refs, a cache that outlives a
