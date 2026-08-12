@@ -260,6 +260,13 @@ The gateway applies these incident-derived recovery rules in order:
    compatible, and preserve checksum/pen-guard ordering.
 4. **Dogfood:** direct and author/gateway changes record ticket-to-SHA evidence without
    rewriting history or overstating remote evidence.
+5. **Merge authority (#302):** an independent `approve` is review evidence, never
+   publication consent. Only the human operator/maintainer authorizes each merge to
+   `main`, whether Correction, Revision, or Generation. The forge MR timeline records
+   that authorization against the exact head SHA; an outage-only relay record uses
+   `x_merge_authorized_by`, `x_merge_authorized_pr`, and `x_merge_authorized_head` and
+   is reconciled to the MR before delivery is complete. Without authorization, agents
+   wait.
 
 ## 8. Acceptance criteria
 
@@ -275,6 +282,8 @@ The gateway applies these incident-derived recovery rules in order:
 7. Local findings are stable, advisory, credential-free, and honest about limits.
 8. “Done” is not reported for an issue, local-only commit, unpushed branch, draft PR,
    or unclosed integration record by itself.
+9. Independent review and human merge authorization are both discoverable and refer to
+   the exact MR/head; peer approval alone never authorizes publication to `main`.
 
 ## 9. Non-goals
 

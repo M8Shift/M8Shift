@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Explicit merge authority (#302).** The delivery workflow now separates
+  independent review from publication consent: only the human operator/maintainer
+  authorizes each merge to `main`, for Corrections, Revisions, and Generations alike.
+  Authorization is tied to the exact MR/head in the forge timeline, with a bounded
+  relay fallback during outages; absent authorization means wait.
+- **Visible skipped pen guard (#279).** An unset `M8SHIFT_AGENT` remains
+  non-blocking for humans and unconfigured checkouts, but the pre-commit hook now
+  prints one stable warning that relay authority was not checked. Documentation and
+  regression tests classify the result as unverified rather than clean and preserve
+  the configured-agent fail-closed path unchanged.
+
 - **Honest usage-observation state (#313).** The official Claude and Codex
   quota examples now distinguish a measured reading, a provider response with
   no usable quota window, and an unavailable provider or credential. The

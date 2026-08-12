@@ -14,8 +14,9 @@
 #      broken scanner must not freeze all commits. This is deliberately NOT the
 #      pre-push posture (#264) — a commit is local and recoverable, a push is the
 #      publish boundary, where an uninspected object leaving the machine is not.
-#   2. Pen guard (#39, unchanged semantics):
-#      - $M8SHIFT_AGENT unset  -> skip (humans/unconfigured checkouts never blocked).
+#   2. Pen guard (#39, #279):
+#      - $M8SHIFT_AGENT unset  -> warn + skip (humans/unconfigured checkouts never blocked;
+#        relay authority remains explicitly unverified).
 #      - $M8SHIFT_AGENT set    -> `m8shift.py may-i-write "$M8SHIFT_AGENT"`; on a
 #        non-zero return code, print why and exit 1 (BLOCK the commit). Fail CLOSED:
 #        a configured agent that cannot prove a valid WORKING lock cannot commit.
@@ -102,6 +103,8 @@ if [ -n "${M8SHIFT_AGENT:-}" ]; then
 		printf '%s\n' "m8shift pre-commit: '${M8SHIFT_AGENT}' does not hold a valid write pen — commit blocked. Acquire the pen (m8shift.py claim ${M8SHIFT_AGENT}) or follow the next action above." >&2
 		exit 1
 	fi
+else
+	printf '%s\n' "m8shift pre-commit: pen guard skipped: M8SHIFT_AGENT unset; relay authority was not checked" >&2
 fi
 
 # --- RFC 065: stable ticket/push reminder (advisory, offline, fail-open) ----------

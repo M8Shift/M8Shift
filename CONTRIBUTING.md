@@ -138,17 +138,31 @@ Behaviour:
   the hook rewrites and stages the manifest automatically. This is fail-closed on
   refresh errors, never hashes an unstaged worktree edit, and runs only after a
   configured agent passes the pen guard.
-- `$M8SHIFT_AGENT` **unset** → the hook exits 0 (skip). Humans and unconfigured
-  checkouts skip only the pen guard; checksum refresh still runs.
+- `$M8SHIFT_AGENT` **unset** → the hook prints the stable
+  `pen guard skipped: M8SHIFT_AGENT unset; relay authority was not checked` warning
+  and exits 0. Humans and unconfigured checkouts remain non-blocking, but the commit
+  is explicitly unverified by the relay; checksum refresh still runs.
 - `$M8SHIFT_AGENT` **set** → the hook runs `m8shift.py may-i-write "$M8SHIFT_AGENT"` and,
   on any non-zero rc, prints why and **blocks the commit** (fail *closed*). The relay
   root is resolved by `m8shift.py` via `$M8SHIFT_ROOT`; the program is found via
   `$M8SHIFT_BIN`, else `m8shift.py` on `$PATH`, else `./m8shift.py` at the repo root.
 
-**Zero-memory note.** A fresh agent needs no memorised rule: the policy lives in the
-program. The `init`-generated anchors (`CLAUDE.md` / `AGENTS.md`) tell the agent to set
-`$M8SHIFT_AGENT` and run `may-i-write`; the installed hook then enforces it at commit
-time. Hook + `may-i-write` + anchors are self-contained.
+**Zero-memory note.** Once configured, a fresh agent needs no memorised rule: the
+`init`-generated anchors (`CLAUDE.md` / `AGENTS.md`) tell it to set `$M8SHIFT_AGENT`
+and run `may-i-write`; the installed hook then enforces it at commit time. If identity
+setup is missed, the hook cannot distinguish an agent from a human, so it warns without
+blocking and the commit remains visibly unverified by the relay.
+
+## Merge authorization
+
+Independent review and authorization to publish are separate gates. A reviewer may
+approve the change, but only the human operator/maintainer authorizes a merge to
+`main`, explicitly and per merge. This does not vary between a routine Correction, a
+Revision, or a Generation. Record the authorization against the exact merge request
+and head SHA in the forge timeline. If it is absent, wait; peer approval alone never
+permits the merge. During a forge outage, a relay turn may temporarily record
+`x_merge_authorized_by`, `x_merge_authorized_pr`, and `x_merge_authorized_head`, but
+that evidence must be reconciled to the merge request before delivery is called done.
 
 This hook is **advisory and local** — it is not a security boundary and does not contact
 the network. It narrows, but does not fully close, the check-then-commit race; see the
