@@ -15,7 +15,7 @@ and passes the conformance profile in section 13.
 The normative body ends before Appendix A. Product-specific commands and file
 formats appear only in the appendix.
 
-<!-- m8shift-exchange-lockstep: protocol=d68fbaa829f703202a01714b4910718a1b432f831febf356b66cece654bdc2ba; stanza=34075b5d403a5f925790c51e79b1bd12ff94a6c74140a15944643baf45c463c9; pack=5e50ed9cc8e6f92654a1c385bf1dc13ee832a238f62173ed702a62dd7f348b92; rfc074=5873caa11d7047a04892c55a96c76611c278526fe4b5ffa85ed721f4523e6914 -->
+<!-- m8shift-exchange-lockstep: protocol=d68fbaa829f703202a01714b4910718a1b432f831febf356b66cece654bdc2ba; stanza=34075b5d403a5f925790c51e79b1bd12ff94a6c74140a15944643baf45c463c9; pack=dbac370b550298a61c4ec0e1b0a76671434f1df130d2403f06cb60446769b547; rfc074=5873caa11d7047a04892c55a96c76611c278526fe4b5ffa85ed721f4523e6914 -->
 
 ## 1. Scope, authority, and terminology
 
@@ -514,6 +514,9 @@ an old decision.
 
 ### 8.1 Compartmentalization
 
+- Source publication uses the bounded carrier-naming range scan, including
+  commit and annotated-tag messages. A database-wide `--objects` scan is an
+  explicit release audit, not an automatic per-push blocker.
 - Project isolation is deny-by-default. Another project's identity, real path,
   adopter-specific version, literal session output, runtime id, credential, or
   confidential term MUST NOT enter the current journal, source, example, ticket,
@@ -767,6 +770,8 @@ M8Shift maps the model as follows:
 | Read incoming turn | `m8shift.py peek` |
 | Acquire exclusive pen | `m8shift.py claim` |
 | Verify write ownership | `m8shift.py may-i-write` |
+| Guard one external argv immediately before mutation | `m8shift.py guard-exec` and the configured-agent Git hooks |
+| Keep an interactive holder renewed and protectively live | `m8shift.py lease-keeper` |
 | Transfer with immutable entry | `m8shift.py append` |
 | Request a cooperative turn | `m8shift.py request-turn` and `m8shift.py steer-turn` |
 | Suspend and resume an open shift | `m8shift.py pause` and `m8shift.py resume` |
