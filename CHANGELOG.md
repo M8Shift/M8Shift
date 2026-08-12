@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fix the disabled tokscale adapter to consume the quota data returned by its
+  actual `tokscale usage --json` command (#316): a redacted live v4.13.0 shape is
+  pinned in tests, Claude/Codex percentages become ratio-native
+  `proxy_reported` windows, model-specific weekly quota is retained, identity and
+  plan fields are discarded, and unavailable/degraded reads are explicit. The
+  legacy spend-total path and the never-submit guard remain compatible.
+
 - **Visible worktree publication-gate drift (#312).** `doctor` now compares the
   active relative `core.hooksPath` pre-push bytes with the same path in the locally
   cached published-main ref. A visible warning-level but non-gating finding includes

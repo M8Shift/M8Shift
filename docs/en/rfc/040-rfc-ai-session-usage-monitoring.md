@@ -1712,6 +1712,23 @@ mandatory) and rule 9 (official data wins over estimates).
   timestamps to `windows[]`, `provenance: official`. The reference adapter keeps
   stdin open while a daemon reader thread waits under a monotonic deadline, then
   fails open to an empty official fixture on any CLI/auth/schema/timeout error.
+- **`tokscale-spend` compatibility adapter (#316; implemented, disabled by
+  default; ratio-native).** The legacy scaffold name is retained, but its default
+  command is correctly treated as quota: a live, redacted `tokscale 4.13.0`
+  capture on 2026-08-12 confirmed that `tokscale usage --json` returns a provider
+  array whose metrics carry `label`, `used_percent`, `remaining_percent`, and
+  `resets_at`. Claude `Session`/`Weekly` map to `session_5h`/`weekly`; Codex
+  model-qualified weekly metrics retain a bounded `model` label. The adapter
+  copies no account id, email, plan, credit balance, remaining-label prose, raw
+  response, or credential data. Its quota provenance is `proxy_reported`: the
+  values are vendor-reported, but tokscale is an explicit extra hop, so they are
+  neither relabeled `official` nor confused with `local_estimate`. Consequently
+  they can drive ordinary ratio classification while remaining ineligible for
+  official-only reset inference. Missing providers emit `unavailable`; present
+  providers with no usable expected windows emit `degraded/no_usable_windows`.
+  The old total/parts spend shapes remain supported as `local_estimate` without
+  invented windows or limits. The pre-launch refusal of exact argv tokens
+  `submit`, `autosubmit`, and `login` remains unchanged.
 - **`codex-jsonl-scan`** (spent; reporting). The Claude scan's twin (same built-in
   `jsonl_scan` kind, `provider: "codex"`) over operator `scan_roots` such as
   `~/.codex/sessions` and `~/.codex/archived_sessions`. The Codex per-row shape is

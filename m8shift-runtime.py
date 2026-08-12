@@ -9579,12 +9579,14 @@ def default_usage_adapters():
                 "enabled": False,
             },
             {
-                "//": ("Disabled by default (#103): tokscale local SPEND aggregation. "
-                       "Point the placeholder command at YOUR local tokscale install "
-                       "(non-interactive JSON, e.g. `tokscale usage --json`). Spend "
-                       "reporting only: used_tokens, no windows/limits, provenance "
-                       "local_estimate — never an official quota gate; may gate only "
-                       "through the explicit budget.json bridge. The reference script "
+                "//": ("Disabled by default (#103/#316): tokscale vendor-quota relay "
+                       "with legacy local-spend compatibility. Point the placeholder "
+                       "command at YOUR local tokscale install. The default "
+                       "`tokscale usage --json` path emits ratio-native windows with "
+                       "proxy_reported provenance (vendor data through a disclosed "
+                       "extra hop), while old spend-total overrides remain "
+                       "local_estimate. The legacy adapter name is retained for "
+                       "configuration compatibility. The reference script "
                        "REFUSES submit/autosubmit/login argv (RFC 052: usage data "
                        "never leaves the machine through M8Shift)."),
                 "name": "tokscale-spend",

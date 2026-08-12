@@ -235,10 +235,14 @@ examples:
 The three executable usage adapters emit normalized JSON and fail open to an empty
 snapshot. `claude-oauth-usage.py` and `codex-ratelimits.py` accept no runtime
 arguments; both now support `--help` and reject unknown arguments with exit 2.
-`tokscale-spend.py [AGENT]` accepts an optional fabricated provider-lane label.
+`tokscale-spend.py [AGENT]` keeps its legacy filename but now maps the selected
+Claude/Codex provider from `tokscale usage --json` to privacy-minimal,
+ratio-native `proxy_reported` quota windows. Older spend-total payloads remain a
+`local_estimate` compatibility path. The optional argument selects the provider
+lane; missing providers are reported as unavailable, never as a zero quota.
 
 ```bash
 python3 examples/usage-adapters/claude-oauth-usage.py
 python3 examples/usage-adapters/codex-ratelimits.py
-python3 examples/usage-adapters/tokscale-spend.py agent-a
+python3 examples/usage-adapters/tokscale-spend.py codex
 ```
