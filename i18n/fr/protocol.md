@@ -255,6 +255,8 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
                                                   #   IDLE / ton propre verrou ; --force = verrou périmé SEULEMENT
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
 ./m8shift.py guard <agent>        # alias for may-i-write
+./m8shift.py guard-exec <agent> -- <argv...>  # garde puis exec sans shell
+./m8shift.py lease-keeper <agent> [--cadence-seconds N] -- <argv...>  # refresh + heartbeat pendant la vie de l'enfant
 ./m8shift.py append <agent> --to <autre> \
      --ask "..." --done "..." [--files a,b] [--body fichier.md|-] [--allow-large-body] [--wait]  # clôt ton tour + passe la main
 ./m8shift.py request-turn <agent> --to <détenteur> --reason "..."  # demande au détenteur courant de céder (registre seulement)

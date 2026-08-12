@@ -9,8 +9,9 @@ delimited by M8SHIFT:TURN <n> <agent> BEGIN / END. See M8SHIFT.protocol.md.
 
 (M8Shift was formerly named CoWork; since v3.0.0 the tool is M8Shift-only.)
 
-No API key, no network, no daemon: a passive local CLI the agents drive with shell
-commands; they bring their own auth, so M8Shift adds zero credentials.
+No API key, built-in network client, or daemon: a local CLI the agents drive with
+commands. Explicit guard-exec/lease-keeper wrappers may delegate one caller-owned
+argv without a shell; they never inspect or store the child's credentials.
 """
 import argparse
 import ast
@@ -22,6 +23,7 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -672,6 +674,8 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
                                                   #   --refresh = extend YOUR OWN WORKING lock only (runner heartbeat)
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
 ./m8shift.py guard <agent>        # alias for may-i-write
+./m8shift.py guard-exec <agent> -- <argv...>  # guard, then shell-free exec with bound identity exported
+./m8shift.py lease-keeper <agent> [--cadence-seconds N] -- <argv...>  # refresh + protective beat while child lives
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-] [--allow-large-body] [--wait]  # closes your turn + hands off
 ./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
@@ -699,22 +703,24 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   manually before routing work to it.
 - **Hard pre-write guard**: `may-i-write <you>` (alias: `guard <you>`) is read-only
   and exits 0 only when `holder=<you>`, `state=WORKING_<YOU>`, and the lock has not
-  expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
-  A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
-  advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
-  valid pen; with it unset it keeps humans/unconfigured checkouts non-blocking but
-  prints a stable warning that relay authority was not checked. Such a commit is
-  unverified by the pen guard, never equivalent to a clean guard result.
+  expired. `guard-exec <you> -- <argv...>` checks immediately before one shell-free
+  command and exports the resolved identity/root. The ready-to-install `pre-commit`
+  and `pre-push` hooks use the same contract: with `$M8SHIFT_AGENT` set they block
+  unless that agent holds a valid pen; with it unset they keep humans/unconfigured
+  checkouts non-blocking but warn that relay authority was not checked. Such a
+  commit or push is unverified by the pen guard, never a clean guard result.
   Every non-empty staged change also gets a non-blocking, offline RFC 065 reminder
   to confirm its forge ticket and push/gateway-pending path. See the agents guide
   and `CONTRIBUTING.md` for install instructions.
 - **SEC-7 / TOCTOU — honest limit**: `may-i-write` is a **point-in-time read** that
   holds **no lock**. It reports the relay state *at the instant it runs*; the state can
   change between that check and the write completing (e.g. the lock expires, or another
-  agent forces a stale-lock takeover). The pre-commit hook **narrows** the window — it
-  checks immediately before the commit — but does **not** fully close the race. Treat the
-  guard as a strong advisory gate, not a mutual-exclusion guarantee; the single-writer
-  invariant still rests on the `claim`/`append` mutex, not on the guard.
+  agent forces a stale-lock takeover). `guard-exec` and both hooks **narrow** the
+  window but do **not** fully close it. `lease-keeper` is the managed interactive
+  path: it periodically runs both `claim --refresh` and
+  `heartbeat --source wrapper` while its shell-free child lives, stopping the child
+  if either operation fails. The single-writer invariant still rests on the
+  `claim`/`append` mutex, not on a wrapper.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB
@@ -1011,7 +1017,9 @@ lossy filter.
 Refresh early, never at the deadline: `claim --refresh` on every wake-up, and
 around minute 15 of a 30-minute pen. A one-time refresh does NOT protect an
 operation longer than the TTL — run a managed producer (listener, or a loop
-calling `heartbeat <you> --source wrapper --cadence-seconds N`) for those.
+calling `heartbeat <you> --source wrapper --cadence-seconds N`) for those. For a
+long interactive argv, use `lease-keeper <you> -- <argv...>` so both refresh and
+protective heartbeat run while the child lives and loss of either stops it.
 Checkpoint (commit/push or a progress note) before the TTL. If `status` shows
 alive-expired, the holder is alive: never force-claim through it.
 
@@ -7879,6 +7887,8 @@ HEARTBEATS_SUBDIR = os.path.join(".m8shift", "holder-heartbeats")
 HEARTBEAT_SCHEMA = "m8shift.holder_heartbeat.v1"
 HEARTBEAT_SOURCES = ("runtime-listener", "wrapper")
 TTL_SECONDS = TTL_MIN * 60
+LEASE_KEEPER_DEFAULT_CADENCE = min(300, max(1, TTL_SECONDS // 2))
+LEASE_KEEPER_MAX_CADENCE = max(1, TTL_SECONDS // 2)
 HEARTBEAT_FLOOR_S = 120
 FORCE_GRACE_S = 5          # direct `claim --force` phase-1 -> phase-2 grace (fixed)
 
@@ -8133,7 +8143,7 @@ _MUTATOR_ACTORS = {
     "yield-turn": "agent", "decline-turn": "agent", "steer-turn": "agent",
     "pause": "agent", "resume": "agent", "release": "agent", "done": "agent",
     "remember": "agent", "work-tag": "agent", "cooldown": None, "archive": None,
-    "heartbeat": "agent",
+    "heartbeat": "agent", "guard-exec": "agent", "lease-keeper": "agent",
 }
 
 
@@ -9602,6 +9612,197 @@ def cmd_may_i_write(args):
     )
     print(tr("status_next", action=next_action_for(lk, agent=agent, stale=expired)))
     return 3
+
+
+def _guarded_child_env(agent):
+    """Identity exported by shell-free holder wrappers.
+
+    COWORK may have been rebound by the actor's durable binding, so derive the
+    root only after the pen guard resolved that binding.  Pin M8SHIFT_BIN to the
+    exact running core: a Git hook reached by guard-exec must evaluate the same
+    relay/version instead of rediscovering an unrelated checkout copy.
+    """
+    env = dict(os.environ)
+    env["M8SHIFT_AGENT"] = agent
+    env["M8SHIFT_ROOT"] = os.path.realpath(os.path.dirname(COWORK))
+    env["M8SHIFT_BIN"] = os.path.abspath(__file__)
+    return env
+
+
+def _shell_free_argv(args, command):
+    argv = list(getattr(args, "argv", None) or [])
+    if not argv:
+        print("refused: %s requires a command after -- (no shell is used)." % command,
+              file=sys.stderr)
+        return None
+    return argv
+
+
+def _process_returncode(returncode):
+    """Expose signal exits using the conventional 128+signal shell status."""
+    return 128 - returncode if returncode < 0 else returncode
+
+
+def cmd_guard_exec(args):
+    """P1 #281: point-in-time pen check followed by one shell-free exec.
+
+    os.execvpe keeps the guard immediately adjacent to the requested mutation
+    and preserves the child's native signals/exit status.  It cannot close the
+    cooperative TOCTOU window; the lease-keeper is the companion for long-lived
+    interactive sessions.
+    """
+    argv = _shell_free_argv(args, "guard-exec")
+    if argv is None:
+        return 2
+    guarded = cmd_may_i_write(args)
+    if guarded != 0:
+        return guarded
+    agent = (args.agent or "").strip().lower()
+    try:
+        os.execvpe(argv[0], argv, _guarded_child_env(agent))
+    except FileNotFoundError:
+        print("guard-exec: command not found: %s" % argv[0], file=sys.stderr)
+        return 127
+    except (PermissionError, OSError) as exc:
+        print("guard-exec: command could not start (%s)." % exc.__class__.__name__,
+              file=sys.stderr)
+        return 126
+
+
+def _lease_keeper_core(env, *argv):
+    """Run one public core control command quietly; return (ok, rc, detail)."""
+    try:
+        result = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), *argv],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, check=False,
+        )
+    except OSError as exc:
+        return False, 126, exc.__class__.__name__
+    if result.returncode == 0:
+        return True, 0, ""
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    return False, _process_returncode(result.returncode), (
+        detail[-1][:512] if detail else "no diagnostic")
+
+
+def _stop_guarded_child(proc):
+    """Best-effort bounded stop after liveness/authority loss."""
+    if proc.poll() is not None:
+        return
+    with contextlib.suppress(OSError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+
+
+def _lease_keeper_step(agent, cadence, env, proc=None):
+    """Refresh authority then emit a beat, stopping between them if child exited."""
+    ok, rc, detail = _lease_keeper_core(env, "claim", agent, "--refresh")
+    if not ok:
+        return False, rc, "claim --refresh", detail
+    if proc is not None and proc.poll() is not None:
+        return True, 0, "child-exited", ""
+    ok, rc, detail = _lease_keeper_core(
+        env, "heartbeat", agent, "--source", "wrapper",
+        "--cadence-seconds", str(cadence),
+    )
+    return (True, 0, "heartbeat", "") if ok else (
+        False, rc, "heartbeat --source wrapper", detail)
+
+
+def cmd_lease_keeper(args):
+    """P1 #280: keep one interactive child protected and write-authorized."""
+    argv = _shell_free_argv(args, "lease-keeper")
+    if argv is None:
+        return 2
+    cadence = args.cadence_seconds
+    if (isinstance(cadence, bool) or not isinstance(cadence, int)
+            or not (1 <= cadence <= LEASE_KEEPER_MAX_CADENCE)):
+        print("refused: --cadence-seconds must be an integer in 1..%d "
+              "(no later than TTL/2)." % LEASE_KEEPER_MAX_CADENCE,
+              file=sys.stderr)
+        return 2
+    guarded = cmd_may_i_write(args)
+    if guarded != 0:
+        return guarded
+    agent = (args.agent or "").strip().lower()
+    env = _guarded_child_env(agent)
+
+    # Refresh before launch.  Do not write a protective beat until the child is
+    # actually alive: producer evidence must describe a real running producer.
+    ok, rc, detail = _lease_keeper_core(
+        env, "claim", agent, "--refresh")
+    if not ok:
+        print("lease-keeper: initial claim --refresh failed (rc %d): %s" %
+              (rc, detail), file=sys.stderr)
+        return 4
+    try:
+        proc = subprocess.Popen(argv, env=env)
+    except FileNotFoundError:
+        print("lease-keeper: command not found: %s" % argv[0], file=sys.stderr)
+        return 127
+    except (PermissionError, OSError) as exc:
+        print("lease-keeper: command could not start (%s)." % exc.__class__.__name__,
+              file=sys.stderr)
+        return 126
+
+    termination_signal = [None]
+    previous_handlers = {}
+
+    def request_stop(signum, _frame):
+        termination_signal[0] = signum
+        raise KeyboardInterrupt
+
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_stop)
+        except (OSError, ValueError):
+            previous_handlers.pop(signum, None)
+    try:
+        if proc.poll() is None:
+            ok, rc, detail = _lease_keeper_core(
+                env, "heartbeat", agent, "--source", "wrapper",
+                "--cadence-seconds", str(cadence),
+            )
+            if not ok:
+                _stop_guarded_child(proc)
+                print("lease-keeper: initial heartbeat --source wrapper failed "
+                      "(rc %d): %s; child stopped." % (rc, detail), file=sys.stderr)
+                return 4
+        while True:
+            try:
+                return _process_returncode(proc.wait(timeout=cadence))
+            except subprocess.TimeoutExpired:
+                ok, rc, stage, detail = _lease_keeper_step(
+                    agent, cadence, env, proc=proc)
+                if ok:
+                    if stage == "child-exited":
+                        return _process_returncode(proc.returncode)
+                    continue
+                _stop_guarded_child(proc)
+                print("lease-keeper: %s failed (rc %d): %s; child stopped "
+                      "because write authority/liveness is no longer managed."
+                      % (stage, rc, detail), file=sys.stderr)
+                return 4
+    except KeyboardInterrupt:
+        # The child normally received the same terminal SIGINT.  Bound the wait
+        # and terminate it if it did not honor that signal.
+        _stop_guarded_child(proc)
+        return 128 + (termination_signal[0] or getattr(signal, "SIGINT", 2))
+    finally:
+        for signum, previous in previous_handlers.items():
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(signum, previous)
 
 
 # ───────────────────────── RFC 051: usage advisory (read-only) ──────────────
@@ -12204,6 +12405,28 @@ def main():
                         help="alias for may-i-write")
     gd.add_argument("agent", help="agent whose pen ownership is checked")
     gd.set_defaults(fn=cmd_may_i_write)
+
+    ge = sub.add_parser(
+        "guard-exec",
+        help="check this agent's live pen, then exec one argv directly without a shell")
+    ge.required_example = "m8shift.py guard-exec agent-a -- COMMAND [ARG ...]"
+    ge.add_argument("agent", help="agent whose pen ownership authorizes the command")
+    ge.add_argument("argv", metavar="COMMAND", nargs=argparse.ONE_OR_MORE,
+                    help="shell-free command argv after --")
+    ge.set_defaults(fn=cmd_guard_exec)
+
+    keeper = sub.add_parser(
+        "lease-keeper",
+        help="run an interactive child while refreshing its pen and protective heartbeat")
+    keeper.required_example = "m8shift.py lease-keeper agent-a -- COMMAND [ARG ...]"
+    keeper.add_argument("agent", help="current WORKING pen holder")
+    keeper.add_argument(
+        "--cadence-seconds", type=int, default=LEASE_KEEPER_DEFAULT_CADENCE,
+        help="real refresh/heartbeat cadence (default: %d; maximum TTL/2 = %d)" %
+             (LEASE_KEEPER_DEFAULT_CADENCE, LEASE_KEEPER_MAX_CADENCE))
+    keeper.add_argument("argv", metavar="COMMAND", nargs=argparse.ONE_OR_MORE,
+                        help="interactive child argv after --; no shell is used")
+    keeper.set_defaults(fn=cmd_lease_keeper)
 
     wt = sub.add_parser("watch", help="continuous read-only status monitor")
     wt.add_argument("--for", dest="for_agent", default="",

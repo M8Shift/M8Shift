@@ -150,6 +150,8 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
                                                   #   --refresh = extend YOUR OWN WORKING lock only (runner heartbeat)
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
 ./m8shift.py guard <agent>        # alias for may-i-write
+./m8shift.py guard-exec <agent> -- <argv...>  # guard, then shell-free exec with bound identity exported
+./m8shift.py lease-keeper <agent> [--cadence-seconds N] -- <argv...>  # refresh + protective beat while child lives
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-] [--allow-large-body] [--wait]  # closes your turn + hands off
 ./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)
@@ -177,22 +179,24 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   manually before routing work to it.
 - **Hard pre-write guard**: `may-i-write <you>` (alias: `guard <you>`) is read-only
   and exits 0 only when `holder=<you>`, `state=WORKING_<YOU>`, and the lock has not
-  expired. Use it in commit hooks, wrapper scripts, and zero-memory agent checklists.
-  A ready-to-install commit hook ships at `hooks/pre-commit` (POSIX sh, stdlib-only,
-  advisory): with `$M8SHIFT_AGENT` set it blocks a commit unless that agent holds a
-  valid pen; with it unset it keeps humans/unconfigured checkouts non-blocking but
-  prints a stable warning that relay authority was not checked. Such a commit is
-  unverified by the pen guard, never equivalent to a clean guard result.
+  expired. `guard-exec <you> -- <argv...>` checks immediately before one shell-free
+  command and exports the resolved identity/root. The ready-to-install `pre-commit`
+  and `pre-push` hooks use the same contract: with `$M8SHIFT_AGENT` set they block
+  unless that agent holds a valid pen; with it unset they keep humans/unconfigured
+  checkouts non-blocking but warn that relay authority was not checked. Such a
+  commit or push is unverified by the pen guard, never a clean guard result.
   Every non-empty staged change also gets a non-blocking, offline RFC 065 reminder
   to confirm its forge ticket and push/gateway-pending path. See the agents guide
   and `CONTRIBUTING.md` for install instructions.
 - **SEC-7 / TOCTOU — honest limit**: `may-i-write` is a **point-in-time read** that
   holds **no lock**. It reports the relay state *at the instant it runs*; the state can
   change between that check and the write completing (e.g. the lock expires, or another
-  agent forces a stale-lock takeover). The pre-commit hook **narrows** the window — it
-  checks immediately before the commit — but does **not** fully close the race. Treat the
-  guard as a strong advisory gate, not a mutual-exclusion guarantee; the single-writer
-  invariant still rests on the `claim`/`append` mutex, not on the guard.
+  agent forces a stale-lock takeover). `guard-exec` and both hooks **narrow** the
+  window but do **not** fully close it. `lease-keeper` is the managed interactive
+  path: it periodically runs both `claim --refresh` and
+  `heartbeat --source wrapper` while its shell-free child lives, stopping the child
+  if either operation fails. The single-writer invariant still rests on the
+  `claim`/`append` mutex, not on a wrapper.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB

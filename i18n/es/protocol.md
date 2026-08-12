@@ -215,6 +215,8 @@ Salvaguarda:
                                                   #   IDLE / tu propio bloqueo ; --force = SOLO bloqueo obsoleto
 ./m8shift.py may-i-write <agent>  # read-only hard guard: rc 0 only while <agent> holds a valid WORKING lock
 ./m8shift.py guard <agent>        # alias for may-i-write
+./m8shift.py guard-exec <agent> -- <argv...>  # guard then shell-free exec
+./m8shift.py lease-keeper <agent> [--cadence-seconds N] -- <argv...>  # refresh + heartbeat while child lives
 ./m8shift.py append <agent> --to <other> \
      --ask "..." --done "..." [--files a,b] [--body file.md|-]   # cierra tu turno + entrega
 ./m8shift.py request-turn <agent> --to <holder> --reason "..."  # ask current holder to yield (request ledger only)

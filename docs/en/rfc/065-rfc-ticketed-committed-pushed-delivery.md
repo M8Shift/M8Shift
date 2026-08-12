@@ -197,7 +197,8 @@ Acceptance amends these surfaces in the implementation change:
 - RFC 053: clarify that a directly approved repository policy does not await learned-
   rule evidence or companion promotion.
 
-Local tooling remains advisory and offline:
+Local delivery reminders remain advisory and offline. Direct-holder authority
+checks are separate and fail closed only when an agent identity is configured:
 
 1. **Pre-commit reminder:** for a non-empty staged repository change, print one stable
    reminder to confirm its forge ticket and push the completed checkpoint before
@@ -207,11 +208,18 @@ Local tooling remains advisory and offline:
    `delivery.no_upstream` for a non-default branch without an upstream and
    `delivery.unpushed` when `HEAD` is ahead of its local upstream ref. It labels this
    local evidence and never claims the remote is current.
+3. **Direct mutation guard (#281 P1):** `guard-exec <agent> -- <argv...>` checks
+   `may-i-write` immediately before one shell-free command. The pre-push hook applies
+   the same rule at Git publication time. With `M8SHIFT_AGENT` configured, missing or
+   invalid pen evidence blocks; without it, the hook warns and preserves the explicit
+   human/unconfigured path. Both narrow the documented TOCTOU window without claiming
+   to eliminate it.
 
 Ticket existence is reviewed on the forge. The hook therefore warns every staged
 change unit to confirm linkage instead of treating `#123`, a branch name, or commit
 prose as proof. Doctor's upstream findings are local-ref evidence only. No core command
-receives credentials or network access.
+implicitly receives network authority or inspects credentials; `guard-exec` is an
+explicit shell-free delegation of the caller's argv and inherited child environment.
 
 ## 6. Safety and failure handling
 
@@ -287,9 +295,18 @@ The gateway applies these incident-derived recovery rules in order:
 
 ## 9. Non-goals
 
-- forge credentials/network access in the core relay;
+- core inspection/storage of forge credentials or implicit network access (the
+  explicit shell-free execution wrappers merely delegate caller-owned argv/env);
 - automatic ticket creation, push, PR, merge, or close;
 - local refs or hooks presented as proof of forge state;
 - commits for transient relay state or each editor save;
 - replacement of independent review or the structured issue lifecycle;
 - hard-coding Claude/Codex into the portable policy.
+
+## 10. Deferred gateway authority (#281 P2)
+
+This amendment ships only the direct-holder P1. The existing gateway ledger remains
+result evidence, not authorization. No ambient gateway-role exemption and no one-shot
+mandate are implemented here: an immutable capability naming actor, action, exact
+target, consumption semantics, replay refusal, expiry, and audit linkage still needs
+an accepted design before a gateway may write outside the pen.

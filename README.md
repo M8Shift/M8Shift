@@ -455,8 +455,9 @@ Verified by the tests and by multi-agent review:
   `WORKING_<you>`. You work only after a successful `claim`, so no two agents ever
   modify the repository at the same time. `--to` ≠ self (strict alternation).
 - **Stale-lock recovery** — `claim --force` reclaims **only a stale lock** (refused
-  on an active one); the holder can refresh its own lock. Long-running wrappers
-  should refresh at least 5 minutes before `expires`.
+  on an active one); the holder can refresh its own lock. Run long interactive
+  commands through `lease-keeper <agent> -- <argv...>` so refresh and protective
+  heartbeat continue concurrently until the child exits.
 - **Guardrails** — `release` / `done` are baton-owner ops (the `holder`: pen holder in WORKING / awaited agent in AWAITING); only `append` requires the pen. `--force --reason TEXT` = audited recovery.
 - **Serialized concurrency** — an inter-process lock `.m8shift.lock` (`O_EXCL`, with
   an ownership token) plus atomic writes (unique temp file + `os.replace`, mode
@@ -491,6 +492,18 @@ Verified by the tests and by multi-agent review:
 > lifecycle/finding events. The optional [`m8shift-runtime.py`](m8shift-runtime.py)
 > companion adds local presence, operator inbox, progress, and runtime diagnostics
 > under `.m8shift/runtime/`.
+
+For a long interactive process that already owns the pen, use the stdlib-only
+keeper instead of a bare launch:
+
+```bash
+./m8shift.py lease-keeper codex -- codex
+```
+
+It exports `M8SHIFT_AGENT`, the binding-resolved `M8SHIFT_ROOT`, and the exact
+`M8SHIFT_BIN`; refreshes the pen and emits `heartbeat --source wrapper` (default
+cadence 300 seconds, never later than TTL/2); and stops the child visibly if either
+control call fails. It does not claim a new turn or wake an interactive UI.
 
 > [!TIP]
 > **You no longer hand-build that loop.** Since RFC 047 the runtime companion ships a

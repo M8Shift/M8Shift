@@ -1758,6 +1758,80 @@ class TestMutexGuards(CLIBase):
         self.assertEqual(alias.returncode, 3)
         self.assertIn("STOP", alias.stdout)
 
+    def test_guard_exec_is_shell_free_fail_closed_and_exports_bound_identity(self):
+        self.init()
+        evidence = os.path.join(self.d, "guard-env.json")
+        child = (
+            "import json,os,sys; "
+            "json.dump({k: os.environ.get(k) for k in "
+            "('M8SHIFT_AGENT','M8SHIFT_ROOT','M8SHIFT_BIN')}, "
+            "open(sys.argv[1], 'w'))"
+        )
+        argv = ("guard-exec", "claude", "--", sys.executable, "-c", child,
+                evidence)
+        blocked = self.cw(*argv)
+        self.assertEqual(blocked.returncode, 3, blocked.stdout + blocked.stderr)
+        self.assertFalse(os.path.exists(evidence), "a failed guard executed the child")
+
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        allowed = self.cw(*argv)
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+        with open(evidence, encoding="utf-8") as fh:
+            env = json.load(fh)
+        self.assertEqual(env["M8SHIFT_AGENT"], "claude")
+        self.assertEqual(os.path.realpath(env["M8SHIFT_ROOT"]), os.path.realpath(self.d))
+        self.assertEqual(os.path.realpath(env["M8SHIFT_BIN"]),
+                         os.path.realpath(os.path.join(self.d, "m8shift.py")))
+
+        child_rc = self.cw("guard-exec", "claude", "--", sys.executable,
+                           "-c", "raise SystemExit(7)")
+        self.assertEqual(child_rc.returncode, 7)
+
+    def test_lease_keeper_refreshes_and_beats_only_while_child_lives(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        before = self.lock()["expires"]
+        evidence = os.path.join(self.d, "keeper-env.json")
+        child = (
+            "import json,os,sys,time; "
+            "json.dump({k: os.environ.get(k) for k in "
+            "('M8SHIFT_AGENT','M8SHIFT_ROOT','M8SHIFT_BIN')}, "
+            "open(sys.argv[1], 'w')); time.sleep(1.8)"
+        )
+        kept = self.cw("lease-keeper", "claude", "--cadence-seconds", "1", "--",
+                       sys.executable, "-c", child, evidence)
+        self.assertEqual(kept.returncode, 0, kept.stdout + kept.stderr)
+        self.assertGreater(self.lock()["expires"], before)
+        with open(evidence, encoding="utf-8") as fh:
+            env = json.load(fh)
+        self.assertEqual(env["M8SHIFT_AGENT"], "claude")
+        self.assertEqual(os.path.realpath(env["M8SHIFT_ROOT"]), os.path.realpath(self.d))
+        heartbeat = os.path.join(
+            self.d, ".m8shift", "holder-heartbeats", "claude.json")
+        with open(heartbeat, encoding="utf-8") as fh:
+            beat = json.load(fh)
+        self.assertEqual((beat["source"], beat["cadence_seconds"], beat["protective"]),
+                         ("wrapper", 1, True))
+
+    def test_lease_keeper_stops_child_when_refresh_loses_authority(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        child = (
+            "import os,subprocess,sys,time; "
+            "subprocess.run([sys.executable, os.environ['M8SHIFT_BIN'], "
+            "'append', 'claude', '--to', 'codex', '--done', 'child handed off'], "
+            "env=os.environ, check=True, stdout=subprocess.DEVNULL); time.sleep(5)"
+        )
+        started = time.monotonic()
+        stopped = self.cw("lease-keeper", "claude", "--cadence-seconds", "1", "--",
+                          sys.executable, "-c", child)
+        elapsed = time.monotonic() - started
+        self.assertEqual(stopped.returncode, 4, stopped.stdout + stopped.stderr)
+        self.assertLess(elapsed, 4.0, "authority loss did not stop the child promptly")
+        self.assertIn("claim --refresh failed", stopped.stderr)
+        self.assertIn("child stopped", stopped.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
     def test_force_refused_on_fresh_lock(self):
         """NR-1: claim --force does not steal a non-stale lock."""
         self.init()
@@ -2071,6 +2145,62 @@ class TestPreCommitHook(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("RFC 058 advisory", r.stderr)
         self.assertIn("no same-commit RFC/amendment", r.stderr)
+
+
+@unittest.skipUnless(shutil.which("git"), "git not available")
+class TestPrePushPenGuard(unittest.TestCase):
+    """#281: configured pushes fail closed before the publication stages."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="m8shift-pre-push-pen-")
+        subprocess.run(["git", "init", "-q"], cwd=self.d, check=True)
+        self.hook = os.path.join(self.d, "pre-push")
+        shutil.copy(os.path.join(REPO, "hooks", "pre-push"), self.hook)
+        os.chmod(self.hook, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _run(self, *, agent=None, guard_rc=0):
+        stub = os.path.join(self.d, "m8shift-stub")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = may-i-write ]; then exit %d; fi\n"
+                "exit 0\n" % guard_rc
+            )
+        os.chmod(stub, 0o755)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("M8SHIFT_AGENT", "M8SHIFT_BIN",
+                            "M8SHIFT_SCRUB_ENFORCE")}
+        env["M8SHIFT_BIN"] = stub
+        if agent is not None:
+            env["M8SHIFT_AGENT"] = agent
+        # Deletion-only is a real pre-push input shape but publishes no object,
+        # so this fixture isolates the pen gate from scrub availability.
+        zeros = "0" * 40
+        return subprocess.run(
+            ["sh", self.hook], cwd=self.d, capture_output=True, text=True,
+            env=env, input="refs/heads/main %s refs/heads/main %s\n" %
+                           (zeros, zeros),
+        )
+
+    def test_unset_agent_warns_but_keeps_human_push_open(self):
+        result = self._run(agent=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pen guard skipped: M8SHIFT_AGENT unset", result.stderr)
+
+    def test_configured_agent_without_pen_is_blocked(self):
+        result = self._run(agent="claude", guard_rc=3)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("does not hold a valid write pen", result.stderr)
+        self.assertIn("push blocked", result.stderr)
+
+    def test_configured_holder_reaches_the_remaining_push_gate(self):
+        result = self._run(agent="claude", guard_rc=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("pen guard skipped", result.stderr)
+        self.assertIn("deletion-only push", result.stderr)
 
 
 class TestRFC058Governance(unittest.TestCase):
@@ -22394,6 +22524,8 @@ class TestRFC052SessionBinding(CLIBase):
             "session report --write": ["session", "report", "current", "--write"],
             "heartbeat": ["heartbeat", "claude", "--source", "wrapper",
                           "--cadence-seconds", "60"],
+            "guard-exec": ["guard-exec", "claude", "--", "true"],
+            "lease-keeper": ["lease-keeper", "claude", "--", "true"],
         }
         for name, argv in mutators.items():
             with self.subTest(cmd=name):
@@ -22406,7 +22538,8 @@ class TestRFC052SessionBinding(CLIBase):
         classified = ({"roster", "claim", "append", "next", "request-turn", "yield-turn",
                        "decline-turn", "steer-turn", "pause", "resume", "release",
                        "done", "remember", "work-tag", "cooldown", "archive", "task",
-                       "decisions", "session", "heartbeat"}         # gated mutators
+                       "decisions", "session", "heartbeat", "guard-exec",
+                       "lease-keeper"}                               # gated mutators
                       | {"init", "update", "bind"}                   # special rules
                       | {"status", "may-i-write", "guard", "watch", "doctor",
                          "contract", "recap", "peek", "log", "turn", "history",

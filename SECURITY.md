@@ -121,6 +121,13 @@ annotated tag messages are inspected directly; deletion-only pushes skip the
 scan). The full-history walk stays a CI/audit tool (`scrub-check.py --all`), not
 a per-push tax. Install with:
 
+When `M8SHIFT_AGENT` is configured, both hooks also require that identity's live
+write pen; failure is closed before commit/push. With no configured identity they
+emit a stable unverified warning and keep the human/unconfigured path open. For a
+direct forge mutation outside Git hooks, use
+`m8shift.py guard-exec <agent> -- <argv...>`; it narrows but cannot eliminate the
+cooperative point-in-time race.
+
     git config core.hooksPath hooks
 
 They are **advisory by default only for an unclassified destination** (warn,

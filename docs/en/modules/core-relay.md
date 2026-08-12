@@ -16,8 +16,9 @@ presence/inbox/progress (that is `m8shift-runtime.py`), context packs or
 compression/retrieval (that is `m8shift-context.py`), isolated worktree lanes
 (`m8shift-worktree.py`), Headroom adapter launching (`m8shift-headroom.py`),
 language-pack builds (`m8shift-i18n.py`), or the e2e harness (`m8shift-e2e.py`).
-The core is passive: no network, no daemon, no API key — agents drive it with shell
-commands.
+The core has no built-in network client, daemon, or API key. Agents drive it with
+commands; the explicit `guard-exec` / `lease-keeper` surfaces may delegate one
+caller-owned argv without a shell, but never inspect or store child credentials.
 
 ## Ownership diagram
 
@@ -56,10 +57,12 @@ Legend:
 
 ## Command surface
 
-`Mutates` classifies **file** mutation only: **read-only** (no writes),
-**local-state** (writes under `M8SHIFT.*` or `.m8shift/`), or **repository-code**
-(writes tracked project files). Nothing here is **external** — the core never
-touches the network or an external service.
+`Mutates` classifies **M8Shift-owned file** mutation only: **read-only** (no relay
+writes), **local-state** (writes under `M8SHIFT.*` or `.m8shift/`), or
+**repository-code** (writes tracked project files). The core itself never opens a
+network connection or interprets forge credentials. The two explicit execution
+wrappers delegate a caller-supplied argv without a shell; that child may perform
+external actions, and its effects remain the caller's responsibility.
 
 | Command | Mutates | Reads | Writes | Notes |
 |---------|---------|-------|--------|-------|
@@ -67,6 +70,8 @@ touches the network or an external service.
 | `update --target DIR [--source DIR --components ...]` | local-state + repository-code | target relay, source kit, checksums, installed artifacts | generated protocol/pack/anchors, installed runners/companions, core, `.m8shift/update-audit.jsonl`, `.m8shift/kit.json` metadata | source-driven; never copies relay/session state; default runner refresh covers only already-installed verified runner artifacts |
 | `status [--json --brief --for A]` | read-only | LOCK, `M8SHIFT.sessions.jsonl` | none | prints UTC + local time; `--for` adds next-action hint |
 | `may-i-write A` / `guard A` | read-only | LOCK | none | rc 0 only while A holds a valid `WORKING` pen (point-in-time, TOCTOU) |
+| `guard-exec A -- ARGV...` | read-only in relay; delegated child may mutate | LOCK | none directly | fail closed on the point-in-time pen check, export resolved identity/root, then `exec` argv without a shell; child rc/signals preserved |
+| `lease-keeper A [--cadence-seconds N] -- ARGV...` | local-state + delegated child may mutate | LOCK | refreshed LOCK + holder heartbeat | requires A's live pen; while child lives, refresh authority and protective wrapper beat at a real cadence no later than TTL/2; stop child on either failure |
 | `watch [--for --interval --clear --changes-only --once]` | read-only | LOCK | none | passive live monitor; no claim/force/daemon |
 | `doctor [--lint --json --security --contracts --severity-min]` | read-only | relay files, `.m8shift.lock`, ledgers | none | never repairs; rc 1 with `--lint` on findings ≥ threshold |
 | `contract validate [--strict --json --all --severity-min]` | read-only | turns | none | Stage-4 advisory contract check; rc 1 with `--strict` |
