@@ -2814,24 +2814,33 @@ def _validate_gateway_action_targets(action, targets):
     keys = set(targets)
     sha_keys = keys & {"commit", "head", "sha", "source"}
     ref_keys = keys & {"branch", "ref"}
-    if action == "push" and (not sha_keys or not ref_keys or "remote" not in keys):
-        raise ValueError(
-            "push mandates require remote, exact commit/head SHA, and branch/ref")
-    if action == "issue_comment" and (not keys & {"issue", "ticket"}
-                                       or "repo" not in keys):
-        raise ValueError(
-            "issue_comment mandates require repo and issue=<id> or ticket=<id>")
-    if action == "pr_open" and (not sha_keys or not ref_keys or "repo" not in keys):
-        raise ValueError("pr_open mandates require repo, exact head SHA, and branch/ref")
-    if action == "pr_comment" and ("pr" not in keys or "repo" not in keys):
-        raise ValueError("pr_comment mandates require repo and pr=<id>")
-
-
-def _gateway_cli_option(argv, option):
-    positions = [index for index, value in enumerate(argv) if value == option]
-    if len(positions) != 1 or positions[0] + 1 >= len(argv):
-        raise ValueError("gateway argv requires exactly one %s value" % option)
-    return argv[positions[0] + 1]
+    if action == "push":
+        if keys - {"remote", "commit", "head", "sha", "source", "branch", "ref"} \
+                or len(sha_keys) != 1 or len(ref_keys) != 1 or "remote" not in keys:
+            raise ValueError(
+                "push mandates require only remote, one exact commit/head SHA, "
+                "and one branch/ref")
+        return
+    if action == "issue_comment":
+        ids = keys & {"issue", "ticket"}
+        if keys - {"repo", "issue", "ticket"} or len(ids) != 1 or "repo" not in keys:
+            raise ValueError(
+                "issue_comment mandates require only repo and one issue/ticket id")
+        return
+    if action == "pr_open":
+        if keys - {"repo", "base", "commit", "head", "sha", "source",
+                   "branch", "ref"} \
+                or len(sha_keys) != 1 or len(ref_keys) != 1 \
+                or not {"repo", "base"} <= keys:
+            raise ValueError(
+                "pr_open mandates require only repo, base, one exact head SHA, "
+                "and one branch/ref")
+        return
+    if action == "pr_comment":
+        if keys != {"repo", "pr"}:
+            raise ValueError("pr_comment mandates require only repo and pr=<id>")
+        return
+    raise ValueError("gateway action has no safe target binding")
 
 
 def _gateway_target_value(targets, names):
@@ -2846,19 +2855,92 @@ def _gateway_program_name(argv):
     return name[:-4] if name.endswith(".exe") else name
 
 
-def _gateway_executable_digest(argv):
+def _gateway_open_executable(argv):
+    """Open and hash the executable inode that gateway-exec will later launch."""
     candidate = argv[0]
     resolved = candidate if os.path.isabs(candidate) or os.sep in candidate \
         else shutil.which(candidate)
     if not resolved:
         raise ValueError("gateway argv executable cannot be resolved")
     resolved = os.path.realpath(os.path.abspath(resolved))
-    if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
-        raise ValueError("gateway argv executable is not a regular executable file")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
     try:
-        return "sha256:" + sha256_file(resolved), resolved
-    except (OSError, ValueError) as exc:
+        fd = os.open(resolved, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111:
+            raise ValueError("gateway argv executable is not a regular executable file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        os.lseek(fd, 0, os.SEEK_SET)
+        return "sha256:" + digest.hexdigest(), resolved, fd
+    except ValueError:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    except OSError as exc:
+        if fd >= 0:
+            os.close(fd)
         raise ValueError("gateway argv executable cannot be hashed (%s)" %
+                         exc.__class__.__name__) from None
+
+
+def _gateway_executable_digest(argv):
+    digest, resolved, fd = _gateway_open_executable(argv)
+    os.close(fd)
+    return digest, resolved
+
+
+def _gateway_executable_snapshot(fd, directory):
+    """Materialize the already-open executable bytes into one private launch path.
+
+    macOS mounts /dev/fd as non-executable and exposes no fexecve.  Copying from the
+    verified descriptor into a create-exclusive file under the private mandate
+    directory removes the attacker-controlled original path from the launch.  The
+    caller verifies this second digest and deletes the snapshot after the child exits.
+    """
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    reject_symlinked_runtime_path(directory, ValueError)
+    directory_info = os.stat(directory, follow_symlinks=False)
+    if not stat.S_ISDIR(directory_info.st_mode) \
+            or (os.name == "posix" and stat.S_IMODE(directory_info.st_mode) & 0o077):
+        raise ValueError("gateway executable snapshot directory is not private")
+    snapshot = os.path.join(directory, ".exec-" + uuid.uuid4().hex)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    out_fd = -1
+    try:
+        out_fd = os.open(snapshot, flags, 0o500)
+        os.lseek(fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(out_fd, view)
+                view = view[written:]
+        os.fsync(out_fd)
+        os.close(out_fd)
+        out_fd = -1
+        return snapshot, "sha256:" + digest.hexdigest()
+    except OSError as exc:
+        if out_fd >= 0:
+            os.close(out_fd)
+        try:
+            os.unlink(snapshot)
+        except OSError:
+            pass
+        raise ValueError("gateway executable snapshot failed (%s)" %
                          exc.__class__.__name__) from None
 
 
@@ -2876,23 +2958,32 @@ def _validate_gateway_command_binding(action, targets, argv, *, verify_live_ref=
         return
     if program != "tea":
         raise ValueError("forge record mandates require the tea CLI")
-    if _gateway_cli_option(argv, "--repo") != targets["repo"]:
-        raise ValueError("gateway argv --repo does not match the mandate target")
     if action in {"issue_comment", "pr_comment"}:
         expected_id = _gateway_target_value(
             targets, ("issue", "ticket") if action == "issue_comment" else ("pr",))
-        if len(argv) < 4 or argv[1:3] != ["comments", "add"] or argv[3] != expected_id:
+        if len(argv) != 8 or argv[1:7] != [
+                "comments", "add", expected_id,
+                "--repo", targets["repo"], "--description",
+        ] or argv[7].startswith("-"):
             raise ValueError(
-                "%s mandate argv must be tea comments add <exact-id>" % action)
+                "%s mandate argv must be exactly: tea comments add <id> "
+                "--repo <repo> --description <body>" % action)
         return
     if action == "pr_open":
         branch = _gateway_target_value(targets, ("branch", "ref"))
         sha = _gateway_target_value(targets, ("commit", "head", "sha", "source"))
-        if len(argv) < 3 or argv[1:3] != ["pulls", "create"] \
-                or _gateway_cli_option(argv, "--head") != branch \
-                or not _gateway_cli_option(argv, "--base"):
+        prefix = [
+            argv[0], "pulls", "create", "--repo", targets["repo"],
+            "--head", branch, "--base", targets["base"], "--title",
+        ]
+        if len(argv) not in {11, 13} or argv[:10] != prefix \
+                or argv[10].startswith("-") \
+                or (len(argv) == 13 and
+                    (argv[11] != "--description" or argv[12].startswith("-"))):
             raise ValueError(
-                "pr_open mandate argv must be tea pulls create with exact --repo/--head and --base")
+                "pr_open mandate argv must be exactly: tea pulls create --repo <repo> "
+                "--head <branch> --base <base> --title <title> "
+                "[--description <body>]")
         if verify_live_ref:
             checked = subprocess.run(
                 ["git", "rev-parse", "--verify", branch + "^{commit}"],
@@ -3077,7 +3168,9 @@ def cmd_gateway_mandate_create(args):
             "relay": relay,
             "source": {"tool": "m8shift-runtime.py", "version": VERSION},
         }
-        write_json_immutable(_gateway_mandate_path(mandate_id), row)
+        mandate_path = _gateway_mandate_path(mandate_id)
+        os.makedirs(os.path.dirname(mandate_path), mode=0o700)
+        write_json_immutable(mandate_path, row)
         ensure_runtime_gitignore()
     except (OSError, ValueError) as exc:
         sys.exit("m8shift-runtime: %s" % exc)
@@ -3116,6 +3209,8 @@ def _gateway_child_returncode(returncode):
 
 
 def cmd_gateway_exec(args):
+    executable_fd = -1
+    executable_snapshot = ""
     try:
         row = _load_gateway_mandate(args.mandate, require_cwd=True)
         actor = (args.actor or "").strip()
@@ -3132,12 +3227,19 @@ def cmd_gateway_exec(args):
             raise ValueError("gateway argv does not match the mandate")
         _validate_gateway_command_binding(
             args.action, targets, argv, verify_live_ref=args.action == "pr_open")
-        executable_digest, resolved_executable = _gateway_executable_digest(argv)
+        executable_digest, _resolved_executable, executable_fd = \
+            _gateway_open_executable(argv)
         if executable_digest != row["executable_sha256"]:
             raise ValueError("gateway executable bytes no longer match the mandate")
         consumed_dt = now()
         if consumed_dt >= parse_utc(row["expires_at"]):
             raise ValueError("gateway mandate expired before consumption")
+        executable_snapshot, snapshot_digest = _gateway_executable_snapshot(
+            executable_fd, os.path.dirname(_gateway_mandate_path(args.mandate)))
+        os.close(executable_fd)
+        executable_fd = -1
+        if snapshot_digest != executable_digest:
+            raise ValueError("gateway executable snapshot digest mismatch")
         mandate_digest = "sha256:" + hashlib.sha256(canonical_json_bytes(row)).hexdigest()
         consumed_at = iso(consumed_dt)
         consumption = {
@@ -3153,11 +3255,18 @@ def cmd_gateway_exec(args):
         _write_gateway_consumption_once(
             _gateway_mandate_path(args.mandate, "consumption.json"), consumption)
     except (OSError, ValueError) as exc:
+        if executable_fd >= 0:
+            os.close(executable_fd)
+        if executable_snapshot:
+            try:
+                os.unlink(executable_snapshot)
+            except OSError:
+                pass
         sys.exit("m8shift-runtime: %s" % exc)
 
     cause = ""
     try:
-        exec_argv = [resolved_executable] + argv[1:]
+        exec_argv = [executable_snapshot] + argv[1:]
         completed = subprocess.run(exec_argv, cwd=os.getcwd()).returncode
         exit_code = _gateway_child_returncode(completed)
         if exit_code != 0:
@@ -3166,6 +3275,11 @@ def cmd_gateway_exec(args):
         exit_code, cause = 127, "command_not_found"
     except (PermissionError, OSError):
         exit_code, cause = 126, "command_not_executable"
+    finally:
+        try:
+            os.unlink(executable_snapshot)
+        except OSError:
+            pass
 
     result = {
         "schema": GATEWAY_MANDATE_RESULT_SCHEMA,

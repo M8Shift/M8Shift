@@ -139,7 +139,10 @@ requires the live pen holder and binds a different named actor, one allowlisted
 non-integration action (`push`, issue/PR comment, or PR open), exact target set,
 physical project and working directory, 30–900 second expiry, and the SHA-256 of
 one bounded shell-free argv plus its resolved executable bytes. The command is never
-persisted. Consumption uses
+persisted. Before consumption, the implementation opens and hashes the executable,
+copies those already-open bytes into a create-exclusive private launch snapshot,
+re-hashes the snapshot, and later removes it; replacing the original path cannot
+change the bytes launched. Consumption uses
 `O_CREAT|O_EXCL|O_NOFOLLOW` before launch: replay, mismatch, expiry, malformed or
 symlinked evidence all refuse without executing, while a crash after consumption
 cannot retry. Mandates cannot authorize merge, close, tag, branch deletion, mirror,
@@ -147,9 +150,10 @@ force push, or another destructive/integration action and never replace the
 operator's exact-head merge authorization. Caller-owned credentials may be inherited
 at execution time, but credential-shaped argv is refused and no credential is stored.
 Action labels are checked against concrete command shapes: an exact full-SHA Git
-refspec for `push`, and targeted `tea` comment/PR-create commands for forge records.
-An arbitrary program or force/delete/mirror push cannot masquerade as an allowlisted
-action.
+refspec for `push`, and closed canonical `tea` comment/PR-create argv for forge
+records. Alternate/combined option spellings, aliases, extra flags, alternate login
+or remote selection, and action-specific extra targets are refused. An arbitrary
+program or force/delete/mirror push cannot masquerade as an allowlisted action.
 
     git config core.hooksPath hooks
 

@@ -231,8 +231,10 @@ Every change follows the same branch-based flow.
    author instead hands the committed SHA to the named forge-gateway role and labels it
    **gateway pending**; while still holding the pen, the author creates the exact
    expiring RFC 065 gateway mandate for the reviewed transport argv. The named gateway
-   atomically consumes it once and pushes that exact history before claiming remote
-   delivery. Merge remains a separate human-authorized action and is never mandateable.
+   atomically consumes it once; closed canonical command shapes prevent option
+   smuggling, and a re-hashed private executable snapshot prevents original-path
+   replacement. It pushes that exact history before claiming remote delivery. Merge
+   remains a separate human-authorized action and is never mandateable.
 7. **Independent review** (the other agent): hygiene, tests green, docs updated, links
    valid, scope clean. The reviewer approves or returns ranked findings.
 8. **Stabilize, authorize, then merge.** `main` receives the change **only once the

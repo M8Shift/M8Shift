@@ -66,6 +66,8 @@ branch, SHA, PR, verification, merge, and structured close. This is a transport 
 not authorship and not a ticket/push waiver. A gateway outside the pen acts only by
 atomically consuming an unexpired mandate created by the live holder for its exact
 actor, non-integration action, target, working directory, and shell-free argv digest.
-The capability is one-shot and cannot authorize merge, close, tag, deletion, mirror,
-or any destructive action. Local hook and doctor reminders are
+Closed canonical command shapes refuse option smuggling, while a re-hashed private
+snapshot fixes the launched executable bytes even if its original path changes. The
+capability is one-shot and cannot authorize merge, close, tag, deletion, mirror, or
+any destructive action. Local hook and doctor reminders are
 advisory and offline; the forge record remains the authority for ticket and remote state.

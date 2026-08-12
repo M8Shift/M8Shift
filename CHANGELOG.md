@@ -11,8 +11,11 @@
   unconfigured warning contract as pre-commit. The runtime companion now completes
   P2 with an immutable, expiring, actor/action/target/working-directory/argv-digest
   mandate created by the live pen holder. `gateway-exec` atomically consumes it
-  before one shell-free transport action, refuses replay and mismatch, persists no
-  command or credential, and links the result to the existing gateway ledger.
+  before one shell-free transport action, accepts only closed canonical `git`/`tea`
+  argv grammars, refuses replay, mismatch, and option smuggling, and launches a
+  private re-hashed snapshot copied from the verified executable descriptor so an
+  original-path swap cannot change the bytes run. It persists no command,
+  credential, or output and links the result to the existing gateway ledger.
   Merge, close, tag, deletion, mirror, and other integration/destructive actions
   remain outside mandate authority and retain explicit human authorization.
 

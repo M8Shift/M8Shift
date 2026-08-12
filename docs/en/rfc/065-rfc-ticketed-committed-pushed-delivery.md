@@ -175,12 +175,14 @@ it does not hold the author's pen only through this two-command runtime flow:
 ```bash
 python3 m8shift-runtime.py gateway-mandate create \
   --by codex --actor m8shift-gateway --action push \
-  --target branch=feat/example --target commit=<exact-full-sha> \
+  --target remote=origin --target branch=feat/example \
+  --target commit=<exact-full-sha> \
   --ttl-seconds 300 -- git push origin <exact-full-sha>:refs/heads/feat/example
 
 python3 m8shift-runtime.py gateway-exec \
   --actor m8shift-gateway --mandate gm-<32-lowercase-hex> --action push \
-  --target branch=feat/example --target commit=<same-exact-full-sha> \
+  --target remote=origin --target branch=feat/example \
+  --target commit=<same-exact-full-sha> \
   -- git push origin <same-exact-full-sha>:refs/heads/feat/example
 ```
 
@@ -191,7 +193,8 @@ different named identity. The immutable `m8shift.gateway.mandate.v1` record bind
 - one allowlisted non-integration action (`push`, `issue_comment`, `pr_open`, or
   `pr_comment`);
 - an action-specific exact target set (a push/PR open requires both branch/ref and a
-  full 40/64-hex Git object id; a comment requires its issue/ticket/PR id);
+  full 40/64-hex Git object id; PR open also requires the exact base; a comment
+  requires its issue/ticket/PR id; alternate or extra target keys are refused);
 - physical project and invocation working directory digests;
 - issue time and a 30–900 second expiry (300 seconds by default);
 - SHA-256 of the canonical bounded argv array and of the resolved executable bytes.
@@ -200,14 +203,19 @@ The reference executor also verifies that the action label describes the command
 `push` is exactly `git push <remote> <full-sha>:refs/heads/<branch>` (so force,
 deletion, mirror, prune, option smuggling, and symbolic moving heads are inexpressible),
 while forge-record actions use the matching `tea comments add` or
-`tea pulls create` shape with the mandated repo/id/head options. Arbitrary programs
-cannot hide behind an allowlisted action label.
+`tea pulls create` shape with the mandated repo/id/head/base options. Those are
+closed canonical argv grammars: aliases, `--option=value`, duplicate or extra flags,
+alternate login/remote selection, and option smuggling are refused. Arbitrary
+programs cannot hide behind an allowlisted action label.
 
 The argv and any comment body are never stored. Credential-shaped argv is refused;
 credentials, if the chosen forge client needs them, remain caller-owned inherited
 process state. `gateway-exec` recomputes every binding (including executable drift),
-refuses expiry or mismatch,
-then creates `m8shift.gateway.mandate-consumption.v1` with
+opens and hashes the resolved executable, copies the already-open bytes into a
+create-exclusive private launch snapshot, re-hashes that snapshot, and removes it
+after the child exits. Replacing the original executable path after verification
+therefore cannot change the bytes launched. It refuses expiry or mismatch, then
+creates `m8shift.gateway.mandate-consumption.v1` with
 `O_CREAT|O_EXCL|O_NOFOLLOW` **before** launching the child without a shell. Existing
 consumption is a replay refusal. A process crash after consumption therefore strands
 the mandate safely instead of re-running an uncertain remote mutation. The immutable

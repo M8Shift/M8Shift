@@ -154,8 +154,10 @@ Companions (runtime, worktree, context, headroom, i18n) never take the pen,
 never rewrite `M8SHIFT.md`, and never auto-force. They are local/advisory except
 for the explicit RFC 065 gateway transport seam: `gateway-exec` may run one exact
 shell-free forge argv only after atomic consumption of a short-lived mandate created
-by the live holder. That capability is not routing, pen, merge, or destructive
-authority. The single-file core remains the only authority on turns.
+by the live holder. Closed canonical command grammars reject alternate/extra options,
+and a private re-hashed snapshot of already-open executable bytes removes original
+path replacement from launch. That capability is not routing, pen, merge, or
+destructive authority. The single-file core remains the only authority on turns.
 
 ## Delivery discipline (incident #99)
 

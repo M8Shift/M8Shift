@@ -598,7 +598,7 @@ M8Shift keeps a **single-pen mutex** (one writer at a time) by design — see
 | Local integration layer | ✅ Shipped | installers, checksums, version surfaces, `examples/headless_runner.py`, `m8shift-runtime.py` | local convenience layer; no provider SDK in the core |
 | Degree-2 parallel work | ✅ Shipped, opt-in | [`m8shift-worktree.py`](docs/en/rfc/008-rfc-worktree-companion.md) | isolated git worktrees; serialized integration pen; core remains degree-1 |
 | Provider/runtime companion | ✅ Shipped v1 | `m8shift-runtime.py init/providers/roles/workflows/approve/report` | host-side config and reports; no secrets, no second routing authority |
-| Scoped forge-gateway transport | ✅ Shipped, opt-in | `gateway-mandate create/show`, `gateway-exec` | live holder issues one expiring exact capability; named gateway consumes once; no merge/destructive authority |
+| Scoped forge-gateway transport | ✅ Shipped, opt-in | `gateway-mandate create/show`, `gateway-exec` | live holder issues one expiring exact capability; closed command grammar plus verified executable snapshot; named gateway consumes once; no merge/destructive authority |
 | Local notifications | ✅ Shipped | `m8shift-runtime.py notify`, `watch` notification path | stdout/file/bell/OS/hook tiers; advisory only, no daemon, no network in M8Shift |
 | `subturn` provenance ledger | ❌ Rejected | [rationale](docs/en/rfc/007-rfc-subturn.md) | redundant with advisory fields and `remember` |
 | Hosted control plane / IDE integrations | 🔭 Future companion | [RFC](docs/en/rfc/013-rfc-hosted-runtime-control-plane.md) | optional layer outside the passive core |

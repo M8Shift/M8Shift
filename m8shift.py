@@ -726,11 +726,13 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   `m8shift.gateway.mandate.v1` created by the live holder for a different named
   actor. The mandate binds one non-integration action, exact target set, physical
   project/working-directory digests, one shell-free argv SHA-256, and the resolved
-  executable-byte SHA-256; consumption is
-  atomic and one-shot before launch. Mismatch, expiry, replay, malformed/symlinked
-  evidence refuse without executing. Merge, close, tag, deletion, mirror, force push,
-  and other destructive/integration actions cannot be mandated, and human exact-head
-  merge authorization remains separate.
+  executable-byte SHA-256. Closed canonical command grammars refuse option smuggling;
+  a private re-hashed launch snapshot copies the already-open executable bytes so an
+  original-path swap cannot alter them. Consumption is atomic and one-shot before
+  launch. Mismatch, expiry, replay, malformed/symlinked evidence refuse without
+  executing. Merge, close, tag, deletion, mirror, force push, and other
+  destructive/integration actions cannot be mandated, and human exact-head merge
+  authorization remains separate.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB
@@ -1088,8 +1090,10 @@ Companions (runtime, worktree, context, headroom, i18n) never take the pen,
 never rewrite `M8SHIFT.md`, and never auto-force. They are local/advisory except
 for the explicit RFC 065 gateway transport seam: `gateway-exec` may run one exact
 shell-free forge argv only after atomic consumption of a short-lived mandate created
-by the live holder. That capability is not routing, pen, merge, or destructive
-authority. The single-file core remains the only authority on turns.
+by the live holder. Closed canonical command grammars reject alternate/extra options,
+and a private re-hashed snapshot of already-open executable bytes removes original
+path replacement from launch. That capability is not routing, pen, merge, or
+destructive authority. The single-file core remains the only authority on turns.
 
 ## Delivery discipline (incident #99)
 

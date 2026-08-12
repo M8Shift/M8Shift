@@ -27,6 +27,7 @@ import ast
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -9884,6 +9885,9 @@ class TestRuntimeCompanion(CLIBase):
         record_path = os.path.join(
             self.d, ".m8shift", "runtime", "gateway-mandates", mandate_id,
             "mandate.json")
+        if os.name == "posix":
+            self.assertEqual(
+                stat.S_IMODE(os.stat(os.path.dirname(record_path)).st_mode) & 0o077, 0)
         with open(record_path, encoding="utf-8") as fh:
             stored = fh.read()
         self.assertNotIn("gateway-ran", stored)
@@ -9972,6 +9976,46 @@ class TestRuntimeCompanion(CLIBase):
         credential = self.gateway_mandate_create(
             command[:-1] + ["token=supersecretvalue"])
         self.assertNotEqual(credential.returncode, 0)
+        extra_target = self.gateway_mandate_create(
+            command, targets=("ticket=281", "repo=owner/repo", "branch=extra"))
+        self.assertNotEqual(extra_target.returncode, 0)
+
+    def test_gateway_comment_commands_reject_option_smuggling(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        command = self.gateway_comment_command()
+        cases = (
+            command + ["--repo=attacker/repo"],
+            command + ["-r", "attacker/repo"],
+            command + ["--close"],
+            command[:-1] + ["--repo=attacker/repo"],
+        )
+        for smuggled in cases:
+            with self.subTest(smuggled=smuggled[-2:]):
+                refused = self.gateway_mandate_create(smuggled)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("must be exactly", refused.stderr)
+
+    def test_gateway_pr_comment_binds_and_executes(self):
+        self.init()
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        marker = os.path.join(self.d, "gateway-pr-comment.txt")
+        command = [
+            self.gateway_fake_tea(
+                "open(%r, 'w', encoding='utf-8').write('reviewed')" % marker),
+            "comments", "add", "323", "--repo", "owner/repo",
+            "--description", "AGY approved",
+        ]
+        targets = ("pr=323", "repo=owner/repo")
+        created = self.gateway_mandate_create(
+            command, action="pr_comment", targets=targets)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        mandate_id = json.loads(created.stdout)["mandate"]["id"]
+        ran = self.gateway_mandate_exec(
+            mandate_id, command, action="pr_comment", targets=targets)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "reviewed")
 
     def test_gateway_push_mandate_requires_exact_non_force_sha_refspec(self):
         self.init()
@@ -10030,7 +10074,16 @@ class TestRuntimeCompanion(CLIBase):
         fake_tea = self.gateway_fake_tea()
         command = [fake_tea, "pulls", "create", "--repo", "owner/repo",
                    "--head", "feat/pr", "--base", "main", "--title", "review"]
-        targets = ("repo=owner/repo", "branch=feat/pr", "head=" + head)
+        targets = ("repo=owner/repo", "branch=feat/pr", "base=main", "head=" + head)
+        for smuggled in (
+                command + ["--draft"],
+                command[:3] + ["-r"] + command[4:],
+                command[:3] + ["--repo=attacker/repo"] + command[5:]):
+            with self.subTest(smuggled=smuggled[3:5]):
+                rejected = self.gateway_mandate_create(
+                    smuggled, action="pr_open", targets=targets)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("must be exactly", rejected.stderr)
         created = self.gateway_mandate_create(
             command, action="pr_open", targets=targets)
         self.assertEqual(created.returncode, 0, created.stderr)
@@ -10047,6 +10100,40 @@ class TestRuntimeCompanion(CLIBase):
         self.assertFalse(os.path.exists(os.path.join(
             self.d, ".m8shift", "runtime", "gateway-mandates", mandate_id,
             "consumption.json")))
+
+    @unittest.skipUnless(os.name == "posix", "descriptor execution requires POSIX")
+    def test_gateway_verified_executable_descriptor_survives_path_swap(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("m8shift_runtime_gateway_fd_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        marker = os.path.join(self.d, "gateway-fd-ran.txt")
+        executable = self.gateway_fake_tea(
+            "open(%r, 'w', encoding='utf-8').write('verified')" % marker)
+        replacement = os.path.join(self.d, "replacement-tea")
+        with open(replacement, "w", encoding="utf-8") as fh:
+            fh.write("#!%s\nopen(%r, 'w', encoding='utf-8').write('swapped')\n" %
+                     (sys.executable, marker))
+        os.chmod(replacement, 0o755)
+
+        _digest, _resolved, fd = runtime._gateway_open_executable([executable])
+        snapshot = ""
+        try:
+            snapshot, snapshot_digest = runtime._gateway_executable_snapshot(fd, self.d)
+            self.assertEqual(snapshot_digest, _digest)
+            os.close(fd)
+            fd = -1
+            os.replace(replacement, executable)
+            completed = subprocess.run(
+                [snapshot], cwd=self.d, capture_output=True, text=True)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if snapshot and os.path.exists(snapshot):
+                os.unlink(snapshot)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "verified")
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink not available")
     def test_gateway_mandate_refuses_symlinked_consumption_before_exec(self):
