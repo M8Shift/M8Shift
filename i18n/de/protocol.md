@@ -201,6 +201,7 @@ Schutzvorrichtung:
 ./m8shift.py status                                # Sperre + letzter Zug (NICHT-blockierend)
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # lokaler Live-Monitor, schreibgeschützt
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # schreibgeschützte Gesundheits-/Sicherheits-/Vertragsprüfungen
+./m8shift.py verify-kit --source DIR [--json] # Offline-Prüfung des lokal deklarierten Kit-Teils in Nur-Lese-Modus
 ./m8shift.py contract validate [--strict] [--json] # schreibgeschützte Validierung der Stage-4-Verträge
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # schreibgeschütztes Briefing: LOCK + letzte Züge + Speicher + Aufgaben
 ./m8shift.py peek <agent>  # letzte an <agent> gerichtete Übergabe (rc 3 wenn nicht dran)
@@ -224,6 +225,7 @@ Schutzvorrichtung:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py review-return <coordinator> --from <reviewer> --run RUN  # validated artifact-only review return
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
@@ -233,6 +235,7 @@ Schutzvorrichtung:
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # bindet diese Schicht an EIN Projekt-Relay (RFC 038 §9); stiftfrei; verweigert bei Mehrdeutigkeit ohne den geschlossenen Selektor
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: schützender Liveness-Herzschlag eines WORKING-Halters (verwaltete Produzenten; Fenster = max(120, min(2*N, TTL)); claim --refresh schreibt nur Audit-Schläge)
 ./m8shift.py release <agent> --to <other> [--force]  # übergibt ohne Text (erhöht turn NICHT erneut)
+./m8shift.py unclaim <agent> --reason "..."  # macht den EIGENEN claim rückgängig — stellt AWAITING_<agent> im selben Zug wieder her; release übergibt
 ./m8shift.py done <agent> [--force]                 # schließt die Sitzung (state=DONE)
 ./m8shift.py archive [--keep N]                     # alte abgeschlossene Züge bereinigen (niemals Zug #0)
 ```

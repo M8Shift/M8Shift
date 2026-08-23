@@ -232,9 +232,17 @@ examples:
 
 ## Usage adapter examples
 
-The three executable usage adapters emit normalized JSON and fail open to an empty
+The four executable usage adapters emit normalized JSON and fail open to an empty
 snapshot. `claude-oauth-usage.py` and `codex-ratelimits.py` accept no runtime
 arguments; both now support `--help` and reject unknown arguments with exit 2.
+`antigravity-quota.py --bucket-prefix PREFIX` calls Antigravity's local
+`RetrieveUserQuotaSummary` endpoint and requires an explicit `bucketId` prefix
+because the response contains two model groups. Its normalized receipt records
+the selection strategy/value, RPC method, and installed client version; it maps
+weekly versus 5h only from the response's `window` field. Fractions outside
+`[0,1]` are rejected rather than clamped, duplicate buckets for one window kind
+make the selection unavailable, and reset deadlines at or before observation
+time are discarded rather than rendered as current usage.
 `tokscale-spend.py [AGENT]` keeps its legacy filename but now maps the selected
 Claude/Codex provider from `tokscale usage --json` to privacy-minimal,
 ratio-native `proxy_reported` quota windows. Older spend-total payloads remain a
@@ -244,5 +252,6 @@ lane; missing providers are reported as unavailable, never as a zero quota.
 ```bash
 python3 examples/usage-adapters/claude-oauth-usage.py
 python3 examples/usage-adapters/codex-ratelimits.py
+python3 examples/usage-adapters/antigravity-quota.py --bucket-prefix gemini-
 python3 examples/usage-adapters/tokscale-spend.py codex
 ```

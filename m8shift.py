@@ -144,7 +144,7 @@ def scaffold_write_gate(confirm_script_dir=False, script_dir=None, command="init
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "4.1.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "4.2.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -243,7 +243,38 @@ COMPANION_REGISTRY = {
 # --full installs the operational companions; e2e is a release test tool (explicit-only).
 COMPANION_FULL = ("top", "runtime", "context", "worktree", "headroom", "i18n")
 KIT_MANIFEST_REL = os.path.join(".m8shift", "kit.json")
+VERIFY_KIT_REPORT_SCHEMA = "m8shift.verify-kit.report.v1"
+VERIFY_KIT_MAX_MANIFEST_BYTES = 1024 * 1024
+VERIFY_KIT_MAX_MANIFEST_ENTRIES = 8192
+VERIFY_KIT_MAX_COMPONENT_BYTES = 16 * 1024 * 1024
+VERIFY_KIT_MAX_SOURCE_BYTES = 256 * 1024 * 1024
+VERIFY_KIT_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+VERIFY_KIT_VERSION_RE = re.compile(r"[0-9]+[.][0-9]+[.][0-9]+\Z")
 _SCRIPT_VERSION_RE = re.compile(r'^VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
+REVIEW_ARTIFACT_OUTPUT_KEYS = frozenset({
+    "sha256", "bytes", "lines", "text",
+    "truncated", "original_bytes", "original_lines",
+})
+"""#368 — the reviewer-artifact output contract, named once per module.
+
+It is duplicated in m8shift-runtime.py and MUST stay identical: the two are
+compared by a lockstep test, in the same spirit as LISTENER_PHASES. Writing it
+twice as an inline literal cost a full suite run to diagnose -- extending only
+one side surfaced not as "unknown key" but as a provider launched three times
+instead of once, because the downstream validator refused and the lane retried."""
+
+
+REVIEW_ARTIFACT_SCHEMA = "m8shift.review-artifact.v1"
+REVIEW_ARTIFACT_MAX_BYTES = 64 * 1024
+REVIEW_ARTIFACT_FILE_MAX_BYTES = REVIEW_ARTIFACT_MAX_BYTES + 16 * 1024
+REVIEW_RETURN_RECEIPT_SCHEMA = "m8shift.review-return-receipt.v1"
+REVIEW_RETURN_RECEIPT_MAX_BYTES = 16 * 1024
+REVIEW_DECISION_RE = re.compile(
+    r"^\s*(?:(?:DECISION|RECOMMENDATION)\s*:\s*)?"
+    r"(APPROVE|REVISE|REJECT)\b", re.IGNORECASE | re.MULTILINE)
+REVIEW_RETURN_NOTE_RE = re.compile(
+    r"\Areview (\S+) returned by validated evidence from (" + AGENT_RE
+    + r") to (" + AGENT_RE + r")\Z")
 RUNNER_REGISTRY = {
     "watch-status": os.path.join("scripts", "watch-status.sh"),
     "headless-runner": os.path.join("examples", "headless_runner.py"),
@@ -278,6 +309,7 @@ UPDATE_AUDIT_REL = os.path.join(".m8shift", "update-audit.jsonl")
 UPDATE_AUDIT_SCHEMA = "m8shift.update.audit.v1"
 UPDATE_AUDIT_KEEP = 100          # bounded generated sidecar: keep the last N rows
 UPDATE_STAGED_REL = os.path.join(".m8shift", "staged", "m8shift.py")
+RUNNER_ADOPTION_BACKUPS_REL = os.path.join(".m8shift", "backups", "runner-adoption")
 
 
 def project_root():
@@ -654,10 +686,11 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py roster add <agent> --by <holder>  # holder-only live enrollment; changes only LOCK agents and never edits anchors
-./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
+./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--adopt-runner headless-runner|watch-status [--force-adopt-runner]] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
 ./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
+./m8shift.py verify-kit --source DIR [--json] # offline read-only verification of the locally declared installed-kit subset
 ./m8shift.py contract validate [--strict] [--json] # read-only Stage-4 contract validation
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N] [--brief]  # read-only briefing: LOCK + last turns + memory + tasks
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
@@ -682,6 +715,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py review-return <coordinator> --from <reviewer> --run RUN  # validated review-evidence handback; then claim (consume decisions only)
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
@@ -691,6 +725,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # pin this shift to ONE project relay (RFC 038 §9); penless; refuses under ambiguity without the closed selector
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: protective liveness beat for a WORKING holder (managed producers; window = max(120, min(2*N, TTL)); claim --refresh records audit-only beats)
 ./m8shift.py release <agent> --to <other> [--force --reason "why"]  # hand off without a body (does NOT re-increment turn)
+./m8shift.py unclaim <agent> --reason "..."                 # RFC/#320: undo your OWN untouched claim — restores AWAITING_<agent> at the SAME turn; release hands off and would change the recipient
 ./m8shift.py done <agent> [--force --reason "why"]  # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)
 ```
@@ -733,6 +768,28 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   executing. Merge, close, tag, deletion, mirror, force push, and other
   destructive/integration actions cannot be mandated, and human exact-head merge
   authorization remains separate.
+- **Artifact-only reviewer return:** `review-return <coordinator> --from <reviewer>
+  --run <id>` is the closed return edge for an explicitly read-only reviewer. It is
+  accepted only while the named reviewer is the idle `AWAITING` holder, the latest
+  closed turn was authored by the coordinator and handed to that reviewer, and
+  stable regular non-symlink evidence binds the exact run, reviewer, and input-turn
+  digest. Evidence is either a bounded decision artifact with exact output digest
+  and explicit `APPROVE`, `REVISE`, or `REJECT`, or a redacted immutable permission-
+  refusal receipt containing only a closed runner evidence id and no provider text.
+  Success changes only the LOCK to `AWAITING_<coordinator>` and records a redacted
+  `review_return` event; it adds no turn, copies no provider text, grants no pen, and
+  does not consume the artifact. The coordinator must claim before consuming a
+  decision artifact; a refusal outcome has no response to consume. Any identity,
+  freshness, digest, shape, size, coordinator, decision, or refusal-evidence mismatch
+  refuses without changing the LOCK. Until the next authored turn, `peek` and the
+  claim-plus-peek path in `next` render only the current redacted return provenance
+  (coordinator, reviewer, run, input turn, outcome, evidence kind, and next action).
+  The return note survives that coordinator claim and must intersect one exact current-
+  session `review_return` event; missing, malformed, stale, cross-session, or wrong-turn
+  evidence fails closed instead of falling back to an older handoff. A return already
+  claimed by an older core is recognized only from the exact `review_return` then
+  coordinator-`claim` event tail, followed at most by same-window work tags. Ordinary
+  turn handoffs keep their existing output.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB
@@ -798,6 +855,17 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   to manual review. Locally edited tracked runners require manual review unless
   the operator deliberately uses `--force-generated`. Each real run appends a
   bounded audit row (`m8shift.update.audit.v1`) to `.m8shift/update-audit.jsonl`.
+
+  **Legacy runner adoption (#328).** `update --adopt-runner
+  headless-runner|watch-status` is the intentionally narrower recovery route
+  for one known runner already on disk but absent from `kit.json`. It requires a
+  checksum-verified source runner and a regular, confined target; it accepts the
+  target as unmodified only when it matches the target release's own
+  `checksums.sha256` entry. Otherwise `--force-adopt-runner` is required and
+  first preserves unique runner and manifest backups. This operation is mutually
+  exclusive with component/companion/generated refreshes, merges only the one
+  runner manifest entry, writes backup evidence into the audit row, and never
+  invokes `init` or changes relay/protocol/anchor state.
 
 ---
 
@@ -2848,6 +2916,396 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+class VerifyKitError(ValueError):
+    """Fail-closed verify-kit input/evidence error with a stable identifier."""
+
+    def __init__(self, result_id, message):
+        super().__init__(message)
+        self.result_id = result_id
+
+
+def _verify_kit_safe_relpath(value, role):
+    if not isinstance(value, str) or not value \
+            or len(value.encode("utf-8")) > 512:
+        raise VerifyKitError("incomplete_manifest", "%s path is missing or invalid" % role)
+    portable = value.replace("\\", "/")
+    if portable.startswith("/") or re.match(r"^[A-Za-z]:", portable) \
+            or ".." in portable.split("/"):
+        raise VerifyKitError("unsupported_manifest_fields",
+                             "%s path is absolute or traversing" % role)
+    normalized = os.path.normpath(portable).replace(os.sep, "/")
+    if normalized in ("", ".", "..") or normalized.startswith("../"):
+        raise VerifyKitError("unsupported_manifest_fields", "%s path is invalid" % role)
+    return normalized
+
+
+def _verify_kit_join(root, rel, role):
+    current = root
+    parts = rel.replace("\\", "/").split("/")
+    for index, part in enumerate(parts):
+        current = os.path.join(current, part)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise VerifyKitError("unreadable", "%s path is unreadable" % role) from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise VerifyKitError("symlink", "%s path has a symlinked segment" % role)
+        if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
+            raise VerifyKitError("unsupported_file",
+                                 "%s path has a non-directory ancestor" % role)
+    return current
+
+
+def _verify_kit_snapshot(path, role, max_bytes=VERIFY_KIT_MAX_COMPONENT_BYTES):
+    """Read one stable regular non-symlink file through its verified descriptor."""
+    fd = -1
+    try:
+        try:
+            before = os.lstat(path)
+        except FileNotFoundError as exc:
+            raise VerifyKitError("missing", "%s is missing" % role) from exc
+        except OSError as exc:
+            detail = exc.strerror or exc.__class__.__name__
+            raise VerifyKitError(
+                "unreadable", "%s is unavailable: %s" % (role, detail)) from exc
+        if stat.S_ISLNK(before.st_mode):
+            raise VerifyKitError("symlink", "%s is symlinked" % role)
+        if not stat.S_ISREG(before.st_mode):
+            raise VerifyKitError("unsupported_file", "%s is not a regular file" % role)
+        if before.st_size > max_bytes:
+            raise VerifyKitError("oversized", "%s exceeds the byte limit" % role)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        parent = os.path.dirname(path) or "."
+        try:
+            parent_before = os.lstat(parent)
+            fd = os.open(path, flags)
+            opened = os.fstat(fd)
+            after_open = os.lstat(path)
+            parent_after_open = os.lstat(parent)
+        except OSError as exc:
+            result_id = "unreadable" if exc.errno in (errno.EACCES, errno.EPERM) \
+                else "unstable"
+            message = "%s is unreadable" if result_id == "unreadable" \
+                else "%s changed while opening"
+            raise VerifyKitError(result_id, message % role) from exc
+        parent_identities = {
+            (parent_before.st_dev, parent_before.st_ino),
+            (parent_after_open.st_dev, parent_after_open.st_ino),
+        }
+        identities = {
+            (before.st_dev, before.st_ino),
+            (opened.st_dev, opened.st_ino),
+            (after_open.st_dev, after_open.st_ino),
+        }
+        if len(identities) != 1 or len(parent_identities) != 1 \
+                or not stat.S_ISDIR(parent_before.st_mode) \
+                or not stat.S_ISDIR(parent_after_open.st_mode) \
+                or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(after_open.st_mode):
+            raise VerifyKitError("unstable", "%s changed identity while opening" % role)
+        raw = bytearray()
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            digest.update(chunk)
+            if len(raw) > max_bytes:
+                raise VerifyKitError("oversized", "%s exceeds the byte limit" % role)
+        finished = os.fstat(fd)
+        after_read = os.lstat(path)
+        parent_after_read = os.lstat(parent)
+        final_identities = {
+            (opened.st_dev, opened.st_ino),
+            (finished.st_dev, finished.st_ino),
+            (after_read.st_dev, after_read.st_ino),
+        }
+        changed_metadata = any(
+            getattr(opened, field, None) != getattr(finished, field, None)
+            for field in ("st_size", "st_mtime_ns", "st_ctime_ns"))
+        if len(final_identities) != 1 \
+                or (parent_after_read.st_dev, parent_after_read.st_ino) \
+                not in parent_identities \
+                or not stat.S_ISDIR(parent_after_read.st_mode) \
+                or stat.S_ISLNK(after_read.st_mode) \
+                or changed_metadata or finished.st_size != len(raw):
+            raise VerifyKitError("unstable", "%s changed while reading" % role)
+        return {"raw": bytes(raw), "sha256": digest.hexdigest(),
+                "size": len(raw)}
+    except OSError as exc:
+        raise VerifyKitError("unstable", "%s changed while reading" % role) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _verify_kit_json(snapshot, role, invalid_id):
+    try:
+        doc = json.loads(snapshot["raw"].decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise VerifyKitError(invalid_id, "%s is malformed JSON" % role) from exc
+    if not isinstance(doc, dict):
+        raise VerifyKitError(invalid_id, "%s must contain one JSON object" % role)
+    return doc
+
+
+def _verify_kit_source(source_arg, component_paths):
+    if not isinstance(source_arg, str) or not source_arg or not os.path.isabs(source_arg):
+        raise VerifyKitError("invalid_source", "--source must be an absolute directory")
+    source = os.path.abspath(source_arg)
+    try:
+        info = os.lstat(source)
+    except OSError as exc:
+        raise VerifyKitError("invalid_source", "source directory is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) \
+            or os.path.realpath(source) != source:
+        raise VerifyKitError("invalid_source", "source must be a real non-symlink directory")
+    manifest_path = os.path.join(source, "checksums.sha256")
+    try:
+        manifest_snapshot = _verify_kit_snapshot(
+            manifest_path, "source checksums.sha256", VERIFY_KIT_MAX_MANIFEST_BYTES)
+    except VerifyKitError as exc:
+        raise VerifyKitError("invalid_source_manifest", str(exc)) from exc
+    try:
+        lines = manifest_snapshot["raw"].decode("utf-8").splitlines()
+    except UnicodeError as exc:
+        raise VerifyKitError("invalid_source_manifest",
+                             "source checksums.sha256 is not UTF-8") from exc
+    entries = {}
+    for number, line in enumerate(lines, 1):
+        if number > VERIFY_KIT_MAX_MANIFEST_ENTRIES:
+            raise VerifyKitError("invalid_source_manifest",
+                                 "source checksum manifest exceeds the entry limit")
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](.+)", line)
+        if not match:
+            raise VerifyKitError("invalid_source_manifest",
+                                 "source checksum manifest line %d is malformed" % number)
+        try:
+            rel = _verify_kit_safe_relpath(match.group(2), "source manifest")
+        except VerifyKitError as exc:
+            raise VerifyKitError("invalid_source_manifest", str(exc)) from exc
+        if rel in entries:
+            raise VerifyKitError("invalid_source_manifest",
+                                 "source checksum manifest repeats %s" % rel)
+        entries[rel] = match.group(1).lower()
+    if not entries or "m8shift.py" not in entries:
+        raise VerifyKitError("invalid_source_manifest",
+                             "source checksum manifest is empty or lacks m8shift.py")
+    snapshots = {}
+    wanted_snapshots = {"m8shift.py", *component_paths}
+    total_source_bytes = 0
+    for rel, expected in sorted(entries.items()):
+        try:
+            absolute = _verify_kit_join(source, rel, "source %s" % rel)
+        except VerifyKitError as exc:
+            raise VerifyKitError("invalid_source_manifest", str(exc)) from exc
+        try:
+            snapshot = _verify_kit_snapshot(absolute, "source %s" % rel)
+        except VerifyKitError as exc:
+            raise VerifyKitError("invalid_source_manifest", str(exc)) from exc
+        if snapshot["sha256"] != expected:
+            raise VerifyKitError("invalid_source_manifest",
+                                 "source checksum mismatch for %s" % rel)
+        total_source_bytes += snapshot["size"]
+        if total_source_bytes > VERIFY_KIT_MAX_SOURCE_BYTES:
+            raise VerifyKitError("invalid_source_manifest",
+                                 "source release exceeds the aggregate byte limit")
+        if rel in wanted_snapshots:
+            snapshots[rel] = snapshot
+    source_version = _verify_kit_version_from_snapshot(snapshots["m8shift.py"], "m8shift.py")
+    if source_version is None:
+        raise VerifyKitError("source_mismatch", "source m8shift.py has no parseable VERSION")
+    return {"root": source, "root_digest": hashlib.sha256(
+        os.path.realpath(source).encode("utf-8")).hexdigest(),
+        "manifest_sha256": manifest_snapshot["sha256"], "entries": entries,
+        "snapshots": snapshots, "version": source_version}
+
+
+def _verify_kit_version_from_snapshot(snapshot, rel):
+    text = snapshot["raw"][:8192].decode("utf-8", errors="replace")
+    regex = _SCRIPT_VERSION_RE if rel.replace("\\", "/").endswith(".py") \
+        else _RUNNER_VERSION_RE
+    match = regex.search(text)
+    return match.group(1) if match else None
+
+
+def _verify_kit_manifest():
+    path = _verify_kit_join(
+        HERE, KIT_MANIFEST_REL.replace(os.sep, "/"), "local kit manifest")
+    try:
+        snapshot = _verify_kit_snapshot(
+            path, "local kit manifest", VERIFY_KIT_MAX_MANIFEST_BYTES)
+    except VerifyKitError as exc:
+        result_id = "incomplete_manifest" if exc.result_id == "missing" else exc.result_id
+        raise VerifyKitError(result_id, str(exc)) from exc
+    doc = _verify_kit_json(snapshot, "local kit manifest", "incomplete_manifest")
+    allowed = {"schema", "core", "companions", "runners"}
+    required = {"schema", "core", "companions"}
+    if not set(doc).issubset(allowed):
+        raise VerifyKitError("unsupported_manifest_fields",
+                             "local kit manifest has unsupported top-level fields")
+    if not required.issubset(doc):
+        raise VerifyKitError("incomplete_manifest",
+                             "local kit manifest lacks required top-level fields")
+    if doc.get("schema") != "m8shift.kit.v1":
+        raise VerifyKitError("incompatible_manifest", "local kit manifest schema is incompatible")
+    core = doc.get("core")
+    if not isinstance(core, dict) or set(core) != {"script", "version"}:
+        raise VerifyKitError("incomplete_manifest", "local kit core row is incomplete")
+    if core.get("script") != "m8shift.py" or not isinstance(core.get("version"), str) \
+            or not VERIFY_KIT_VERSION_RE.fullmatch(core["version"]):
+        raise VerifyKitError("incomplete_manifest", "local kit core identity is invalid")
+    companions = doc.get("companions")
+    runners = doc.get("runners", [])
+    if not isinstance(companions, list) or not isinstance(runners, list):
+        raise VerifyKitError("incomplete_manifest",
+                             "local kit companion or runner collection is invalid")
+    components = [{"kind": "core", "name": "core", "path": "m8shift.py",
+                   "version": core["version"], "manifest_sha256": ""}]
+    seen_names = {"core"}
+    seen_paths = {"m8shift.py"}
+    row_fields = {
+        "companion": {"name", "script", "version", "sha256", "copied_at", "source"},
+        "runner": {"name", "path", "version", "sha256", "copied_at", "source"},
+    }
+    for kind, rows in (("companion", companions), ("runner", runners)):
+        for index, row in enumerate(rows):
+            expected_fields = row_fields[kind]
+            if not isinstance(row, dict) or not expected_fields.issubset(row):
+                raise VerifyKitError("incomplete_manifest",
+                                     "local kit %s row %d is incomplete" % (kind, index))
+            if set(row) != expected_fields:
+                raise VerifyKitError("unsupported_manifest_fields",
+                                     "local kit %s row %d has unsupported fields" % (kind, index))
+            name = row.get("name")
+            rel = row.get("script" if kind == "companion" else "path")
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9-]+", name):
+                raise VerifyKitError("incomplete_manifest",
+                                     "local kit %s row %d name is invalid" % (kind, index))
+            registry = COMPANION_REGISTRY if kind == "companion" else RUNNER_REGISTRY
+            if name not in registry:
+                raise VerifyKitError("unsupported_manifest_fields",
+                                     "local kit declares unsupported %s %s" % (kind, name))
+            normalized = _verify_kit_safe_relpath(rel, "local kit %s" % kind)
+            expected_rel = registry[name].replace(os.sep, "/")
+            if normalized != expected_rel:
+                raise VerifyKitError("unsupported_manifest_fields",
+                                     "local kit %s %s path is unsupported" % (kind, name))
+            version = row.get("version")
+            digest = row.get("sha256")
+            if not isinstance(version, str) or not VERIFY_KIT_VERSION_RE.fullmatch(version) \
+                    or not isinstance(digest, str) or not VERIFY_KIT_SHA256_RE.fullmatch(digest) \
+                    or not isinstance(row.get("copied_at"), str) or not row["copied_at"] \
+                    or not isinstance(row.get("source"), str) or not row["source"]:
+                raise VerifyKitError("incomplete_manifest",
+                                     "local kit %s %s metadata is invalid" % (kind, name))
+            if name in seen_names or normalized in seen_paths:
+                raise VerifyKitError("unsupported_manifest_fields",
+                                     "local kit repeats a component identity")
+            seen_names.add(name)
+            seen_paths.add(normalized)
+            components.append({"kind": kind, "name": name, "path": normalized,
+                               "version": version, "manifest_sha256": digest})
+    return {"snapshot": snapshot, "doc": doc, "components": components}
+
+
+def _verify_kit_component(component, source):
+    rel = component["path"]
+    expected = source["entries"].get(rel, "")
+    row = {
+        "id": "%s:%s" % (component["kind"], component["name"]),
+        "kind": component["kind"], "name": component["name"], "path": rel,
+        "result": "success", "kit_version": component["version"],
+        "source_version": source["version"],
+        "local_version": "", "source_sha256": expected,
+        "manifest_sha256": component["manifest_sha256"], "local_sha256": "",
+    }
+    if not expected:
+        row["result"] = "source_mismatch"
+        return row
+    source_snapshot = source["snapshots"][rel]
+    source_component_version = _verify_kit_version_from_snapshot(source_snapshot, rel)
+    if source_component_version != source["version"]:
+        row["result"] = "source_mismatch"
+        return row
+    try:
+        path = _verify_kit_join(HERE, rel, "local %s" % rel)
+    except VerifyKitError as exc:
+        row["result"] = exc.result_id
+        return row
+    try:
+        local = _verify_kit_snapshot(path, "local %s" % rel)
+    except VerifyKitError as exc:
+        row["result"] = exc.result_id
+        return row
+    row["local_sha256"] = local["sha256"]
+    row["local_version"] = _verify_kit_version_from_snapshot(local, rel) or ""
+    if component["manifest_sha256"] and component["manifest_sha256"] != expected:
+        row["result"] = "manifest_sha_mismatch"
+    elif component["version"] != source["version"] \
+            or row["local_version"] != source["version"]:
+        row["result"] = "version_mismatch"
+    elif local["sha256"] != expected:
+        row["result"] = "drift"
+    return row
+
+
+def verify_kit_report(source_arg):
+    kit = _verify_kit_manifest()
+    source = _verify_kit_source(
+        source_arg, {row["path"] for row in kit["components"]})
+    components = [_verify_kit_component(row, source) for row in kit["components"]]
+    ok = all(row["result"] == "success" for row in components)
+    return {
+        "schema": VERIFY_KIT_REPORT_SCHEMA, "ok": ok,
+        "result": "success" if ok else "failed",
+        "target_root_digest": hashlib.sha256(
+            os.path.realpath(HERE).encode("utf-8")).hexdigest(),
+        "source_root_digest": source["root_digest"],
+        "source_manifest_sha256": source["manifest_sha256"],
+        "source_version": source["version"],
+        "kit_sha256": kit["snapshot"]["sha256"], "components": components,
+    }
+
+
+def _verify_kit_print(report):
+    print("m8shift.py v%s" % VERSION)
+    print("── verify-kit ─────────────────────────")
+    print("result: %s" % report["result"])
+    print("source version: %s" % report.get("source_version", "-"))
+    for row in report.get("components", []):
+        print("%s %s %s (%s)" % (
+            "✓" if row["result"] == "success" else "✗",
+            row["id"], row["path"], row["result"]))
+
+
+def cmd_verify_kit(args):
+    try:
+        report = verify_kit_report(args.source)
+    except VerifyKitError as exc:
+        report = {
+            "schema": VERIFY_KIT_REPORT_SCHEMA, "ok": False,
+            "result": "invalid", "result_id": exc.result_id,
+            "message": str(exc), "components": [],
+        }
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        else:
+            print("m8shift.py v%s" % VERSION)
+            print("── verify-kit ─────────────────────────")
+            print("✗ %s: %s" % (exc.result_id, exc), file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    else:
+        _verify_kit_print(report)
+    return 0 if report["ok"] else 1
+
+
 def selected_companions(args):
     """Resolve --companions / --with-* / --full / --no-companions to an ordered selector
     list. Returns (selectors, error_message_or_None). Unknown names are a hard error."""
@@ -2908,17 +3366,10 @@ def _kit_list(data, key):
     return value if isinstance(value, list) else []
 
 
-def _write_kit_manifest(installed, runners=None):
+def _write_kit_manifest_document(data):
+    """Atomically replace kit.json with one already-validated document."""
     path = os.path.join(HERE, KIT_MANIFEST_REL)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    previous = _read_kit_manifest(HERE)
-    if runners is None:
-        runners = _kit_list(previous, "runners")
-    data = {"schema": "m8shift.kit.v1",
-            "core": {"script": "m8shift.py", "version": VERSION},
-            "companions": installed}
-    if runners:
-        data["runners"] = runners
     tmp = os.path.join(os.path.dirname(path),
                        ".m8shift-kit-%s.tmp" % uuid.uuid4().hex)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -2935,6 +3386,18 @@ def _write_kit_manifest(installed, runners=None):
                 os.unlink(tmp)
             except OSError:
                 pass
+
+
+def _write_kit_manifest(installed, runners=None):
+    previous = _read_kit_manifest(HERE)
+    if runners is None:
+        runners = _kit_list(previous, "runners")
+    data = {"schema": "m8shift.kit.v1",
+            "core": {"script": "m8shift.py", "version": VERSION},
+            "companions": installed}
+    if runners:
+        data["runners"] = runners
+    _write_kit_manifest_document(data)
 
 
 def plan_companions(args):
@@ -3814,6 +4277,147 @@ def _update_runners_component(source_dir, checksums, force_generated, strict_unt
             "; ".join(notes), items)
 
 
+def _adopt_legacy_runner(name, source_dir, checksums, *, force, allow_downgrade,
+                          dry_run, guard=None):
+    """Adopt one known, pre-manifest runner without invoking ``init``.
+
+    This deliberately has a narrower contract than the ordinary ``runner``
+    update component: it creates exactly one runner manifest entry, after
+    proving both the source release bytes and the untracked target's release
+    bytes.  A target whose bytes cannot be tied to its own checksum manifest is
+    considered locally modified and needs the dedicated destructive override.
+    """
+    rel = RUNNER_REGISTRY.get(name, "")
+    if not rel:
+        return "refused", "unknown runner %r" % name, {}
+    target = os.path.join(HERE, rel)
+    source_link = os.path.join(source_dir, rel)
+    source = os.path.realpath(source_link)
+    manifest = os.path.join(HERE, KIT_MANIFEST_REL)
+    backup_root = os.path.join(HERE, RUNNER_ADOPTION_BACKUPS_REL)
+    evidence = {"name": name, "path": rel.replace(os.sep, "/")}
+
+    if (not _physically_under(HERE, target) or os.path.islink(target)
+            or not os.path.isfile(target)):
+        return ("refused", "runner %s: target %s must be an existing regular file inside the target root"
+                % (name, rel), evidence)
+    if (os.path.islink(source_link) or not os.path.isfile(source)
+            or not _physically_under(source_dir, source)):
+        return ("refused", "runner %s: source %s missing, symlinked, or escapes source dir"
+                % (name, rel), evidence)
+    # Unlike ordinary update, adoption always needs a release manifest: it is
+    # the evidence that makes a formerly untracked artifact safe to adopt.
+    if checksums is None:
+        return ("refused", "runner %s: source release has no checksums.sha256; adoption requires SHA-256 verification"
+                % name, evidence)
+    verified, note = _verify_source_checksum(checksums, source_dir, rel)
+    if not verified:
+        return "refused", "runner %s: %s" % (name, note), evidence
+    source_version = _parse_runner_version(source, rel)
+    if not _version_tuple(source_version):
+        return ("manual_review_required", "runner %s: source %s has no parseable runner VERSION marker"
+                % (name, rel), evidence)
+    if (os.path.islink(manifest) or not os.path.isfile(manifest)
+            or not _physically_under(HERE, manifest)):
+        return ("manual_review_required", "runner %s: prior %s must be a regular file for recoverable adoption"
+                % (name, KIT_MANIFEST_REL), evidence)
+    if not _physically_under(HERE, backup_root):
+        return ("refused", "runner %s: adoption backup directory escapes the target root" % name,
+                evidence)
+    try:
+        target_sha = _sha256_file(target)
+        source_sha = _sha256_file(source)
+        with open(manifest, "rb") as fh:
+            prior_manifest = fh.read()
+    except OSError as exc:
+        return "refused", "runner %s: cannot read adoption inputs (%s)" % (name, exc), evidence
+    try:
+        prior_kit = json.loads(prior_manifest.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return ("manual_review_required",
+                "runner %s: prior %s is malformed; refusing a non-preserving rewrite"
+                % (name, KIT_MANIFEST_REL), evidence)
+    existing_runners = prior_kit.get("runners", []) if isinstance(prior_kit, dict) else None
+    if (not isinstance(prior_kit, dict)
+            or prior_kit.get("schema") != "m8shift.kit.v1"
+            or not isinstance(prior_kit.get("core"), dict)
+            or not isinstance(prior_kit.get("companions"), list)
+            or not isinstance(existing_runners, list)):
+        return ("manual_review_required",
+                "runner %s: prior %s does not have a preservable m8shift.kit.v1 structure"
+                % (name, KIT_MANIFEST_REL), evidence)
+    canonical_rel = rel.replace(os.sep, "/")
+    for entry in existing_runners:
+        if (isinstance(entry, dict)
+                and (entry.get("name") == name
+                     or (entry.get("path") or "").replace("\\", "/") == canonical_rel)):
+            return ("manual_review_required",
+                    "runner %s: already tracked in %s; use the normal runner update path"
+                    % (name, KIT_MANIFEST_REL), evidence)
+    target_version = _parse_runner_version(target, rel)
+    if (target_version and _version_tuple(target_version)
+            and _version_tuple(target_version) > _version_tuple(source_version)
+            and not allow_downgrade):
+        return ("refused", "runner %s: target v%s is newer than source v%s; refused without --allow-downgrade"
+                % (name, target_version, source_version), evidence)
+
+    target_checksums = _source_checksums(HERE)
+    expected_target_sha = (target_checksums or {}).get(rel.replace(os.sep, "/"))
+    target_pristine = bool(expected_target_sha and expected_target_sha == target_sha)
+    if not target_pristine and not force:
+        reason = ("target checksums.sha256 has no entry" if not expected_target_sha
+                  else "target digest differs from its checksums.sha256 entry")
+        return ("manual_review_required", "runner %s: %s; refusing local replacement without --force-adopt-runner"
+                % (name, reason), evidence)
+
+    evidence.update({
+        "source_version": source_version,
+        "source_sha256": source_sha,
+        "target_sha256_before": target_sha,
+        "target_pristine": target_pristine,
+        "source_verified": True,
+    })
+    if dry_run:
+        action = "register already-current" if target_sha == source_sha else "adopt"
+        return ("updated", "runner %s: would %s verified %s v%s with runner and manifest backups"
+                % (name, action, rel, source_version), evidence)
+
+    token = uuid.uuid4().hex
+    runner_backup = os.path.join(backup_root, "%s-%s.runner.bak" % (name, token))
+    manifest_backup = os.path.join(backup_root, "%s-%s.kit.json.bak" % (name, token))
+    evidence.update({
+        "runner_backup": os.path.relpath(runner_backup, HERE),
+        "manifest_backup": os.path.relpath(manifest_backup, HERE),
+        "runner_replaced": target_sha != source_sha,
+    })
+    if guard is not None:
+        guard.require_owned()
+    adopted_entry = _kit_runner_entry(name, rel, source_version, source_sha, source_dir)
+    adopted_manifest = dict(prior_kit)
+    adopted_manifest["runners"] = list(existing_runners) + [adopted_entry]
+    try:
+        _copy_regular_file_atomic(target, runner_backup)
+        _copy_regular_file_atomic(manifest, manifest_backup)
+        if target_sha != source_sha:
+            _copy_regular_file_atomic(source, target)
+            if _sha256_file(target) != source_sha:
+                raise OSError("verified source runner changed during copy")
+        _write_kit_manifest_document(adopted_manifest)
+    except OSError as exc:
+        # The pre-replacement runner is retained before either mutation. Restore
+        # it if the manifest transaction cannot complete; leave the unique
+        # backups in place for inspection if the restoration itself fails.
+        try:
+            if os.path.isfile(runner_backup):
+                _copy_regular_file_atomic(runner_backup, target)
+        except OSError:
+            pass
+        return "refused", "runner %s: adoption failed (%s); prior bytes retained in backup" % (name, exc), evidence
+    action = "registered already-current" if target_sha == source_sha else "adopted"
+    return ("updated", "runner %s: %s %s v%s from verified source"
+            % (name, action, rel, source_version), evidence)
+
+
 def _update_core_component(source_dir, target_root, checksums, version_before,
                            dry_run, guard=None):
     """Replace the target's m8shift.py with the source copy after path-confinement,
@@ -3951,8 +4555,25 @@ def cmd_update(args):
     if not os.path.isdir(target_root):
         return _update_refusal(args, "refused", "--target %s is not a directory" % args.target)
 
+    # A legacy runner adoption is intentionally one artifact wide.  It must not
+    # piggy-back on a routine refresh that could rewrite protocol/anchors/core.
+    adopt_runner = getattr(args, "adopt_runner", "") or ""
+    if adopt_runner:
+        if args.components is not None or args.companions or args.force_generated:
+            return _update_refusal(
+                args, "refused",
+                "--adopt-runner is a bounded one-runner operation; do not combine it with "
+                "--components, --companions, or --force-generated")
+        if adopt_runner not in RUNNER_REGISTRY:
+            return _update_refusal(
+                args, "refused", "unknown runner %r; valid: %s" % (
+                    adopt_runner, ", ".join(sorted(RUNNER_REGISTRY))))
+    elif getattr(args, "force_adopt_runner", False):
+        return _update_refusal(args, "refused", "--force-adopt-runner requires --adopt-runner")
+
     # components selection (order-independent CSV; execution follows UPDATE_ORDER)
-    components_arg = UPDATE_DEFAULT_COMPONENTS if args.components is None else args.components
+    components_arg = ("" if adopt_runner else
+                      UPDATE_DEFAULT_COMPONENTS if args.components is None else args.components)
     components_explicit = args.components is not None
     selected = []
     for tok in (components_arg or "").split(","):
@@ -3976,7 +4597,7 @@ def cmd_update(args):
             explicit_companions.append(tok)
     if explicit_companions and "companions" not in selected:
         selected.append("companions")
-    if not selected:
+    if not selected and not adopt_runner:
         return _update_refusal(args, "refused", "no components selected (--components is empty)")
 
     # source authority: the file that will become the target core must exist,
@@ -4093,6 +4714,15 @@ def cmd_update(args):
             return _update_refusal(args, "refused", str(exc))
 
     def run_components(guard=None, dry_run=False):
+        if adopt_runner:
+            res, detail, evidence = _adopt_legacy_runner(
+                adopt_runner, source_dir, checksums,
+                force=bool(getattr(args, "force_adopt_runner", False)),
+                allow_downgrade=args.allow_downgrade,
+                dry_run=dry_run, guard=guard)
+            return [{"component": "runner", "result": res, "detail": detail,
+                     "runners": [{"name": adopt_runner, "path": RUNNER_REGISTRY[adopt_runner],
+                                  "result": res, "detail": detail, "adoption": evidence}]}]
         rows = []
         for comp in UPDATE_ORDER:
             if comp not in selected:
@@ -4163,7 +4793,8 @@ def cmd_update(args):
             version_after = (_parse_script_version(os.path.join(target_root, "m8shift.py"))
                              or version_before)
             if wrote:
-                _sync_kit_core_version(target_root)
+                if not adopt_runner:
+                    _sync_kit_core_version(target_root)
                 _append_update_audit(target_root, {
                     "schema": UPDATE_AUDIT_SCHEMA,
                     "at": iso(now()),
@@ -4186,6 +4817,11 @@ def cmd_update(args):
                              or any(i["result"] == "updated"
                                     for i in r.get("runners", ())))
                         for r in rows),
+                    "runners_adopted": [
+                        item.get("adoption", {}) for r in rows
+                        for item in r.get("runners", ())
+                        if item.get("result") == "updated" and item.get("adoption")
+                    ],
                 })
 
     ok = all(r["result"] in UPDATE_OK_RESULTS for r in rows)
@@ -4578,6 +5214,49 @@ def parse_session_events(text):
 
 def read_session_events():
     return parse_session_events(read(SESSIONS)) if os.path.exists(SESSIONS) else []
+
+
+def _doctor_session_event_is_valid(row):
+    """Validate the closed event vocabulary used by ``doctor``.
+
+    Historical event kinds keep their deliberately shallow compatibility
+    check.  ``review_return`` is newer security-relevant provenance, so accept
+    only the exact shape emitted by ``cmd_review_return`` and preserve the
+    outcome/evidence-kind pairing.
+    """
+    if not isinstance(row, dict) or not isinstance(row.get("session_id"), str):
+        return False
+    event = row.get("event")
+    if event in {"start", "done", "reset", "force", "pause", "resume",
+                 "state", "work_tag"}:
+        return True
+    if event != "review_return":
+        return False
+    required = {
+        "event", "session_id", "at", "m8shift_version", "by", "reviewer",
+        "run_id", "outcome", "evidence_kind", "evidence_sha256", "turn",
+    }
+    if set(row) != required \
+            or SESSION_ID_RE.fullmatch(row["session_id"]) is None \
+            or parse_iso(row.get("at")) is None \
+            or not isinstance(row.get("m8shift_version"), str) \
+            or VERIFY_KIT_VERSION_RE.fullmatch(row["m8shift_version"]) is None \
+            or not isinstance(row.get("by"), str) \
+            or re.fullmatch(AGENT_RE, row["by"]) is None \
+            or not isinstance(row.get("reviewer"), str) \
+            or re.fullmatch(AGENT_RE, row["reviewer"]) is None \
+            or row["by"] == row["reviewer"] \
+            or not isinstance(row.get("run_id"), str) \
+            or RUN_ID_RE.fullmatch(row["run_id"]) is None \
+            or not isinstance(row.get("turn"), str) \
+            or re.fullmatch(r"[1-9][0-9]*", row["turn"]) is None \
+            or not isinstance(row.get("evidence_sha256"), str) \
+            or re.fullmatch(r"[0-9a-f]{64}", row["evidence_sha256"]) is None:
+        return False
+    kind = row.get("evidence_kind")
+    outcome = row.get("outcome")
+    return ((kind == "decision" and outcome in {"approve", "revise", "reject"})
+            or (kind == "permission_refused" and outcome == "permission_refused"))
 
 
 def clean_work_item(value, label="--work-item"):
@@ -8159,6 +8838,7 @@ def cmd_heartbeat(args):
 _MUTATOR_ACTORS = {
     "claim": "agent", "append": "agent", "next": "agent", "request-turn": "agent",
     "yield-turn": "agent", "decline-turn": "agent", "steer-turn": "agent",
+    "review-return": "agent",
     "pause": "agent", "resume": "agent", "release": "agent", "done": "agent",
     "remember": "agent", "work-tag": "agent", "cooldown": None, "archive": None,
     "heartbeat": "agent", "guard-exec": "agent", "lease-keeper": "agent",
@@ -8951,10 +9631,7 @@ def collect_doctor_findings(security=False, contracts=False, update_source="",
                         os.path.basename(SESSIONS),
                     ))
                     break
-                if (not isinstance(row, dict)
-                        or row.get("event") not in {"start", "done", "reset", "force", "pause", "resume",
-                                                     "state", "work_tag"}
-                        or not isinstance(row.get("session_id"), str)):
+                if not _doctor_session_event_is_valid(row):
                     findings.append(doctor_finding(
                         "sessions.event_invalid", "warning",
                         f"{os.path.basename(SESSIONS)} has an invalid session event near line {n}.",
@@ -9340,9 +10017,150 @@ def cmd_recap(args):
                 print(f"  #{ev['id']} {ev['author']}: {ev['text']}")
     return 0
 
+def _review_return_note_identity(note):
+    """Return the bounded identity carried by a core-generated return note."""
+    match = REVIEW_RETURN_NOTE_RE.fullmatch(note or "")
+    if match is None or RUN_ID_RE.fullmatch(match.group(1)) is None:
+        return None
+    return {
+        "run_id": match.group(1),
+        "reviewer": match.group(2),
+        "coordinator": match.group(3),
+    }
+
+
+def _review_return_event_route(row, lock, coordinator):
+    """Validate and redact one review_return session row for pickup display."""
+    if not isinstance(row, dict) or row.get("event") != "review_return" \
+            or row.get("session_id") != lock.get("session") \
+            or row.get("by") != coordinator \
+            or str(row.get("turn")) != str(lock.get("turn")) \
+            or parse_iso(row.get("at")) is None \
+            or not isinstance(row.get("reviewer"), str) \
+            or not re.fullmatch(AGENT_RE, row["reviewer"]) \
+            or row["reviewer"] == coordinator \
+            or not isinstance(row.get("run_id"), str) \
+            or RUN_ID_RE.fullmatch(row["run_id"]) is None \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("evidence_sha256", ""))):
+        return None
+    kind = row.get("evidence_kind")
+    outcome = row.get("outcome")
+    if kind == "decision":
+        if outcome not in ("approve", "revise", "reject"):
+            return None
+    elif kind == "permission_refused":
+        if outcome != "permission_refused":
+            return None
+    else:
+        return None
+    return {
+        "coordinator": coordinator,
+        "reviewer": row["reviewer"],
+        "run_id": row["run_id"],
+        "input_turn": str(row["turn"]),
+        "outcome": outcome,
+        "evidence_kind": kind,
+    }
+
+
+def _review_return_tail_matches(rows, index, lock, coordinator):
+    """Require the return row to be current, optionally followed by its claim."""
+    tail = rows[index + 1:]
+    state = lock.get("state", "")
+    if state == "AWAITING_%s" % coordinator.upper():
+        return not tail
+    if state != "WORKING_%s" % coordinator.upper() or not tail:
+        return False
+    claim = tail[0]
+    claim_matches = (
+        claim.get("event") == "state"
+        and claim.get("session_id") == lock.get("session")
+        and claim.get("operation") == "claim"
+        and claim.get("actor") == coordinator
+        and claim.get("from_state") == "AWAITING_%s" % coordinator.upper()
+        and claim.get("to_state") == "WORKING_%s" % coordinator.upper()
+        and str(claim.get("turn")) == str(lock.get("turn"))
+        and parse_iso(claim.get("at")) is not None
+    )
+    if not claim_matches:
+        return False
+    return all(
+        row.get("event") == "work_tag"
+        and row.get("session_id") == lock.get("session")
+        and row.get("actor") == coordinator
+        and str(row.get("turn")) == str(lock.get("turn"))
+        and row.get("work_window_id") == claim.get("work_window_id")
+        and parse_iso(row.get("at")) is not None
+        for row in tail[1:]
+    )
+
+
+def current_review_return_route(agent, text):
+    """Resolve a current penless return from LOCK intent plus session evidence.
+
+    A core-generated return note is an explicit routing marker and therefore
+    fails closed when its evidence is absent or malformed.  The tail-sequence
+    fallback recognizes a return claimed by an older kit that overwrote the
+    marker, but only when the review row is immediately followed by its exact
+    claim transition.
+    """
+    lock = get_lock(text)
+    state = lock.get("state", "")
+    if lock.get("holder") != agent or state not in (
+            "AWAITING_%s" % agent.upper(), "WORKING_%s" % agent.upper()):
+        return None
+    note = lock.get("note", "")
+    marker = _review_return_note_identity(note)
+    marker_suspected = isinstance(note, str) and note.startswith("review ")
+    if marker_suspected and (marker is None or marker["coordinator"] != agent):
+        sys.exit("refused: current review-return provenance is missing, stale, "
+                 "or invalid; inspect the session ledger before continuing.")
+
+    rows = [row for row in read_session_events()
+            if row.get("session_id") == lock.get("session")]
+    rough = []
+    for index, row in enumerate(rows):
+        if row.get("event") != "review_return" or row.get("by") != agent \
+                or str(row.get("turn")) != str(lock.get("turn")):
+            continue
+        if marker and (row.get("run_id") != marker["run_id"]
+                       or row.get("reviewer") != marker["reviewer"]):
+            continue
+        rough.append((index, row))
+    if not rough:
+        if marker_suspected:
+            sys.exit("refused: current review-return provenance is missing, stale, "
+                     "or invalid; inspect the session ledger before continuing.")
+        return None
+    index, row = rough[-1]
+    route = _review_return_event_route(row, lock, agent)
+    if route is None or not _review_return_tail_matches(rows, index, lock, agent):
+        sys.exit("refused: current review-return provenance is missing, stale, "
+                 "or invalid; inspect the session ledger before continuing.")
+    if marker and (route["run_id"] != marker["run_id"]
+                   or route["reviewer"] != marker["reviewer"]):
+        sys.exit("refused: current review-return provenance is missing, stale, "
+                 "or invalid; inspect the session ledger before continuing.")
+    return route
+
+
 def print_peek_for(agent, text=None):
     """Print the last handoff addressed to <agent> as parse-free key=value (+ body)."""
     text = text if text is not None else load_or_die()
+    route = current_review_return_route(agent, text)
+    if route is not None:
+        print("review_return=validated")
+        for key in ("coordinator", "reviewer", "run_id", "input_turn",
+                    "outcome", "evidence_kind"):
+            print("%s=%s" % (key, route[key]))
+        if route["evidence_kind"] == "decision":
+            action = ("claim %s; then m8shift-runtime.py review-delivery consume %s "
+                      "--by %s" % (agent, route["run_id"], agent))
+        else:
+            action = ("claim %s; then repair or relaunch the reviewer lane; "
+                      "do not consume" % agent)
+        print("next=%s" % action)
+        return
     mine = [t for t in parse_turns(text) if t["fields"].get("to") == agent]
     if mine:
         t = mine[-1]
@@ -11539,13 +12357,20 @@ def cmd_claim(args):
                 sys.exit(usage_throttle_message(agent, hold_error))
         before = dict(lk)
         t = now()
+        return_note = lk.get("note", "")
+        preserve_return_note = (
+            isinstance(return_note, str)
+            and return_note.startswith("review ")
+            and (st == f"AWAITING_{agent.upper()}" or same_window)
+        )
         lk.update(
             holder=agent,
             state=f"WORKING_{agent.upper()}",
             since=(lk.get("since") if same_window else iso(t)),
             expires=iso(t + dt.timedelta(minutes=TTL_MIN)),
-            note=(tr("note_reclaim", holder=holder) if reclaim
-                  else tr("note_holds", agent=agent)),
+            note=(return_note if preserve_return_note else
+                  (tr("note_reclaim", holder=holder) if reclaim
+                   else tr("note_holds", agent=agent))),
         )
         capture_agent_model(lk, agent)
         capture_agent_effort(lk, agent)
@@ -11852,6 +12677,211 @@ def cmd_steer_turn(args):
     return 0
 
 
+def _review_return_expected_input(reviewer, lock, relay_text):
+    turn_number = str(lock.get("turn", ""))
+    block = next((match.group(0) for match in TURN_RE.finditer(relay_text)
+                  if match.group(1) == turn_number), "")
+    expected = {
+        "state": "AWAITING_%s" % reviewer.upper(),
+        "holder": reviewer,
+        "turn": turn_number,
+        "turn_sha256": hashlib.sha256(block.encode("utf-8")).hexdigest(),
+    }
+    if not block:
+        sys.exit("refused: review evidence input turn is unavailable.")
+    return expected
+
+
+def _review_return_artifact(run_id, reviewer, lock, relay_text):
+    """Validate one immutable reviewer artifact for a core routing return.
+
+    The artifact remains advisory text, but its exact input binding is strong
+    enough to authorize only the deterministic return edge encoded by the
+    closed handoff: reviewer -> original coordinator. Provider text is never
+    copied into the relay or an error message.
+    """
+    if not RUN_ID_RE.fullmatch(run_id or ""):
+        sys.exit("refused: review-return run id is invalid.")
+    path = os.path.join(HERE, ".m8shift", "runtime", "reviews", run_id + ".json")
+    try:
+        snapshot = _verify_kit_snapshot(
+            path, "review artifact", REVIEW_ARTIFACT_FILE_MAX_BYTES)
+        doc = json.loads(snapshot["raw"].decode("utf-8"))
+    except (VerifyKitError, UnicodeDecodeError, json.JSONDecodeError,
+            RecursionError, ValueError):
+        sys.exit("refused: review artifact is missing, unreadable, unstable, or invalid.")
+
+    required = {"schema", "created_at", "run_id", "agent", "provider",
+                "agent_model", "input", "output"}
+    if not isinstance(doc, dict) or set(doc) != required \
+            or doc.get("schema") != REVIEW_ARTIFACT_SCHEMA \
+            or doc.get("run_id") != run_id or doc.get("agent") != reviewer \
+            or parse_iso(doc.get("created_at")) is None \
+            or not isinstance(doc.get("provider"), str) \
+            or (doc.get("provider") and not re.fullmatch(
+                r"[a-z][a-z0-9-]*", doc["provider"])) \
+            or not isinstance(doc.get("agent_model"), str) \
+            or (doc.get("agent_model") and not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}",
+                doc["agent_model"])):
+        sys.exit("refused: review artifact identity is invalid.")
+    input_snapshot = doc.get("input")
+    output = doc.get("output")
+    if not isinstance(input_snapshot, dict) \
+            or set(input_snapshot) != {"state", "holder", "turn", "turn_sha256"} \
+            or not isinstance(output, dict) \
+            or set(output) != REVIEW_ARTIFACT_OUTPUT_KEYS:
+        sys.exit("refused: review artifact shape is invalid.")
+    # #360: an over-cap review is truncated and delivered rather than destroyed, so
+    # the artifact states what was cut. The set above stays closed -- an unknown key
+    # is still a refusal -- and these three are validated as strictly as the rest:
+    # a truncation that under-reports the original is indistinguishable from none.
+    if not isinstance(output.get("truncated"), bool) \
+            or isinstance(output.get("original_bytes"), bool) \
+            or isinstance(output.get("original_lines"), bool) \
+            or not isinstance(output.get("original_bytes"), int) \
+            or not isinstance(output.get("original_lines"), int) \
+            or output["original_bytes"] < output.get("bytes", 0) \
+            or output["original_lines"] < output.get("lines", 0) \
+            or (output["truncated"] is False
+                and output["original_bytes"] != output.get("bytes")):
+        sys.exit("refused: review artifact truncation record is invalid.")
+
+    if input_snapshot != _review_return_expected_input(reviewer, lock, relay_text):
+        sys.exit("refused: review artifact is stale or bound to another input turn.")
+
+    text = output.get("text")
+    encoded = text.encode("utf-8") if isinstance(text, str) else b""
+    if (not encoded or len(encoded) > REVIEW_ARTIFACT_MAX_BYTES
+            or output.get("bytes") != len(encoded)
+            or output.get("lines") != len(text.splitlines())
+            or not re.fullmatch(r"[0-9a-f]{64}", str(output.get("sha256", "")))
+            or hashlib.sha256(encoded).hexdigest() != output.get("sha256")
+            or REVIEW_DECISION_RE.search(text) is None):
+        sys.exit("refused: review artifact has no valid bounded review decision.")
+    return {"evidence_sha256": output["sha256"], "outcome":
+            REVIEW_DECISION_RE.search(text).group(1).lower(), "kind": "decision"}
+
+
+def _review_return_receipt(run_id, reviewer, lock, relay_text):
+    path = os.path.join(
+        HERE, ".m8shift", "runtime", "review-returns", run_id + ".json")
+    try:
+        snapshot = _verify_kit_snapshot(
+            path, "review return receipt", REVIEW_RETURN_RECEIPT_MAX_BYTES)
+        doc = json.loads(snapshot["raw"].decode("utf-8"))
+    except (VerifyKitError, UnicodeDecodeError, json.JSONDecodeError,
+            RecursionError, ValueError):
+        sys.exit("refused: review return evidence is missing, unreadable, unstable, or invalid.")
+    required = {"schema", "created_at", "run_id", "agent", "provider",
+                "input", "outcome"}
+    if not isinstance(doc, dict) or set(doc) != required \
+            or doc.get("schema") != REVIEW_RETURN_RECEIPT_SCHEMA \
+            or doc.get("run_id") != run_id or doc.get("agent") != reviewer \
+            or parse_iso(doc.get("created_at")) is None \
+            or not isinstance(doc.get("provider"), str) \
+            or (doc.get("provider") and not re.fullmatch(
+                r"[a-z][a-z0-9-]*", doc["provider"])):
+        sys.exit("refused: review return receipt identity is invalid.")
+    input_snapshot = doc.get("input")
+    outcome = doc.get("outcome")
+    if not isinstance(input_snapshot, dict) \
+            or set(input_snapshot) != {"state", "holder", "turn", "turn_sha256"} \
+            or input_snapshot != _review_return_expected_input(
+                reviewer, lock, relay_text) \
+            or not isinstance(outcome, dict) \
+            or set(outcome) != {"status", "evidence_ids", "provider_returncode"}:
+        sys.exit("refused: review return receipt is stale or malformed.")
+    evidence_ids = outcome.get("evidence_ids")
+    allowed = {
+        "headless_permission_refused", "approval_required",
+        "environment_write_probe",
+    }
+    if outcome.get("status") != "review_permission_refused" \
+            or not isinstance(outcome.get("provider_returncode"), int) \
+            or not isinstance(evidence_ids, list) or not evidence_ids \
+            or not all(isinstance(value, str) and value in allowed
+                       for value in evidence_ids) \
+            or len(set(evidence_ids)) != len(evidence_ids) \
+            or evidence_ids != sorted(evidence_ids) \
+            or ("headless_permission_refused" in evidence_ids
+                and doc.get("provider") != "google-antigravity") \
+            or ("approval_required" in evidence_ids
+                and outcome.get("provider_returncode") == 0):
+        sys.exit("refused: review return receipt outcome is invalid.")
+    return {"evidence_sha256": snapshot["sha256"],
+            "outcome": "permission_refused", "kind": "permission_refused"}
+
+
+def _review_return_evidence(run_id, reviewer, lock, relay_text):
+    if not RUN_ID_RE.fullmatch(run_id or ""):
+        sys.exit("refused: review-return run id is invalid.")
+    artifact_path = os.path.join(
+        HERE, ".m8shift", "runtime", "reviews", run_id + ".json")
+    if os.path.lexists(artifact_path):
+        return _review_return_artifact(run_id, reviewer, lock, relay_text)
+    return _review_return_receipt(run_id, reviewer, lock, relay_text)
+
+
+def cmd_review_return(args):
+    """Return an evidence-bound reviewer handoff to its original coordinator."""
+    with file_lock() as guard:
+        relay_text = load_or_die()
+        coordinator = need_agent(args.agent)
+        reviewer = need_agent(args.from_agent)
+        if coordinator == reviewer:
+            sys.exit("refused: review-return requires distinct reviewer and coordinator.")
+        lock = get_lock(relay_text)
+        state = lock.get("state", "")
+        if state != "AWAITING_%s" % reviewer.upper() or lock.get("holder") != reviewer:
+            sys.exit("refused: review-return requires the named idle AWAITING reviewer.")
+
+        turn_number = str(lock.get("turn", ""))
+        turn_match = next((match for match in TURN_RE.finditer(relay_text)
+                           if match.group(1) == turn_number), None)
+        if turn_match is None:
+            sys.exit("refused: current closed review handoff is unavailable.")
+        fields = {}
+        for line in turn_match.group(3).splitlines():
+            match = re.match(r"- ([a-z][a-z0-9_]*):\s*(.*)$", line)
+            if not match:
+                break
+            fields[match.group(1)] = match.group(2).rstrip()
+        if turn_match.group(2) != coordinator or fields.get("from") != coordinator \
+                or fields.get("to") != reviewer or fields.get("handoff") != reviewer:
+            sys.exit("refused: review-return target is not the original coordinator.")
+
+        evidence = _review_return_evidence(args.run, reviewer, lock, relay_text)
+        timestamp = now()
+        before = dict(lock)
+        lock.update(
+            holder=coordinator,
+            state="AWAITING_%s" % coordinator.upper(),
+            since=iso(timestamp),
+            expires="-",
+            note=("review %s returned by validated evidence from %s to %s"
+                  % (args.run, reviewer, coordinator)),
+        )
+        guard.require_owned()
+        write(set_lock(relay_text, lock))
+        guard.require_owned()
+        append_state_transition(before, lock, coordinator, "review-return", timestamp)
+        if lock.get("session"):
+            guard.require_owned()
+            append_session_event_observational(
+                "review_return", lock["session"], timestamp=timestamp,
+                by=coordinator, reviewer=reviewer, run_id=args.run,
+                outcome=evidence["outcome"], evidence_kind=evidence["kind"],
+                evidence_sha256=evidence["evidence_sha256"],
+                turn=turn_number,
+            )
+    next_action = ("claim before consume" if evidence["kind"] == "decision"
+                   else "claim before lane repair")
+    print("✓ review %s returned from %s to %s; coordinator must %s."
+          % (args.run, reviewer, coordinator, next_action))
+    return 0
+
+
 def cmd_append(args):
     # Field/body reading stays OUTSIDE the critical section (stdin may block); agent
     # validation happens UNDER the lock, against the roster load_or_die reads.
@@ -12074,6 +13104,50 @@ def cmd_work_tag(args):
                   % exc.__class__.__name__, file=sys.stderr)
             return 2
     print("✓ work window %s tagged %s." % (window, item))
+    return 0
+
+
+def cmd_unclaim(args):
+    """#320 — undo one's own claim, restoring the awaiting state it replaced.
+
+    `release` hands the pen to another agent: measured, releasing a turn addressed
+    to claude leaves the relay AWAITING_CODEX, so the turn changes recipient. That
+    is a handoff, not an undo, and routing a baton to an agent outside the current
+    scope is one of the harms #320 names.
+
+    A reservation needs the opposite: put it back exactly as it was. This restores
+    AWAITING_<agent> for the SAME agent, at the same turn, changing no addressing.
+
+    Refused unless the caller is the holder and nothing was authored under the
+    hold: once a turn has been appended the claim was used, and there is nothing
+    to undo."""
+    reason = clean_field("--reason", getattr(args, "reason", ""))
+    if not reason:
+        sys.exit("refused: unclaim records why a reservation was abandoned; --reason is required.")
+    with file_lock() as guard:
+        text = load_or_die()
+        agent = need_agent(args.agent)
+        lk = get_lock(text)
+        holder = lk.get("holder", "none")
+        _guard_integrating(args, lk, "unclaim")
+        if lk.get("state") == "PAUSED":
+            sys.exit("refused: session is PAUSED; unclaim changes nothing while paused.")
+        if lk.get("state") != f"WORKING_{agent.upper()}" or holder != agent:
+            sys.exit(f"refused: {agent} does not hold a working lock "
+                     f"(state={lk.get('state', '?')}, holder={holder}); "
+                     "unclaim only undoes your own untouched claim.")
+        t = now()
+        before = dict(lk)
+        lk.update(
+            state=f"AWAITING_{agent.upper()}", holder=agent,
+            since=iso(t), expires="-",
+            note=f"claim undone by {agent}: {reason}",
+        )
+        guard.require_owned()
+        write(set_lock(text, lk))
+        guard.require_owned()
+        append_state_transition(before, lk, agent, "unclaim", t)
+    print(f"✓ claim undone by {agent}; the turn is awaiting {agent} again, unchanged.")
     return 0
 
 
@@ -12371,6 +13445,13 @@ def main():
                          "artifacts, `companions` refreshes companions ALREADY installed in the "
                          "target; neither silently adds absent files)"
                          % UPDATE_DEFAULT_COMPONENTS)
+    up.add_argument("--adopt-runner", choices=tuple(sorted(RUNNER_REGISTRY)), default="",
+                    help="adopt exactly one existing legacy runner into kit.json from the "
+                         "verified source release; bounded to this runner and never runs init "
+                         "or refreshes other update components")
+    up.add_argument("--force-adopt-runner", action="store_true",
+                    help="allow --adopt-runner to replace target bytes that do not match the "
+                         "target checksum manifest; saves unique runner and kit manifest backups first")
     up.add_argument("--companions", default="",
                     help="explicit companion names to refresh/install from the source "
                          "(implies the companions component; the only way an absent companion "
@@ -12507,6 +13588,16 @@ def main():
                          "workspace.dirty_worktree finding when the project checkout has "
                          "uncommitted changes (read-only; no network)")
     dr.set_defaults(fn=cmd_doctor)
+
+    vk = sub.add_parser(
+        "verify-kit",
+        help="offline read-only verification of the locally declared kit subset")
+    vk.add_argument(
+        "--source", required=True,
+        help="absolute path to a separately obtained source release with checksums.sha256")
+    vk.add_argument("--json", action="store_true",
+                    help="emit m8shift.verify-kit.report.v1 JSON")
+    vk.set_defaults(fn=cmd_verify_kit)
 
     co = sub.add_parser("contract", help="read-only Stage-4 contract tools")
     co_sub = co.add_subparsers(dest="verb", required=True)
@@ -12734,6 +13825,16 @@ def main():
     sr.add_argument("--reason", required=True, help="why the idle holder is being redirected")
     sr.set_defaults(fn=cmd_steer_turn)
 
+    rr = sub.add_parser(
+        "review-return",
+        help="return validated review evidence to its original coordinator")
+    rr.add_argument("agent", help="original coordinator receiving the turn")
+    rr.add_argument("--from", dest="from_agent", required=True,
+                    help="read-only reviewer named by the current AWAITING state")
+    rr.add_argument("--run", required=True,
+                    help="reviewer run id whose fresh evidence authorizes the handback")
+    rr.set_defaults(fn=cmd_review_return)
+
     rm = sub.add_parser("remember",
                         help="append one durable note to M8SHIFT.memory.md (no pen needed)")
     rm.add_argument("agent", help="roster agent recording the note")
@@ -12785,6 +13886,15 @@ def main():
                          help="also list tasks whose last event is done/drop, not only open ones")
     tk_show = tk_sub.add_parser("show", help="event history of one task id")
     tk_show.add_argument("id", type=int, help="task id whose event history is printed")
+
+    uc = sub.add_parser(
+        "unclaim",
+        help="undo your own untouched claim, restoring the awaiting state it replaced "
+             "(same agent, same turn, no handoff)")
+    uc.add_argument("agent", help="roster agent undoing its own claim")
+    uc.add_argument("--reason", default="",
+                    help="required; why the reservation was abandoned, recorded in the audit trail")
+    uc.set_defaults(fn=cmd_unclaim)
 
     r = sub.add_parser("release",
                        help="hand off the pen without writing a turn body (does not increment the turn)")

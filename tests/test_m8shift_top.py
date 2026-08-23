@@ -1184,6 +1184,167 @@ class M8ShiftTopFallbackTests(unittest.TestCase):
         self.assertNotIn("\x1b[?1049", proc.stdout + proc.stderr)
 
 
+class TopIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.top = load_top()
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = self.temp.name
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_top(self, version="4.1.0"):
+        path = os.path.join(self.root, "m8shift-top.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('#!/usr/bin/env python3\nVERSION = "%s"\n' % version)
+        return path
+
+    def test_identity_equal_newer_and_older(self):
+        for disk, relation, restart in (
+                ("4.1.0", "equal", False),
+                ("4.1.1", "newer_on_disk", True),
+                ("4.0.9", "older_on_disk", True)):
+            with self.subTest(disk=disk):
+                self.write_top(disk)
+                result = self.top.inspect_top_identity(
+                    self.root, loaded_version="4.1.0")
+                self.assertEqual(result["relation"], relation)
+                self.assertIs(result["restart_required"], restart)
+                self.assertEqual(result["status"], "equal" if not restart else "skew")
+
+    def test_identity_missing_unreadable_symlink_and_ambiguous_root(self):
+        self.assertEqual(
+            self.top.inspect_top_identity(self.root)["status"], "missing")
+        path = self.write_top()
+        with mock.patch.object(self.top.os, "open", side_effect=PermissionError):
+            self.assertEqual(
+                self.top.inspect_top_identity(self.root)["status"], "unreadable")
+        os.unlink(path)
+        os.symlink(__file__, path)
+        self.assertEqual(
+            self.top.inspect_top_identity(self.root)["status"], "symlink_refused")
+        self.assertEqual(
+            self.top.inspect_top_identity(
+                self.root, root_explicit=False)["status"], "ambiguous_root")
+
+    def test_identity_detects_path_replacement_during_read(self):
+        path = self.write_top()
+        real_read = self.top.os.read
+        replaced = [False]
+
+        def replacing_read(fd, size):
+            chunk = real_read(fd, size)
+            if not replaced[0]:
+                replacement = path + ".new"
+                with open(replacement, "w", encoding="utf-8") as fh:
+                    fh.write('VERSION = "4.1.1"\n')
+                os.replace(replacement, path)
+                replaced[0] = True
+            return chunk
+
+        with mock.patch.object(self.top.os, "read", side_effect=replacing_read):
+            result = self.top.inspect_top_identity(self.root)
+        self.assertEqual(result["status"], "changed_during_read")
+
+    def test_monitor_never_blocks_render_thread_and_reports_fresh_result(self):
+        entered = __import__("threading").Event()
+        release = __import__("threading").Event()
+
+        def blocked(_root, root_explicit=True):
+            entered.set()
+            release.wait(2)
+            return self.top._top_identity_result(
+                "equal", self.top.VERSION, datetime.now(timezone.utc),
+                on_disk=self.top.VERSION, relation="equal")
+
+        monitor = self.top.TopIdentityMonitor(inspector=blocked)
+        started = time.monotonic()
+        first = monitor.snapshot(self.root, interval=1)
+        self.assertLess(time.monotonic() - started, .2)
+        self.assertEqual(first["freshness"], "checking")
+        self.assertTrue(entered.wait(1))
+        again = monitor.snapshot(self.root, interval=1)
+        self.assertEqual(again["freshness"], "checking")
+        release.set()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            current = monitor.snapshot(self.root, interval=1)
+            if current["status"] == "equal":
+                break
+            time.sleep(.01)
+        self.assertEqual(current["status"], "equal")
+        self.assertEqual(current["freshness"], "fresh")
+
+    def test_process_marker_contract_is_exact_and_hidden(self):
+        digest = self.top._top_root_digest(self.root)
+        self.assertTrue(self.top._validate_top_process_markers(
+            self.top.VERSION, digest, self.root))
+        self.assertFalse(self.top._validate_top_process_markers(
+            None, None, self.root))
+        with self.assertRaises(RuntimeError):
+            self.top._validate_top_process_markers(
+                self.top.VERSION, None, self.root)
+        with self.assertRaises(RuntimeError):
+            self.top._validate_top_process_markers(
+                "0.0.0", digest, self.root)
+        argv = self.top._top_process_exec_argv(
+            __file__, ["--interval", "2"], self.root)
+        self.assertEqual(argv[2], self.top.TOP_PROCESS_VERSION_FLAG + "=" + self.top.VERSION)
+        self.assertEqual(argv[3], self.top.TOP_PROCESS_ROOT_FLAG + "=" + digest)
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "m8shift-top.py"), "--help"],
+            text=True, capture_output=True)
+        self.assertNotIn("top-process-loaded", proc.stdout)
+        self.assertNotIn("top-process-root", proc.stdout)
+
+    def test_real_posix_tty_execs_once_before_entering_raw_mode(self):
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return -1
+
+        stdin = TTY()
+        stdout = TTY()
+        with mock.patch.object(self.top.sys, "argv", [
+                "m8shift-top.py", "--root", self.root]), \
+                mock.patch.object(self.top.sys, "stdin", stdin), \
+                mock.patch.object(self.top.sys, "stdout", stdout), \
+                mock.patch.dict(os.environ, {"TERM": "xterm"}, clear=True), \
+                mock.patch.object(self.top.os, "execve",
+                                  side_effect=RuntimeError("exec seam")) as execute, \
+                mock.patch.object(self.top, "enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "exec seam"):
+                self.top.main()
+        enter.assert_not_called()
+        argv = execute.call_args.args[1]
+        self.assertIn(self.top.TOP_PROCESS_VERSION_FLAG + "=" + self.top.VERSION,
+                      argv)
+        self.assertIn(self.top.TOP_PROCESS_ROOT_FLAG + "=" +
+                      self.top._top_root_digest(self.root), argv)
+
+    def test_render_separates_core_and_top_and_reserves_warning_geometry(self):
+        snap = fixture()
+        snap["top_identity"] = {
+            "status": "skew", "process_loaded": "4.1.0",
+            "on_disk": "4.1.1", "restart_required": True,
+            "freshness": "fresh", "age_seconds": .25,
+        }
+        for width in (80, 120):
+            with self.subTest(width=width), \
+                    mock.patch.dict(os.environ, {"NO_COLOR": "1"}, clear=True):
+                output = self.top.render(snap, width, self.NOW if hasattr(self, "NOW") else
+                                         datetime(2026, 7, 13, tzinfo=timezone.utc),
+                                         height=30)
+            self.assertIn("CORE v0.0.0-fixture", output)
+            self.assertIn("TOP 4.1.0", output)
+            self.assertIn("TOP RESTART REQUIRED", output)
+            self.assertIn("on disk 4.1.1", output)
+            self.assertEqual(len(output.splitlines()), 30)
+            self.assertTrue(all(len(line) == width for line in output.splitlines()))
+
+
 class IncrementalStatusReaderTests(unittest.TestCase):
     NOW = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
 

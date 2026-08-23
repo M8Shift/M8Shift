@@ -45,9 +45,10 @@ larger than 4096 bytes, with this additive schema:
   "capabilities": [
     "bounded-tty-tee-v1",
     "environment-write-probe-v1",
+    "review-artifact-delivery-v1",
     "runner-exit-v2"
   ],
-  "options": ["--agent-model", "--once", "--resume-working"]
+  "options": ["--agent-model", "--once", "--resume-working", "--review-delivery"]
 }
 ```
 
@@ -79,6 +80,102 @@ such failures remain diagnosable from signature IDs without persisting raw text.
 classification is terminal for the invocation and points to the placeholder-only
 permission guide scaffolded by headless/full init at
 `.m8shift/PROVIDER-PERMISSIONS.md`.
+
+### v4.1.1 reviewer-delivery amendment (#336)
+
+A reviewer whose provider is deliberately `plan`/read-only cannot honestly
+claim, append, or close the relay.  `--expected-transition none` is therefore
+legacy compatibility only: a clean provider exit is `unverified_read_only`, not
+success.  A profile must explicitly declare `"review_delivery":"artifact"` to
+use the alternative contract.
+
+For that mode, a one-shot runner succeeds only after it writes an immutable,
+private `.m8shift/runtime/reviews/<run-id>.json` artifact.  The artifact is
+non-empty, at most 64 KiB, contains the final response, its SHA-256, run id,
+agent/model/provider, and the entry LOCK state/holder/turn plus a SHA-256 of the
+exact closed input turn.  Normal provider output remains unpersisted.
+
+`review_delivered_pending` means *artifact delivery only*: it is never a relay
+advance.  The listener retains a fresh pending artifact for the same reviewer
+and input turn without launching another provider run.  Empty output,
+permission refusal, provider failure, invalid artifact, changed input turn, and
+attempted relay mutation have distinct statuses.  The coordinator must claim
+and re-read the incoming turn, then run `review-delivery status <run>` and
+`review-delivery consume <run> --by <holder>`; consume refuses unless the holder
+has the live `WORKING_<holder>` pen and the closed input turn is still identical.
+
+### v4.1.1 reviewer-return recovery amendment (#352)
+
+A pending reviewer artifact cannot require the reviewer to impersonate a writer in
+order to return the pen. The core therefore exposes one narrow recovery edge:
+
+```bash
+./m8shift.py review-return <coordinator> --from <reviewer> --run <run-id>
+./m8shift.py claim <coordinator>
+python3 m8shift-runtime.py review-delivery consume <run-id> --by <coordinator>
+```
+
+`review-return` is accepted only from the idle `AWAITING_<reviewer>` state. It
+validates stable regular non-symlink evidence, the exact schema/run/reviewer,
+the complete latest closed input-turn digest, and that the named coordinator
+authored the closed handoff. A decision artifact additionally requires exact
+output bounds/digest and an explicit `APPROVE`, `REVISE`, or `REJECT`. A
+permission-refusal outcome instead requires an immutable bounded
+`.m8shift/runtime/review-returns/<run-id>.json` receipt carrying only the input
+fingerprint, provider, return code, and a closed evidence id; it contains no provider
+text and is not a review artifact. The core then performs only
+`AWAITING_<reviewer> -> AWAITING_<coordinator>`, records a redacted
+`review_return` event, and grants no pen. Wrong coordinators and malformed,
+mutated, stale, oversized, empty, decisionless, or uncorroborated evidence fails
+closed without a LOCK change. After a refusal return the coordinator claims and
+repairs/relaunches the lane; there is no review response to consume.
+
+The runner also treats AGY/Jetski's exact headless auto-denial grammar, with one
+bounded safe permission name, as `review_permission_refused`, even when the provider
+exits zero. No review artifact is written; the redacted routing receipt is written
+instead, and a refusal can never be classified as `review_delivered_pending`. Broad
+permission bypass remains outside this contract. If the receipt cannot be written,
+the distinct `review_return_receipt_invalid` failure leaves manual recovery visible.
+
+### v4.1.1 reviewer-return pickup provenance amendment (#354)
+
+A penless `review-return` does not create a synthetic reviewer turn. Consequently,
+`peek` and `next` must not recover context by selecting an older ordinary handoff to
+the coordinator. Until that coordinator authors the next turn, pickup renders only
+the current redacted return provenance: coordinator, reviewer, run id, input turn,
+outcome, evidence kind, and the bounded consume-or-repair action.
+
+The core preserves the generated return note through the coordinator's claim and
+intersects it with one exact current-session `review_return` event. Missing,
+malformed, stale, cross-session, wrong-turn, wrong-coordinator, or inconsistent
+evidence fails closed without provider text or raw paths. For deployment continuity,
+a return claimed by the pre-amendment core after it overwrote the note is accepted
+only when the current LOCK and the final session-event tail are exactly
+`review_return -> coordinator claim`, followed at most by same-window work tags.
+Ordinary turn-backed `peek` output remains byte-compatible.
+
+### v4.1.1 external-instance root amendment (#327)
+
+An external provider workspace is not a second relay.  A listener now names two
+different canonical roots: `relay_root` is the sole authority for the profile,
+`M8SHIFT.md`, core, runner, plans, PID/state/log sidecars, and every M8Shift
+write; `workspace_root` is only the provider child cwd.  Legacy profile `cwd`
+remains a compatible spelling for `workspace_root`.
+
+The listener never discovers a relay from `workspace_root`; it injects the
+already selected relay root as `M8SHIFT_ROOT` into the provider child.  Profile,
+protocol, runtime, core, and runner paths must still resolve inside the relay
+root, including after symlink resolution.  Both roots and their provenance are
+visible in dry-run plans and `listener status --json`.  A detached or service
+payload carries the canonical workspace selected by its parent and refuses a
+profile change that would alter that root before it creates child sidecars or
+launches a provider.
+
+For a read-only reviewer lane, lifecycle evidence is not an empty provider exit:
+it is `ALIVE` with `coverage=invoker` while its captured, attributed review
+artifact remains fresh for the same incoming turn.  The reviewer never claims
+or appends, and its provider prompt makes that boundary explicit; the
+coordinator alone consumes the artifact under its live pen.
 
 ## Problem
 
@@ -175,6 +272,8 @@ Definitions:
 
 | Post state | Turn relation / authorship | Runner status | Retry counter |
 |------------|----------------------------|---------------|---------------|
+| unchanged entry LOCK + valid bounded reviewer artifact | `review_delivery=artifact` | `review_delivered_pending` | reset, but do not advance relay |
+| reviewer mode + empty/invalid artifact, permission/provider error, stale input, or relay mutation | any | `review_*` failure | increment / terminal as applicable |
 | `DONE` | any | `completed` | reset |
 | any valid state | `authored_by_me` | `advanced` | reset |
 | invalid/missing LOCK after bounded OSError retry | any | `invalid_relay` | increment |
@@ -190,7 +289,8 @@ Definitions:
 | `WORKING_<peer>` | `same` or advanced not authored by me | `external_transition` | unchanged |
 | other valid state | any | `external_transition` | unchanged |
 
-`non_completion`, `stuck_working`, and `invalid_relay` are failures for the run even
+`non_completion`, `stuck_working`, `invalid_relay`, `unverified_read_only`, and
+the `review_*` delivery failures are failures for the run even
 when the provider process exits with rc 0. `suspended` is neutral: it must not burn
 retries, because a usage cooldown or operator pause is not a provider failure.
 
@@ -202,8 +302,9 @@ briefly (for example up to 3 attempts over ~1 second) before classifying.
 
 For a one-shot run:
 
-- `completed` / `advanced` => exit 0
-- `non_completion` / `stuck_working` / `invalid_relay` => non-zero
+- `completed` / `advanced` / `review_delivered_pending` => exit 0
+- `non_completion` / `stuck_working` / `invalid_relay` / `unverified_read_only` /
+  failed `review_*` delivery => non-zero
 - `external_transition` => dedicated non-zero code, not counted as provider failure by
   a supervising listener
 - `suspended` => dedicated neutral code
@@ -265,6 +366,16 @@ Minimum tests:
 9. `PAUSED` during run => `suspended`, no retry burn;
 10. active `integrating:` sentinel prevents same-turn `WORKING_<agent>` from being
     classified as ordinary stuck work.
+11. read-only reviewer: non-empty artifact is accepted once; empty output,
+    permission/provider error, stale input and relay mutation are refused; the
+    listener does not relaunch a fresh pending artifact for the same input turn.
+12. artifact-only return: wrong coordinator, missing decision, mutated digest, stale
+    input, or malformed refusal receipt refuses without a LOCK change; valid decision
+    or refusal evidence routes to the original coordinator without a reviewer claim,
+    force event, or provider text in the relay.
+13. AGY/Jetski headless auto-denials with a bounded safe permission name are
+    permission failures even with provider exit zero; they create no reviewer
+    artifact, only a redacted immutable routing receipt.
 
 ## Phase 2 — Listener lifecycle companion (#21)
 

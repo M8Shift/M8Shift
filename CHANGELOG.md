@@ -1,5 +1,356 @@
 # Changelog
 
+## v4.2.0 — 2026-08-23
+
+- **Loaded-versus-on-disk TOP identity (#334 / RFC 069 + RFC 081).** An
+  interactive POSIX dashboard stamps its actually loaded version and relay-root
+  digest into one pre-raw-mode re-exec, compares that version with the canonical
+  non-symlink `m8shift-top.py` through a bounded background inspector, and renders
+  distinct `CORE`/`TOP` identities plus truncation-resistant `RESTART REQUIRED`
+  or non-green freshness diagnostics. Fleet-upgrade terminal checkpoints now
+  persist read-only `top_on_disk` and `top_process_loaded` evidence, retaining
+  every observed loaded version and reporting legacy processes as unobservable
+  instead of inventing a version. A stale loaded dashboard remains an
+  observational warning and never makes an otherwise verified upgrade red. No
+  active TUI is stopped, signalled, detached, or reparented. Protocol impact: no
+  — relay states, commands, routing, authority and operator obligations are
+  unchanged.
+
+- **Doctor accepts core-generated reviewer-return events (#356).** Session-ledger
+  validation now recognizes the exact `review_return` shape emitted by the core,
+  including normalized distinct identities, bounded run/turn fields, timestamp,
+  version, evidence digest, and the closed outcome/evidence-kind pairing. Unknown,
+  extra-field, malformed, or inconsistent variants remain non-green. Protocol impact:
+  no — relay states, commands, event format, routing invariants, and operator
+  obligations are unchanged; the diagnostic now enforces the existing #352/#354
+  contract instead of rejecting its valid output.
+
+- **Current reviewer-return pickup provenance (#354 / RFC 047).** `peek` and
+  `next` now recognize a penless reviewer return from the authoritative LOCK plus
+  its exact current-session event and render only redacted coordinator, reviewer,
+  run, input-turn, outcome, evidence-kind, and next-action fields. The generated
+  return note survives coordinator claim; missing, malformed, stale, cross-session,
+  or wrong-turn evidence fails closed instead of exposing an unrelated historical
+  handoff. A constrained event-tail fallback supports returns claimed by the prior
+  core, while ordinary turn-backed handoffs remain byte-compatible. Protocol impact: yes
+  — pickup semantics are documented in the embedded reference, RFC 047, command
+  reference, runtime guide, and specification.
+
+- **Fail-closed reviewer return (#352 / RFC 047).** A validated artifact-only
+  review can now return `AWAITING_<reviewer>` to the original coordinator through
+  core `review-return`, without reviewer impersonation, force recovery, a synthetic
+  turn, or provider text in the relay. Exact coordinator, run/reviewer identity,
+  input/output digests, bounds, and an explicit `APPROVE`, `REVISE`, or `REJECT`
+  are mandatory; malformed, mutated, stale, or decisionless evidence leaves the
+  LOCK unchanged. AGY/Jetski headless auto-denials with a bounded safe permission
+  name are now failures even when the provider exits zero, so they never become
+  pending reviews. They produce no review artifact, only an immutable redacted
+  return receipt that lets the original coordinator recover routing through the
+  same command; an unwritable receipt is a distinct failure. Protocol impact: yes
+  — one new core command and one constrained `AWAITING` transition, documented in
+  the embedded protocol/reference.
+
+- **Installed kit subset verification (#333 / RFC 081).** The portable core now
+  provides offline `verify-kit --source DIR` human and
+  `m8shift.verify-kit.report.v1` JSON output. It verifies the complete source
+  checksum manifest before comparing only the core, companions, and runners
+  declared by the adopter kit. Stable component ids distinguish missing files,
+  symlinks, byte drift, version skew, manifest-hash skew, and source mismatch;
+  malformed, incomplete, unsupported, unstable, traversing, oversized, or
+  checksum-bad evidence fails closed with no green verdict. Reports expose root
+  digests instead of raw paths and the command never accesses the network or
+  mutates relay/project state. Protocol impact: yes for the canonical
+  command/reference surface and language packs; relay semantics are unchanged.
+
+- **Doctor drift baselines (#332 / RFC 081).** The runtime can capture one
+  bounded, immutable, root/session/turn/version-bound doctor baseline and
+  compare current findings as pre-existing, resolved, or introduced using a
+  wording-independent multiset identity. New warning/error counts are non-green
+  unless an exact fresh baseline/root/actor/decision/key/count exception record
+  covers them; new info remains visible and green. Malformed, stale, cross-root,
+  traversing, symlinked/unstable, or incompatible evidence fails closed. Both
+  human and portable JSON reports are available, and the raw #331 doctor
+  artifacts can feed the explicit pre-mutation capture/post-mutation comparison
+  flow. Protocol impact: no.
+
+- **Re-entrant fleet kit upgrades (#331 / RFC 081).** The runtime now executes
+  one explicit `m8shift.fleet-upgrade.spec.v1` as an all-member-preflighted,
+  ordered fail-stop transaction with exact source verification, immutable raw
+  doctor baselines, kit-only per-instance rollback, crash-consistent re-entry,
+  portable JSON/Markdown reports, and only `updated`/`already_current` green.
+  It stops and restores exactly listeners proven ALIVE (including notify-only),
+  never starts a previously dead lane, and treats a failed restore as the
+  non-green `updated_but_listener_down`. When an approved kit changes the runner,
+  the transaction explicitly migrates the #329 plan's runner identity with
+  old/new plan lineage; strict `--from-plan` replay remains unchanged.
+
+- **Re-entrant fleet kit-upgrade transaction design (#330 / RFC 081).** The
+  implementation gate for #331 now fixes one policy: all members preflight
+  first, then update in declared order and fail-stop on the first ambiguity,
+  retaining earlier verified members and leaving later roots untouched. Only
+  the current member's kit bytes may roll back; relay journals and ledgers are
+  never restored. The design binds a named rostered coordinator, #301 PAUSED or
+  DONE windows, exact ALIVE listener stop/restore sets (including notify-only),
+  crash-consistent checkpoints, bounded reports, and explicit non-green partial
+  outcomes.
+
+- **Validated listener-plan restore (#329).** Every normal listener start now
+  persists one restart contract with versioned SHA-256 identities for the
+  profile source and runner, bounded backend probe facts, cadence, retry policy,
+  launch mode, and root provenance. `listener stop` preserves that plan, and
+  `listener start --from-plan` restores it without configuration reconstruction.
+  Replay refuses legacy unattested plans, changed/missing/symlinked inputs,
+  backend or root drift, and an incompatible runner handshake before any
+  PID/state/log/service/provider mutation. Detached and service payloads no
+  longer overwrite the parent operator plan with their internal foreground
+  command.
+
+- **Verifiable read-only reviewer delivery (#336 / RFC 047).** A listener
+  profile may now declare `review_delivery: "artifact"` for a deliberately
+  read-only reviewer whose provider can never claim, append, or close the
+  relay. The runner previously defined success only as a relay transition, so
+  a legitimate plan-mode review ended `non_completion` and halted the lane
+  after retries — while blessing a bare exit 0 would have converted empty
+  output, permission denials, and provider failures into success. A
+  review-only run succeeds only when the runner captures a non-empty, bounded
+  (64 KiB) immutable artifact under `.m8shift/runtime/reviews/<run-id>.json`
+  carrying the response digest, run id, agent/model/provider, and the entry
+  LOCK state/holder plus a digest of the exact closed input turn; it then
+  classifies `review_delivered_pending`, resets the retry counter, keeps the
+  lane resident, and idempotently suppresses reruns for the same reviewer and
+  input turn. Empty output, permission refusal, provider failure, invalid
+  artifact, stale input, and attempted relay mutation stay distinct failures
+  even at exit 0; undeclared profiles keep legacy semantics, where a clean
+  read-only exit is `unverified_read_only`, not success. The coordinator
+  consumes the artifact through `review-delivery status`/`consume` only under
+  its live `WORKING_<holder>` pen and only while the closed input turn is
+  byte-identical. Protocol impact: no — the reviewer gains no relay-write
+  authority; delivery never mutates M8SHIFT.md, claims the pen, or creates an
+  attributed turn.
+
+- **Restored listener lock-snapshot test contract (#339).** Three full-suite
+  listener tests errored on the main baseline because their fixtures still
+  mocked `read_relay_lock_fields(include_text=True)` as a mapping while the
+  live contract returns a `(lock, relay_text)` tuple — one path bound a string
+  as the lock, the other mis-unpacked three mapping keys as two values. The
+  fixtures now model the documented tuple return, and one focused regression
+  pins the snapshot contract at the listener boundary so a mapping supplied
+  there fails again. This was CI-blocking test-contract drift, not a runtime
+  defect: listener production behaviour and the read-only lock API are
+  byte-identical, and the complete discovery suite is green on the repaired
+  baseline. Protocol impact: no — tests only; no relay state, provider
+  launch, or policy semantics change.
+
+- **Distinct relay and provider workspace roots (#327 / RFC 047 + RFC 073).**
+  v4.1.0 refused at dry-run any listener profile whose provider cwd was a
+  separately managed project checkout, blocking the externalized topology
+  where the kit and immutable relay state intentionally live outside the
+  workspace a provider edits. A validated profile now carries canonical
+  `workspace_root` (legacy `cwd` remains a compatible spelling) solely as the
+  provider child working directory, while `relay_root` stays the exclusive
+  authority for M8SHIFT.md, core, runtime, runner, profiles, plans, every
+  PID/state/log sidecar, and all M8Shift writes. The runtime never discovers
+  a relay from the workspace — it injects the already selected root as
+  `M8SHIFT_ROOT` — and profile, protocol, runtime, core, and runner paths
+  must still resolve inside the relay root after symlink resolution. Dry-run
+  plans, persisted listener plans, and `listener status --json` expose both
+  roots with their provenance; conflicting root selection, symlink escape,
+  unavailable paths, and a plan-to-launch workspace change in detached or
+  service payloads fail before any sidecar or provider mutation, and existing
+  one-root profiles are unchanged. The externalized reviewer lane reaches
+  ALIVE with `coverage=invoker` on its fresh captured artifact rather than on
+  an empty provider exit. Protocol impact: no — no new routing authority;
+  relay states, commands, and the #259 split-brain protection are unchanged.
+
+- **Bounded legacy runner adoption (#328 / RFC 046 + RFC 048).** A
+  pre-manifest headless runner could exist on disk yet be absent from
+  `kit.json`; update rightly refused a blind overwrite, but the only recovery
+  was `init` with force-companions, whose installation semantics are far wider
+  than the intended repair. `update --adopt-runner headless-runner|watch-status`
+  now adopts exactly one known runner from a verified source release: it
+  requires a regular, non-symlinked, root-confined source and target, verifies
+  the source `checksums.sha256` entry and version (downgrade refusal
+  retained), and accepts the target as pristine only when its bytes match the
+  target release's own manifest entry — anything else is
+  `manual_review_required` until the explicit `--force-adopt-runner` override,
+  which first saves unique copies of the prior runner and manifest under
+  `.m8shift/backups/runner-adoption/`. Adoption atomically merges the single
+  `runners[]` entry with name/path/version/digest/source provenance, records
+  the backup evidence in the bounded update audit row, rejects combination
+  with `--components`, `--companions`, or `--force-generated`, and never
+  touches core, protocol, pack, anchors, relay journal, or another runner;
+  dry-run reports the same verification without writing. Hermetic tests cover
+  untracked, modified, symlinked, missing-source, and successful adoption.
+  Protocol impact: yes — the embedded command/protocol reference documents
+  the adoption syntax; relay semantics are unchanged.
+
+- **Protocol synchronization as a documentation DoD gate (#344).** The
+  delivery workflow asked for regenerated derived docs on protocol change,
+  but the documentation Definition of Done never made the protocol-impact
+  decision and its synchronization proof explicit, so a documentation-only
+  change could pass review without recording whether the embedded English
+  protocol sources were assessed, regenerated, and checked. CONTRIBUTING.md
+  now carries one explicit documentation DoD naming the protocol-impact
+  assessment, `PROTOCOL["en"]`/`PROTOCOL_REFERENCE["en"]`,
+  `scripts/gen_docs.py`, and `test_protocol_docs_in_sync`, and requires
+  stating when the protocol is not affected, so omission becomes an explicit
+  disposition rather than an assumption. `docs/en/agents-guide.md` mirrors
+  the same mandatory gate without creating a second conflicting rule, and a
+  focused textual regression protects the wording from silent removal.
+  Protocol impact: no — a delivery-process gate; the embedded protocol
+  itself is unchanged.
+
+- **Consult child disposition on empty output (#343).** A read-only AGY
+  consultation compiled with a valid sandbox/cwd/prompt attestation, then
+  ended `invalid_output` with `response_bytes=0` — and the ledger could not
+  distinguish a silent successful CLI from a non-zero provider failure, a
+  sandbox refusal written to stderr, or a timeout without weakening
+  redaction. Every terminal `consults.jsonl` row now retains a bounded,
+  non-secret child disposition from a closed set (`not_started`, `timed_out`,
+  or zero/non-zero exit with empty/non-empty stdout) plus the child return
+  code and timeout/truncation flags; doctor validates the new evidence and
+  never replays or infers a verdict from empty output. Raw stderr, prompts,
+  and provider response bodies stay out of the ledger; empty or
+  whitespace-only reviewer output remains `invalid_output` — explicitly not a
+  verdict — and hermetic fake providers witness that the four empty/valid
+  outcomes are distinguishable. Listener HALTED/coverage semantics, consult
+  sandbox attestation, and the read-only consultation authority model are
+  unchanged. Protocol impact: no — observability only; relay states,
+  commands, and routing are untouched.
+
+- **Antigravity quota windows in TOP (#335 / RFC 040).** An opt-in usage adapter
+  reads the Antigravity language server's quota summary over its local
+  Connect-RPC endpoint and surfaces both rate windows in the dashboard. A window
+  the endpoint drops is recorded as a bounded `dropped` note with its reason
+  (`invalid_type`, `out_of_bounds`, `invalid_timestamp`, `expired`) instead of
+  silently vanishing when a sibling survives (#363); an unknown window is never
+  given an invented label. Protocol impact: no — display and admission evidence
+  only.
+
+- **Usage adapters run in a constructed environment (#340 / RFC 067).** An
+  adapter child no longer inherits the caller's environment: the runtime builds
+  it from a base set plus the profile's explicit `env_allowlist`, and a malformed
+  allowlist refuses the run instead of degrading. Credentials or identity present
+  in the invoking shell can no longer leak into a provider adapter that never
+  declared them. Protocol impact: no.
+
+- **A denied headless permission is named, and terminal statuses stop the lane
+  (#359, #365).** A provider refusal that headless mode cannot prompt for used to
+  be reported as `non_completion` and retried forever; it is now the bounded
+  `headless_permission_refused` status, and every member of
+  `TERMINAL_FAILURE_STATUSES` is exempt from the retry counter and stops the
+  lane, with one observing witness per member so a future member cannot join the
+  tuple untested. Protocol impact: no — run classification only.
+
+- **An oversized reviewer artifact is truncated and delivered, never destroyed
+  (#360).** The bounded reviewer delivery cuts on an exact UTF-8 character
+  boundary and seals digest, byte count and a `truncated` marker over exactly the
+  stored bytes — the previous behavior discarded the whole document and retried a
+  deterministic condition. Protocol impact: no.
+
+- **A local-only branch is visible before it is lost (#361).** `doctor` reports
+  branches that exist only in the local clone, classified by whether they hold
+  unique commits, so unpublished work stops hiding behind a green status.
+  Protocol impact: no.
+
+- **The reviewer-artifact contract is named once (#368) and a lane names the
+  relay it serves (#372).** The closed artifact key set lives in one constant
+  read by both validators — a mismatch between two copies used to present as a
+  retry loop, not a schema error — and a listener that discovers its relay root
+  gone exits with a stated reason instead of polling a directory that no longer
+  exists. Protocol impact: no.
+
+- **Listener lanes are enumerated by the relay they poll (#370).** `listener
+  list` classifies every lane process on the host by relay root rather than by
+  advertised agent name, reaches duplicates a pid file cannot name, distinguishes
+  tombstones from live lanes, and `stop --all`'s authority is bounded to the
+  current relay: an unplaceable third-party process warns on stderr and never
+  poisons a deploy loop waiting for rc 0. Failed-start reaping consults the
+  process table with `ps -axww` so width truncation cannot hide a lane's
+  identity. Protocol impact: no — lifecycle tooling only.
+
+- **A runner inside a git worktree is refused at arming time (#283).** A lane
+  pinned to an ephemeral worktree destroys itself later; the refusal now happens
+  when the lane is armed, survives the detached re-exec, and leaves the main
+  working tree unaffected. Protocol impact: no.
+
+- **The project rationale is sourced (#275).** "Why more than one agent" cites
+  verified primary evidence, and records explicitly what those sources do not
+  license the project to claim. Protocol impact: no — documentation.
+
+- **A turn is reserved before the expensive work, and `unclaim` gives it back
+  (#320 / RFC 047).** A listener claims the pen before launching its provider
+  child (which runs under the existing `--resume-working` contract), so a
+  listener and an interactive session of the same identity can no longer both
+  take charge of one incoming turn; notify-only and review-artifact lanes, which
+  never author a turn, never reserve. The new core verb `unclaim` undoes one's
+  own unused claim and restores the exact awaiting state without advancing the
+  turn — a child that already appended makes the reservation non-releasable, and
+  the refusal is observable. Protocol impact: **yes** — new core verb `unclaim`,
+  documented in the protocol reference with translated glosses.
+
+- **`advanced` certifies an identified premise, not mere authorship (#377).**
+  Authorship alone let a run publish an answer to a superseded premise and be
+  recorded as a success. The launch snapshot digests the exact pre-turn block
+  into the immutable run plan (`premise_sha256`); certification requires the
+  authored turn to be the sole direct successor of that premise and the premise
+  block to still hash identically — an intervening turn, a multi-turn run, or a
+  rewritten/unreadable premise is the new retryable `premise_superseded`, present
+  in the runner and listener catalogs at birth. A launch whose snapshot cannot
+  read a nonzero premise block is refused before the plan exists; turn 0 remains
+  the explicit fresh-start exception. The RFC 047 t7 ping-pong contract is
+  deliberately preserved: a peer that consumes the answer and replies within the
+  run window is success, never supersession. Protocol impact: no — certification
+  evidence only.
+
+- **The four #362-cycle defects found by adversarial review are fixed (#379,
+  #380, #381, #382).** Failed-start reaping binds the pid to a process identity
+  (start reference + detached-group invariant) revalidated immediately before the
+  first signal, so a reused pid is never signalled (#379). A width-truncated `ps`
+  fallback marks the census degraded end to end, TOP observation stops calling a
+  degraded negative `absent`, and `stop --all` refuses to certify a relay clean
+  under a census it could not read while keeping rc 0 for reliable-census
+  third-party rows (#380). Truncation at an exact character boundary keeps the
+  character that fit, and a truncation that leaves zero bytes is refused with its
+  own reason instead of sealing an empty artifact (#381). A terminal status that
+  times out keeps its finality: the timeout branch reads the named policy
+  constants, never a literal (#382). Protocol impact: no.
+
+- **Executable witnesses replace source-fragment assertions (#383).** The
+  reservation matrix `{author, notify-only, review-artifact}` is exercised
+  through the real listener loop, the post-append unclaim refusal is observed
+  rather than survived, and both reviewer-artifact validators are pinned to the
+  shared constant by source inspection so an identical inlined literal cannot
+  silently recreate the two-copy defect. Protocol impact: no — test strength.
+
+- **Every runner status survives the listener boundary (#385).** The runner's
+  five status families and the listener's classification vocabulary are held in
+  lockstep by an exact-set witness with an explicit listener-only remainder; the
+  retired `review_artifact_invalid` label is gone and pinned absent; and
+  `headless_permission_refused` gains sibling parity with
+  `environment_blocked`/`approval_required` — halt after one attempt with a
+  bounded operator notification that never recommends the unsafe permission
+  bypass. Protocol impact: no.
+
+- **Rate-limit and neutral classifications survive a timeout (#387).** A
+  provider that prints its rate-limit reset and then hangs past the turn deadline
+  used to be ledgered as `timeout`, burning a retry and skipping the scoped usage
+  hold; the timeout branch now preserves every classification whose own doctrine
+  says no-retry (terminal, rate-limit, neutral), with one witness per member per
+  family and an end-to-end proof that the listener places the hold from a
+  timed-out rate-limited run. Protocol impact: no.
+
+- **The installer test gate may fail, but can no longer hang (#390).** On one
+  host the global suite stalled inside an unbounded installer `communicate()` and
+  yielded no verdict at all. Every installer-family child now runs through one
+  bounded, hermetic helper: a stall is a named `TimeoutExpired` within 120 s, the
+  whole process group dies with it so a grandchild cannot survive into the next
+  witness, and inherited `M8SHIFT_*` relay identity — measured as the stall's
+  carrier — is stripped while the installer's own
+  `M8SHIFT_INSTALL_*`/`M8SHIFT_HEADROOM_*` inputs are kept. The guarded boundary
+  is inventoried, not hand-listed. Measured on the affected host: the unfiltered
+  global suite reaches its verdict, entirely green. Protocol impact: no.
+
 ## v4.1.0 — 2026-08-12
 
 - **Managed interactive and gateway authority (#280/#281).** `lease-keeper` now wraps one

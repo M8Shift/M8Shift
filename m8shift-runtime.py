@@ -30,6 +30,7 @@ import json
 import math
 import os
 import plistlib
+import posixpath
 import re
 import shlex
 import shutil
@@ -37,6 +38,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -62,7 +64,7 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.epilog = old
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -230,6 +232,10 @@ CONSULT_CLASSIFICATIONS = frozenset((
     "completed", "timed_out", "launch_refused", "provider_failed",
     "invalid_output",
 ))
+CONSULT_CHILD_DISPOSITIONS = frozenset((
+    "not_started", "timed_out", "exited_zero_empty", "exited_zero_output",
+    "exited_nonzero_empty", "exited_nonzero_output",
+))
 CONSULT_ROOT_MARKER = "$M8SHIFT_ROOT"
 CONSULT_DEFAULT_TIMEOUT_S = 120
 CONSULT_MAX_TIMEOUT_S = 900
@@ -317,34 +323,67 @@ DEFAULT_RUNNER_PATH = os.path.join(HERE, "examples", "headless_runner.py")
 LISTENER_PROFILE_SCHEMA = "m8shift.listener.profile.v1"
 LISTENER_STATE_SCHEMA = "m8shift.listener.state.v1"
 LISTENER_PLAN_SCHEMA = "m8shift.listener.plan.v1"
+LISTENER_PROFILE_IDENTITY_SCHEMA = "m8shift.listener.profile-identity.v1"
+LISTENER_EXECUTABLE_IDENTITY_SCHEMA = "m8shift.listener.executable-identity.v1"
+LISTENER_BACKEND_IDENTITY_SCHEMA = "m8shift.listener.backend-identity.v1"
+LISTENER_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 LISTENER_BACKEND_SCHEMA = "m8shift.listener.backend.v1"
 RUNNER_HANDSHAKE_SCHEMA = "m8shift.runner.handshake.v1"
+REVIEW_ARTIFACT_SCHEMA = "m8shift.review-artifact.v1"
+REVIEW_ARTIFACT_DIR = os.path.join(RUNTIME_DIR, "reviews")
+REVIEW_ARTIFACT_OUTPUT_KEYS = frozenset({
+    "sha256", "bytes", "lines", "text",
+    "truncated", "original_bytes", "original_lines",
+})
+"""#368 — MUST stay identical to m8shift.py's copy of the same name.
+
+A lockstep test compares them. A mismatch does not present as a schema error: the
+validator here returns None, the delivery is treated as failed, and the lane
+retries, so the symptom is a launch count rather than a message."""
+
+
+REVIEW_ARTIFACT_MAX_BYTES = 64 * 1024
+REVIEW_TURN_BLOCK_RE = re.compile(
+    r"<!-- M8SHIFT:TURN (?P<number>\d+) [a-z][a-z0-9_-]* BEGIN -->\r?\n"
+    r".*?<!-- M8SHIFT:TURN (?P=number) [a-z][a-z0-9_-]* END -->",
+    re.DOTALL,
+)
 RUNNER_HANDSHAKE_LIMIT = 4 * 1024
 RUNNER_HANDSHAKE_TIMEOUT_S = 5
 RUNNER_REQUIRED_CAPABILITIES = {
     "bounded-tty-tee-v1",
     "environment-write-probe-v1",
+    "review-artifact-delivery-v1",
     "runner-exit-v2",
 }
 RUNNER_REQUIRED_OPTIONS = {
     "--agent-model", "--cmd", "--cwd", "--env-allowlist",
     "--m8shift", "--m8shift-py", "--once", "--resume-working",
-    "--run-id", "--runtime-dir", "--start-on-idle",
+    "--review-delivery", "--run-id", "--runtime-dir", "--start-on-idle",
 }
 LISTENER_PHASES = ("polling", "backoff", "halted")
 LISTENER_CLASSIFICATIONS = {
-    "", "success", "completed", "advanced", "not_required",
+    "", "success", "completed", "advanced", "review_delivered_pending",
     "non_completion", "stuck_working", "invalid_relay",
+    "unverified_read_only", "review_output_empty", "review_permission_refused",
+    "review_provider_error", "review_artifact_stale", "review_relay_mutated",
+    "review_artifact_budget_invalid", "review_artifact_input_invalid",
+    "review_artifact_unsafe_path", "review_artifact_write_failed",
+    "review_artifact_truncation_empty", "review_return_receipt_invalid",
     "external_transition", "suspended", "failed_partial",
+    "premise_superseded",
     "failed_missing_ledger", "timeout", "run_failure",
     "infrastructure_failure", "runner_crash", "runner_refused_argv",
-    "environment_blocked", "approval_required",
+    "environment_blocked", "approval_required", "headless_permission_refused",
     "provider_rate_limited", "provider_rate_limited_reset_unknown",
 }
 LISTENER_BACKENDS = ("auto", "local", "launchd", "systemd", "windows")
 LISTENER_SERVICE_BACKENDS = ("launchd", "systemd", "windows")
 LISTENER_BACKOFF_BASE_S = 20
 LISTENER_MAX_BACKOFF_S = 300
+# #370: how long `listener start` waits for the detached lane to become
+# observable before it refuses to call the start a success.
+LISTENER_START_OBSERVE_TIMEOUT_S = 10.0
 LISTENER_DEFAULT_POLL_S = 20.0
 LISTENER_DEFAULT_MAX_RETRIES = 3
 LISTENER_DETACHED_ENV = "M8SHIFT_LISTENER_DETACHED"
@@ -395,6 +434,11 @@ APPROVAL_REQUIRED_NOTIFICATION = (
     ".m8shift/PROVIDER-PERMISSIONS.md to this provider's documented headless "
     "permission allowlist, verify one bounded turn, then restart the listener."
 )
+HEADLESS_PERMISSION_REFUSED_NOTIFICATION = (
+    "provider headless permission refused (headless_permission_refused): add an "
+    "exact tool allow-rule under permissions.allow in settings.json, verify one "
+    "bounded turn, then restart the listener."
+)
 PROVIDER_RATE_LIMIT_MARGIN_S = 30
 # Provider terminal output is untrusted admission input. Eight days covers a
 # weekly reset plus clock/timezone skew without allowing an arbitrary hold.
@@ -402,6 +446,12 @@ PROVIDER_RATE_LIMIT_MAX_HORIZON_S = 8 * 24 * 60 * 60
 LISTENER_TURN_PROMPT = (
     "Apply M8SHIFT.protocol.md: you are {agent}; take exactly one relay turn "
     "(claim, work, append) and then exit."
+)
+LISTENER_REVIEW_PROMPT = (
+    "Apply M8SHIFT.protocol.md: you are {agent}, a read-only reviewer. Do NOT "
+    "claim, append, release, or otherwise mutate the relay. Read the incoming "
+    "handoff and return an evidence-based APPROVE, REVISE, or REJECT review as "
+    "your final response; the coordinator will consume the captured artifact."
 )
 LISTENER_RESUME_PROMPT = (
     "Apply M8SHIFT.protocol.md: you are {agent}; you ALREADY hold the pen "
@@ -436,6 +486,64 @@ FLEET_INTEGRATION_SCHEMA = "m8shift.fleet.integration.v1"
 FLEET_JOBS_DIR = os.path.join(FLEET_DIR, "jobs")
 FLEET_JOB_ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}\Z")
 FLEET_VERIFY_TIMEOUT_MAX_S = 900
+
+# RFC 081 / #331 — kit release transactions across independent relay roots.
+# This is deliberately separate from RFC 072 ``fleet`` identity/listener
+# management.  The private record is local evidence under the coordinator's
+# runtime directory; it never carries a pen or routing authority.
+FLEET_UPGRADE_SPEC_SCHEMA = "m8shift.fleet-upgrade.spec.v1"
+FLEET_UPGRADE_OPERATION_SCHEMA = "m8shift.fleet-upgrade.operation.v1"
+FLEET_UPGRADE_REPORT_SCHEMA = "m8shift.fleet-upgrade.report.v1"
+FLEET_UPGRADE_POLICY = "ordered_fail_stop_retain_verified"
+FLEET_UPGRADE_DIR = os.path.join(RUNTIME_DIR, "fleet-upgrades")
+FLEET_UPGRADE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+FLEET_UPGRADE_INSTANCE_ID_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}\Z")
+FLEET_UPGRADE_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+FLEET_UPGRADE_MAX_INSTANCES = 64
+FLEET_UPGRADE_MAX_MANIFEST_ENTRIES = 4096
+FLEET_UPGRADE_MAX_SPEC_BYTES = 1024 * 1024
+FLEET_UPGRADE_MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+FLEET_UPGRADE_MAX_PLAN_BYTES = 256 * 1024
+FLEET_UPGRADE_MAX_OPERATION_BYTES = 16 * 1024 * 1024
+FLEET_UPGRADE_TOP_PREFIX_MAX = 64 * 1024
+FLEET_UPGRADE_TOP_FILE_MAX = 1024 * 1024
+FLEET_UPGRADE_TOP_VERSION_FLAG = "--top-process-loaded-version"
+FLEET_UPGRADE_TOP_ROOT_FLAG = "--top-process-root-digest"
+FLEET_UPGRADE_TOP_VERSION_RE = re.compile(
+    rb'(?m)^VERSION\s*=\s*"([0-9]+[.][0-9]+[.][0-9]+)"')
+FLEET_UPGRADE_PROCESS_ROWS_UNSET = object()
+FLEET_UPGRADE_GREEN = frozenset(("updated", "already_current"))
+FLEET_UPGRADE_TERMINAL = frozenset((
+    "excluded", "not_started", "already_current", "updated", "rolled_back",
+    "failed", "updated_but_listener_down",
+))
+FLEET_UPGRADE_RELAY_FILES = (
+    "M8SHIFT.md", "M8SHIFT.sessions.jsonl", "M8SHIFT.archive.md",
+    "M8SHIFT.tasks.md", "M8SHIFT.requests.md",
+)
+FLEET_UPGRADE_GENERATED_FILES = (
+    "M8SHIFT.protocol.md", "M8SHIFT.protocol-reference.md",
+    "M8SHIFT.agent-pack.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md",
+)
+
+# RFC 081 continuation / #332 — bounded doctor drift evidence.  These local
+# artifacts classify diagnostics only; they never feed the pen or routing.
+DOCTOR_BASELINE_SCHEMA = "m8shift.doctor-baseline.v1"
+DOCTOR_BASELINE_NORMALIZER = "doctor-finding-multiset.v1"
+DOCTOR_BASELINE_EXCEPTIONS_SCHEMA = "m8shift.doctor-baseline.exceptions.v1"
+DOCTOR_BASELINE_REPORT_SCHEMA = "m8shift.doctor-baseline.comparison.v1"
+DOCTOR_BASELINE_MAX_BYTES = 4 * 1024 * 1024
+DOCTOR_BASELINE_MAX_FINDINGS = 4096
+DOCTOR_BASELINE_MAX_STRING_BYTES = 1024
+DOCTOR_BASELINE_TTL_DEFAULT_S = 86400
+DOCTOR_BASELINE_TTL_MIN_S = 60
+DOCTOR_BASELINE_TTL_MAX_S = 86400
+DOCTOR_BASELINE_CLOCK_SKEW_S = 300
+DOCTOR_BASELINE_CHECK_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
+DOCTOR_BASELINE_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
+DOCTOR_BASELINE_ACTOR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\Z")
+DOCTOR_BASELINE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/#-]{0,255}\Z")
+DOCTOR_BASELINE_SEVERITIES = frozenset(("info", "warning", "error"))
 
 
 def now():
@@ -2492,6 +2600,53 @@ def update_presence(core, agent, session_id, mode, state, run_id="", stale_after
     return presence[agent], findings
 
 
+def reserve_turn_before_launch(agent):
+    """#320 — take the pen BEFORE the expensive work, not after it.
+
+    A listener and an interactive session of the same identity could both take
+    charge of one incoming turn: the pen mutex serialises writes but reserved
+    nothing while either was still reasoning. Claiming here makes the reservation
+    visible in the LOCK, where any other producer already looks. It never forces
+    or steals: a refused claim means the work is held elsewhere and this lane
+    simply does not launch."""
+    result = subprocess.run([sys.executable, CORE_PATH, "claim", agent],
+                            cwd=HERE, capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stderr or result.stdout).strip()
+
+
+def release_unused_reservation(agent, pre_turn):
+    """Give the pen back when the work we reserved it for did not happen.
+
+    Two independent readings of the reverted first attempt agreed that releasing
+    only on a failed LAUNCH was the defect: a failed RUN left the relay
+    WORKING_<agent> with nobody working, which broke the explicit `--restart`
+    recovery path (it clears the sidecar and can then no longer launch the held
+    turn). One release point after the child exits covers run failure, HALT and
+    every other non-appending exit.
+
+    Returns True when the pen was returned. Refuses to act on anything but our own
+    unadvanced hold: if the turn moved, the provider did append and the pen is no
+    longer ours to give back."""
+    snapshot = read_relay_lock_fields()
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("state", "") != f"WORKING_{agent.upper()}":
+        return False
+    if snapshot.get("holder", "") != agent:
+        return False
+    if str(snapshot.get("turn", "")) != str(pre_turn):
+        return False  # the turn advanced: the provider appended, nothing to undo
+    # `unclaim`, not `release`: release HANDS OFF, and measured on a real relay it
+    # leaves a turn addressed to claude sitting as AWAITING_CODEX -- the turn
+    # changes recipient, which is one of the harms #320 names. unclaim restores the
+    # same agent at the same turn and reroutes nothing.
+    result = subprocess.run(
+        [sys.executable, CORE_PATH, "unclaim", agent,
+         "--reason", "listener reservation abandoned: the reserved turn was not authored"],
+        cwd=HERE, capture_output=True, text=True, timeout=30)
+    return result.returncode == 0
+
+
 def run_core_json(*args):
     r = subprocess.run([sys.executable, CORE_PATH, *args], cwd=HERE, capture_output=True, text=True)
     if r.returncode != 0:
@@ -4424,6 +4579,53 @@ def run_consult_process(argv, root, env, timeout_s, max_output_bytes):
     }
 
 
+def consult_child_disposition(outcome, response):
+    """Return one bounded, non-secret child outcome for the consult ledger."""
+    if outcome.get("timed_out"):
+        return "timed_out"
+    empty = not response
+    if outcome.get("returncode") == 0:
+        return "exited_zero_empty" if empty else "exited_zero_output"
+    return "exited_nonzero_empty" if empty else "exited_nonzero_output"
+
+
+def consult_record_is_valid(record, require_child=False):
+    """Validate terminal consult enums while accepting pre-#343 v1 rows."""
+    if (record.get("schema") != CONSULT_SCHEMA
+            or record.get("classification") not in CONSULT_CLASSIFICATIONS):
+        return False
+    child_keys = (
+        "child_started", "child_returncode", "child_timed_out",
+        "child_output_truncated", "child_disposition",
+    )
+    present = [key in record for key in child_keys]
+    if not any(present):
+        return not require_child
+    if not all(present):
+        return False
+    structurally_valid = (
+        isinstance(record["child_started"], bool)
+        and (record["child_returncode"] is None
+             or type(record["child_returncode"]) is int)
+        and isinstance(record["child_timed_out"], bool)
+        and isinstance(record["child_output_truncated"], bool)
+        and record["child_disposition"] in CONSULT_CHILD_DISPOSITIONS
+    )
+    if not structurally_valid:
+        return False
+    if not record["child_started"]:
+        return (record["child_returncode"] is None
+                and not record["child_timed_out"]
+                and not record["child_output_truncated"]
+                and record["child_disposition"] == "not_started")
+    return (record["child_disposition"] != "not_started"
+            and (record["child_timed_out"]
+                 == (record["child_disposition"] == "timed_out"))
+            and ("response_truncated" not in record
+                 or record["child_output_truncated"]
+                 == bool(record["response_truncated"])))
+
+
 def consult_record_base(consult_id, requester, responder, row, brief,
                         root, timeout_s, max_output_bytes, response_sink):
     redacted = redact_consult_brief(brief)
@@ -4449,6 +4651,11 @@ def consult_record_base(consult_id, requester, responder, row, brief,
         "timeout_seconds": timeout_s,
         "max_output_bytes": max_output_bytes,
         "classification": "launch_refused",
+        "child_started": False,
+        "child_returncode": None,
+        "child_timed_out": False,
+        "child_output_truncated": False,
+        "child_disposition": "not_started",
         "response_sha256": hashlib.sha256(b"").hexdigest(),
         "response_bytes": 0,
         "response_truncated": False,
@@ -4458,8 +4665,8 @@ def consult_record_base(consult_id, requester, responder, row, brief,
 
 
 def append_consult_record(record):
-    if record.get("classification") not in CONSULT_CLASSIFICATIONS:
-        raise ValueError("invalid consult terminal classification")
+    if not consult_record_is_valid(record, require_child=True):
+        raise ValueError("invalid consult terminal record")
     append_jsonl(CONSULTS, record)
 
 
@@ -4543,6 +4750,18 @@ def cmd_consult(args):
         return 2
 
     response = outcome["stdout"]
+    try:
+        decoded = response.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = None
+    empty_review = decoded is not None and not decoded.strip()
+    record["child_started"] = True
+    record["child_returncode"] = (
+        outcome["returncode"] if isinstance(outcome.get("returncode"), int) else None
+    )
+    record["child_timed_out"] = bool(outcome["timed_out"])
+    record["child_output_truncated"] = bool(outcome["truncated"])
+    record["child_disposition"] = consult_child_disposition(outcome, response)
     record["response_sha256"] = hashlib.sha256(response).hexdigest()
     record["response_bytes"] = len(response)
     record["response_truncated"] = bool(outcome["truncated"])
@@ -4553,11 +4772,7 @@ def cmd_consult(args):
         classification = "provider_failed"
         exit_code = 1
     else:
-        try:
-            decoded = response.decode("utf-8")
-        except UnicodeDecodeError:
-            decoded = ""
-        if not decoded.strip():
+        if decoded is None or empty_review:
             classification = "invalid_output"
             exit_code = 65
         else:
@@ -4579,7 +4794,12 @@ def cmd_consult(args):
     elif response_path and record["response_saved"]:
         print(f"✓ consult {consult_id} {classification}; response saved to {response_sink}")
     if classification != "completed":
-        print(f"m8shift-runtime: consult {consult_id} {classification}", file=sys.stderr)
+        empty_note = ""
+        if empty_review:
+            empty_note = (f": empty reviewer output ({record['child_disposition']}); "
+                          "an empty review is not a verdict")
+        print(f"m8shift-runtime: consult {consult_id} {classification}{empty_note}",
+              file=sys.stderr)
     return exit_code
 
 
@@ -4659,13 +4879,14 @@ def fleet_session_path(session_ref):
     return os.path.join(FLEET_SESSIONS_DIR, f"{session_ref}.json")
 
 
-def write_fleet_json_atomic(path, doc):
-    """Crash-consistent, restricted, non-symlink-following fleet record write."""
+def write_fleet_bytes_atomic(path, raw):
+    """Crash-consistent restricted replacement of already-validated bytes."""
+    if not isinstance(raw, bytes):
+        raise TypeError("fleet atomic payload must be bytes")
     reject_symlinked_runtime_path(path)
     parent = os.path.dirname(path)
     os.makedirs(parent, mode=0o700, exist_ok=True)
     reject_symlinked_runtime_path(path)
-    raw = canonical_json_bytes(doc)
     tmp = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -4691,6 +4912,11 @@ def write_fleet_json_atomic(path, doc):
             os.unlink(tmp)
         except OSError:
             pass
+
+
+def write_fleet_json_atomic(path, doc):
+    """Crash-consistent, restricted, non-symlink-following fleet JSON write."""
+    write_fleet_bytes_atomic(path, canonical_json_bytes(doc))
 
 
 def acquire_fleet_supervisor_lock():
@@ -5263,6 +5489,2113 @@ def build_fleet_plan(spec):
             actions.append({"action": "stop_listener", "agent": item["name"]})
     return {"schema": "m8shift.fleet.plan.v1", "relay": relay,
             "health": health, "actions": actions}
+
+
+# ── RFC 081 / #331 — re-entrant fleet kit-upgrade transaction ───────────────
+
+def fleet_upgrade_digest(data):
+    return hashlib.sha256(canonical_json_bytes(data)).hexdigest()
+
+
+def fleet_upgrade_path_digest(path):
+    return hashlib.sha256(os.path.realpath(path).encode("utf-8")).hexdigest()
+
+
+def fleet_upgrade_top_on_disk(root, observed_at=None):
+    """Read one canonical top version through a bounded stable descriptor."""
+    observed_at = observed_at or iso()
+    result = {"status": "unreadable", "version": "", "observed_at": observed_at}
+    path = os.path.join(os.path.realpath(root), "m8shift-top.py")
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        result["status"] = "missing"
+        return result
+    except OSError:
+        return result
+    if stat.S_ISLNK(before.st_mode):
+        result["status"] = "symlink_refused"
+        return result
+    if not stat.S_ISREG(before.st_mode):
+        result["status"] = "non_regular"
+        return result
+    if before.st_size > FLEET_UPGRADE_TOP_FILE_MAX:
+        result["status"] = "oversized"
+        return result
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(path, flags)
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode)
+                or opened.st_size > FLEET_UPGRADE_TOP_FILE_MAX
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+            result["status"] = "changed_during_read"
+            return result
+        chunks, remaining = [], FLEET_UPGRADE_TOP_PREFIX_MAX
+        while remaining:
+            chunk = os.read(fd, min(8192, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        opened_after = os.fstat(fd)
+    except OSError:
+        return result
+    finally:
+        if fd is not None:
+            os.close(fd)
+    try:
+        after = os.lstat(path)
+    except OSError:
+        result["status"] = "changed_during_read"
+        return result
+    before_identity = (
+        opened.st_dev, opened.st_ino, opened.st_size,
+        getattr(opened, "st_mtime_ns", int(opened.st_mtime * 1000000000)))
+    after_identity = (
+        opened_after.st_dev, opened_after.st_ino, opened_after.st_size,
+        getattr(opened_after, "st_mtime_ns",
+                int(opened_after.st_mtime * 1000000000)))
+    if (before_identity != after_identity
+            or stat.S_ISLNK(after.st_mode) or not stat.S_ISREG(after.st_mode)
+            or (after.st_dev, after.st_ino) !=
+            (opened_after.st_dev, opened_after.st_ino)):
+        result["status"] = "changed_during_read"
+        return result
+    match = FLEET_UPGRADE_TOP_VERSION_RE.search(b"".join(chunks))
+    if match is None:
+        result["status"] = "version_invalid"
+        return result
+    result.update(status="observed", version=match.group(1).decode("ascii"))
+    return result
+
+
+class ProcessCensusRows(list):
+    """Process rows plus the quality of the argv census that produced them.
+
+    This stays list-compatible for the existing read-only consumers, but makes a
+    width-truncated fallback impossible to mistake for complete evidence.  A
+    negative conclusion drawn from ``degraded`` rows is not a clean census.
+    """
+
+    def __init__(self, rows=(), *, degraded=False, degradation_reason=""):
+        super().__init__(rows)
+        self.degraded = bool(degraded)
+        self.degradation_reason = str(degradation_reason or "")
+
+
+def fleet_upgrade_process_rows():
+    """Return marked read-only argv rows, or None when no census is possible."""
+    if os.name == "nt":  # pragma: no cover - no portable argv census
+        return None
+    try:
+        # -ww forbids the width truncation `ps` applies by default to the terminal
+        # width -- often 80 columns under CI or systemd, which silently cuts the
+        # very --runner/--project-root arguments a relay lane is identified by.
+        # Guessing at truncation from a length threshold is a mirage: a line cut at
+        # 80 characters is short, not long.
+        proc = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,command="], capture_output=True,
+            text=True, timeout=5)
+        degraded = False
+        degradation_reason = ""
+        if proc.returncode != 0:  # -ww unsupported: fall back, truncation possible
+            proc = subprocess.run(
+                ["ps", "-axo", "pid=,command="], capture_output=True,
+                text=True, timeout=5)
+            degraded = True
+            degradation_reason = "ps_axww_unsupported_width_truncation_possible"
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    rows = []
+    for line in (proc.stdout or "").splitlines():
+        match = re.match(r"\s*([0-9]+)\s+(.+)$", line)
+        if not match:
+            continue
+        # ``ps command`` is a display string, not a shell-escaped command line.
+        # Splitting it with shlex can reject a perfectly live process when any
+        # unrelated argument contains an unmatched quote.  TOP identity markers
+        # are deliberately whitespace-free, so plain field splitting retains
+        # the evidence without pretending that argv can be reconstructed.
+        argv = match.group(2).split()
+        if argv:
+            rows.append({"pid": int(match.group(1)), "argv": argv})
+    return ProcessCensusRows(
+        rows, degraded=degraded, degradation_reason=degradation_reason)
+
+
+def _fleet_upgrade_top_flag_values(argv, flag):
+    return [item[len(flag) + 1:] for item in argv
+            if isinstance(item, str) and item.startswith(flag + "=")]
+
+
+def _fleet_upgrade_top_script_matches(row, canonical):
+    pid = row.get("pid")
+    cwd = row.get("cwd") or ""
+    for arg in row.get("argv") or []:
+        if not isinstance(arg, str) or os.path.basename(arg) != "m8shift-top.py":
+            continue
+        if os.path.isabs(arg):
+            candidate = arg
+        else:
+            cwd = cwd or process_cwd(pid)
+            if not cwd:
+                continue
+            candidate = os.path.join(cwd, arg)
+        if os.path.realpath(candidate) == canonical:
+            return True
+    return False
+
+
+def fleet_upgrade_top_process_loaded(
+        root, process_rows=FLEET_UPGRADE_PROCESS_ROWS_UNSET, observed_at=None):
+    """Observe marker-bearing top argv without signalling or reparenting it."""
+    observed_at = observed_at or iso()
+    rows = (fleet_upgrade_process_rows()
+            if process_rows is FLEET_UPGRADE_PROCESS_ROWS_UNSET else process_rows)
+    census_degraded = bool(getattr(rows, "degraded", False))
+    base = {"status": "unobservable", "versions": [], "process_count": 0,
+            "legacy_count": 0, "invalid_count": 0,
+            "observed_at": observed_at}
+    if rows is None:
+        base["reason"] = "process_argv_unavailable"
+        return base
+    root_digest = fleet_upgrade_path_digest(root)
+    canonical = os.path.realpath(os.path.join(root, "m8shift-top.py"))
+    versions, legacy, invalid = [], 0, 0
+    for row in rows:
+        argv = row.get("argv") if isinstance(row, dict) else None
+        if not isinstance(argv, list) or not argv:
+            continue
+        version_values = _fleet_upgrade_top_flag_values(
+            argv, FLEET_UPGRADE_TOP_VERSION_FLAG)
+        root_values = _fleet_upgrade_top_flag_values(
+            argv, FLEET_UPGRADE_TOP_ROOT_FLAG)
+        script_matches = _fleet_upgrade_top_script_matches(row, canonical)
+        targets_root = root_digest in root_values
+        if not targets_root and not script_matches:
+            continue
+        if not version_values and not root_values:
+            legacy += 1
+            continue
+        if (len(version_values) != 1 or len(root_values) != 1
+                or root_values[0] != root_digest
+                or not re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+",
+                                    version_values[0])):
+            invalid += 1
+            continue
+        versions.append(version_values[0])
+    unique = sorted(set(versions), key=lambda value: tuple(
+        int(part) for part in value.split(".")))
+    base.update(versions=unique, process_count=len(versions),
+                legacy_count=legacy, invalid_count=invalid)
+    if unique and not legacy and not invalid:
+        base["status"] = "partial" if census_degraded else "observed"
+    elif unique:
+        base["status"] = "partial"
+    elif legacy or invalid:
+        base["status"] = "unobservable"
+        base["reason"] = "legacy_or_invalid_markers"
+    else:
+        base["status"] = "unobservable" if census_degraded else "absent"
+    if census_degraded:
+        base["reason"] = (getattr(rows, "degradation_reason", "")
+                          or "process_argv_census_degraded")
+    return base
+
+
+def fleet_upgrade_top_observation(
+        root, process_rows=FLEET_UPGRADE_PROCESS_ROWS_UNSET, observed_at=None):
+    observed_at = observed_at or iso()
+    on_disk = fleet_upgrade_top_on_disk(root, observed_at)
+    loaded = fleet_upgrade_top_process_loaded(
+        root, process_rows=process_rows, observed_at=observed_at)
+    disk_version = on_disk.get("version") if on_disk.get("status") == "observed" else ""
+    restart_required = bool(
+        disk_version and any(version != disk_version
+                             for version in loaded.get("versions") or []))
+    return {"top_on_disk": on_disk, "top_process_loaded": loaded,
+            "restart_required": restart_required, "observed_at": observed_at}
+
+
+def fleet_upgrade_operation_dir(operation_id):
+    return os.path.join(FLEET_UPGRADE_DIR, operation_id)
+
+
+def fleet_upgrade_state_path(operation_id):
+    return os.path.join(fleet_upgrade_operation_dir(operation_id), "operation.json")
+
+
+def fleet_upgrade_report_path(operation_id, suffix):
+    return os.path.join(fleet_upgrade_operation_dir(operation_id), f"report.{suffix}")
+
+
+def fleet_upgrade_safe_relpath(raw, role):
+    if (not isinstance(raw, str) or not raw or len(raw.encode("utf-8")) > 512
+            or os.path.isabs(raw)):
+        raise ValueError(f"{role} path is invalid")
+    rel = os.path.normpath(raw)
+    if rel in (".", "..") or rel.startswith(".." + os.sep):
+        raise ValueError(f"{role} path escapes its root")
+    return rel
+
+
+def fleet_upgrade_manifest(source_root):
+    path = os.path.join(source_root, "checksums.sha256")
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"source checksums.sha256 is unavailable: {exc}") from exc
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+            or info.st_size > FLEET_UPGRADE_MAX_MANIFEST_BYTES):
+        raise ValueError(
+            "source checksums.sha256 must be a bounded regular non-symlink file")
+    entries = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"source checksums.sha256 is unreadable: {exc}") from exc
+    for number, line in enumerate(lines, 1):
+        if number > FLEET_UPGRADE_MAX_MANIFEST_ENTRIES:
+            raise ValueError("source manifest exceeds the fleet-upgrade entry limit")
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](.+)", line)
+        if not match:
+            raise ValueError(f"source checksums.sha256:{number} is malformed")
+        rel = fleet_upgrade_safe_relpath(match.group(2), "source manifest")
+        if rel in entries:
+            raise ValueError(f"source manifest repeats {rel}")
+        entries[rel] = match.group(1).lower()
+    if not entries or "m8shift.py" not in entries:
+        raise ValueError("source manifest is empty or lacks m8shift.py")
+    return path, entries
+
+
+def fleet_upgrade_verify_source(source_root, expected):
+    source_root = _canonical_root(source_root)
+    try:
+        info = os.lstat(source_root)
+    except OSError as exc:
+        raise ValueError(f"source root is unavailable: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("source root must be a real non-symlink directory")
+    manifest_path, entries = fleet_upgrade_manifest(source_root)
+    manifest_digest = sha256_file(manifest_path)
+    if manifest_digest != expected["manifest_sha256"]:
+        raise ValueError("source manifest digest does not match the approved spec")
+    version = script_version(os.path.join(source_root, "m8shift.py"))
+    if version != expected["version"]:
+        raise ValueError(
+            f"source version {version or '-'} does not match approved {expected['version']}")
+    generation = int(version.split(".", 1)[0])
+    if generation != expected["generation"]:
+        raise ValueError("source Generation does not match the approved spec")
+    identities = []
+    for rel, wanted in sorted(entries.items()):
+        absolute = os.path.join(source_root, rel)
+        if not _path_is_within(absolute, source_root):
+            raise ValueError(f"source manifest path escapes the source: {rel}")
+        try:
+            item = os.lstat(absolute)
+        except OSError as exc:
+            raise ValueError(f"source manifest path is unavailable: {rel}: {exc}") from exc
+        if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
+            raise ValueError(f"source manifest path is not a regular file: {rel}")
+        got = sha256_file(absolute)
+        if got != wanted:
+            raise ValueError(f"source checksum mismatch for {rel}")
+        identities.append({"path": rel, "sha256": got, "size": item.st_size,
+                           "mode": stat.S_IMODE(item.st_mode)})
+    return {"root": source_root, "manifest_sha256": manifest_digest,
+            "version": version, "generation": generation,
+            "entries": entries, "identities": identities}
+
+
+def load_fleet_upgrade_spec(path):
+    absolute = os.path.abspath(path)
+    try:
+        info = os.lstat(absolute)
+    except OSError as exc:
+        raise ValueError(f"fleet-upgrade spec is unavailable: {exc}") from exc
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+            or info.st_size > FLEET_UPGRADE_MAX_SPEC_BYTES):
+        raise ValueError("fleet-upgrade spec must be a bounded regular non-symlink file")
+    doc, err = read_json_diagnostic(absolute, {})
+    if err:
+        raise ValueError(f"fleet-upgrade spec is unreadable: {err}")
+    if doc.get("schema") != FLEET_UPGRADE_SPEC_SCHEMA:
+        raise ValueError(f"fleet-upgrade spec schema must be {FLEET_UPGRADE_SPEC_SCHEMA}")
+    if set(doc) != {"schema", "operation_id", "coordinator", "policy", "source",
+                    "allow_generation_changes", "instances"}:
+        raise ValueError("fleet-upgrade spec has unsupported or missing fields")
+    operation_id = doc.get("operation_id")
+    coordinator = doc.get("coordinator")
+    if not isinstance(operation_id, str) or not FLEET_UPGRADE_ID_RE.fullmatch(operation_id):
+        raise ValueError("fleet-upgrade operation_id is invalid")
+    if not isinstance(coordinator, str) or not AGENT_RE.fullmatch(coordinator):
+        raise ValueError("fleet-upgrade coordinator is invalid")
+    if doc.get("policy") != FLEET_UPGRADE_POLICY:
+        raise ValueError(f"fleet-upgrade policy must be {FLEET_UPGRADE_POLICY}")
+    source = doc.get("source")
+    if not isinstance(source, dict) or set(source) != {
+            "version", "generation", "manifest_sha256"}:
+        raise ValueError("fleet-upgrade source identity has invalid fields")
+    if not isinstance(source.get("version"), str) or not re.fullmatch(
+            r"[0-9]+[.][0-9]+[.][0-9]+", source["version"]):
+        raise ValueError("fleet-upgrade source version is invalid")
+    if (not isinstance(source.get("generation"), int)
+            or isinstance(source.get("generation"), bool)
+            or source["generation"] < 0):
+        raise ValueError("fleet-upgrade source generation is invalid")
+    if not isinstance(source.get("manifest_sha256"), str) or not \
+            FLEET_UPGRADE_SHA256_RE.fullmatch(source["manifest_sha256"]):
+        raise ValueError("fleet-upgrade source manifest digest is invalid")
+    approvals = doc.get("allow_generation_changes")
+    if not isinstance(approvals, list):
+        raise ValueError("fleet-upgrade allow_generation_changes must be an array")
+    approved = {}
+    for index, row in enumerate(approvals):
+        if not isinstance(row, dict) or set(row) != {
+                "instance_id", "from", "to", "approval_ref"}:
+            raise ValueError(f"generation approval {index} has invalid fields")
+        instance_id = row.get("instance_id")
+        approval_ref = row.get("approval_ref")
+        if not isinstance(instance_id, str) or not \
+                FLEET_UPGRADE_INSTANCE_ID_RE.fullmatch(instance_id):
+            raise ValueError(f"generation approval {index} instance_id is invalid")
+        if instance_id in approved:
+            raise ValueError(f"duplicate generation approval for {instance_id}")
+        if any(isinstance(row.get(key), bool) or not isinstance(row.get(key), int)
+               or row[key] < 0 for key in ("from", "to")):
+            raise ValueError(f"generation approval {index} versions are invalid")
+        if not isinstance(approval_ref, str) or not FLEET_UPGRADE_ID_RE.fullmatch(
+                approval_ref):
+            raise ValueError(f"generation approval {index} approval_ref is invalid")
+        approved[instance_id] = dict(row)
+    instances = doc.get("instances")
+    if not isinstance(instances, list) or not instances \
+            or len(instances) > FLEET_UPGRADE_MAX_INSTANCES:
+        raise ValueError("fleet-upgrade instances must be a non-empty array")
+    seen_ids, seen_roots, normalized = set(), set(), []
+    for index, row in enumerate(instances):
+        if not isinstance(row, dict) or set(row) != {"id", "root", "resume_relay"}:
+            raise ValueError(f"fleet-upgrade instance {index} has invalid fields")
+        instance_id = row.get("id")
+        root_raw = row.get("root")
+        if not isinstance(instance_id, str) or not \
+                FLEET_UPGRADE_INSTANCE_ID_RE.fullmatch(instance_id):
+            raise ValueError(f"fleet-upgrade instance {index} id is invalid")
+        if instance_id in seen_ids:
+            raise ValueError(f"duplicate fleet-upgrade instance id {instance_id}")
+        if not isinstance(root_raw, str) or not os.path.isabs(root_raw):
+            raise ValueError(f"fleet-upgrade instance {instance_id} root must be absolute")
+        try:
+            info = os.lstat(root_raw)
+        except OSError as exc:
+            raise ValueError(f"fleet-upgrade instance {instance_id} root is unavailable: {exc}") from exc
+        root = _canonical_root(root_raw)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"fleet-upgrade instance {instance_id} root must be a real directory")
+        if root != os.path.abspath(root_raw):
+            raise ValueError(f"fleet-upgrade instance {instance_id} root is not canonical")
+        if root in seen_roots:
+            raise ValueError(f"duplicate fleet-upgrade root for {instance_id}")
+        if not isinstance(row.get("resume_relay"), bool):
+            raise ValueError(f"fleet-upgrade instance {instance_id} resume_relay must be boolean")
+        seen_ids.add(instance_id)
+        seen_roots.add(root)
+        normalized.append({"id": instance_id, "root": root,
+                           "resume_relay": row["resume_relay"]})
+    roots = [row["root"] for row in normalized]
+    for index, root in enumerate(roots):
+        for other in roots[index + 1:]:
+            if os.path.commonpath((root, other)) in (root, other):
+                raise ValueError("nested fleet-upgrade roots are refused")
+    unknown_approvals = set(approved) - seen_ids
+    if unknown_approvals:
+        raise ValueError("generation approval names an undeclared instance")
+    result = dict(doc)
+    result["instances"] = normalized
+    result["_generation_approvals"] = approved
+    return result
+
+
+def fleet_upgrade_validate_topology(spec, source):
+    source_root = source["root"]
+    for row in spec["instances"]:
+        common = os.path.commonpath((source_root, row["root"]))
+        if common in (source_root, row["root"]):
+            raise ValueError("source and target relay roots must be independent")
+
+
+def fleet_upgrade_lock_fields(root):
+    relay = os.path.join(root, "M8SHIFT.md")
+    try:
+        with open(relay, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"relay is unreadable: {exc}") from exc
+    if RELAY_LOCK_BEGIN not in text or RELAY_LOCK_END not in text:
+        raise ValueError("relay LOCK block is missing")
+    body = text.split(RELAY_LOCK_BEGIN, 1)[1].split(RELAY_LOCK_END, 1)[0]
+    fields = {}
+    for line in body.splitlines():
+        match = re.match(r"([a-z_]+):\s*(.*)$", line.strip())
+        if match:
+            fields[match.group(1)] = match.group(2).strip()
+    required = ("state", "agents", "session", "turn", "note")
+    if any(not fields.get(key) for key in required):
+        raise ValueError("relay LOCK block is incomplete")
+    agents = [item.strip() for item in fields["agents"].split(",") if item.strip()]
+    if len(agents) < 2 or any(not AGENT_RE.fullmatch(item) for item in agents):
+        raise ValueError("relay roster is invalid")
+    try:
+        turn = int(fields["turn"])
+    except ValueError as exc:
+        raise ValueError("relay turn is invalid") from exc
+    fields["agents_list"] = agents
+    fields["turn_int"] = turn
+    return fields, text
+
+
+def fleet_upgrade_file_identities(root, relpaths):
+    rows = []
+    for rel in sorted(set(relpaths)):
+        rel = fleet_upgrade_safe_relpath(rel, "target")
+        path = os.path.join(root, rel)
+        if not _path_is_within(path, root):
+            raise ValueError(f"target path escapes the relay root: {rel}")
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            rows.append({"path": rel, "present": False, "sha256": "", "mode": None})
+            continue
+        except OSError as exc:
+            raise ValueError(f"target path is unreadable: {rel}: {exc}") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"target path is not a regular file: {rel}")
+        rows.append({"path": rel, "present": True, "sha256": sha256_file(path),
+                     "mode": stat.S_IMODE(info.st_mode), "size": info.st_size})
+    return rows
+
+
+def fleet_upgrade_kit_paths(root):
+    path = os.path.join(root, ".m8shift", "kit.json")
+    kit, err = read_json_diagnostic(path, {})
+    if err or kit.get("schema") != "m8shift.kit.v1":
+        raise ValueError("target kit manifest is missing or invalid")
+    core = kit.get("core")
+    companions = kit.get("companions", [])
+    runners = kit.get("runners", [])
+    if not isinstance(core, dict) or core.get("script") != "m8shift.py" \
+            or not isinstance(companions, list) or not isinstance(runners, list):
+        raise ValueError("target kit manifest has invalid component fields")
+    paths = ["m8shift.py", os.path.join(".m8shift", "kit.json")]
+    companion_names = []
+    for row in companions:
+        if (not isinstance(row, dict)
+                or not isinstance(row.get("name"), str)
+                or not re.fullmatch(r"[a-z0-9-]+", row["name"])):
+            raise ValueError("target kit companion row is invalid")
+        rel = fleet_upgrade_safe_relpath(row.get("script"), "companion")
+        if rel != f"m8shift-{row['name']}.py":
+            raise ValueError(f"target kit companion path is unsupported: {rel}")
+        paths.append(rel)
+        companion_names.append(row["name"])
+    for row in runners:
+        if not isinstance(row, dict):
+            raise ValueError("target kit runner row is invalid")
+        paths.append(fleet_upgrade_safe_relpath(row.get("path"), "runner"))
+    paths += list(FLEET_UPGRADE_GENERATED_FILES)
+    return kit, sorted(set(paths)), sorted(set(companion_names))
+
+
+def fleet_upgrade_relay_identities(root):
+    return fleet_upgrade_file_identities(root, FLEET_UPGRADE_RELAY_FILES)
+
+
+def fleet_upgrade_run_json(argv, cwd, role, timeout=180):
+    try:
+        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                                timeout=timeout, env={**os.environ, "M8SHIFT_ROOT": cwd})
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"{role} could not run: {exc}") from exc
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        detail = (result.stderr or result.stdout or "no output").strip().splitlines()
+        raise ValueError(f"{role} returned invalid JSON: {(detail[0] if detail else 'no output')[:300]}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{role} returned a non-object JSON payload")
+    return result.returncode, payload
+
+
+def fleet_upgrade_update_argv(source, target, companions, dry_run=False,
+                              allow_generation_change=False):
+    argv = [sys.executable, os.path.join(source, "m8shift.py"), "update",
+            "--target", target, "--source", source,
+            "--components", "core,protocol,pack,anchors,companions,runner",
+            "--json"]
+    if companions:
+        argv += ["--companions", ",".join(companions)]
+    if dry_run:
+        argv.append("--dry-run")
+    if allow_generation_change:
+        argv.append("--allow-generation-change")
+    return argv
+
+
+def fleet_upgrade_update_plan(source, target, companions, allow_generation_change):
+    rc, payload = fleet_upgrade_run_json(
+        fleet_upgrade_update_argv(source, target, companions, dry_run=True,
+                                  allow_generation_change=allow_generation_change),
+        target, "update dry-run")
+    if rc != 0 or payload.get("ok") is not True:
+        refusal = payload.get("refusal") or {}
+        raise ValueError("update dry-run refused: " + str(
+            refusal.get("reason") or "component plan is incomplete"))
+    return payload
+
+
+def fleet_upgrade_plan_is_current(payload):
+    rows = payload.get("components")
+    return bool(rows) and all(
+        isinstance(row, dict) and row.get("result") in ("already_current", "skipped")
+        for row in rows)
+
+
+def fleet_upgrade_installed_subset_current(source, identities):
+    ignored = set(FLEET_UPGRADE_GENERATED_FILES) | {
+        os.path.join(".m8shift", "kit.json")}
+    selected = [row for row in identities if row["path"] not in ignored]
+    return bool(selected) and all(
+        row.get("present") is True
+        and source["entries"].get(row["path"]) == row.get("sha256")
+        for row in selected)
+
+
+def fleet_upgrade_discover_listener_agents(root, roster):
+    directory = os.path.join(root, ".m8shift", "runtime", "listeners")
+    agents = set(roster)
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return sorted(agents)
+    except OSError as exc:
+        raise ValueError(f"listener directory is unreadable: {exc}") from exc
+    suffixes = (".backend.json", ".plan.json", ".json", ".pid")
+    for name in names:
+        agent = ""
+        for suffix in suffixes:
+            if name.endswith(suffix):
+                agent = name[:-len(suffix)]
+                break
+        if agent and AGENT_RE.fullmatch(agent):
+            agents.add(agent)
+    return sorted(agents)
+
+
+def fleet_upgrade_listener_status(root, agent):
+    argv = [sys.executable, SELF_PATH, "--project-root", root,
+            "listener", "status", "--agent", agent, "--json"]
+    rc, payload = fleet_upgrade_run_json(argv, root, f"listener status {agent}")
+    if rc != 0:
+        raise ValueError(f"listener status {agent} failed")
+    return payload
+
+
+def fleet_upgrade_listener_preflight(root, roster):
+    rows, restore = [], []
+    for agent in fleet_upgrade_discover_listener_agents(root, roster):
+        status = fleet_upgrade_listener_status(root, agent)
+        resident = status.get("process_resident") is True
+        lifecycle = status.get("status", "")
+        if resident:
+            if not isinstance(lifecycle, str) or not lifecycle.startswith("ALIVE"):
+                raise ValueError(f"resident listener {agent} is not demonstrably ALIVE")
+            if status.get("roots_consistent") is not True:
+                raise ValueError(f"resident listener {agent} has inconsistent roots")
+            if not (status.get("can_invoke_agent") is True
+                    or status.get("can_notify") is True):
+                raise ValueError(f"resident listener {agent} has no invoker/notifier coverage")
+            plan_rel = fleet_upgrade_safe_relpath(status.get("plan_file"), "listener plan")
+            plan_path = os.path.join(root, plan_rel)
+            try:
+                if os.path.getsize(plan_path) > FLEET_UPGRADE_MAX_PLAN_BYTES:
+                    raise ValueError("plan exceeds the size limit")
+                plan_digest = sha256_file(plan_path)
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"resident listener {agent} plan is not replayable: {exc}") from exc
+            restore.append({
+                "agent": agent, "pid": status.get("pid"),
+                "coverage": status.get("coverage"),
+                "can_invoke_agent": bool(status.get("can_invoke_agent")),
+                "can_notify": bool(status.get("can_notify")),
+                "notify_only": bool(status.get("notify_only")),
+                "plan_file": plan_rel, "plan_sha256": plan_digest,
+            })
+        rows.append({
+            "agent": agent, "lifecycle": lifecycle,
+            "process_resident": resident, "coverage": status.get("coverage", ""),
+            "can_invoke_agent": bool(status.get("can_invoke_agent")),
+            "can_notify": bool(status.get("can_notify")),
+            "notify_only": bool(status.get("notify_only")),
+        })
+    return rows, restore
+
+
+def fleet_upgrade_capture_doctor(root, operation_dir, instance_id, moment):
+    argv = [sys.executable, os.path.join(root, "m8shift.py"), "doctor", "--json"]
+    _rc, payload = fleet_upgrade_run_json(argv, root, f"doctor {moment}")
+    rel = os.path.join("doctor", f"{instance_id}-{moment}.json")
+    path = os.path.join(operation_dir, rel)
+    write_json_immutable(path, payload)
+    return {"artifact": rel, "sha256": fleet_upgrade_digest(payload)}
+
+
+def fleet_upgrade_preflight_instance(spec, source, row, operation_dir):
+    root = row["root"]
+    if os.path.basename(root).lower() in {
+            "archive", "archives", "backup", "backups", "trash", "temporary"}:
+        raise ValueError("target root is an excluded archive/backup/trash location")
+    fields, relay_text = fleet_upgrade_lock_fields(root)
+    if spec["coordinator"] not in fields["agents_list"]:
+        raise ValueError("coordinator is not rostered in target")
+    state = fields["state"]
+    if state == "PAUSED":
+        boundary = r"[A-Za-z0-9_.-]"
+        if not re.search(
+                rf"(?<!{boundary}){re.escape(spec['operation_id'])}(?!{boundary})",
+                fields.get("note", "")):
+            raise ValueError("target pause is not bound to this operation_id")
+    elif state != "DONE":
+        raise ValueError(f"target relay state {state} is not PAUSED or DONE")
+    kit, kit_paths, companions = fleet_upgrade_kit_paths(root)
+    target_version = ((kit.get("core") or {}).get("version") or "")
+    target_generation = int(target_version.split(".", 1)[0]) if re.fullmatch(
+        r"[0-9]+[.][0-9]+[.][0-9]+", target_version) else None
+    if target_generation is None:
+        raise ValueError("target kit core version is invalid")
+    generation_change = target_generation != source["generation"]
+    approval = spec["_generation_approvals"].get(row["id"])
+    if generation_change and (not approval
+            or approval["from"] != target_generation
+            or approval["to"] != source["generation"]):
+        raise ValueError("Generation change lacks an exact per-instance approval")
+    if not generation_change and approval:
+        raise ValueError("Generation approval is present but no Generation change is required")
+    relay_ids = fleet_upgrade_relay_identities(root)
+    kit_ids = fleet_upgrade_file_identities(root, kit_paths)
+    doctor = fleet_upgrade_capture_doctor(
+        root, operation_dir, row["id"], "pre")
+    listeners, restore = fleet_upgrade_listener_preflight(
+        root, fields["agents_list"])
+    dry_run = fleet_upgrade_update_plan(
+        source["root"], root, companions, generation_change)
+    return {
+        "id": row["id"], "root": root,
+        "root_digest": fleet_upgrade_path_digest(root),
+        "resume_relay": row["resume_relay"], "relay_state": state,
+        "relay": {"session": fields["session"], "turn": fields["turn_int"],
+                  "roster": fields["agents_list"],
+                  "lock_digest": hashlib.sha256(relay_text.encode("utf-8")).hexdigest(),
+                  "files": relay_ids},
+        "kit": {"version": target_version, "generation": target_generation,
+                "manifest_sha256": sha256_file(os.path.join(root, ".m8shift", "kit.json")),
+                "paths": kit_ids, "companions": companions},
+        "doctor_pre": doctor, "listeners": listeners, "restore_set": restore,
+        "dry_run_digest": fleet_upgrade_digest(dry_run),
+        "already_current": (
+            target_version == source["version"]
+            and fleet_upgrade_installed_subset_current(source, kit_ids)),
+        "generation_approval": approval,
+        "phase": "preflighted", "outcome": None, "reason": "",
+        "updated_at": iso(),
+    }
+
+
+def acquire_fleet_upgrade_lock(operation_id):
+    directory = fleet_upgrade_operation_dir(operation_id)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    path = os.path.join(directory, "operation.lock")
+    token = uuid.uuid4().hex
+    for _attempt in range(2):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            owner, err = read_json_diagnostic(path, {})
+            pid = owner.get("pid") if not err else None
+            start_ref = owner.get("process_start_ref") if not err else ""
+            if err or not isinstance(pid, int) or pid <= 0 \
+                    or not isinstance(start_ref, str):
+                raise ValueError(
+                    "fleet-upgrade operation lock is malformed or incomplete; "
+                    "manual reconciliation is required")
+            if isinstance(pid, int) and listener_pid_alive(pid):
+                current = fleet_process_start_ref(pid)
+                if not start_ref or not current or current == start_ref:
+                    raise ValueError("fleet-upgrade operation is already running")
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ValueError(f"fleet-upgrade stale lock cannot be cleared: {exc}") from exc
+            continue
+        payload = canonical_json_bytes({
+            "pid": os.getpid(), "process_start_ref": fleet_process_start_ref(os.getpid()),
+            "token": token, "created_at": iso(),
+        })
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return token
+    raise ValueError("fleet-upgrade operation lock could not be acquired")
+
+
+def release_fleet_upgrade_lock(operation_id, token):
+    path = os.path.join(fleet_upgrade_operation_dir(operation_id), "operation.lock")
+    doc, err = read_json_diagnostic(path, {})
+    if not err and doc.get("token") == token:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def fleet_upgrade_checkpoint(operation, instance=None, phase=None, reason=None):
+    if instance is not None and phase is not None:
+        instance["phase"] = phase
+        instance["updated_at"] = iso()
+    if instance is not None and reason is not None:
+        instance["reason"] = reason
+    # Terminal observations are captured before the crash-consistent operation
+    # checkpoint. Reopening a completed report therefore never invents newer
+    # process evidence, while an in-memory top skew remains a warning only.
+    terminal_without_top = [row for row in operation.get("instances") or []
+                            if (isinstance(row, dict)
+                                and row.get("phase") == "terminal"
+                                and not isinstance(row.get("top_observation"), dict))]
+    process_rows = (fleet_upgrade_process_rows()
+                    if terminal_without_top else FLEET_UPGRADE_PROCESS_ROWS_UNSET)
+    for row in terminal_without_top:
+        row["top_observation"] = fleet_upgrade_top_observation(
+            row["root"], process_rows=process_rows)
+    operation["updated_at"] = iso()
+    write_fleet_json_atomic(
+        fleet_upgrade_state_path(operation["operation_id"]), operation)
+
+
+def fleet_upgrade_interrupt(args, instance_id, phase):
+    requested = getattr(args, "interrupt_after", "") or ""
+    if requested == f"{instance_id}:{phase}":
+        raise SystemExit(75)
+
+
+def fleet_upgrade_backup(operation, instance):
+    operation_dir = fleet_upgrade_operation_dir(operation["operation_id"])
+    root = instance["root"]
+    backup_root = os.path.join(operation_dir, "backups", instance["id"])
+    manifest = []
+    expected = {row["path"]: row for row in instance["kit"]["paths"]}
+    current = {row["path"]: row for row in fleet_upgrade_file_identities(
+        root, expected)}
+    if current != expected:
+        raise ValueError("target kit changed after preflight and before backup")
+    for rel, identity in sorted(expected.items()):
+        row = dict(identity)
+        if identity["present"]:
+            source_path = os.path.join(root, rel)
+            target_path = os.path.join(backup_root, rel)
+            os.makedirs(os.path.dirname(target_path), mode=0o700, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+            os.chmod(target_path, 0o600)
+            if sha256_file(target_path) != identity["sha256"]:
+                raise ValueError(f"backup digest mismatch for {rel}")
+        manifest.append(row)
+    rel = os.path.join("backups", instance["id"], "manifest.json")
+    write_json_immutable(os.path.join(operation_dir, rel), {
+        "schema": "m8shift.fleet-upgrade.backup.v1", "instance_id": instance["id"],
+        "files": manifest,
+    })
+    instance["backup"] = {"manifest": rel,
+                          "sha256": fleet_upgrade_digest(manifest)}
+    return manifest
+
+
+def fleet_upgrade_load_backup(operation, instance):
+    backup = instance.get("backup") or {}
+    rel = fleet_upgrade_safe_relpath(backup.get("manifest"), "backup manifest")
+    path = os.path.join(fleet_upgrade_operation_dir(operation["operation_id"]), rel)
+    doc, err = read_json_diagnostic(path, {})
+    if err or doc.get("schema") != "m8shift.fleet-upgrade.backup.v1" \
+            or doc.get("instance_id") != instance["id"] \
+            or not isinstance(doc.get("files"), list):
+        raise ValueError("fleet-upgrade backup manifest is invalid")
+    if fleet_upgrade_digest(doc["files"]) != backup.get("sha256"):
+        raise ValueError("fleet-upgrade backup manifest digest changed")
+    return doc["files"]
+
+
+def fleet_upgrade_matches_backup(operation, instance):
+    manifest = fleet_upgrade_load_backup(operation, instance)
+    current = fleet_upgrade_file_identities(
+        instance["root"], [row["path"] for row in manifest])
+    return current == manifest
+
+
+def fleet_upgrade_restore_backup(operation, instance):
+    manifest = fleet_upgrade_load_backup(operation, instance)
+    operation_dir = fleet_upgrade_operation_dir(operation["operation_id"])
+    backup_root = os.path.join(operation_dir, "backups", instance["id"])
+    root = instance["root"]
+    for row in manifest:
+        rel = fleet_upgrade_safe_relpath(row.get("path"), "backup")
+        target = os.path.join(root, rel)
+        if not _path_is_within(target, root):
+            raise ValueError(f"rollback path escapes target: {rel}")
+        try:
+            current = os.lstat(target)
+        except FileNotFoundError:
+            current = None
+        if current is not None and (stat.S_ISLNK(current.st_mode)
+                                    or not stat.S_ISREG(current.st_mode)):
+            raise ValueError(f"rollback target is not a regular file: {rel}")
+        if not row.get("present"):
+            if current is not None:
+                os.unlink(target)
+            continue
+        source = os.path.join(backup_root, rel)
+        if sha256_file(source) != row.get("sha256"):
+            raise ValueError(f"rollback backup bytes changed for {rel}")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".m8shift-fleet-rollback-",
+                                   dir=os.path.dirname(target))
+        try:
+            with os.fdopen(fd, "wb") as out, open(source, "rb") as inp:
+                shutil.copyfileobj(inp, out)
+                out.flush()
+                os.fsync(out.fileno())
+            os.chmod(tmp, row.get("mode") or 0o600)
+            os.replace(tmp, target)
+            tmp = ""
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    if not fleet_upgrade_matches_backup(operation, instance):
+        raise ValueError("rollback could not prove the original kit identity")
+
+
+def fleet_upgrade_relay_unchanged(instance):
+    return fleet_upgrade_relay_identities(instance["root"]) == instance["relay"]["files"]
+
+
+def fleet_upgrade_revalidate_before_mutation(spec, source, instance):
+    """Re-prove preflight evidence at the last boundary before process/file writes."""
+    fleet_upgrade_verify_source(source["root"], spec["source"])
+    if not fleet_upgrade_relay_unchanged(instance):
+        raise ValueError("relay bytes changed after cohort preflight")
+    expected = instance["kit"]["paths"]
+    current = fleet_upgrade_file_identities(
+        instance["root"], [row["path"] for row in expected])
+    if current != expected:
+        raise ValueError("target kit changed after cohort preflight")
+
+
+def fleet_upgrade_verify_target(operation, spec, source, instance):
+    if not fleet_upgrade_relay_unchanged(instance):
+        raise ValueError("relay journal or ledger bytes changed during kit upgrade")
+    fleet_upgrade_verify_source(source["root"], spec["source"])
+    plan = fleet_upgrade_update_plan(
+        source["root"], instance["root"], instance["kit"]["companions"],
+        instance["kit"]["generation"] != source["generation"])
+    if not fleet_upgrade_plan_is_current(plan):
+        raise ValueError("installed kit does not exactly match the approved source")
+    instance["verified_plan_sha256"] = fleet_upgrade_digest(plan)
+    return True
+
+
+def fleet_upgrade_prepare_plan_migrations(operation, instance, source):
+    """Promote only the runner identity sealed by #329 after approved kit proof.
+
+    ``listener start --from-plan`` keeps its strict digest check.  The upgrade
+    transaction therefore records both complete plan documents and both
+    digests before replacing any plan.  Re-entry adopts exactly old or new
+    bytes; any third value needs reconciliation.
+    """
+    root = instance["root"]
+    pending = []
+    for lane in instance["restore_set"]:
+        migration = lane.get("plan_migration")
+        if migration:
+            pending.append((lane, migration))
+            continue
+        path = os.path.join(root, lane["plan_file"])
+        if os.path.getsize(path) > FLEET_UPGRADE_MAX_PLAN_BYTES:
+            raise ValueError(f"listener {lane['agent']} plan exceeds the size limit")
+        try:
+            with open(path, "rb") as fh:
+                old_plan_raw = fh.read()
+            old_plan_text = old_plan_raw.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(
+                f"listener {lane['agent']} plan bytes are unreadable: {exc}") from exc
+        plan, err = read_json_diagnostic(path, {})
+        if err or plan.get("schema") != LISTENER_PLAN_SCHEMA \
+                or plan.get("agent") != lane["agent"]:
+            raise ValueError(f"listener {lane['agent']} plan is invalid before migration")
+        old_digest = hashlib.sha256(old_plan_raw).hexdigest()
+        if old_digest != lane["plan_sha256"]:
+            raise ValueError(f"listener {lane['agent']} plan changed before migration")
+        identity = plan.get("runner_identity")
+        if not isinstance(identity, dict) or identity.get("schema") != \
+                LISTENER_EXECUTABLE_IDENTITY_SCHEMA:
+            raise ValueError(f"listener {lane['agent']} plan lacks runner identity")
+        runner_rel = fleet_upgrade_safe_relpath(identity.get("path"), "listener runner")
+        approved = source["entries"].get(runner_rel)
+        if not approved:
+            raise ValueError(f"listener {lane['agent']} runner is absent from source manifest")
+        runner_path = os.path.join(root, runner_rel)
+        if sha256_file(runner_path) != approved:
+            raise ValueError(f"listener {lane['agent']} runner does not match approved source")
+        new_plan = json.loads(json.dumps(plan))
+        new_plan["runner_identity"]["sha256"] = approved
+        new_plan["runner_identity"]["status"] = "validated"
+        new_plan["runtime_version"] = source["version"]
+        new_plan["upgrade_lineage"] = {
+            "schema": "m8shift.listener.plan-upgrade.v1",
+            "operation_id": operation["operation_id"],
+            "previous_plan_sha256": old_digest,
+            "source_manifest_sha256": source["manifest_sha256"],
+        }
+        new_digest = hashlib.sha256(canonical_json_bytes(new_plan)).hexdigest()
+        migration = {
+            "old_sha256": old_digest, "new_sha256": new_digest,
+            "old_plan_text": old_plan_text,
+            "new_plan": new_plan, "applied": False,
+        }
+        lane["plan_migration"] = migration
+        pending.append((lane, migration))
+    fleet_upgrade_checkpoint(operation, instance, "migrating_listener_plans")
+    for lane, migration in pending:
+        path = os.path.join(root, lane["plan_file"])
+        current = sha256_file(path)
+        if current == migration["new_sha256"]:
+            pass
+        elif current == migration["old_sha256"]:
+            write_fleet_json_atomic(path, migration["new_plan"])
+            if sha256_file(path) != migration["new_sha256"]:
+                raise ValueError(f"listener {lane['agent']} migrated plan digest mismatch")
+        else:
+            raise ValueError(f"listener {lane['agent']} plan is neither original nor migrated")
+        migration["applied"] = True
+        lane["original_plan_sha256"] = migration["old_sha256"]
+        lane["plan_sha256"] = migration["new_sha256"]
+        fleet_upgrade_checkpoint(operation)
+
+
+def fleet_upgrade_restore_original_plans(operation, instance):
+    root = instance["root"]
+    for lane in instance.get("restore_set", []):
+        migration = lane.get("plan_migration")
+        if not migration:
+            continue
+        path = os.path.join(root, lane["plan_file"])
+        current = sha256_file(path)
+        if current == migration["new_sha256"]:
+            original = migration.get("old_plan_text")
+            if not isinstance(original, str):
+                raise ValueError(
+                    f"listener {lane['agent']} original plan bytes are unavailable")
+            write_fleet_bytes_atomic(path, original.encode("utf-8"))
+        elif current != migration["old_sha256"]:
+            raise ValueError(f"listener {lane['agent']} plan cannot be rolled back safely")
+        if sha256_file(path) != migration["old_sha256"]:
+            raise ValueError(f"listener {lane['agent']} original plan was not restored")
+        lane["plan_sha256"] = migration["old_sha256"]
+        migration["applied"] = False
+        fleet_upgrade_checkpoint(operation)
+
+
+def fleet_upgrade_stop_listeners(operation, instance, args):
+    root = instance["root"]
+    # Validate the whole immutable set before stopping the first lane. A changed
+    # later plan must not leave an earlier listener unnecessarily stopped.
+    for lane in instance["restore_set"]:
+        try:
+            if sha256_file(os.path.join(root, lane["plan_file"])) != lane["plan_sha256"]:
+                raise ValueError(f"listener {lane['agent']} plan changed before stop")
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"listener {lane['agent']} plan changed before stop: {exc}") from exc
+        status = fleet_upgrade_listener_status(root, lane["agent"])
+        if status.get("process_resident") is not True:
+            if lane.get("stop_intent") is True:
+                continue
+            raise ValueError(f"listener {lane['agent']} disappeared before stop intent")
+        if (status.get("pid") != lane["pid"]
+                or not str(status.get("status", "")).startswith("ALIVE")):
+            raise ValueError(f"listener {lane['agent']} identity changed before stop")
+    for lane in instance["restore_set"]:
+        status = fleet_upgrade_listener_status(root, lane["agent"])
+        if status.get("process_resident") is not True:
+            if lane.get("stop_intent") is not True:
+                raise ValueError(f"listener {lane['agent']} disappeared during stop set")
+            lane["stopped"] = True
+            fleet_upgrade_checkpoint(operation)
+            continue
+        if (status.get("pid") != lane["pid"]
+                or not str(status.get("status", "")).startswith("ALIVE")):
+            raise ValueError(f"listener {lane['agent']} identity changed during stop set")
+        if lane.get("stop_intent") is not True:
+            lane["stop_intent"] = True
+            fleet_upgrade_checkpoint(operation)
+        argv = [sys.executable, SELF_PATH, "--project-root", root,
+                "listener", "stop", "--agent", lane["agent"], "--grace", "10"]
+        result = subprocess.run(argv, cwd=root, capture_output=True, text=True,
+                                timeout=30, env={**os.environ, "M8SHIFT_ROOT": root})
+        if result.returncode != 0:
+            raise ValueError(f"listener stop failed for {lane['agent']}: " +
+                             (result.stderr or result.stdout).strip()[:300])
+        after = fleet_upgrade_listener_status(root, lane["agent"])
+        if after.get("process_resident") is True:
+            raise ValueError(f"listener {lane['agent']} remained resident after stop")
+        lane["stopped"] = True
+        fleet_upgrade_checkpoint(operation)
+        fleet_upgrade_interrupt(
+            args, instance["id"], f"listener_stopped:{lane['agent']}")
+
+
+def fleet_upgrade_restore_listeners(instance):
+    root = instance["root"]
+    failures = []
+    for lane in instance["restore_set"]:
+        plan = os.path.join(root, lane["plan_file"])
+        try:
+            current_plan = sha256_file(plan)
+        except (OSError, ValueError):
+            current_plan = ""
+        if current_plan != lane["plan_sha256"]:
+            failures.append(f"{lane['agent']}: listener plan identity changed")
+            continue
+        status = fleet_upgrade_listener_status(root, lane["agent"])
+        if status.get("process_resident") is not True:
+            plan_doc, plan_err = read_json_diagnostic(plan, {})
+            if plan_err:
+                failures.append(f"{lane['agent']}: listener plan became unreadable")
+                continue
+            provenance = plan_doc.get("root_provenance")
+            runtime = os.path.join(root, "m8shift-runtime.py")
+            argv = [sys.executable, runtime]
+            env = os.environ.copy()
+            env.pop("M8SHIFT_ROOT", None)
+            if provenance == "cli":
+                argv += ["--project-root", root]
+            elif provenance == "env":
+                env["M8SHIFT_ROOT"] = root
+            elif provenance != "discovery":
+                failures.append(
+                    f"{lane['agent']}: unsupported listener root provenance {provenance!r}")
+                continue
+            argv += ["listener", "start", "--agent", lane["agent"], "--from-plan"]
+            result = subprocess.run(argv, cwd=root, capture_output=True, text=True,
+                                    timeout=30, env=env)
+            if result.returncode != 0:
+                failures.append(f"{lane['agent']}: " +
+                                (result.stderr or result.stdout).strip()[:240])
+                continue
+            deadline = time.monotonic() + 5.0
+            while True:
+                status = fleet_upgrade_listener_status(root, lane["agent"])
+                if str(status.get("status", "")).startswith("ALIVE") \
+                        or status.get("process_resident") is not True \
+                        or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+        mismatches = []
+        if status.get("process_resident") is not True:
+            mismatches.append("not_resident")
+        if not str(status.get("status", "")).startswith("ALIVE"):
+            mismatches.append("not_alive")
+        if status.get("coverage") != lane["coverage"]:
+            mismatches.append("coverage")
+        if bool(status.get("can_invoke_agent")) != lane["can_invoke_agent"]:
+            mismatches.append("invoker_capability")
+        if bool(status.get("can_notify")) != lane["can_notify"]:
+            mismatches.append("notifier_capability")
+        if status.get("roots_consistent") is not True:
+            mismatches.append("roots")
+        if mismatches:
+            failures.append(
+                f"{lane['agent']}: restored listener postconditions failed: "
+                + ",".join(mismatches)
+                + f" (lifecycle={status.get('status', '')!r}, "
+                  f"coverage={status.get('coverage', '')!r}, "
+                  f"cause={status.get('cause', '')!r})")
+    return failures
+
+
+def fleet_upgrade_resume_relay(spec, instance):
+    if instance["relay_state"] == "DONE" or not instance["resume_relay"]:
+        return
+    fields, _text = fleet_upgrade_lock_fields(instance["root"])
+    expected = f"AWAITING_{spec['coordinator'].upper()}"
+    if fields["state"] == expected and fields.get("holder") == spec["coordinator"]:
+        return
+    boundary = r"[A-Za-z0-9_.-]"
+    bound = re.search(
+        rf"(?<!{boundary}){re.escape(spec['operation_id'])}(?!{boundary})",
+        fields["note"])
+    if fields["state"] != "PAUSED" or not bound:
+        raise ValueError("relay is no longer paused for this operation")
+    argv = [sys.executable, os.path.join(instance["root"], "m8shift.py"),
+            "resume", spec["coordinator"], "--reason",
+            f"fleet-upgrade {spec['operation_id']} verified"]
+    result = subprocess.run(argv, cwd=instance["root"], capture_output=True, text=True,
+                            timeout=30, env={**os.environ, "M8SHIFT_ROOT": instance["root"]})
+    if result.returncode != 0:
+        raise ValueError("relay resume failed: " +
+                         (result.stderr or result.stdout).strip()[:300])
+    fields, _text = fleet_upgrade_lock_fields(instance["root"])
+    if fields["state"] != expected or fields.get("holder") != spec["coordinator"]:
+        raise ValueError("relay did not resume to the named coordinator")
+
+
+def fleet_upgrade_public_report(operation):
+    rows = []
+    for instance in operation["instances"]:
+        top = instance.get("top_observation") or {
+            "top_on_disk": {"status": "unobservable", "version": ""},
+            "top_process_loaded": {"status": "unobservable", "versions": []},
+            "restart_required": False, "observed_at": "",
+        }
+        rows.append({
+            "id": instance["id"], "root_digest": instance["root_digest"],
+            "phase": instance["phase"],
+            "outcome": instance.get("outcome") or "not_started",
+            "reason": instance.get("reason", ""),
+            "kit_before": {
+                "version": instance.get("kit", {}).get("version", ""),
+                "manifest_sha256": instance.get("kit", {}).get("manifest_sha256", ""),
+            },
+            "listener_classes": [
+                {"agent": lane["agent"], "coverage": lane["coverage"],
+                 "notify_only": lane["notify_only"]}
+                for lane in instance.get("restore_set", [])
+            ],
+            "doctor_pre_sha256": instance.get("doctor_pre", {}).get("sha256", ""),
+            "doctor_post_sha256": instance.get("doctor_post", {}).get("sha256", ""),
+            "top_on_disk": top["top_on_disk"],
+            "top_process_loaded": top["top_process_loaded"],
+            "top_restart_required": bool(top.get("restart_required")),
+            "top_observed_at": top.get("observed_at", ""),
+        })
+    green = bool(rows) and all(row["outcome"] in FLEET_UPGRADE_GREEN for row in rows)
+    return {
+        "schema": FLEET_UPGRADE_REPORT_SCHEMA,
+        "operation_id": operation["operation_id"],
+        "coordinator": operation["coordinator"], "policy": operation["policy"],
+        "source": operation["source_public"],
+        "inventory_sha256": operation["inventory_sha256"],
+        "state": operation["state"], "green": green,
+        "instances": rows, "updated_at": operation["updated_at"],
+    }
+
+
+def fleet_upgrade_report_markdown(report):
+    lines = [
+        f"# M8Shift fleet upgrade {report['operation_id']}", "",
+        f"- Coordinator: `{report['coordinator']}`",
+        f"- Policy: `{report['policy']}`",
+        f"- State: `{report['state']}`",
+        f"- Green: `{'yes' if report['green'] else 'no'}`", "",
+        "| Instance | Outcome | Phase | TOP on disk | TOP process loaded | Restart | Root digest |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for row in report["instances"]:
+        on_disk = row["top_on_disk"]
+        loaded = row["top_process_loaded"]
+        disk_cell = (on_disk.get("version") or on_disk.get("status") or "unobservable")
+        versions = loaded.get("versions") or []
+        loaded_cell = (",".join(versions) if versions else
+                       loaded.get("status") or "unobservable")
+        restart = "required" if row["top_restart_required"] else "no"
+        lines.append(f"| `{row['id']}` | `{row['outcome']}` | `{row['phase']}` | "
+                     f"`{disk_cell}` | `{loaded_cell}` | `{restart}` | "
+                     f"`{row['root_digest']}` |")
+    lines += ["", "Only `updated` and `already_current` are green outcomes. "
+              "A TOP restart warning is observational and does not make an otherwise "
+              "verified fleet upgrade red.", ""]
+    return "\n".join(lines)
+
+
+def fleet_upgrade_write_reports(operation):
+    report = fleet_upgrade_public_report(operation)
+    write_fleet_json_atomic(
+        fleet_upgrade_report_path(operation["operation_id"], "json"), report)
+    write_text_atomic(
+        fleet_upgrade_report_path(operation["operation_id"], "md"),
+        fleet_upgrade_report_markdown(report))
+    return report
+
+
+def fleet_upgrade_initial_operation(spec, source):
+    public_spec = {key: value for key, value in spec.items() if not key.startswith("_")}
+    inventory = [{"id": row["id"], "root_digest": fleet_upgrade_path_digest(row["root"]),
+                  "resume_relay": row["resume_relay"]} for row in spec["instances"]]
+    return {
+        "schema": FLEET_UPGRADE_OPERATION_SCHEMA,
+        "operation_id": spec["operation_id"], "coordinator": spec["coordinator"],
+        "policy": spec["policy"], "spec_sha256": fleet_upgrade_digest(public_spec),
+        "source_public": dict(spec["source"]), "source_root": source["root"],
+        "source_manifest_sha256": source["manifest_sha256"],
+        "inventory_sha256": fleet_upgrade_digest(inventory),
+        "state": "planned", "current_index": 0, "instances": [],
+        "created_at": iso(), "updated_at": iso(),
+    }
+
+
+def fleet_upgrade_load_operation(spec, source, resume):
+    path = fleet_upgrade_state_path(spec["operation_id"])
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        info = None
+    except OSError as exc:
+        raise ValueError(f"fleet-upgrade operation record is unavailable: {exc}") from exc
+    if info is not None and (stat.S_ISLNK(info.st_mode)
+                             or not stat.S_ISREG(info.st_mode)
+                             or info.st_size > FLEET_UPGRADE_MAX_OPERATION_BYTES):
+        raise ValueError("fleet-upgrade operation record is unsafe or too large")
+    existing, err = read_json_diagnostic(path, {})
+    public_spec = {key: value for key, value in spec.items() if not key.startswith("_")}
+    if err:
+        raise ValueError(f"fleet-upgrade operation record is unreadable: {err}")
+    if existing:
+        if not resume:
+            raise ValueError("fleet-upgrade operation exists; re-run with --resume")
+        expected = {
+            "schema": FLEET_UPGRADE_OPERATION_SCHEMA,
+            "operation_id": spec["operation_id"], "coordinator": spec["coordinator"],
+            "policy": spec["policy"], "spec_sha256": fleet_upgrade_digest(public_spec),
+            "source_manifest_sha256": source["manifest_sha256"],
+            "source_root": source["root"],
+        }
+        if any(existing.get(key) != value for key, value in expected.items()):
+            raise ValueError("fleet-upgrade resume identity does not match the operation")
+        if existing.get("state") not in {
+                "planned", "preflighted", "running", "halted",
+                "needs_reconciliation", "complete"}:
+            raise ValueError("fleet-upgrade operation state is invalid")
+        rows = existing.get("instances")
+        if not isinstance(rows, list) or len(rows) > len(spec["instances"]):
+            raise ValueError("fleet-upgrade operation instances are invalid")
+        declared = {row["id"]: row for row in spec["instances"]}
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict) or row.get("id") in seen \
+                    or row.get("id") not in declared \
+                    or row.get("root") != declared[row.get("id")]["root"]:
+                raise ValueError("fleet-upgrade operation instance binding is invalid")
+            if row.get("phase") not in {
+                    "preflighted", "stopping_listeners", "listeners_stopped",
+                    "updating", "verifying", "migrating_listener_plans",
+                    "restoring_listeners", "resuming_relay", "terminal"}:
+                raise ValueError("fleet-upgrade operation instance phase is invalid")
+            outcome = row.get("outcome")
+            if outcome is not None and outcome not in FLEET_UPGRADE_TERMINAL:
+                raise ValueError("fleet-upgrade operation outcome is invalid")
+            seen.add(row["id"])
+        return existing
+    if resume:
+        raise ValueError("fleet-upgrade has no operation record to resume")
+    operation = fleet_upgrade_initial_operation(spec, source)
+    fleet_upgrade_checkpoint(operation)
+    return operation
+
+
+def fleet_upgrade_mark_preflight_failure(operation, spec, failed_id, reason):
+    by_id = {row["id"]: row for row in operation["instances"]}
+    rows = []
+    for declared in spec["instances"]:
+        current = by_id.get(declared["id"], {
+            "id": declared["id"], "root": declared["root"],
+            "root_digest": fleet_upgrade_path_digest(declared["root"]),
+            "resume_relay": declared["resume_relay"], "phase": "terminal",
+            "relay_state": "", "kit": {}, "restore_set": [],
+        })
+        current["phase"] = "terminal"
+        current["outcome"] = "excluded" if declared["id"] == failed_id else "not_started"
+        current["reason"] = ("preflight_refused" if declared["id"] == failed_id
+                             else "cohort_preflight_failed")
+        if declared["id"] == failed_id:
+            current["private_reason"] = reason
+        rows.append(current)
+    operation["instances"] = rows
+    operation["state"] = "halted"
+    fleet_upgrade_checkpoint(operation)
+
+
+def fleet_upgrade_preflight(operation, spec, source):
+    operation_dir = fleet_upgrade_operation_dir(operation["operation_id"])
+    completed = {row["id"] for row in operation["instances"]
+                 if row.get("phase") == "preflighted"}
+    for declared in spec["instances"]:
+        if declared["id"] in completed:
+            continue
+        try:
+            instance = fleet_upgrade_preflight_instance(
+                spec, source, declared, operation_dir)
+        except ValueError as exc:
+            fleet_upgrade_mark_preflight_failure(
+                operation, spec, declared["id"], str(exc)[:300])
+            return False
+        operation["instances"].append(instance)
+        fleet_upgrade_checkpoint(operation)
+    operation["state"] = "preflighted"
+    fleet_upgrade_checkpoint(operation)
+    return True
+
+
+def fleet_upgrade_finish_current(operation, spec, instance):
+    if not fleet_upgrade_relay_unchanged(instance):
+        raise ValueError("relay bytes changed during already-current verification")
+    fleet_upgrade_resume_relay(spec, instance)
+    instance["doctor_post"] = fleet_upgrade_capture_doctor(
+        instance["root"], fleet_upgrade_operation_dir(operation["operation_id"]),
+        instance["id"], "post")
+    instance["outcome"] = "already_current"
+    fleet_upgrade_checkpoint(operation, instance, "terminal")
+
+
+def fleet_upgrade_process_instance(operation, spec, source, instance, args):
+    phase = instance["phase"]
+    resumed_from_updating = bool(getattr(args, "resume", False) and phase == "updating")
+    if phase in ("preflighted", "stopping_listeners"):
+        try:
+            fleet_upgrade_revalidate_before_mutation(spec, source, instance)
+        except ValueError as exc:
+            instance["outcome"] = "failed"
+            instance["private_reason"] = str(exc)[:300]
+            operation["state"] = "needs_reconciliation"
+            fleet_upgrade_checkpoint(
+                operation, instance, "terminal", "pre_mutation_evidence_drift")
+            return False
+    if phase == "preflighted" and instance.get("already_current"):
+        fleet_upgrade_finish_current(operation, spec, instance)
+        return True
+    if phase == "preflighted":
+        fleet_upgrade_checkpoint(operation, instance, "stopping_listeners")
+        fleet_upgrade_interrupt(args, instance["id"], "stopping_listeners")
+        phase = "stopping_listeners"
+    if phase == "stopping_listeners":
+        fleet_upgrade_stop_listeners(operation, instance, args)
+        fleet_upgrade_checkpoint(operation, instance, "listeners_stopped")
+        fleet_upgrade_interrupt(args, instance["id"], "listeners_stopped")
+        phase = "listeners_stopped"
+    if phase == "listeners_stopped":
+        fleet_upgrade_backup(operation, instance)
+        fleet_upgrade_checkpoint(operation, instance, "updating")
+        fleet_upgrade_interrupt(args, instance["id"], "updating")
+        phase = "updating"
+    if phase == "updating":
+        # Re-entry after an update intent is evidence-driven. Exact target bytes
+        # advance; exact original bytes become a proven local rollback; any mix
+        # needs reconciliation and is never overwritten by a second update.
+        if resumed_from_updating:
+            try:
+                current = fleet_upgrade_update_plan(
+                    source["root"], instance["root"], instance["kit"]["companions"],
+                    instance["kit"]["generation"] != source["generation"])
+                target_exact = fleet_upgrade_plan_is_current(current)
+            except ValueError:
+                target_exact = False
+            if target_exact:
+                fleet_upgrade_checkpoint(operation, instance, "verifying")
+                phase = "verifying"
+            elif fleet_upgrade_matches_backup(operation, instance):
+                failures = fleet_upgrade_restore_listeners(instance)
+                instance["outcome"] = "rolled_back" if not failures else "failed"
+                instance["reason"] = ("interrupted_before_update" if not failures else
+                                      "listener_restore_failed_after_rollback")
+                if failures:
+                    instance["private_reason"] = failures[0]
+                else:
+                    instance["doctor_post"] = fleet_upgrade_capture_doctor(
+                        instance["root"],
+                        fleet_upgrade_operation_dir(operation["operation_id"]),
+                        instance["id"], "post")
+                operation["state"] = "halted" if not failures else "needs_reconciliation"
+                fleet_upgrade_checkpoint(operation, instance, "terminal")
+                return False
+            else:
+                instance["outcome"] = "failed"
+                operation["state"] = "needs_reconciliation"
+                fleet_upgrade_checkpoint(
+                    operation, instance, "terminal", "mixed_or_unknown_kit_after_interruption")
+                return False
+        else:
+            fleet_upgrade_verify_source(source["root"], spec["source"])
+            if getattr(args, "fail_update_instance", "") == instance["id"]:
+                rc, payload = 1, {"ok": False, "refusal": {
+                    "reason": "injected hermetic update failure"}}
+            else:
+                rc, payload = fleet_upgrade_run_json(
+                    fleet_upgrade_update_argv(
+                        source["root"], instance["root"], instance["kit"]["companions"],
+                        allow_generation_change=(
+                            instance["kit"]["generation"] != source["generation"])),
+                    instance["root"], "kit update", timeout=300)
+            if rc != 0 or payload.get("ok") is not True:
+                try:
+                    fleet_upgrade_restore_backup(operation, instance)
+                    failures = fleet_upgrade_restore_listeners(instance)
+                except ValueError as exc:
+                    failures = [str(exc)]
+                instance["outcome"] = "rolled_back" if not failures else "failed"
+                instance["reason"] = "update_failed" if not failures else "rollback_failed"
+                if failures:
+                    instance["private_reason"] = failures[0]
+                if not failures:
+                    instance["doctor_post"] = fleet_upgrade_capture_doctor(
+                        instance["root"],
+                        fleet_upgrade_operation_dir(operation["operation_id"]),
+                        instance["id"], "post")
+                operation["state"] = "halted" if not failures else "needs_reconciliation"
+                fleet_upgrade_checkpoint(operation, instance, "terminal")
+                return False
+            fleet_upgrade_checkpoint(operation, instance, "verifying")
+            fleet_upgrade_interrupt(args, instance["id"], "verifying")
+            phase = "verifying"
+    if phase == "verifying":
+        try:
+            fleet_upgrade_verify_target(operation, spec, source, instance)
+            fleet_upgrade_prepare_plan_migrations(operation, instance, source)
+        except ValueError:
+            try:
+                fleet_upgrade_restore_backup(operation, instance)
+                fleet_upgrade_restore_original_plans(operation, instance)
+                failures = fleet_upgrade_restore_listeners(instance)
+            except ValueError as exc:
+                failures = [str(exc)]
+            instance["outcome"] = "rolled_back" if not failures else "failed"
+            instance["reason"] = "verification_failed" if not failures else "rollback_failed"
+            if failures:
+                instance["private_reason"] = failures[0]
+            if not failures:
+                instance["doctor_post"] = fleet_upgrade_capture_doctor(
+                    instance["root"],
+                    fleet_upgrade_operation_dir(operation["operation_id"]),
+                    instance["id"], "post")
+            operation["state"] = "halted" if not failures else "needs_reconciliation"
+            fleet_upgrade_checkpoint(operation, instance, "terminal")
+            return False
+        fleet_upgrade_interrupt(args, instance["id"], "migrating_listener_plans")
+        phase = "migrating_listener_plans"
+    if phase == "migrating_listener_plans":
+        try:
+            fleet_upgrade_prepare_plan_migrations(operation, instance, source)
+        except ValueError as exc:
+            instance["outcome"] = "failed"
+            instance["private_reason"] = str(exc)[:300]
+            operation["state"] = "needs_reconciliation"
+            fleet_upgrade_checkpoint(
+                operation, instance, "terminal", "listener_plan_migration_failed")
+            return False
+        fleet_upgrade_checkpoint(operation, instance, "restoring_listeners")
+        fleet_upgrade_interrupt(args, instance["id"], "restoring_listeners")
+        phase = "restoring_listeners"
+    if phase == "restoring_listeners":
+        failures = fleet_upgrade_restore_listeners(instance)
+        if failures:
+            instance["outcome"] = "updated_but_listener_down"
+            instance["reason"] = "listener_restore_failed"
+            instance["private_reason"] = failures[0][:300]
+            instance["doctor_post"] = fleet_upgrade_capture_doctor(
+                instance["root"], fleet_upgrade_operation_dir(operation["operation_id"]),
+                instance["id"], "post")
+            operation["state"] = "halted"
+            fleet_upgrade_checkpoint(operation, instance, "terminal")
+            return False
+        if instance["resume_relay"] and instance["relay_state"] != "DONE":
+            fleet_upgrade_checkpoint(operation, instance, "resuming_relay")
+            fleet_upgrade_interrupt(args, instance["id"], "resuming_relay")
+            phase = "resuming_relay"
+        else:
+            phase = "terminal"
+    if phase == "resuming_relay":
+        try:
+            fleet_upgrade_resume_relay(spec, instance)
+        except ValueError as exc:
+            instance["outcome"] = "failed"
+            operation["state"] = "needs_reconciliation"
+            instance["private_reason"] = str(exc)[:300]
+            fleet_upgrade_checkpoint(operation, instance, "terminal", "relay_resume_failed")
+            return False
+        fleet_upgrade_interrupt(args, instance["id"], "relay_resumed")
+        phase = "terminal"
+    if phase == "terminal" and not instance.get("outcome"):
+        instance["doctor_post"] = fleet_upgrade_capture_doctor(
+            instance["root"], fleet_upgrade_operation_dir(operation["operation_id"]),
+            instance["id"], "post")
+        instance["outcome"] = "updated"
+        fleet_upgrade_checkpoint(operation, instance, "terminal")
+    return instance.get("outcome") in FLEET_UPGRADE_GREEN
+
+
+def cmd_fleet_upgrade(args):
+    try:
+        spec = load_fleet_upgrade_spec(args.spec)
+        source = fleet_upgrade_verify_source(args.source, spec["source"])
+        fleet_upgrade_validate_topology(spec, source)
+        token = acquire_fleet_upgrade_lock(spec["operation_id"])
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    try:
+        operation = fleet_upgrade_load_operation(spec, source, args.resume)
+        if operation["state"] == "planned":
+            if not fleet_upgrade_preflight(operation, spec, source):
+                report = fleet_upgrade_write_reports(operation)
+                if args.json:
+                    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+                else:
+                    print(f"fleet-upgrade {operation['operation_id']}: halted during preflight")
+                return 1
+        if operation["state"] in ("halted", "needs_reconciliation", "complete"):
+            report = fleet_upgrade_write_reports(operation)
+            if args.json:
+                print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            else:
+                print(f"fleet-upgrade {operation['operation_id']}: {operation['state']}")
+            return 0 if report["green"] else 1
+        operation["state"] = "running"
+        fleet_upgrade_checkpoint(operation)
+        for index, instance in enumerate(operation["instances"]):
+            operation["current_index"] = index
+            fleet_upgrade_checkpoint(operation)
+            if instance.get("outcome") in FLEET_UPGRADE_TERMINAL:
+                continue
+            if not fleet_upgrade_process_instance(
+                    operation, spec, source, instance, args):
+                for later in operation["instances"][index + 1:]:
+                    if not later.get("outcome"):
+                        later["outcome"] = "not_started"
+                        later["phase"] = "terminal"
+                        later["reason"] = "earlier_instance_halted_cohort"
+                fleet_upgrade_checkpoint(operation)
+                break
+        else:
+            operation["state"] = "complete"
+            operation["current_index"] = len(operation["instances"])
+            fleet_upgrade_checkpoint(operation)
+        report = fleet_upgrade_write_reports(operation)
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"fleet-upgrade {operation['operation_id']}: {operation['state']} "
+                  f"(green={'yes' if report['green'] else 'no'})")
+            for row in report["instances"]:
+                print(f"  {row['id']}: {row['outcome']}")
+        return 0 if report["green"] else 1
+    except ValueError as exc:
+        sys.exit(f"m8shift-runtime: {exc}")
+    finally:
+        release_fleet_upgrade_lock(spec["operation_id"], token)
+
+
+# ── RFC 081 continuation / #332 — doctor baseline classification ───────────
+
+def doctor_baseline_digest(doc):
+    return hashlib.sha256(canonical_json_bytes(doc)).hexdigest()
+
+
+def doctor_baseline_parse_time(value, role):
+    if not isinstance(value, str):
+        raise ValueError(f"{role} timestamp is invalid")
+    try:
+        parsed = dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError(f"{role} timestamp must be strict UTC Z") from exc
+    return parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def doctor_baseline_read_json(path, role):
+    absolute = os.path.abspath(path)
+    fd = -1
+    try:
+        try:
+            before = os.lstat(absolute)
+            if (stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode)
+                    or before.st_size > DOCTOR_BASELINE_MAX_BYTES):
+                raise ValueError(
+                    f"{role} must be a stable bounded regular non-symlink file")
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(absolute, flags)
+            opened = os.fstat(fd)
+            after = os.lstat(absolute)
+        except OSError as exc:
+            raise ValueError(f"{role} is unavailable: {exc}") from exc
+        identities = (
+            (before.st_dev, before.st_ino),
+            (opened.st_dev, opened.st_ino),
+            (after.st_dev, after.st_ino),
+        )
+        if (stat.S_ISLNK(before.st_mode) or stat.S_ISLNK(after.st_mode)
+                or not stat.S_ISREG(opened.st_mode)
+                or len(set(identities)) != 1
+                or max(before.st_size, opened.st_size, after.st_size)
+                > DOCTOR_BASELINE_MAX_BYTES):
+            raise ValueError(f"{role} must be a stable bounded regular non-symlink file")
+        with os.fdopen(fd, "rb") as fh:
+            fd = -1
+            raw = fh.read(DOCTOR_BASELINE_MAX_BYTES + 1)
+        if len(raw) > DOCTOR_BASELINE_MAX_BYTES:
+            raise ValueError(f"{role} exceeds the byte limit")
+        try:
+            doc = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+            raise ValueError(f"{role} is unreadable: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"{role} is unreadable: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(doc, dict):
+        raise ValueError(f"{role} must contain one JSON object")
+    return doc
+
+
+def doctor_baseline_string(value, role, *, allow_empty=False, max_bytes=None):
+    limit = max_bytes or DOCTOR_BASELINE_MAX_STRING_BYTES
+    if (not isinstance(value, str) or (not allow_empty and not value)
+            or len(value.encode("utf-8")) > limit
+            or any(ord(char) < 32 and char not in "\t" for char in value)):
+        raise ValueError(f"{role} is invalid or exceeds its bound")
+    return value
+
+
+def doctor_baseline_path(value):
+    raw = doctor_baseline_string(
+        value if value is not None else "", "doctor finding path",
+        allow_empty=True, max_bytes=512)
+    if not raw:
+        return ""
+    portable = raw.replace("\\", "/")
+    if portable.startswith("/") or re.match(r"^[A-Za-z]:", portable):
+        raise ValueError("doctor finding path must be project-relative")
+    if ".." in portable.split("/"):
+        raise ValueError("doctor finding path must not contain traversal segments")
+    normalized = posixpath.normpath(portable)
+    if normalized == ".." or normalized.startswith("../"):
+        raise ValueError("doctor finding path escapes the project root")
+    if normalized == "." and portable != ".":
+        return ""
+    return normalized
+
+
+def doctor_baseline_finding_key(check, severity, path):
+    return doctor_baseline_digest({
+        "check": check, "severity": severity, "path": path,
+    })
+
+
+def doctor_baseline_normalize(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("findings"), list):
+        raise ValueError("doctor payload must be an object with a findings array")
+    version = payload.get("m8shift_version")
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", version):
+        raise ValueError("doctor payload m8shift_version is invalid")
+    findings = payload["findings"]
+    if len(findings) > DOCTOR_BASELINE_MAX_FINDINGS:
+        raise ValueError("doctor payload exceeds the finding limit")
+    counts = {}
+    allowed = {"check", "severity", "message", "path", "fix_hint"}
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict) or not set(finding).issubset(allowed) \
+                or not {"check", "severity", "message"}.issubset(finding):
+            raise ValueError(f"doctor finding {index} has unsupported or missing fields")
+        check = doctor_baseline_string(finding.get("check"), f"doctor finding {index} check")
+        if not DOCTOR_BASELINE_CHECK_RE.fullmatch(check):
+            raise ValueError(f"doctor finding {index} check is not a stable identifier")
+        severity = finding.get("severity")
+        if severity not in DOCTOR_BASELINE_SEVERITIES:
+            raise ValueError(f"doctor finding {index} severity is invalid")
+        doctor_baseline_string(
+            finding.get("message"), f"doctor finding {index} message", allow_empty=True)
+        if "fix_hint" in finding:
+            doctor_baseline_string(
+                finding["fix_hint"], f"doctor finding {index} fix_hint", allow_empty=True)
+        path = doctor_baseline_path(finding.get("path", ""))
+        key = doctor_baseline_finding_key(check, severity, path)
+        row = counts.setdefault(key, {
+            "key": key, "check": check, "severity": severity,
+            "path": path, "count": 0,
+        })
+        row["count"] += 1
+    return sorted(counts.values(), key=lambda row: row["key"])
+
+
+def doctor_baseline_context():
+    fields, _relay = fleet_upgrade_lock_fields(HERE)
+    kit_path = os.path.join(HERE, ".m8shift", "kit.json")
+    kit = doctor_baseline_read_json(kit_path, "kit manifest")
+    if kit.get("schema") != "m8shift.kit.v1" or not isinstance(kit.get("core"), dict):
+        raise ValueError("kit manifest is missing its v1 core identity")
+    kit_version = kit["core"].get("version")
+    core_version = script_version(CORE_PATH)
+    for value, role in ((kit_version, "kit version"), (core_version, "core version")):
+        if not isinstance(value, str) or not re.fullmatch(
+                r"[0-9]+[.][0-9]+[.][0-9]+", value):
+            raise ValueError(f"{role} is invalid")
+    if kit_version != core_version:
+        raise ValueError("installed kit and core versions differ")
+    return {
+        "root_digest": hashlib.sha256(
+            os.path.realpath(HERE).encode("utf-8")).hexdigest(),
+        "core_version": core_version, "kit_version": kit_version,
+        "session": fields["session"], "turn": fields["turn_int"],
+    }
+
+
+def doctor_baseline_live_payload():
+    rc, payload = fleet_upgrade_run_json(
+        [sys.executable, CORE_PATH, "doctor", "--json"], HERE, "doctor baseline")
+    if rc != 0:
+        raise ValueError("doctor baseline command failed")
+    return payload
+
+
+def doctor_baseline_payload(path, role):
+    return doctor_baseline_read_json(path, role) if path else doctor_baseline_live_payload()
+
+
+def doctor_baseline_build(payload, ttl_seconds):
+    if (isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int)
+            or ttl_seconds < DOCTOR_BASELINE_TTL_MIN_S
+            or ttl_seconds > DOCTOR_BASELINE_TTL_MAX_S):
+        raise ValueError(
+            f"doctor baseline ttl must be {DOCTOR_BASELINE_TTL_MIN_S}.."
+            f"{DOCTOR_BASELINE_TTL_MAX_S} seconds")
+    context = doctor_baseline_context()
+    if payload.get("m8shift_version") != context["core_version"]:
+        raise ValueError("doctor payload version does not match the current core")
+    captured = now()
+    return {
+        "schema": DOCTOR_BASELINE_SCHEMA,
+        "normalizer": DOCTOR_BASELINE_NORMALIZER,
+        **context,
+        "captured_at": iso(captured),
+        "expires_at": iso(captured + dt.timedelta(seconds=ttl_seconds)),
+        "doctor_payload_sha256": doctor_baseline_digest(payload),
+        "findings": doctor_baseline_normalize(payload),
+    }
+
+
+def doctor_baseline_output_path(raw):
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("doctor baseline output path is required")
+    candidate = os.path.abspath(raw if os.path.isabs(raw) else os.path.join(HERE, raw))
+    runtime = os.path.abspath(RUNTIME_DIR)
+    try:
+        within = os.path.commonpath((candidate, runtime)) == runtime
+    except ValueError:
+        within = False
+    if not within or not candidate.endswith(".json"):
+        raise ValueError("doctor baseline output must be a JSON file under .m8shift/runtime")
+    if os.path.lexists(candidate):
+        raise ValueError("doctor baseline output already exists")
+    reject_symlinked_runtime_path(candidate, ValueError)
+    return candidate
+
+
+def doctor_baseline_validate_rows(rows):
+    if not isinstance(rows, list) or len(rows) > DOCTOR_BASELINE_MAX_FINDINGS:
+        raise ValueError("doctor baseline normalized findings are invalid")
+    previous = ""
+    normalized = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != {
+                "key", "check", "severity", "path", "count"}:
+            raise ValueError(f"doctor baseline finding {index} has invalid fields")
+        check = row.get("check")
+        severity = row.get("severity")
+        path = row.get("path")
+        count = row.get("count")
+        key = row.get("key")
+        if not isinstance(check, str) or not DOCTOR_BASELINE_CHECK_RE.fullmatch(check) \
+                or severity not in DOCTOR_BASELINE_SEVERITIES \
+                or doctor_baseline_path(path) != path \
+                or isinstance(count, bool) or not isinstance(count, int) \
+                or count < 1 or count > DOCTOR_BASELINE_MAX_FINDINGS \
+                or key != doctor_baseline_finding_key(check, severity, path) \
+                or key <= previous:
+            raise ValueError(f"doctor baseline finding {index} identity is invalid")
+        previous = key
+        normalized.append(dict(row))
+    if sum(row["count"] for row in normalized) > DOCTOR_BASELINE_MAX_FINDINGS:
+        raise ValueError("doctor baseline aggregate count exceeds the finding limit")
+    return normalized
+
+
+def doctor_baseline_validate(doc, context, instant=None):
+    expected_fields = {
+        "schema", "normalizer", "root_digest", "core_version", "kit_version",
+        "session", "turn", "captured_at", "expires_at",
+        "doctor_payload_sha256", "findings",
+    }
+    if not isinstance(doc, dict) or set(doc) != expected_fields \
+            or doc.get("schema") != DOCTOR_BASELINE_SCHEMA \
+            or doc.get("normalizer") != DOCTOR_BASELINE_NORMALIZER:
+        raise ValueError("doctor baseline schema or fields are incompatible")
+    for field in ("root_digest", "doctor_payload_sha256"):
+        if not isinstance(doc.get(field), str) or not DOCTOR_BASELINE_KEY_RE.fullmatch(doc[field]):
+            raise ValueError(f"doctor baseline {field} is invalid")
+    for field in ("core_version", "kit_version"):
+        if not isinstance(doc.get(field), str) or not re.fullmatch(
+                r"[0-9]+[.][0-9]+[.][0-9]+", doc[field]):
+            raise ValueError(f"doctor baseline {field} is invalid")
+    if doc["core_version"] != doc["kit_version"]:
+        raise ValueError("doctor baseline kit and core versions differ")
+    if not isinstance(doc.get("session"), str) or not SESSION_RE.fullmatch(doc["session"]):
+        raise ValueError("doctor baseline session is invalid")
+    if isinstance(doc.get("turn"), bool) or not isinstance(doc.get("turn"), int) \
+            or doc["turn"] < 0:
+        raise ValueError("doctor baseline turn is invalid")
+    captured = doctor_baseline_parse_time(doc.get("captured_at"), "doctor baseline captured_at")
+    expires = doctor_baseline_parse_time(doc.get("expires_at"), "doctor baseline expires_at")
+    current = instant or now()
+    lifetime = (expires - captured).total_seconds()
+    if (captured > current + dt.timedelta(seconds=DOCTOR_BASELINE_CLOCK_SKEW_S)
+            or lifetime < DOCTOR_BASELINE_TTL_MIN_S
+            or lifetime > DOCTOR_BASELINE_TTL_MAX_S
+            or current > expires):
+        raise ValueError("doctor baseline is stale or has an invalid lifetime")
+    if doc["root_digest"] != context["root_digest"]:
+        raise ValueError("doctor baseline belongs to a different relay root")
+    if doc["session"] != context["session"]:
+        raise ValueError("doctor baseline belongs to a different relay session")
+    if context["turn"] < doc["turn"]:
+        raise ValueError("current relay turn precedes the doctor baseline")
+    doctor_baseline_validate_rows(doc["findings"])
+    return captured, expires
+
+
+def doctor_baseline_validate_exceptions(doc, baseline, baseline_sha, context,
+                                        baseline_expires, instant=None):
+    fields = {
+        "schema", "baseline_sha256", "root_digest", "accepted_by",
+        "decision_ref", "created_at", "expires_at", "exceptions",
+    }
+    if not isinstance(doc, dict) or set(doc) != fields \
+            or doc.get("schema") != DOCTOR_BASELINE_EXCEPTIONS_SCHEMA:
+        raise ValueError("doctor baseline exceptions schema or fields are incompatible")
+    if doc.get("baseline_sha256") != baseline_sha:
+        raise ValueError("doctor baseline exceptions bind a different baseline")
+    if doc.get("root_digest") != context["root_digest"] \
+            or doc["root_digest"] != baseline["root_digest"]:
+        raise ValueError("doctor baseline exceptions bind a different relay root")
+    actor = doc.get("accepted_by")
+    decision_ref = doc.get("decision_ref")
+    if not isinstance(actor, str) or not DOCTOR_BASELINE_ACTOR_RE.fullmatch(actor):
+        raise ValueError("doctor baseline exceptions accepted_by is invalid")
+    if not isinstance(decision_ref, str) or not DOCTOR_BASELINE_REF_RE.fullmatch(decision_ref):
+        raise ValueError("doctor baseline exceptions decision_ref is invalid")
+    created = doctor_baseline_parse_time(
+        doc.get("created_at"), "doctor baseline exceptions created_at")
+    expires = doctor_baseline_parse_time(
+        doc.get("expires_at"), "doctor baseline exceptions expires_at")
+    current = instant or now()
+    baseline_captured = doctor_baseline_parse_time(
+        baseline["captured_at"], "doctor baseline captured_at")
+    lifetime = (expires - created).total_seconds()
+    if (created < baseline_captured - dt.timedelta(seconds=DOCTOR_BASELINE_CLOCK_SKEW_S)
+            or created > current + dt.timedelta(seconds=DOCTOR_BASELINE_CLOCK_SKEW_S)
+            or lifetime <= 0 or lifetime > DOCTOR_BASELINE_TTL_MAX_S
+            or current > expires or expires > baseline_expires):
+        raise ValueError("doctor baseline exceptions are stale or have an invalid lifetime")
+    rows = doc.get("exceptions")
+    if not isinstance(rows, list) or len(rows) > DOCTOR_BASELINE_MAX_FINDINGS:
+        raise ValueError("doctor baseline exceptions array is invalid")
+    result = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != {
+                "finding_key", "max_introduced", "reason"}:
+            raise ValueError(f"doctor baseline exception {index} has invalid fields")
+        key = row.get("finding_key")
+        maximum = row.get("max_introduced")
+        doctor_baseline_string(
+            row.get("reason"), f"doctor baseline exception {index} reason", max_bytes=512)
+        if not isinstance(key, str) or not DOCTOR_BASELINE_KEY_RE.fullmatch(key):
+            raise ValueError(f"doctor baseline exception {index} key is invalid")
+        if key in result:
+            raise ValueError(f"doctor baseline exception {index} repeats a finding key")
+        if isinstance(maximum, bool) or not isinstance(maximum, int) \
+                or maximum < 1 or maximum > DOCTOR_BASELINE_MAX_FINDINGS:
+            raise ValueError(f"doctor baseline exception {index} count is invalid")
+        result[key] = maximum
+    return result
+
+
+def doctor_baseline_classify(baseline, current_rows, exceptions=None):
+    before = {row["key"]: row for row in baseline["findings"]}
+    after = {row["key"]: row for row in current_rows}
+    allowed = exceptions or {}
+    classifications = []
+    totals = {"preexisting": 0, "resolved": 0, "introduced": 0,
+              "accepted": 0, "blocking": 0}
+    for key in sorted(set(before) | set(after)):
+        old = before.get(key)
+        new = after.get(key)
+        identity = new or old
+        old_count = old["count"] if old else 0
+        new_count = new["count"] if new else 0
+        preexisting = min(old_count, new_count)
+        resolved = max(0, old_count - new_count)
+        introduced = max(0, new_count - old_count)
+        accepted = min(introduced, allowed.get(key, 0))
+        blocking = 0
+        if identity["severity"] in ("warning", "error"):
+            blocking = introduced - accepted
+        row = {
+            "finding_key": key, "check": identity["check"],
+            "severity": identity["severity"], "path": identity["path"],
+            "preexisting": preexisting, "resolved": resolved,
+            "introduced": introduced, "accepted": accepted,
+            "blocking": blocking,
+        }
+        classifications.append(row)
+        for field in totals:
+            totals[field] += row[field]
+    return classifications, totals
+
+
+def doctor_baseline_compare(baseline, current_payload, context,
+                            exceptions_doc=None, instant=None):
+    _captured, baseline_expires = doctor_baseline_validate(
+        baseline, context, instant=instant)
+    if current_payload.get("m8shift_version") != context["core_version"]:
+        raise ValueError("current doctor payload version does not match the current core")
+    current_rows = doctor_baseline_normalize(current_payload)
+    baseline_sha = doctor_baseline_digest(baseline)
+    exception_map = {}
+    exception_sha = ""
+    if exceptions_doc is not None:
+        exception_map = doctor_baseline_validate_exceptions(
+            exceptions_doc, baseline, baseline_sha, context,
+            baseline_expires, instant=instant)
+        exception_sha = doctor_baseline_digest(exceptions_doc)
+    classifications, totals = doctor_baseline_classify(
+        baseline, current_rows, exception_map)
+    by_key = {row["finding_key"]: row for row in classifications}
+    for key in exception_map:
+        row = by_key.get(key)
+        if row is None or row["introduced"] < 1 \
+                or row["severity"] not in ("warning", "error"):
+            raise ValueError(
+                "doctor baseline exceptions contain a non-blocking or absent finding key")
+    return {
+        "schema": DOCTOR_BASELINE_REPORT_SCHEMA,
+        "normalizer": DOCTOR_BASELINE_NORMALIZER,
+        "baseline_sha256": baseline_sha,
+        "current_doctor_sha256": doctor_baseline_digest(current_payload),
+        "exceptions_sha256": exception_sha,
+        "root_digest": context["root_digest"],
+        "session": context["session"],
+        "baseline_turn": baseline["turn"], "current_turn": context["turn"],
+        "baseline_core_version": baseline["core_version"],
+        "current_core_version": context["core_version"],
+        "baseline_kit_version": baseline["kit_version"],
+        "current_kit_version": context["kit_version"],
+        "baseline_captured_at": baseline["captured_at"],
+        "baseline_expires_at": baseline["expires_at"],
+        "green": totals["blocking"] == 0,
+        "counts": totals, "classifications": classifications,
+    }
+
+
+def doctor_baseline_print_report(report):
+    print("M8Shift doctor baseline comparison")
+    print(f"  baseline: {report['baseline_sha256']}")
+    print(f"  root: {report['root_digest']}")
+    print(f"  session: {report['session']} "
+          f"(turn {report['baseline_turn']} -> {report['current_turn']})")
+    print(f"  green: {'yes' if report['green'] else 'no'}")
+    counts = report["counts"]
+    print("  counts: " + ", ".join(
+        f"{name}={counts[name]}" for name in (
+            "preexisting", "resolved", "introduced", "accepted", "blocking")))
+    for row in report["classifications"]:
+        print(f"  {row['severity']} {row['check']} path={row['path'] or '-'} "
+              f"preexisting={row['preexisting']} resolved={row['resolved']} "
+              f"introduced={row['introduced']} accepted={row['accepted']} "
+              f"blocking={row['blocking']}")
+
+
+def cmd_doctor_baseline_capture(args):
+    try:
+        payload = doctor_baseline_payload(args.doctor_json, "doctor JSON input")
+        baseline = doctor_baseline_build(payload, args.ttl_seconds)
+        path = doctor_baseline_output_path(args.output)
+        write_json_immutable(path, baseline)
+    except ValueError as exc:
+        print(f"m8shift-runtime: {exc}", file=sys.stderr)
+        return 2
+    summary = {
+        "schema": DOCTOR_BASELINE_SCHEMA,
+        "baseline_sha256": doctor_baseline_digest(baseline),
+        "root_digest": baseline["root_digest"],
+        "session": baseline["session"], "turn": baseline["turn"],
+        "captured_at": baseline["captured_at"],
+        "expires_at": baseline["expires_at"],
+        "finding_classes": len(baseline["findings"]),
+        "output": os.path.relpath(path, HERE).replace(os.sep, "/"),
+    }
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"doctor baseline captured: {summary['baseline_sha256']}")
+        print(f"  output: {summary['output']}")
+        print(f"  expires: {summary['expires_at']}")
+    return 0
+
+
+def cmd_doctor_baseline_compare(args):
+    try:
+        baseline = doctor_baseline_read_json(args.baseline, "doctor baseline")
+        current = doctor_baseline_payload(args.current_json, "current doctor JSON")
+        exceptions = (doctor_baseline_read_json(
+            args.exceptions, "doctor baseline exceptions") if args.exceptions else None)
+        report = doctor_baseline_compare(
+            baseline, current, doctor_baseline_context(), exceptions)
+    except ValueError as exc:
+        if args.json:
+            print(json.dumps({
+                "schema": DOCTOR_BASELINE_REPORT_SCHEMA,
+                "green": False, "error": str(exc),
+            }, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"m8shift-runtime: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    else:
+        doctor_baseline_print_report(report)
+    return 0 if report["green"] else 1
 
 
 def cmd_fleet_plan(args):
@@ -7528,6 +9861,93 @@ def consult_kit_findings():
     return findings
 
 
+LOCAL_BRANCH_REPORT_LIMIT = 50
+
+
+def local_branch_findings(limit=LOCAL_BRANCH_REPORT_LIMIT, run=None):
+    """#361 — report local branches with no remote counterpart, classified by
+    PATCH IDENTITY rather than by commit count.
+
+    `git rev-list --count <base>..<branch>` measures divergence from a base, not
+    unique work: measured here, branches reporting up to 511 commits carried
+    between 1 and 9 unique patches, while nine branches reporting one commit
+    carried none at all. A count-based report would flag every branch as
+    unpublished work, bury the ones that matter under the ones that do not, and
+    overstate several by two orders of magnitude. `git cherry` compares by patch
+    identity and is the only measure that separates them.
+
+    Reports only. Publishing and deleting are operator acts -- that boundary is
+    why #306 exists -- so this never pushes, never deletes, and touches no ref."""
+    runner = run or (lambda argv: subprocess.run(
+        argv, cwd=HERE, capture_output=True, text=True))
+    findings = []
+    listing = runner(["git", "for-each-ref", "refs/heads/",
+                      "--format=%(refname:short)|%(upstream:short)|%(committerdate:short)"])
+    if listing.returncode != 0:
+        return findings
+
+    untracked = []
+    for line in listing.stdout.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) == 3 and not parts[1].strip() and parts[0].strip():
+            untracked.append((parts[0].strip(), parts[2].strip()))
+    if not untracked:
+        return findings
+
+    # The comparison base must exist. Without this the cherry call below fails
+    # for every branch and each one is skipped, so a repository with no
+    # origin/<default> reports nothing at all -- which reads as "no unpublished
+    # work" instead of "not measured". An unmeasurable check must say so.
+    base = None
+    for candidate in ("origin/main", "origin/master"):
+        if runner(["git", "rev-parse", "--verify", "--quiet", candidate]).returncode == 0:
+            base = candidate
+            break
+    if base is None:
+        findings.append({
+            "severity": "warning", "check": "git.branch_base_missing",
+            "message": ("%d local branch(es) have no remote counterpart, but no "
+                        "origin/main or origin/master exists to compare against; "
+                        "publication state is unmeasured, not clean."
+                        % len(untracked))})
+        return findings
+
+    skipped = max(0, len(untracked) - limit)
+    for branch, tip_date in untracked[:limit]:
+        cherry = runner(["git", "cherry", base, branch])
+        if cherry.returncode != 0:
+            # Never silently drop a branch: unmeasured is its own state.
+            findings.append({
+                "severity": "warning", "check": "git.branch_unmeasured",
+                "message": ("local branch %r (tip %s) could not be compared against "
+                            "%s; its publication state is unknown."
+                            % (branch, tip_date, base))})
+            continue
+        unique = sum(1 for row in cherry.stdout.splitlines() if row.startswith("+"))
+        ticket = re.search(r"(?:^|[/_-])(?:issue|fix|feat|test|docs|rfc)?[/_-]?(\d{2,5})(?=[/_-]|$)",
+                           branch)
+        label = " (names #%s)" % ticket.group(1) if ticket else ""
+        if unique == 0:
+            findings.append({
+                "severity": "info", "check": "git.branch_absorbed",
+                "message": ("local branch %r%s (tip %s) carries no patch absent from "
+                            "%s; it can be deleted without loss."
+                            % (branch, label, tip_date, base))})
+        else:
+            findings.append({
+                "severity": "warning", "check": "git.branch_unpublished",
+                "message": ("local branch %r%s (tip %s) carries %d patch(es) that "
+                            "exist nowhere else; one disk is the only copy."
+                            % (branch, label, tip_date, unique))})
+    if skipped:
+        # Silent truncation reads as full coverage; say what was not examined.
+        findings.append({
+            "severity": "warning", "check": "git.branch_report_truncated",
+            "message": ("%d further local branch(es) without a remote counterpart "
+                        "were not examined (limit %d)." % (skipped, limit))})
+    return findings
+
+
 def cmd_doctor(args):
     findings = []
     core = load_core()
@@ -7543,6 +9963,7 @@ def cmd_doctor(args):
         })
     notify_config, notify_findings = load_notify_config()
     findings.extend(notify_findings)
+    findings.extend(local_branch_findings())
     if "os" in notify_config.get("tiers", []):
         argv, exe = os_notify_argv(notify_config.get("os_preset", "auto"), "turn-ready", "test")
         if argv and ((os.path.isabs(argv[0]) and not os.path.exists(argv[0]))
@@ -7570,9 +9991,7 @@ def cmd_doctor(args):
     if consult_err:
         findings.append({"severity": "warning", "check": "runtime.jsonl",
                          "message": consult_err})
-    elif any(row.get("schema") != CONSULT_SCHEMA
-             or row.get("classification") not in CONSULT_CLASSIFICATIONS
-             for row in consult_rows):
+    elif any(not consult_record_is_valid(row) for row in consult_rows):
         findings.append({
             "severity": "warning",
             "check": "consult.event_schema",
@@ -7903,7 +10322,6 @@ def listener_root_metadata(profile, runner_path):
     runner_root = _path_relay_root(runner_path)
     checks = {
         "profile": profile_root,
-        "provider cwd": _path_relay_root(profile["cwd"]),
         "protocol": protocol_root,
         "runtime": runtime_root,
         "core": core_root,
@@ -7912,7 +10330,6 @@ def listener_root_metadata(profile, runner_path):
     for role, observed in checks.items():
         if observed != HERE:
             shown = observed or _canonical_root(
-                profile["cwd"] if role == "provider cwd" else
                 profile_path if role == "profile" else
                 runner_path if role == "runner" else "")
             raise SystemExit(
@@ -7922,7 +10339,6 @@ def listener_root_metadata(profile, runner_path):
                 "the versioned companions in that relay")
     for role, path in (
             ("profile", profile_path),
-            ("provider cwd", profile["cwd"]),
             ("runner", runner_path),
             ("protocol", RELAY_PATH),
             ("runtime", RUNTIME_DIR),
@@ -7932,9 +10348,21 @@ def listener_root_metadata(profile, runner_path):
                 "m8shift-runtime: mixed relay roots refused before launch: "
                 f"{role} path {os.path.realpath(path)!r} escapes selected "
                 f"project root {HERE!r}")
+    workspace_root = _canonical_root(profile["workspace_root"])
+    if not os.path.isdir(workspace_root):
+        raise SystemExit(
+            "m8shift-runtime: workspace_root is not an existing directory: "
+            f"{workspace_root!r}")
     return {
+        # Keep the old project_root aliases for existing clients.  The explicit
+        # relay_root name prevents a provider workspace from being mistaken for
+        # the authority that owns M8SHIFT.md and runtime sidecars.
         "project_root": HERE,
         "root_provenance": ROOT_PROVENANCE,
+        "relay_root": HERE,
+        "relay_root_provenance": ROOT_PROVENANCE,
+        "workspace_root": workspace_root,
+        "workspace_root_provenance": profile["workspace_root_provenance"],
         "profile_root": profile_root,
         "protocol_root": protocol_root,
         "runtime_root": runtime_root,
@@ -7965,7 +10393,7 @@ def listener_emit(agent, msg, owns_log=False):
     listener_log_line(msg)
 
 
-def read_relay_lock_fields():
+def read_relay_lock_fields(include_text=False):
     """Read-only LOCK snapshot for the listener loop.
 
     Returns the LOCK fields as a dict, or None when the relay file or its markers
@@ -7985,7 +10413,7 @@ def read_relay_lock_fields():
         m = re.match(r"([a-z_]+):\s*(.*)$", line.strip())
         if m:
             fields[m.group(1)] = m.group(2).strip()
-    return fields
+    return (fields, text) if include_text else fields
 
 
 def macos_protected_folder(project_dir=None, home=None):
@@ -8114,7 +10542,7 @@ def listener_service_label(agent):
     return f"ai.m8shift.{base}-{digest}.{agent}"
 
 
-def listener_child_argv(args, agent, runner_path, *, service_payload=False):
+def listener_child_argv(args, agent, runner_path, profile=None, *, service_payload=False):
     """The supervised foreground loop as one explicit argv array.
 
     This IS the service payload for every backend — `listener start --foreground
@@ -8135,8 +10563,18 @@ def listener_child_argv(args, agent, runner_path, *, service_payload=False):
         argv += ["--cmd-file", os.path.abspath(args.cmd_file)]
     if args.provider:
         argv.append("--provider")
+    if profile is not None:
+        # The detached/service payload re-loads the operator profile.  Carry the
+        # canonical workspace selected by its parent so a profile edit cannot
+        # redirect a provider between plan and launch.
+        argv += ["--workspace-root-snapshot", profile["workspace_root"]]
     if getattr(args, "notify_only", False):
         argv.append("--notify-only")
+    if getattr(args, "allow_ephemeral_runner", False):
+        # #283: the child re-runs `listener start --foreground`, so a refusal the
+        # parent accepted would fire again there and kill the lane at birth. An
+        # escape hatch that does not survive the re-exec is not an escape hatch.
+        argv.append("--allow-ephemeral-runner")
     if args.max_ticks:
         argv += ["--max-ticks", str(args.max_ticks)]
     if service_payload:
@@ -8202,7 +10640,7 @@ def windows_task_command(child_argv):
     return subprocess.list2cmdline(child_argv)
 
 
-def backend_install_plan(backend, agent, args, runner_path):
+def backend_install_plan(backend, agent, args, runner_path, profile=None):
     """GENERATE (never install) one service backend's definition + argv steps.
 
     Pure content generation: tests assert plist/unit text without bootstrapping
@@ -8213,7 +10651,8 @@ def backend_install_plan(backend, agent, args, runner_path):
     """
     label = listener_service_label(agent)
     log_path = listener_paths(agent)["log"]
-    child = listener_child_argv(args, agent, runner_path, service_payload=True)
+    child = listener_child_argv(
+        args, agent, runner_path, profile, service_payload=True)
     if backend == "launchd":
         service_file = os.path.join(LISTENERS_DIR, f"{label}.plist")
         content = plistlib.dumps(
@@ -8653,13 +11092,32 @@ def listener_profile_findings(doc, agent):
         problems.append("argv must be an argv array, not a shell string")
     elif not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
         problems.append("argv must be a non-empty JSON array of non-empty strings")
+    cwd_present = "cwd" in doc
     cwd = doc.get("cwd", ".")
-    if not isinstance(cwd, str) or not cwd:
+    workspace_present = "workspace_root" in doc
+    workspace = doc.get("workspace_root", "")
+    if cwd_present and (not isinstance(cwd, str) or not cwd):
         problems.append("cwd must be a non-empty string path")
-    else:
-        cwd_abs = cwd if os.path.isabs(cwd) else os.path.join(HERE, cwd)
-        if not os.path.isdir(cwd_abs):
-            problems.append(f"cwd is not an existing directory: {cwd}")
+    if workspace_present and (not isinstance(workspace, str) or not workspace):
+        problems.append("workspace_root must be a non-empty string path")
+    if not cwd_present and not workspace_present:
+        # A legacy profile may omit cwd, which has always meant the relay root.
+        cwd = "."
+    configured_workspace = workspace if workspace_present else cwd
+    if isinstance(configured_workspace, str) and configured_workspace:
+        workspace_abs = (configured_workspace if os.path.isabs(configured_workspace)
+                         else os.path.join(HERE, configured_workspace))
+        if not os.path.isdir(workspace_abs):
+            key = "workspace_root" if workspace_present else "cwd"
+            problems.append(f"{key} is not an existing directory: {configured_workspace}")
+    if (workspace_present and cwd_present and isinstance(cwd, str) and cwd
+            and isinstance(workspace, str) and workspace):
+        cwd_abs = _canonical_root(cwd if os.path.isabs(cwd)
+                                  else os.path.join(HERE, cwd))
+        workspace_abs = _canonical_root(workspace if os.path.isabs(workspace)
+                                        else os.path.join(HERE, workspace))
+        if cwd_abs != workspace_abs:
+            problems.append("cwd and workspace_root must resolve to the same directory")
     env_allow = doc.get("env_allowlist", [])
     if env_allow in (None, ""):
         env_allow = []
@@ -8675,22 +11133,33 @@ def listener_profile_findings(doc, agent):
     if (provider and (not isinstance(provider, str)
                       or not PROVIDER_TOKEN_RE.fullmatch(provider))):
         problems.append("provider must be a valid provider adapter id")
+    review_delivery = doc.get("review_delivery", "none")
+    if review_delivery not in ("none", "artifact"):
+        problems.append("review_delivery must be none or artifact (default none)")
     return problems
 
 
 def normalize_listener_profile(doc, source, profile_path=""):
-    cwd = doc.get("cwd", ".") or "."
-    cwd_abs = cwd if os.path.isabs(cwd) else os.path.abspath(os.path.join(HERE, cwd))
+    # `cwd` is the v1 compatibility spelling.  A new explicit
+    # `workspace_root` makes the external-instance boundary inspectable without
+    # granting that workspace any relay or sidecar authority.
+    workspace_key = "workspace_root" if "workspace_root" in doc else "cwd"
+    workspace = doc.get(workspace_key, ".") or "."
+    workspace_abs = _canonical_root(
+        workspace if os.path.isabs(workspace) else os.path.join(HERE, workspace))
     profile = {
         "schema": LISTENER_PROFILE_SCHEMA,
         "agent": doc.get("agent", ""),
         "argv": list(doc.get("argv") or []),
-        "cwd": cwd_abs,
+        "cwd": workspace_abs,
+        "workspace_root": workspace_abs,
+        "workspace_root_provenance": "profile.%s" % workspace_key,
         "env_allowlist": list(doc.get("env_allowlist") or []),
         "start_on_idle": bool(doc.get("start_on_idle", False)),
         "agent_model": doc.get("agent_model", "") or "",
         "provider": (doc.get("provider", "")
                      or (doc.get("provider_row") or {}).get("provider", "")),
+        "review_delivery": doc.get("review_delivery", "none") or "none",
         "source": source,
         "_profile_path": profile_path or RELAY_PATH,
     }
@@ -8759,8 +11228,16 @@ def load_listener_profile(args, agent):
     if problems:
         sys.exit(f"m8shift-runtime: invalid listener profile ({source}):\n  - "
                  + "\n  - ".join(problems))
-    return normalize_listener_profile(
+    profile = normalize_listener_profile(
         doc, source, path if args.cmd_file else PROVIDERS)
+    expected_workspace = getattr(args, "workspace_root_snapshot", "")
+    if expected_workspace:
+        expected_workspace = _canonical_root(expected_workspace)
+        if expected_workspace != profile["workspace_root"]:
+            sys.exit(
+                "m8shift-runtime: listener workspace root changed since plan; "
+                "refusing before mutation")
+    return profile
 
 
 def new_listener_run_id(agent):
@@ -8891,7 +11368,10 @@ def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=Fal
     this listener ever wakes an own WORKING lock) and the rendered prompt tells
     the provider it already holds the pen — finish and append, do not claim.
     """
-    prompt_template = LISTENER_RESUME_PROMPT if resume_working else LISTENER_TURN_PROMPT
+    prompt_template = (
+        LISTENER_REVIEW_PROMPT if profile.get("review_delivery") == "artifact"
+        else LISTENER_RESUME_PROMPT if resume_working else LISTENER_TURN_PROMPT
+    )
     prompt = prompt_template.format(agent=agent, agent_upper=agent.upper())
     agent_model = profile.get("agent_model", "")
     if selected_pin is not None:
@@ -8910,13 +11390,17 @@ def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=Fal
         provider_argv = render_argv_template(
             profile["argv"], agent=agent, prompt=prompt, run_id=run_id,
         )
+    # Normalized listener profiles always carry workspace_root.  Keep the
+    # legacy cwd fallback for narrow in-process integrations that compile an
+    # argv from a pre-normalized profile.
+    workspace_root = profile.get("workspace_root", profile.get("cwd", HERE))
     argv = [
         sys.executable, runner_path, agent, "--once",
         "--m8shift", RELAY_PATH,
         "--m8shift-py", CORE_PATH,
         "--runtime-dir", RUNTIME_DIR,
         "--run-id", run_id,
-        "--cwd", profile["cwd"],
+        "--cwd", workspace_root,
     ]
     if profile["env_allowlist"]:
         argv += ["--env-allowlist", ",".join(profile["env_allowlist"])]
@@ -8926,6 +11410,8 @@ def listener_runner_argv(agent, profile, runner_path, run_id, resume_working=Fal
         argv += ["--agent-model", agent_model]
     if profile.get("provider"):
         argv += ["--provider", profile["provider"]]
+    if profile.get("review_delivery") == "artifact":
+        argv += ["--review-delivery", "artifact"]
     if resume_working:
         argv.append("--resume-working")
     argv += ["--cmd", *provider_argv]
@@ -8939,9 +11425,29 @@ def read_listener_state(agent):
     return doc
 
 
+def current_relay_session():
+    """#370 — the relay session this runtime is looking at, or "" if unreadable.
+
+    A listener that does not record which relay it serves cannot be told from one
+    serving another; measured on this machine, five listener processes were read
+    as competing on one relay when not one of them watched it. The agent name is
+    the most legible thing on a `ps` line and the least decisive."""
+    # read_relay_lock_fields, not load_core(): this runs on every state write, and
+    # loading the whole core to learn one field is both expensive and side-effect
+    # bearing -- doing so broke an unrelated fleet-upgrade preflight, which is how
+    # the cost was found. This reader is the one the listener loop already uses:
+    # a plain file read that returns None rather than exiting when there is no
+    # relay here.
+    fields = read_relay_lock_fields()
+    if not isinstance(fields, dict):
+        return ""
+    return str(fields.get("session", "") or "")
+
+
 def write_listener_state(agent, *, phase, consecutive_failures,
                          last_run_id="", last_classification="", reason="",
                          start_on_idle=False, notify_only=False,
+                         review_delivery="none",
                          generation="", process_pid=None):
     os.makedirs(LISTENERS_DIR, exist_ok=True)
     if last_classification not in LISTENER_CLASSIFICATIONS:
@@ -8962,7 +11468,13 @@ def write_listener_state(agent, *, phase, consecutive_failures,
         # at-most-one-starter rule; runtime_version feeds listener.version_skew.
         "start_on_idle": bool(start_on_idle),
         "notify_only": bool(notify_only),
+        "review_delivery": review_delivery if review_delivery == "artifact" else "none",
         "runtime_version": VERSION,
+        # #370: the relay this lane serves, and when it started. Written here so
+        # an existing state file without them is distinguishable from a current
+        # one -- absence is reported, never migrated away silently.
+        "session": current_relay_session(),
+        "started_at": previous.get("started_at") or iso(),
         "updated_at": iso(),
     }
     if generation and isinstance(process_pid, int) and process_pid > 0:
@@ -9071,6 +11583,28 @@ def listener_pid_alive(pid):
     return True
 
 
+def listener_process_identity(pid):
+    """Bind one live pid incarnation to the group a detached listener owns.
+
+    The start reference distinguishes pid reuse. POSIX additionally records the
+    process group because listener shutdown signals that group, not merely the
+    numeric pid. An unavailable component yields no identity: callers that need
+    reuse-safe authority to signal must then fail closed.
+    """
+    start_ref = fleet_process_start_ref(pid)
+    if not start_ref:
+        return None
+    if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
+        return (start_ref, None)
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+    # start_new_session=True promises pid == pgid. If that invariant is not
+    # corroborated, we have no authority to target a group named by this pid.
+    return (start_ref, pgid) if pgid == pid else None
+
+
 def _posix_signal_group_or_pid(pid, sig):
     """Signal the process group led by `pid`; fall back to the single process only
     when the pid is alive but not a group leader. Never guesses another group."""
@@ -9089,13 +11623,23 @@ def _posix_signal_group_or_pid(pid, sig):
         return False
 
 
-def listener_terminate_group(pid, grace):
+_LISTENER_IDENTITY_UNCHECKED = object()
+
+
+def listener_terminate_group(pid, grace,
+                             expected_identity=_LISTENER_IDENTITY_UNCHECKED):
     """RFC 047 stop contract: TERM the WHOLE process group, wait `grace`, then KILL.
 
     Windows path uses `taskkill /PID <pid> /T /F` as an explicit argv subprocess —
     no POSIX signals and no os.kill aliveness probes on Windows. Returns True when
-    the supervised pid is confirmed dead.
+    the supervised pid is confirmed dead. When an expected process identity is
+    supplied, revalidate it immediately before the first signal and refuse a
+    missing or changed identity; the pid may have been reused since its last probe.
     """
+    if expected_identity is not _LISTENER_IDENTITY_UNCHECKED:
+        if not expected_identity \
+                or listener_process_identity(pid) != expected_identity:
+            return False
     if os.name == "nt":  # pragma: no cover - exercised only on Windows hosts
         try:
             subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
@@ -9151,6 +11695,169 @@ def listener_run_provider_terminal(run_id):
             terminal = row.get("provider_terminal")
             return dict(terminal) if isinstance(terminal, dict) else None
     return None
+
+
+def review_input_from_relay(lock, text):
+    """Return the current closed-turn fingerprint used by reviewer artifacts."""
+    try:
+        turn = int(str(lock.get("turn", "")).strip())
+    except (TypeError, ValueError):
+        return None
+    for match in REVIEW_TURN_BLOCK_RE.finditer(text or ""):
+        if int(match.group("number")) == turn:
+            return {
+                "state": lock.get("state", ""),
+                "holder": lock.get("holder", ""),
+                "turn": str(turn),
+                "turn_sha256": hashlib.sha256(
+                    match.group(0).encode("utf-8")).hexdigest(),
+            }
+    return None
+
+
+def review_artifact_path(run_id):
+    return os.path.join(REVIEW_ARTIFACT_DIR, "%s.json" % run_id)
+
+
+def review_artifact_summary(doc):
+    """Validate one private artifact without surfacing provider text as diagnostics."""
+    required = {"schema", "created_at", "run_id", "agent", "provider",
+                "agent_model", "input", "output"}
+    if not isinstance(doc, dict) or set(doc) != required:
+        return None
+    if doc.get("schema") != REVIEW_ARTIFACT_SCHEMA:
+        return None
+    if (not isinstance(doc.get("run_id"), str) or not SESSION_RE.fullmatch(doc["run_id"])
+            or not isinstance(doc.get("agent"), str) or not AGENT_RE.fullmatch(doc["agent"])
+            or not isinstance(doc.get("provider"), str)
+            or not isinstance(doc.get("agent_model"), str)):
+        return None
+    input_snapshot = doc.get("input")
+    output = doc.get("output")
+    if (not isinstance(input_snapshot, dict)
+            or set(input_snapshot) != {"state", "holder", "turn", "turn_sha256"}
+            or not all(isinstance(input_snapshot.get(key), str)
+                       for key in ("state", "holder", "turn", "turn_sha256"))
+            or not input_snapshot["turn"].isdigit()
+            or not re.fullmatch(r"[0-9a-f]{64}", input_snapshot["turn_sha256"])):
+        return None
+    # #360: the closed set gains the truncation record. It stays closed -- an
+    # unknown key is still a refusal -- and the record is validated as strictly as
+    # the rest: a truncation that under-reports its original is indistinguishable
+    # from no truncation at all.
+    if (not isinstance(output, dict)
+            or set(output) != REVIEW_ARTIFACT_OUTPUT_KEYS
+            or not isinstance(output.get("text"), str)
+            or not isinstance(output.get("bytes"), int)
+            or not isinstance(output.get("lines"), int)
+            or not isinstance(output.get("truncated"), bool)
+            or isinstance(output.get("original_bytes"), bool)
+            or isinstance(output.get("original_lines"), bool)
+            or not isinstance(output.get("original_bytes"), int)
+            or not isinstance(output.get("original_lines"), int)
+            or output["original_bytes"] < output["bytes"]
+            or output["original_lines"] < output["lines"]
+            or (output["truncated"] is False
+                and output["original_bytes"] != output["bytes"])
+            or not re.fullmatch(r"[0-9a-f]{64}", output.get("sha256", ""))):
+        return None
+    encoded = output["text"].encode("utf-8")
+    if (not output["text"].strip() or len(encoded) > REVIEW_ARTIFACT_MAX_BYTES
+            or output["bytes"] != len(encoded)
+            or output["lines"] != len(output["text"].splitlines())
+            or hashlib.sha256(encoded).hexdigest() != output["sha256"]):
+        return None
+    return {
+        "run_id": doc["run_id"],
+        "agent": doc["agent"],
+        "input": dict(input_snapshot),
+        "output_sha256": output["sha256"],
+        "output_bytes": output["bytes"],
+        "output_lines": output["lines"],
+        "text": output["text"],
+    }
+
+
+def review_artifact_evaluation(run_id, lock=None, text=None):
+    """Return missing/invalid/stale/fresh plus redacted reviewer metadata."""
+    path = review_artifact_path(run_id)
+    try:
+        if os.path.islink(REVIEW_ARTIFACT_DIR) or os.path.islink(path):
+            return {"status": "invalid", "fresh": False}
+        size = os.path.getsize(path)
+        if size < 1 or size > REVIEW_ARTIFACT_MAX_BYTES + 16 * 1024:
+            return {"status": "invalid", "fresh": False}
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {"status": "missing", "fresh": False}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {"status": "invalid", "fresh": False}
+    artifact = review_artifact_summary(doc)
+    if artifact is None or artifact["run_id"] != run_id:
+        return {"status": "invalid", "fresh": False}
+    if lock is None or text is None:
+        try:
+            core = load_core()
+            text, lock = load_status(core)
+        except (SystemExit, Exception):
+            return {"status": "invalid", "fresh": False}
+    current = review_input_from_relay(lock, text)
+    fresh = bool(current and current.get("turn") == artifact["input"]["turn"]
+                 and current.get("turn_sha256") == artifact["input"]["turn_sha256"])
+    return {
+        "status": "fresh" if fresh else "stale",
+        "fresh": fresh,
+        "artifact": artifact,
+        "current_input": current or {},
+    }
+
+
+def review_delivery_pending_for(agent, run_id, classification, lock, text):
+    """A delivered artifact suppresses only the same agent/input wake-up."""
+    if classification != "review_delivered_pending" or not run_id:
+        return False
+    evaluation = review_artifact_evaluation(run_id, lock, text)
+    artifact = evaluation.get("artifact") or {}
+    return bool(evaluation.get("fresh") and artifact.get("agent") == agent)
+
+
+def cmd_review_delivery_status(args):
+    run_id = validate_run_id(args.run)
+    result = review_artifact_evaluation(run_id)
+    artifact = result.get("artifact") or {}
+    payload = {
+        "run_id": run_id,
+        "status": result["status"],
+        "fresh": bool(result.get("fresh")),
+        "artifact": {key: artifact[key] for key in
+                     ("run_id", "agent", "input", "output_sha256", "output_bytes", "output_lines")
+                     if key in artifact},
+        "current_input": result.get("current_input") or {},
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print("review delivery %s: %s" % (run_id, result["status"]))
+        if artifact:
+            print("agent: %s  bytes: %s  sha256: %s" % (
+                artifact["agent"], artifact["output_bytes"], artifact["output_sha256"]))
+    return 0 if result.get("fresh") else 1
+
+
+def cmd_review_delivery_consume(args):
+    core = load_core()
+    text, lock = load_status(core)
+    agent = validate_agent(core, args.by)
+    if lock.get("state") != "WORKING_%s" % agent.upper() or lock.get("holder") != agent:
+        sys.exit("m8shift-runtime: review delivery consume requires the live WORKING pen of --by")
+    result = review_artifact_evaluation(validate_run_id(args.run), lock, text)
+    if not result.get("fresh"):
+        sys.exit("m8shift-runtime: review artifact is not fresh; re-read the relay and request a new review")
+    sys.stdout.write(result["artifact"]["text"])
+    if not result["artifact"]["text"].endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
 
 
 def validate_provider_rate_limit_terminal(terminal, provider):
@@ -9217,23 +11924,125 @@ def listener_route_switches(session, agent):
     return highest
 
 
-def build_listener_plan(agent, profile, runner_path, args, backend, fallback_reason=""):
+def listener_plan_profile(profile):
+    """Return the bounded, non-secret profile fields safe to persist in a plan."""
+    return {key: profile[key] for key in
+            ("schema", "agent", "argv", "cwd", "workspace_root",
+             "workspace_root_provenance", "env_allowlist", "start_on_idle",
+             "agent_model", "review_delivery")}
+
+
+def listener_file_identity(path, schema, role, *, allow_unavailable=False):
+    """Pin one restart input without following a final symlink."""
+    absolute = os.path.abspath(path)
+    try:
+        info = os.lstat(absolute)
+    except FileNotFoundError:
+        if allow_unavailable:
+            return {
+                "schema": schema,
+                "path": os.path.relpath(absolute, HERE),
+                "sha256": "",
+                "status": "missing",
+            }
+        sys.exit(f"m8shift-runtime: listener {role} is missing; "
+                 "run a new explicit listener start to validate a replacement")
+    except OSError as exc:
+        sys.exit(f"m8shift-runtime: cannot inspect listener {role} "
+                 f"({exc.__class__.__name__})")
+    if stat.S_ISLNK(info.st_mode):
+        if allow_unavailable:
+            return {
+                "schema": schema,
+                "path": os.path.relpath(absolute, HERE),
+                "sha256": "",
+                "status": "symlinked",
+            }
+        sys.exit(f"m8shift-runtime: listener {role} must not be a symlink; "
+                 "run a new explicit listener start with a regular file")
+    if not stat.S_ISREG(info.st_mode):
+        sys.exit(f"m8shift-runtime: listener {role} must be a regular file")
+    try:
+        digest = sha256_file(absolute)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"m8shift-runtime: cannot hash listener {role} "
+                 f"({exc.__class__.__name__})")
+    return {
+        "schema": schema,
+        "path": os.path.relpath(absolute, HERE),
+        "sha256": digest,
+        "status": "validated",
+    }
+
+
+def listener_profile_identity(profile, args):
+    if getattr(args, "cmd_file", ""):
+        identity = listener_file_identity(
+            os.path.abspath(args.cmd_file), LISTENER_PROFILE_IDENTITY_SCHEMA,
+            "profile")
+        identity["source_kind"] = "cmd_file"
+        return identity
+    if getattr(args, "provider", False):
+        identity = listener_file_identity(
+            PROVIDERS, LISTENER_PROFILE_IDENTITY_SCHEMA, "provider registry")
+        identity["source_kind"] = "provider_registry"
+        return identity
+    # notify-only has no external provider profile. Pin the normalized bounded
+    # profile itself so replay still has a versioned identity contract.
+    return {
+        "schema": LISTENER_PROFILE_IDENTITY_SCHEMA,
+        "source_kind": "notify_only",
+        "path": "",
+        "sha256": hashlib.sha256(
+            canonical_json_bytes(listener_plan_profile(profile))).hexdigest(),
+    }
+
+
+def listener_backend_identity(requested, effective, facts):
+    platform = facts.get("platform")
+    if platform not in ("darwin", "linux", "windows", "other"):
+        platform = "other"
+    return {
+        "schema": LISTENER_BACKEND_IDENTITY_SCHEMA,
+        "requested": requested,
+        "effective": effective,
+        "facts": {
+            "platform": platform,
+            "launchctl": bool(facts.get("launchctl")),
+            "systemctl": bool(facts.get("systemctl")),
+            "schtasks": bool(facts.get("schtasks")),
+            "gui_session": bool(facts.get("gui_session")),
+            "user_session": bool(facts.get("user_session")),
+            "protected_folder": bool(facts.get("protected_folder")),
+        },
+    }
+
+
+def build_listener_plan(agent, profile, runner_path, args, backend,
+                        fallback_reason="", backend_facts=None):
     paths = listener_paths(agent)
     roots = listener_root_metadata(profile, runner_path)
     max_retries = args.max_retries
+    profile_doc = listener_plan_profile(profile)
     plan = {
         "schema": LISTENER_PLAN_SCHEMA,
         "agent": agent,
         "backend": backend,
         "backend_requested": args.backend,
+        "backend_identity": listener_backend_identity(
+            args.backend, backend, backend_facts or listener_backend_probe()),
         "backend_fallback_reason": fallback_reason,
         "mode": ("notify_only" if getattr(args, "notify_only", False) else
                  "foreground" if args.foreground else "detached"),
-        "profile": {key: profile[key] for key in
-                    ("schema", "agent", "argv", "cwd", "env_allowlist", "start_on_idle",
-                     "agent_model")},
+        "foreground": bool(args.foreground),
+        "notify_only": bool(getattr(args, "notify_only", False)),
+        "profile": profile_doc,
         "profile_source": profile["source"],
+        "profile_identity": listener_profile_identity(profile, args),
         "runner": os.path.relpath(runner_path, HERE),
+        "runner_identity": listener_file_identity(
+            runner_path, LISTENER_EXECUTABLE_IDENTITY_SCHEMA, "runner executable",
+            allow_unavailable=bool(args.dry_run)),
         "runner_exists": os.path.isfile(runner_path),
         "runner_handshake": {"status": "not_probed", "reason": "dry_run"},
         "runner_argv_preview": ([] if getattr(args, "notify_only", False) else
@@ -9253,7 +12062,7 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
     if backend in LISTENER_SERVICE_BACKENDS and not args.foreground:
         # Dry-run inspection of the WOULD-BE service install: rendered definition
         # plus the exact bounded argv steps — nothing is written or bootstrapped.
-        service = backend_install_plan(backend, agent, args, runner_path)
+        service = backend_install_plan(backend, agent, args, runner_path, profile)
         plan["service"] = {
             "label": service["label"],
             "service_file": os.path.relpath(service["service_file"], HERE),
@@ -9264,7 +12073,7 @@ def build_listener_plan(agent, profile, runner_path, args, backend, fallback_rea
     return plan
 
 
-def spawn_detached_listener(args, agent, runner_path, backend):
+def spawn_detached_listener(args, agent, runner_path, backend, profile):
     """Local backend detach: stdlib process primitives only (RFC 047 Phase C).
 
     POSIX detaches with start_new_session=True (child pid == pgid, so stop can
@@ -9273,7 +12082,7 @@ def spawn_detached_listener(args, agent, runner_path, backend):
     """
     os.makedirs(LISTENERS_DIR, exist_ok=True)
     os.makedirs(LISTENER_LOGS_DIR, exist_ok=True)
-    child_argv = listener_child_argv(args, agent, runner_path)
+    child_argv = listener_child_argv(args, agent, runner_path, profile)
     env = os.environ.copy()
     env[LISTENER_DETACHED_ENV] = "1"
     generation = uuid.uuid4().hex
@@ -9296,8 +12105,12 @@ def spawn_detached_listener(args, agent, runner_path, backend):
         popen_kwargs["stdout"] = log_fh
         popen_kwargs["stderr"] = log_fh
         proc = subprocess.Popen(child_argv, **popen_kwargs)
+    # Capture identity while this Popen still names the child incarnation. If
+    # the platform cannot corroborate it, failed-start cleanup later refuses to
+    # signal by pid; an unmanaged lane warning is safer than killing a stranger.
+    process_identity = listener_process_identity(proc.pid)
     write_listener_pid(agent, proc.pid, generation)
-    return proc.pid
+    return proc.pid, process_identity
 
 
 def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retries,
@@ -9356,7 +12169,9 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                              last_run_id=last_run_id,
                              last_classification=last_classification, reason=reason,
                              start_on_idle=profile["start_on_idle"],
-                             notify_only=notify_only, generation=generation,
+                             notify_only=notify_only,
+                             review_delivery=profile.get("review_delivery", "none"),
+                             generation=generation,
                              process_pid=os.getpid())
 
     def notify_halt(state, holder, message="", prompt=""):
@@ -9380,10 +12195,21 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             if phase == "halted":
                 time.sleep(poll)  # resident so status/logs stay inspectable; never launches
                 continue
-            lk = read_relay_lock_fields()
-            if lk is None:
+            relay_snapshot = read_relay_lock_fields(include_text=True)
+            if relay_snapshot is None:
+                # #372: a relay being written, or momentarily invalid, is neutral --
+                # waiting is right and that behaviour is unchanged. A relay whose
+                # ROOT no longer exists is not coming back, and waiting on it is a
+                # process reporting a lane it cannot possibly serve. One such
+                # listener was found polling a deleted directory for 1 day 23 hours;
+                # nothing in `ps` distinguished it from a live lane.
+                if not os.path.isdir(HERE):
+                    say(f"{agent}: relay root {HERE} no longer exists — "
+                        "the lane it served is gone; exiting rather than polling it.")
+                    return 0
                 time.sleep(poll)  # missing/invalid relay is neutral: wait, never repair
                 continue
+            lk, relay_text = relay_snapshot
             state = lk.get("state", "")
             if state == "DONE":
                 say(f"{agent}: relay session is DONE — stopping cleanly.")
@@ -9421,6 +12247,22 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 # permission are all neutral: sleep. Never launch on WORKING_<peer>.
                 if phase != "polling":
                     phase = "polling"
+                    save()
+                time.sleep(poll)
+                continue
+            if (profile.get("review_delivery") == "artifact"
+                    and wake in {"awaiting_turn", "idle_start"}
+                    and review_delivery_pending_for(
+                        agent, last_run_id, last_classification, lk, relay_text)):
+                # The runner has delivered a verifiable artifact for this exact
+                # input turn.  Keep polling for a genuinely new turn, but never
+                # burn quota by re-running the same reviewer or pretend the relay
+                # advanced before a coordinator consumes it.
+                phase = "polling"
+                if reason != "review_delivery_pending":
+                    reason = "review_delivery_pending"
+                    say(f"{agent}: reviewer artifact {last_run_id} is fresh for this "
+                        "input turn; awaiting coordinator consumption without relaunch.")
                     save()
                 time.sleep(poll)
                 continue
@@ -9549,6 +12391,27 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     say(f"{agent}: safe-boundary policy selected an operator-declared "
                         f"RFC 070 pin for invocation "
                         f"{boundary_result.plan.applies_to_invocation}.")
+            # #320: reserve before the expensive work, but ONLY for a lane that
+            # will author a turn. A notify-only lane wakes a human and a
+            # review-delivery lane produces an artifact the coordinator must
+            # consume -- neither writes a turn, and holding the pen for them is
+            # the daemon dependency requirement 6 forbids. Both exclusions come
+            # from tests that failed the first attempt, not from design.
+            reserved = False
+            reserved_turn = ""
+            authors_a_turn = not notify_only and not (
+                (profile.get("review_delivery") or "none") == "artifact")
+            if not resume and authors_a_turn:
+                ok, why = reserve_turn_before_launch(agent)
+                if not ok:
+                    say(f"{agent}: this turn is reserved elsewhere "
+                        f"({(why.splitlines()[0][:100] if why else 'claim refused')}) "
+                        "— not launching.")
+                    time.sleep(poll)
+                    continue
+                reserved = True
+                reserved_turn = str(lk.get("turn", ""))
+                resume = True  # the pen is ours; the child must not claim again
             argv = listener_runner_argv(
                 agent, profile, runner_path, run_id,
                 resume_working=resume,
@@ -9568,6 +12431,12 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 # RFC 049 PR B: the listener is the managed liveness producer
                 # while the child turn runs (protective beats + early refresh).
                 rc = supervise_child_with_liveness(child, agent, poll, say)
+            # One release point for every non-appending exit: launch failure, run
+            # failure, HALT. It acts only on our own unadvanced hold, so a turn the
+            # provider actually authored is never undone.
+            if reserved and release_unused_reservation(agent, reserved_turn):
+                say(f"{agent}: reservation released — the reserved turn was not "
+                    "authored, so the pen is back where another producer can take it.")
             last_run_id = run_id
             ledger_classification = listener_run_classification(run_id)
             last_classification = (ledger_classification
@@ -9637,7 +12506,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                 continue
             if ((rc == 2 and not ledger_classification)
                     or last_classification in {"environment_blocked",
-                                               "approval_required"}):
+                                               "approval_required",
+                                               "headless_permission_refused"}):
                 fails += 1
                 phase = "halted"
                 notification_message = ""
@@ -9654,9 +12524,16 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
                     say(f"{agent}: {message}")
                     notification_message = message
                     notification_prompt = message
-                else:
+                elif last_classification == "approval_required":
                     reason = "approval_required:provider_permission_allowlist"
                     message = APPROVAL_REQUIRED_NOTIFICATION
+                    say(f"{agent}: {message}")
+                    notification_message = message
+                    notification_prompt = message
+                else:
+                    reason = ("headless_permission_refused:"
+                              "provider_permission_allowlist")
+                    message = HEADLESS_PERMISSION_REFUSED_NOTIFICATION
                     say(f"{agent}: {message}")
                     notification_message = message
                     notification_prompt = message
@@ -9667,7 +12544,13 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             if rc == 0:
                 fails = 0
                 phase = "polling"
-                say(f"{agent}: run {run_id} succeeded ({last_classification}); failure counter reset.")
+                if last_classification == "review_delivered_pending":
+                    reason = "review_delivery_pending"
+                    say(f"{agent}: run {run_id} delivered a reviewer artifact; "
+                        "relay remains unchanged and coordinator consumption is pending.")
+                else:
+                    reason = ""
+                    say(f"{agent}: run {run_id} succeeded ({last_classification}); failure counter reset.")
                 save()
                 time.sleep(poll)
                 continue
@@ -9697,7 +12580,232 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
         remove_own_listener_pid(agent)
 
 
+def listener_restore_relative_path(raw, role):
+    if not isinstance(raw, str) or not raw or os.path.isabs(raw):
+        sys.exit(f"m8shift-runtime: persisted listener {role} path is invalid")
+    normalized = os.path.normpath(raw)
+    if normalized == ".." or normalized.startswith(".." + os.sep):
+        sys.exit(f"m8shift-runtime: persisted listener {role} path escapes the relay root")
+    absolute = os.path.abspath(os.path.join(HERE, normalized))
+    if not _path_is_within(absolute, HERE):
+        sys.exit(f"m8shift-runtime: persisted listener {role} path escapes the relay root")
+    return absolute
+
+
+def verify_listener_plan_identity(identity, schema, role):
+    if not isinstance(identity, dict) or identity.get("schema") != schema:
+        sys.exit(
+            "m8shift-runtime: persisted listener plan lacks versioned identity "
+            f"for {role}; run a new explicit listener start with the original options")
+    digest = identity.get("sha256")
+    if not isinstance(digest, str) or not LISTENER_SHA256_RE.fullmatch(digest):
+        sys.exit(f"m8shift-runtime: persisted listener {role} digest is invalid")
+    absolute = listener_restore_relative_path(identity.get("path"), role)
+    current = listener_file_identity(absolute, schema, role)
+    if current["path"] != identity["path"] or current["sha256"] != digest:
+        sys.exit(
+            f"m8shift-runtime: listener {role} identity changed since the persisted "
+            "plan; replay refused before mutation — run a new explicit listener "
+            "start to validate the replacement")
+    return absolute
+
+
+def read_listener_restore_plan(agent):
+    path = listener_paths(agent)["plan"]
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        sys.exit(f"m8shift-runtime: no persisted listener plan for {agent!r}")
+    except OSError as exc:
+        sys.exit("m8shift-runtime: cannot inspect persisted listener plan "
+                 f"({exc.__class__.__name__})")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        sys.exit("m8shift-runtime: persisted listener plan must be a regular non-symlink file")
+    plan, error = read_json_diagnostic(path, {})
+    if error or not isinstance(plan, dict):
+        sys.exit("m8shift-runtime: persisted listener plan is unreadable or malformed")
+    if plan.get("schema") != LISTENER_PLAN_SCHEMA or plan.get("agent") != agent:
+        sys.exit("m8shift-runtime: persisted listener plan schema or agent does not match")
+    profile = plan.get("profile")
+    if not isinstance(profile, dict) or profile.get("schema") != LISTENER_PROFILE_SCHEMA:
+        sys.exit("m8shift-runtime: persisted listener plan profile is invalid")
+    if plan.get("backend_requested") not in LISTENER_BACKENDS:
+        sys.exit("m8shift-runtime: persisted listener requested backend is invalid")
+    if plan.get("backend") not in ("local",) + LISTENER_SERVICE_BACKENDS:
+        sys.exit("m8shift-runtime: persisted listener effective backend is invalid")
+    backend_identity = plan.get("backend_identity")
+    if (not isinstance(backend_identity, dict)
+            or backend_identity.get("schema") != LISTENER_BACKEND_IDENTITY_SCHEMA):
+        sys.exit(
+            "m8shift-runtime: persisted listener plan lacks versioned backend facts; "
+            "run a new explicit listener start with the original options")
+    numeric = (
+        ("poll_interval_seconds", (int, float), lambda value: math.isfinite(value) and value > 0),
+        ("max_ticks", (int,), lambda value: value >= 0),
+        ("max_retries", (int,), lambda value: value >= 1),
+        ("max_backoff_seconds", (int,), lambda value: value >= 1),
+    )
+    for key, kinds, valid in numeric:
+        value = plan.get(key)
+        if isinstance(value, bool) or not isinstance(value, kinds) or not valid(value):
+            sys.exit(f"m8shift-runtime: persisted listener {key} is invalid")
+    if not isinstance(plan.get("foreground"), bool) or not isinstance(
+            plan.get("notify_only"), bool):
+        sys.exit("m8shift-runtime: persisted listener launch mode is incomplete")
+    return plan
+
+
+def apply_listener_restore_plan(args, agent, plan):
+    conflicting = []
+    for supplied, label in (
+            (bool(args.cmd_file), "--cmd-file"),
+            (bool(args.provider), "--provider"),
+            (bool(args.notify_only), "--notify-only"),
+            (bool(args.foreground), "--foreground"),
+            (bool(args.runner), "--runner"),
+            (args.backend is not None, "--backend"),
+            (args.poll_interval is not None, "--poll-interval"),
+            (args.max_ticks is not None, "--max-ticks"),
+            (args.max_retries is not None, "--max-retries"),
+            (args.max_backoff is not None, "--max-backoff"),
+            (bool(args.service_payload), "--service-payload"),
+            (bool(args.workspace_root_snapshot), "--workspace-root-snapshot")):
+        if supplied:
+            conflicting.append(label)
+    if conflicting:
+        sys.exit("m8shift-runtime: --from-plan restores launch configuration and "
+                 "cannot be combined with " + ", ".join(conflicting))
+
+    runner_identity = plan.get("runner_identity")
+    runner_path = verify_listener_plan_identity(
+        runner_identity, LISTENER_EXECUTABLE_IDENTITY_SCHEMA, "runner executable")
+    if plan.get("runner") != runner_identity.get("path"):
+        sys.exit("m8shift-runtime: persisted listener runner path contradicts its identity")
+
+    profile_identity = plan.get("profile_identity")
+    if (not isinstance(profile_identity, dict)
+            or profile_identity.get("schema") != LISTENER_PROFILE_IDENTITY_SCHEMA
+            or not isinstance(profile_identity.get("sha256"), str)
+            or not LISTENER_SHA256_RE.fullmatch(profile_identity.get("sha256", ""))):
+        sys.exit(
+            "m8shift-runtime: persisted listener plan lacks versioned identity for "
+            "profile; run a new explicit listener start with the original options")
+    source_kind = profile_identity.get("source_kind")
+    if source_kind == "cmd_file":
+        args.cmd_file = verify_listener_plan_identity(
+            profile_identity, LISTENER_PROFILE_IDENTITY_SCHEMA, "profile")
+        args.provider = False
+        args.notify_only = False
+    elif source_kind == "provider_registry":
+        provider_path = verify_listener_plan_identity(
+            profile_identity, LISTENER_PROFILE_IDENTITY_SCHEMA, "provider registry")
+        if provider_path != os.path.abspath(PROVIDERS):
+            sys.exit("m8shift-runtime: persisted provider registry path is not canonical")
+        args.cmd_file = ""
+        args.provider = True
+        args.notify_only = False
+    elif source_kind == "notify_only":
+        if profile_identity.get("path") != "":
+            sys.exit("m8shift-runtime: persisted notify-only profile identity is invalid")
+        expected = hashlib.sha256(
+            canonical_json_bytes(plan["profile"])).hexdigest()
+        if expected != profile_identity["sha256"]:
+            sys.exit("m8shift-runtime: persisted notify-only profile identity changed")
+        args.cmd_file = ""
+        args.provider = False
+        args.notify_only = True
+    else:
+        sys.exit("m8shift-runtime: persisted listener profile source kind is invalid")
+
+    args.backend = plan["backend_requested"]
+    args.poll_interval = plan["poll_interval_seconds"]
+    args.max_ticks = plan["max_ticks"]
+    args.max_retries = plan["max_retries"]
+    args.max_backoff = plan["max_backoff_seconds"]
+    args.foreground = plan["foreground"]
+    args.runner = runner_path
+    return runner_path
+
+
+def validate_listener_restore_candidate(saved, candidate):
+    exact_keys = (
+        "agent", "backend", "backend_requested", "backend_identity", "mode",
+        "foreground", "notify_only", "profile", "profile_identity", "runner",
+        "runner_identity", "poll_interval_seconds", "max_ticks", "max_retries",
+        "max_backoff_seconds", "project_root", "root_provenance", "relay_root",
+        "relay_root_provenance", "workspace_root", "workspace_root_provenance",
+        "profile_root", "protocol_root", "runtime_root", "runner_root",
+        "roots_consistent",
+    )
+    changed = [key for key in exact_keys if saved.get(key) != candidate.get(key)]
+    if changed:
+        sys.exit(
+            "m8shift-runtime: persisted listener plan no longer matches validated "
+            "profile, roots, backend facts, or launch policy (%s); replay refused "
+            "before mutation — run a new explicit listener start" % ", ".join(changed))
+
+
+def should_reap_after_failed_start(observed, died_on_its_own):
+    """#370 — whether a start that could not observe its lane must kill the pid.
+
+    Never when our own wait loop watched the process die: the OS may have handed
+    that number to something else in the meantime, and the signal would land on a
+    stranger. Only a process still alive and still unobservable is ours to reap."""
+    if observed:
+        return False
+    return not died_on_its_own
+
+
+def ephemeral_worktree_root(path):
+    """#283 — the linked git worktree a path sits in, or "" when it sits in none.
+
+    A lane pinned to a worktree destroys itself later: `git worktree prune` and
+    cleanup scripts remove them as routine hygiene, and the listener dies at its
+    next tick. One lane sat HALTED for seven days and twenty hours for exactly
+    this, and nothing warned at the moment the choice was made -- which is the only
+    moment the choice can still be changed.
+
+    The signature is precise: a linked worktree's `.git` is a FILE containing
+    `gitdir: <...>/worktrees/<name>`, where the main working tree's `.git` is a
+    directory. Anything else -- no `.git`, an unreadable one, a plain repository --
+    is not a worktree and must not be reported as one."""
+    current = os.path.realpath(path)
+    if not os.path.isdir(current):
+        current = os.path.dirname(current)
+    while current and current != os.path.dirname(current):
+        marker = os.path.join(current, ".git")
+        if os.path.isdir(marker):
+            return ""  # main working tree reached first: not a worktree
+        if os.path.isfile(marker):
+            try:
+                with open(marker, encoding="utf-8") as fh:
+                    body = fh.read(4096).strip()
+            except OSError:
+                return ""
+            if body.startswith("gitdir:") and "/worktrees/" in body.replace(os.sep, "/"):
+                return current
+            return ""
+        current = os.path.dirname(current)
+    return ""
+
+
 def cmd_listener_start(args):
+    restore_plan = None
+    agent = validate_listener_agent(args.agent)
+    if getattr(args, "from_plan", False):
+        restore_plan = read_listener_restore_plan(agent)
+        apply_listener_restore_plan(args, agent, restore_plan)
+    else:
+        if args.backend is None:
+            args.backend = "auto"
+        if args.poll_interval is None:
+            args.poll_interval = LISTENER_DEFAULT_POLL_S
+        if args.max_ticks is None:
+            args.max_ticks = 0
+        if args.max_retries is None:
+            args.max_retries = LISTENER_DEFAULT_MAX_RETRIES
+        if args.max_backoff is None:
+            args.max_backoff = LISTENER_MAX_BACKOFF_S
     # Codex PR-B review M3: float("nan")/float("inf") passed the <=0 check and
     # crashed int() deep inside supervision — validate finiteness up front.
     _poll = getattr(args, "poll_interval", None)
@@ -9705,7 +12813,6 @@ def cmd_listener_start(args):
                               or not isinstance(_poll, (int, float))
                               or not math.isfinite(_poll) or _poll <= 0):
         sys.exit("m8shift-runtime: --poll-interval must be a finite number > 0.")
-    agent = validate_listener_agent(args.agent)
     if args.poll_interval <= 0:
         sys.exit("m8shift-runtime: --poll-interval must be > 0 (fractional seconds allowed)")
     if args.max_ticks < 0:
@@ -9732,8 +12839,13 @@ def cmd_listener_start(args):
     if args.dry_run:
         # Validation-only: do not execute even the runner handshake. The plan
         # records that omission and writes NO pid, state, log, or service file.
-        plan = build_listener_plan(agent, profile, runner_path, args, backend, fallback_reason)
-        print(json.dumps({"dry_run": True, "plan": plan},
+        plan = build_listener_plan(
+            agent, profile, runner_path, args, backend, fallback_reason, facts)
+        if restore_plan is not None:
+            validate_listener_restore_candidate(restore_plan, plan)
+        print(json.dumps({"dry_run": True,
+                          "restored_from_plan": restore_plan is not None,
+                          "plan": plan},
                          ensure_ascii=False, sort_keys=True, indent=2))
         return 0
     # Compatibility is a strict preflight for every executable mode, including
@@ -9741,18 +12853,58 @@ def cmd_listener_start(args):
     # creation, or any listener/provider launch.
     require_runner_handshake(runner_path)
     persisted_plan = build_listener_plan(
-        agent, profile, runner_path, args, backend, fallback_reason)
+        agent, profile, runner_path, args, backend, fallback_reason, facts)
+    if restore_plan is not None:
+        validate_listener_restore_candidate(restore_plan, persisted_plan)
     persisted_plan["runner_handshake"] = {
         "status": "compatible",
         "reason": "validated_before_install",
     }
-    write_json_atomic(listener_paths(agent)["plan"], persisted_plan)
+    supervised = os.environ.get(LISTENER_DETACHED_ENV) == "1" or args.service_payload
+    # A detached/service child must not overwrite the parent operator plan with
+    # its internal foreground/local payload. Replay likewise preserves the exact
+    # validated plan it consumed.
     if fallback_reason:
         # RFC 047: the fallback must be VISIBLE — never silently downgrade.
         print(f"backend {args.backend} → local: {fallback_reason}")
-    supervised = os.environ.get(LISTENER_DETACHED_ENV) == "1" or args.service_payload
+    # #283: refuse at ARMING time, the only moment the choice can still change.
+    # The halt itself always behaved correctly -- failed closed, ran nothing, wrote
+    # the reason -- but it arrived a week later, on a lane that had already stopped
+    # answering. A worktree is temporary by construction; pinning a long-lived
+    # service to one builds a lane that destroys itself.
+    resolved_runner = os.path.realpath(runner_path) if runner_path else ""
+    if resolved_runner and not getattr(args, "allow_ephemeral_runner", False):
+        worktree = ephemeral_worktree_root(resolved_runner)
+        if worktree:
+            sys.exit(
+                f"m8shift-runtime: the runner {resolved_runner} lives inside the git "
+                f"worktree {worktree}, which routine cleanup (`git worktree prune`) "
+                "removes; the lane would die at its next tick, silently, hours or "
+                "days later. Point --runner at a path outside any worktree, or pass "
+                "--allow-ephemeral-runner to accept a lane with a known expiry.")
     if not supervised:
         exists, pid = read_listener_pid(agent)
+        # #370: restored after an adversarial review showed the removal was wrong.
+        # The guard just below reads the PID FILE, so deleting that file -- by a
+        # cleanup script, or by `status --repair` on a file wrongly judged stale --
+        # lets a second lane start for the same agent. This one reads the PROCESS
+        # TABLE and catches exactly that case. They are not two recognitions of one
+        # condition: they read different evidence and cover different failures, so
+        # this runs only when the pid file has nothing live to say.
+        if not (exists and pid and listener_pid_alive(pid)) \
+                and not getattr(args, "restart", False) \
+                and not getattr(args, "force", False) \
+                and not getattr(args, "dry_run", False):
+            rivals = [e for e in (listener_process_census() or [])
+                      if e["scope"] == "this_relay" and e["agent"] == agent
+                      and e["pid"] != os.getpid()]
+            if rivals:
+                pids = ", ".join(str(e["pid"]) for e in rivals)
+                sys.exit(f"m8shift-runtime: agent {agent!r} already has a listener "
+                         f"process on this relay (pid {pids}) even though no live pid "
+                         "file names it; use --restart to replace it, --force to run "
+                         "a second one deliberately, or `listener list` to see every "
+                         "lane.")
         if exists and pid and listener_pid_alive(pid):
             if not args.restart:
                 sys.exit(f"m8shift-runtime: listener for {agent!r} is already running "
@@ -9770,7 +12922,12 @@ def cmd_listener_start(args):
             write_listener_state(agent, phase="polling", consecutive_failures=0,
                                  last_run_id="", last_classification="", reason="",
                                  start_on_idle=profile["start_on_idle"],
-                                 notify_only=getattr(args, "notify_only", False))
+                                 notify_only=getattr(args, "notify_only", False),
+                                 review_delivery=profile.get("review_delivery", "none"))
+    if restore_plan is None and not supervised:
+        # A refused attempt against a live lane must not replace its last valid
+        # restart contract. Persist only after lifecycle preflight succeeds.
+        write_json_atomic(listener_paths(agent)["plan"], persisted_plan)
     if args.foreground:
         # The loop always records its own pid: for a local detach this is the same
         # value the parent already wrote; for an OS-service payload there IS no
@@ -9789,7 +12946,7 @@ def cmd_listener_start(args):
         # OS service lifecycle (RFC 047 Phase D): generate the definition under
         # .m8shift/runtime/listeners/, then drive the service manager with the
         # plan's explicit argv steps. The payload is the SAME foreground loop.
-        plan = backend_install_plan(backend, agent, args, runner_path)
+        plan = backend_install_plan(backend, agent, args, runner_path, profile)
         rc = install_service_backend(agent, plan)
         if rc != 0:
             return rc
@@ -9798,7 +12955,56 @@ def cmd_listener_start(args):
         print(f"  log:     {os.path.relpath(paths['log'], HERE)}")
         print(f"  state:   {os.path.relpath(paths['state'], HERE)}")
         return 0
-    pid = spawn_detached_listener(args, agent, runner_path, backend)
+    pid, spawned_identity = spawn_detached_listener(
+        args, agent, runner_path, backend, profile)
+    # #370: the detached child writes the state file, so this command used to
+    # report success roughly a second before the lane it started was observable.
+    # A caller reading the state immediately was racing it -- measured at rc 0 in
+    # 0.48s with the file appearing ~1s later. Announcing an intention as an
+    # outcome is the defect this project keeps removing elsewhere, so wait,
+    # bounded, and say plainly when the lane does not appear.
+    observed = False
+    died_on_its_own = False
+    deadline = time.time() + LISTENER_START_OBSERVE_TIMEOUT_S
+    while time.time() < deadline:
+        if os.path.exists(paths["state"]):
+            observed = True
+            break
+        if not listener_pid_alive(pid):
+            # It died by itself. Killing this pid now would be killing whatever
+            # the OS has since given the number to, not our child.
+            died_on_its_own = True
+            break
+        time.sleep(0.05)
+    if not observed:
+        # Returning a failure while the launched process survives manufactures the
+        # duplicate this command exists to prevent: the caller retries, and the
+        # first process eventually writes its state. Either the lane is up and we
+        # say so, or it is stopped and we say that.
+        if not should_reap_after_failed_start(observed, died_on_its_own):
+            remove_listener_pid(agent)
+            print(f"m8shift-runtime: listener for {agent} (pid {pid}) exited before it "
+                  "could record any state; nothing is left running — check "
+                  "`listener logs`.", file=sys.stderr)
+            return 1
+        reaped = listener_terminate_group(
+            pid, getattr(args, "grace", 10.0),
+            expected_identity=spawned_identity)
+        if not reaped and not listener_pid_alive(pid):
+            # Gone is reaped. Reporting "a lane may be running unmanaged" for a pid
+            # that is demonstrably dead announces a worse situation than the real
+            # one, and sends an operator hunting a process that does not exist.
+            reaped = True
+        if reaped:
+            remove_listener_pid(agent)
+        print(f"m8shift-runtime: listener for {agent} was launched (pid {pid}) but its "
+              f"state did not appear within {LISTENER_START_OBSERVE_TIMEOUT_S:g}s; "
+              + ("the process was stopped so no unmanaged lane is left behind"
+                 if reaped else
+                 f"AND pid {pid} could not be stopped — a lane may be running "
+                 "unmanaged; stop it by pid before retrying")
+              + " — check `listener logs`.", file=sys.stderr)
+        return 1
     print(f"✓ listener started for {agent} (pid {pid}, backend {backend}, detached)")
     print(f"  log:   {os.path.relpath(paths['log'], HERE)}")
     print(f"  state: {os.path.relpath(paths['state'], HERE)}")
@@ -9806,9 +13012,72 @@ def cmd_listener_start(args):
 
 
 def cmd_listener_stop(args):
-    agent = validate_listener_agent(args.agent)
     if args.grace < 0:
         sys.exit("m8shift-runtime: --grace must be >= 0")
+    # #370: --all and --pid reach lanes the pid file cannot. `stop --agent X`
+    # terminates exactly the one pid recorded, so a second listener for the same
+    # agent survives it and stays invisible; that behaviour is deliberately
+    # UNCHANGED so the difference stays observable.
+    if not args.agent and not getattr(args, "all", False) and not getattr(args, "pid", None):
+        sys.exit("m8shift-runtime: listener stop needs --agent, --all or --pid")
+    if getattr(args, "all", False) or getattr(args, "pid", None):
+        census = listener_process_census()
+        if census is None:
+            sys.exit("m8shift-runtime: this host exposes no argv census; "
+                     "--all and --pid cannot enumerate lanes")
+        census_degraded = bool(getattr(census, "degraded", False))
+        if census_degraded and getattr(args, "all", False):
+            print("m8shift-runtime: argv census is DEGRADED because `ps -axww` "
+                  "failed and the fallback may truncate lane identity; stop --all "
+                  "will stop every resolved local lane but cannot certify this "
+                  "relay clean", file=sys.stderr)
+        local = [e for e in census if e["scope"] == "this_relay"]
+        if getattr(args, "pid", None):
+            targets = [e for e in local if e["pid"] == args.pid]
+            if not targets:
+                foreign = [e for e in census if e["pid"] == args.pid]
+                if foreign:
+                    sys.exit(f"m8shift-runtime: pid {args.pid} serves "
+                             f"{foreign[0]['root'] or 'an unresolvable root'}, not this "
+                             "relay; refusing to stop another instance's lane")
+                sys.exit(f"m8shift-runtime: no listener pid {args.pid} on this relay")
+        else:
+            targets = local
+        unresolved = [e for e in census if e["scope"] == "unresolvable"]
+        if unresolved and not getattr(args, "pid", None):
+            # Silence here is the worst outcome: the operator believes the relay is
+            # clean while a lane it could not place keeps taking turns. Refusing to
+            # kill an unidentified process is right; refusing quietly is not.
+            print(f"m8shift-runtime: {len(unresolved)} listener process(es) could not "
+                  "be placed on any relay and were NOT stopped — this relay may not "
+                  "be clean:", file=sys.stderr)
+            for entry in unresolved:
+                print(f"  pid {entry['pid']}  agent {entry['agent'] or '?'}  "
+                      f"({entry['reason'] or 'unknown'}) — inspect it, then "
+                      f"`listener stop --pid {entry['pid']}` if it is yours",
+                      file=sys.stderr)
+        # rc stays 0 when every RESOLVED target on this relay was stopped under a
+        # complete census. The command's authority is this relay, and a third-party
+        # process nobody can place must not poison a deploy loop that waits for rc
+        # 0. The warning is on stderr, where it is read, not in the exit status,
+        # where it blocks. A degraded census is different: its missing identity may
+        # belong to this relay, so --all must not certify the cleanup with rc 0.
+        if not targets:
+            print("no listener process on this relay (nothing to stop).")
+            return 1 if census_degraded and getattr(args, "all", False) else 0
+        rc = 0
+        for entry in targets:
+            if listener_terminate_group(entry["pid"], args.grace):
+                print(f"✓ listener stopped (pid {entry['pid']}, agent "
+                      f"{entry['agent'] or '?'}).")
+            else:
+                print(f"m8shift-runtime: listener pid {entry['pid']} did not die "
+                      "after TERM/KILL", file=sys.stderr)
+                rc = 1
+        if census_degraded and getattr(args, "all", False):
+            rc = 1
+        return rc
+    agent = validate_listener_agent(args.agent)
     rc = 0
     exists, pid = read_listener_pid(agent)
     if not exists:
@@ -9835,6 +13104,192 @@ def cmd_listener_stop(args):
         print(f"✓ removed {record.get('backend', 'service')} definition for {agent} "
               f"({record.get('service_file', '') or record.get('label', '')}).")
     return rc
+
+
+def _listener_row_root(argv):
+    """Best-effort relay root for one `listener start` argv.
+
+    The agent name is the most legible thing on a `ps` line and the least
+    decisive: five listener processes on one machine were read as competing on one
+    relay when not one of them watched it. What determines the relay served is the
+    root buried in --project-root, --cmd-file or --runner. Returns "" when none of
+    them is present, which is itself reportable -- unresolvable is not local."""
+    for index, item in enumerate(argv):
+        if item == "--project-root" and index + 1 < len(argv):
+            return os.path.realpath(argv[index + 1])
+        if item.startswith("--project-root="):
+            return os.path.realpath(item.split("=", 1)[1])
+    saw_relative = False
+    for flag in ("--cmd-file", "--runner"):
+        for index, item in enumerate(argv):
+            value = ""
+            if item == flag and index + 1 < len(argv):
+                value = argv[index + 1]
+            elif item.startswith(flag + "="):
+                value = item.split("=", 1)[1]
+            if not value:
+                continue
+            if not os.path.isabs(value):
+                # `ps` gives no cwd, so a relative path cannot be resolved from
+                # here. That is a distinct cause from "no root argument at all"
+                # and must not share its label.
+                saw_relative = True
+                continue
+            # <root>/examples/headless_runner.py, <root>/.m8shift/providers/x.json
+            path = os.path.dirname(os.path.realpath(value))
+            while path and path != os.path.dirname(path):
+                if os.path.isfile(os.path.join(path, "M8SHIFT.md")):
+                    return os.path.realpath(path)
+                path = os.path.dirname(path)
+            saw_relative = True  # an absolute path that resolves to no relay
+    return "relative" if saw_relative else ""
+
+
+def _listener_row_agent(argv):
+    for index, item in enumerate(argv):
+        if item == "--agent" and index + 1 < len(argv):
+            return argv[index + 1]
+        if item.startswith("--agent="):
+            return item.split("=", 1)[1]
+    return ""
+
+
+def listener_process_census(rows=None):
+    """#370 — every `listener start` process on this host, classified BY THE RELAY
+    IT POLLS rather than by the agent name it advertises.
+
+    Returns None when the host cannot expose an argv census (the same contract as
+    fleet_upgrade_process_rows, which this reuses rather than duplicating: two
+    recognitions of one signature diverge)."""
+    rows = fleet_upgrade_process_rows() if rows is None else rows
+    if rows is None:
+        return None
+    census_degraded = bool(getattr(rows, "degraded", False))
+    degradation_reason = getattr(rows, "degradation_reason", "")
+    here = os.path.realpath(HERE)
+    census = []
+    for row in rows:
+        argv = row.get("argv") or []
+        if not any(str(a).endswith("m8shift-runtime.py") for a in argv):
+            continue
+        if "listener" not in argv or "start" not in argv:
+            continue
+        root = _listener_row_root(argv)
+        reason = ""
+        if root == "relative":
+            root, scope = "", "unresolvable"
+            reason = "root_path_not_absolute_or_no_relay_above_it"
+        elif not root:
+            scope = "unresolvable"
+            # A truncated `ps` line loses --runner entirely and looks exactly like
+            # a command that never carried a root. Distinguishing them matters:
+            # one is a lane we cannot place, the other may be a lane on THIS relay
+            # that stop --all would skip.
+            reason = "no_root_argument"
+        elif root == here:
+            scope = "this_relay"
+        else:
+            scope = "other_relay"
+        census.append({"pid": row.get("pid"), "agent": _listener_row_agent(argv),
+                       "root": root, "scope": scope, "reason": reason})
+    return ProcessCensusRows(
+        census, degraded=census_degraded,
+        degradation_reason=degradation_reason)
+
+
+def cmd_listener_list(args):
+    """#370 — enumerate every lane, including ones this instance did not start.
+
+    `listener status --agent X` reads one state file and one pid file, so a second
+    listener for the same agent is invisible to it and survives `stop --agent X`.
+    This walks the process table instead, so a duplicate that never wrote a state
+    file is still found."""
+    census = listener_process_census()
+    session = current_relay_session()
+    if census is None:
+        print("listener list: this host exposes no argv census; "
+              "running lanes cannot be enumerated (state files only).")
+    elif (getattr(census, "degraded", False)
+          and not getattr(args, "json", False)):
+        print("listener list: argv census is DEGRADED; `ps -axww` failed and "
+              "fallback output may have truncated lane identity.")
+    rows = []
+    for entry in sorted(census or [], key=lambda e: (e["scope"], e["agent"], e["pid"] or 0)):
+        rows.append(entry)
+    states = []
+    if os.path.isdir(LISTENERS_DIR):
+        for name in sorted(os.listdir(LISTENERS_DIR)):
+            if not name.endswith(".json") or name.endswith(".plan.json"):
+                continue
+            doc, err = read_json_diagnostic(os.path.join(LISTENERS_DIR, name), {})
+            if err or not isinstance(doc, dict):
+                continue
+            states.append(doc)
+    if getattr(args, "json", False):
+        print(json.dumps({"schema": "m8shift.listener.list.v1",
+                          "relay_root": os.path.realpath(HERE),
+                          "relay_session": session,
+                          "census_available": census is not None,
+                          "census_degraded": bool(
+                              getattr(census, "degraded", False)),
+                          "census_degradation_reason": str(
+                              getattr(census, "degradation_reason", "")),
+                          "processes": rows, "states": states,
+                          "tombstones": [
+                              {"agent": str(d.get("agent", "")),
+                               "updated_at": d.get("updated_at", ""),
+                               "session": str(d.get("session", "") or ""),
+                               "process_pid": d.get("process_pid")}
+                              for d in states
+                              if str(d.get("agent", "")) and str(d.get("agent", "")) not in
+                              {e["agent"] for e in rows if e["scope"] == "this_relay"}]},
+                         indent=2, sort_keys=True))
+        return 0
+    local = [r for r in rows if r["scope"] == "this_relay"]
+    print(f"relay {os.path.realpath(HERE)} (session {session or 'unknown'})")
+    print(f"  running lanes on THIS relay: {len(local)}")
+    for entry in local:
+        print(f"    pid {entry['pid']}  agent {entry['agent'] or '?'}")
+    elsewhere = [r for r in rows if r["scope"] != "this_relay"]
+    if elsewhere:
+        print(f"  listener processes serving ANOTHER relay or unresolvable: {len(elsewhere)}")
+        for entry in elsewhere:
+            where = entry["root"] or "root unresolvable from argv"
+            print(f"    pid {entry['pid']}  agent {entry['agent'] or '?'}  -> {where}")
+        print("  these are not this relay's lanes; stopping them would touch "
+              "another instance's work.")
+    # The process table is amnesiac: a lane killed by SIGKILL or the OOM killer
+    # leaves it instantly and without trace. Its state file is the tombstone -- the
+    # only evidence that a lane ran here and did not stop cleanly. A census alone
+    # would report a clean relay over the remains of a violent death.
+    live_agents = {entry["agent"] for entry in local}
+    tombstones = []
+    for doc in states:
+        name = str(doc.get("agent", ""))
+        if not name or name in live_agents:
+            continue
+        recorded = str(doc.get("session", "") or "")
+        tombstones.append((name, doc.get("updated_at", "?"), recorded,
+                           doc.get("process_pid")))
+    if tombstones:
+        print(f"  state without a live process: {len(tombstones)}")
+        for name, seen, recorded, recorded_pid in sorted(tombstones):
+            if not recorded and recorded_pid is None:
+                why = "no session and no pid recorded — unattributable"
+            elif recorded and session and recorded != session:
+                why = f"recorded session {recorded} is not this relay's"
+            else:
+                why = "the process is gone; it did not stop cleanly or was reaped"
+            print(f"    agent {name}  last seen {seen}  ({why})")
+    duplicates = {}
+    for entry in local:
+        duplicates.setdefault(entry["agent"], []).append(entry["pid"])
+    for agent, pids in sorted(duplicates.items()):
+        if len(pids) > 1:
+            print(f"  DUPLICATE: agent {agent!r} has {len(pids)} lanes on this relay "
+                  f"(pids {', '.join(str(p) for p in pids)}); "
+                  "`listener stop --agent` reaches only the recorded one.")
+    return 0
 
 
 def cmd_listener_status(args):
@@ -9883,12 +13338,39 @@ def cmd_listener_status(args):
     can_invoke_agent = row["coverage"] == "invoker"
     can_notify = row["coverage"] == "notifier"
     last_successful_run = doc.get("last_successful_run", "")
+    review_delivery = doc.get("review_delivery", "none")
+    review_pending = False
+    if review_delivery == "artifact":
+        snapshot = read_relay_lock_fields(include_text=True)
+        if snapshot is not None:
+            review_pending = review_delivery_pending_for(
+                agent, doc.get("last_run_id", ""),
+                doc.get("last_classification", ""), *snapshot)
     plan_doc, plan_err = read_json_diagnostic(paths["plan"], {})
     if plan_err or not isinstance(plan_doc, dict):
         plan_doc = {}
+    # #370: a lane that cannot name the relay it serves, or names another one, is
+    # not healthy -- it is unattributable or orphaned. Reported, never migrated
+    # away: a state file rewritten to look current would hide exactly the case
+    # that took two days to notice.
+    recorded_session = str(doc.get("session", "") or "")
+    relay_session = current_relay_session()
+    if doc and not state_err and "process_pid" not in doc:
+        attribution = "unattributable"
+    elif doc and not state_err and recorded_session and relay_session \
+            and recorded_session != relay_session:
+        attribution = "orphaned"
+    elif doc and not state_err and not recorded_session:
+        attribution = "unattributable"
+    else:
+        attribution = "current" if doc and not state_err else ""
     payload = {
         "agent": agent,
         "status": status_label,
+        "attribution": attribution,
+        "recorded_session": recorded_session,
+        "relay_session": relay_session,
+        "started_at": doc.get("started_at", ""),
         "pid": pid,
         "pid_status": pid_status,
         "process_resident": alive,
@@ -9904,6 +13386,8 @@ def cmd_listener_status(args):
         "can_invoke_agent": can_invoke_agent,
         "can_notify": can_notify,
         "notify_only": notify_only,
+        "review_delivery": review_delivery,
+        "review_delivery_pending": review_pending,
         "coverage": row["coverage"],
         "attention": row["attention"],
         "cause": row.get("cause", ""),
@@ -9920,6 +13404,10 @@ def cmd_listener_status(args):
         "plan_file": os.path.relpath(paths["plan"], HERE),
         "project_root": plan_doc.get("project_root", HERE),
         "root_provenance": plan_doc.get("root_provenance", ROOT_PROVENANCE),
+        "relay_root": plan_doc.get("relay_root", HERE),
+        "relay_root_provenance": plan_doc.get("relay_root_provenance", ROOT_PROVENANCE),
+        "workspace_root": plan_doc.get("workspace_root", ""),
+        "workspace_root_provenance": plan_doc.get("workspace_root_provenance", ""),
         "profile_root": plan_doc.get("profile_root", ""),
         "protocol_root": plan_doc.get("protocol_root", HERE),
         "runtime_root": plan_doc.get("runtime_root", HERE),
@@ -9932,10 +13420,21 @@ def cmd_listener_status(args):
         return 0
     where = f" (pid {pid}, process {'resident' if alive else 'gone'})" if exists else ""
     print(f"listener {agent}: {status_label}{where}")
+    if payload["attribution"] == "orphaned":
+        print(f"  ORPHANED: recorded session {payload['recorded_session']} is not "
+              f"this relay's {payload['relay_session']}; this lane serves another "
+              "relay and cannot advance this one.")
+    elif payload["attribution"] == "unattributable":
+        print("  UNATTRIBUTABLE: the state records no session"
+              + ("" if "process_pid" in doc else " and no process id")
+              + "; which process, if any, it describes cannot be established.")
     print(
-        f"  root: {payload['project_root']} "
-        f"(provenance={payload['root_provenance']}, "
+        f"  relay root: {payload['relay_root']} "
+        f"(provenance={payload['relay_root_provenance']}, "
         f"consistent={str(payload['roots_consistent']).lower()})")
+    if payload["workspace_root"]:
+        print(f"  workspace root: {payload['workspace_root']} "
+              f"(provenance={payload['workspace_root_provenance']})")
     print(f"  capability: can_invoke_agent={str(can_invoke_agent).lower()} "
           f"can_notify={str(can_notify).lower()} "
           f"survives_parent_exit={str(survives_parent_exit).lower()} "
@@ -9952,6 +13451,8 @@ def cmd_listener_status(args):
         print(f"  last run: {doc.get('last_run_id') or '-'} "
               f"classification={doc.get('last_classification') or '-'} "
               f"updated={doc.get('updated_at') or '-'}")
+    if review_pending:
+        print("  reviewer artifact: delivered and fresh; awaiting coordinator consumption")
     if halted:
         print(f"  reason: {doc.get('reason') or 'max retries reached'}")
         print(f"  clear with: python3 m8shift-runtime.py listener start --agent {agent} --restart ...")
@@ -10007,11 +13508,17 @@ USAGE_BUDGET_SCHEMA = "m8shift.usage.budget.v1"
 USAGE_BUDGET_MAX_CAP = 10 ** 12             # a trillion tokens: above any real plan, below float-overflow risk
 USAGE_SNAPSHOT_SCHEMA = "m8shift.usage.snapshot.v1"
 USAGE_FIXTURE_SCHEMA = "m8shift.usage.fixture.v1"
+# #363: mirrors the adapter's own bound. A record of what was dropped must not
+# itself become unbounded input.
+USAGE_MAX_DROPPED_WINDOWS = 10
 USAGE_ADAPTER_KINDS = ("cli_json", "fixture", "jsonl_scan")
 USAGE_PROVENANCE = ("official", "local_estimate", "proxy_reported",
                     "historical_estimate", "manual", "unknown")
 USAGE_MEASUREMENT_STATES = ("measured", "degraded", "unavailable")
 USAGE_MEASUREMENT_REASON_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,79}\Z")
+USAGE_SELECTION_VALUE_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,39}\Z")
+USAGE_SELECTION_METHOD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,159}\Z")
+USAGE_SELECTION_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}\Z")
 USAGE_MEASUREMENT_UNDECLARED = (
     "measurement is not declared; legacy success semantics retained"
 )
@@ -10162,6 +13669,22 @@ def default_usage_adapters():
                 "provider": "openai-codex",
                 "kind": "cli_json",
                 "command": ["python3", "examples/usage-adapters/codex-ratelimits.py"],
+                "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
+                "enabled": False,
+            },
+            {
+                "//": ("Disabled by default (#335): Antigravity's own local language "
+                       "server quota summary. The explicit gemini- bucketId prefix selects "
+                       "one of the endpoint's two model groups; the adapter records that "
+                       "selection, RPC method, and client version in the normalized receipt. "
+                       "It reads the CSRF token in memory and emits only aggregate official "
+                       "weekly/5h ratios. M8Shift never receives the token or raw response."),
+                "name": "agy-antigravity-quota",
+                "agent": "agy",
+                "provider": "google-antigravity",
+                "kind": "cli_json",
+                "command": ["python3", "examples/usage-adapters/antigravity-quota.py",
+                            "--bucket-prefix", "gemini-"],
                 "timeout_s": USAGE_TIMEOUT_DEFAULT_S,
                 "enabled": False,
             },
@@ -10470,6 +13993,33 @@ def _usage_remaining_ratio(used_ratio):
     return round(1.0 - ratio, 4)
 
 
+def _usage_selection_or_none(value, warnings):
+    """Normalize a bounded, identity-free adapter selection receipt (#335)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        warnings.append("selection must be an object; ignored")
+        return None
+    if set(value) != {"strategy", "value", "source_method", "client_version"}:
+        warnings.append("selection must contain only strategy, value, source_method, and client_version; ignored")
+        return None
+    strategy = value.get("strategy")
+    selected = value.get("value")
+    method = value.get("source_method")
+    version = value.get("client_version")
+    if strategy != "bucket_id_prefix" \
+            or not isinstance(selected, str) \
+            or not USAGE_SELECTION_VALUE_RE.fullmatch(selected) \
+            or not isinstance(method, str) \
+            or not USAGE_SELECTION_METHOD_RE.fullmatch(method) \
+            or not isinstance(version, str) \
+            or not USAGE_SELECTION_VERSION_RE.fullmatch(version):
+        warnings.append("selection contains an invalid bounded receipt field; ignored")
+        return None
+    return {"strategy": strategy, "value": selected,
+            "source_method": method, "client_version": version}
+
+
 def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
                              include_raw_excerpt=False, budget=None):
     """Normalize one m8shift.usage.fixture.v1 document to the pinned
@@ -10498,6 +14048,7 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
         warnings.append(f"unknown provenance {provenance!r}; recorded as \"unknown\"")
         provenance = "unknown"
     measurement = _usage_measurement_or_none(doc.get("measurement"), warnings)
+    selection = _usage_selection_or_none(doc.get("selection"), warnings)
     captured_at = _usage_iso_or_none(doc.get("captured_at"), "captured_at", warnings) or iso()
     used_tokens = _usage_int_or_none(doc.get("used_tokens"), "used_tokens", warnings)
     limit_tokens = _usage_int_or_none(doc.get("limit_tokens"), "limit_tokens", warnings)
@@ -10620,7 +14171,7 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
                                if primary_window else None)
     primary_window_kind = primary_window.get("kind") if primary_window else None
     known = {"schema", "agent", "provenance", "captured_at", "used_tokens",
-             "limit_tokens", "windows", "measurement"}
+             "limit_tokens", "windows", "measurement", "selection", "dropped"}
     for key in sorted(set(doc) - known):
         warnings.append(f"unknown input key {key!r} ignored")
     snapshot = {
@@ -10636,6 +14187,29 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
         "decision_window": decision_window,
         "windows": windows,
     }
+    # #363: carry the dropped-window record through, additively, exactly like
+    # selection and measurement above. Without this the adapter records why a
+    # gauge is missing and nothing downstream ever sees it, so top still shows a
+    # gauge that is simply not there. Bounded and shape-checked: an adapter is
+    # third-party output, so an unusable record is dropped rather than trusted.
+    raw_dropped = doc.get("dropped")
+    if isinstance(raw_dropped, list) and raw_dropped:
+        clean_dropped = []
+        for row in raw_dropped[:USAGE_MAX_DROPPED_WINDOWS]:
+            if not isinstance(row, dict) or set(row) != {"kind", "reason"}:
+                continue
+            kind_value, reason_value = row["kind"], row["reason"]
+            if kind_value is not None and not isinstance(kind_value, str):
+                continue
+            if not isinstance(reason_value, str) or not reason_value:
+                continue
+            clean_dropped.append({"kind": kind_value, "reason": reason_value})
+        if len(clean_dropped) != len(raw_dropped[:USAGE_MAX_DROPPED_WINDOWS]):
+            warnings.append("adapter reported unusable dropped-window rows; they were discarded")
+        if clean_dropped:
+            snapshot["dropped"] = clean_dropped
+    if selection is not None:
+        snapshot["source"]["selection"] = selection
     if measurement is not None:
         snapshot["measurement"] = measurement
     if primary_window is not None:
@@ -10705,7 +14279,7 @@ def usage_normalization_finding(adapter_name, message):
             "message": f"{adapter_name}: {message}"}
 
 
-def run_usage_adapter_bounded(argv, timeout, cap):
+def run_usage_adapter_bounded(argv, timeout, cap, env=None):
     """USAGE-1 (Codex review): bounded subprocess capture that NEVER materializes
     unbounded adapter stdout in memory. Binary pipes + reader threads accumulate at
     most cap+1 bytes each; the process is killed on stdout overflow or timeout.
@@ -10714,6 +14288,7 @@ def run_usage_adapter_bounded(argv, timeout, cap):
     returncode is None when the process was killed before exiting on its own."""
     proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                            env=env,
                             shell=False)
     buffers = {"out": b"", "err": b""}
     overflow = threading.Event()
@@ -10793,9 +14368,20 @@ def _run_usage_adapter_io(entry):
         if digest != pin:
             return None, "", "adapter identity mismatch (sha256 pin); refusing to run"
     timeout = usage_timeout_s(entry)
+
+    # RFC 067: Isolation environnementale par défaut fermée (fail-closed)
+    # Socle commun pour permettre le fonctionnement normal sans héritage abusif
+    base_keys = ["HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER"]
+    env_keys = entry.get("env_allowlist", [])
+    if not isinstance(env_keys, list) or not all(
+            isinstance(name, str) for name in env_keys):
+        return None, "", "env_allowlist unsupported format: must be a list of strings"
+    
+    child_env = {k: os.environ[k] for k in base_keys + env_keys if k in os.environ}
+
     try:
         rc, out_b, err_b, overflowed, timed_out = run_usage_adapter_bounded(
-            [resolved] + argv[1:], timeout, USAGE_MAX_STDOUT_BYTES)
+            [resolved] + argv[1:], timeout, USAGE_MAX_STDOUT_BYTES, env=child_env)
     except OSError as e:
         return None, "", f"adapter failed to start: {e}"
     if overflowed:
@@ -10813,14 +14399,6 @@ def _run_usage_adapter_io(entry):
     except json.JSONDecodeError as e:
         return None, stdout, f"adapter stdout is not valid JSON: {e}"
 
-
-# ── RFC 040 Phase 3 Slice 2 — built-in jsonl_scan usage adapter ──
-# A SPENT/reporting source. It sums an operator's LOCAL agent-session JSONL token
-# integers into rolling windows and emits used_tokens with limit_tokens=null, so
-# decision_ratio is null → status unknown → it NEVER gates (fail-open by design;
-# consumption alone cannot gate). The row parsers touch ONLY the integer usage
-# fields and the row timestamp — never prompt/response text, model, or sessionId —
-# which structurally guarantees no message content can reach the snapshot.
 
 def _usage_scan_sum_tokens(obj):
     """Sum the recognized non-negative-integer token fields of a usage-like object.
@@ -12963,6 +16541,23 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
                     help="seconds after which a runtime presence lane counts as stale (default: 300)")
     dr.set_defaults(fn=cmd_doctor)
 
+    review = sub.add_parser(
+        "review-delivery",
+        help="inspect or consume an explicit bounded read-only reviewer artifact")
+    review_sub = review.add_subparsers(dest="review_verb", required=True)
+    review_status = review_sub.add_parser(
+        "status", help="validate artifact integrity and freshness against the current relay input turn")
+    review_status.add_argument("run", help="reviewer run id")
+    review_status.add_argument("--json", action="store_true",
+                               help="emit redacted artifact metadata as JSON")
+    review_status.set_defaults(fn=cmd_review_delivery_status)
+    review_consume = review_sub.add_parser(
+        "consume", help="print a fresh review only for the live coordinator pen holder")
+    review_consume.add_argument("run", help="reviewer run id")
+    review_consume.add_argument("--by", required=True,
+                                help="live WORKING coordinator identity consuming the review")
+    review_consume.set_defaults(fn=cmd_review_delivery_consume)
+
     consult = sub.add_parser(
         "consult", help="run one bounded advisory read-only provider consultation")
     consult.add_argument("--from", dest="requester", required=True,
@@ -13007,6 +16602,53 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
                      help="optional run id substituted for the $M8SHIFT_RUN_ID placeholder")
     pvr.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of human output")
     pvr.set_defaults(fn=cmd_providers_render)
+
+    db = sub.add_parser(
+        "doctor-baseline",
+        help="capture and compare bounded RFC 081 doctor-drift evidence")
+    db_sub = db.add_subparsers(dest="doctor_baseline_verb", required=True)
+    dbc = db_sub.add_parser(
+        "capture", help="write one root/session/version-bound doctor baseline")
+    dbc.add_argument(
+        "--output", required=True,
+        help="new JSON path under .m8shift/runtime/ (existing files are refused)")
+    dbc.add_argument(
+        "--ttl-seconds", type=int, default=DOCTOR_BASELINE_TTL_DEFAULT_S,
+        help="baseline lifetime in seconds (default/max: 86400; min: 60)")
+    dbc.add_argument(
+        "--doctor-json", default="",
+        help="optional bounded raw doctor JSON fixture/artifact; default runs local doctor --json")
+    dbc.add_argument("--json", action="store_true",
+                     help="emit a portable capture summary as JSON")
+    dbc.set_defaults(fn=cmd_doctor_baseline_capture)
+    dbcmp = db_sub.add_parser(
+        "compare", help="classify current doctor drift against one fresh baseline")
+    dbcmp.add_argument("--baseline", required=True,
+                       help="m8shift.doctor-baseline.v1 JSON artifact")
+    dbcmp.add_argument(
+        "--current-json", default="",
+        help="optional bounded raw post-doctor JSON artifact; default runs local doctor --json")
+    dbcmp.add_argument(
+        "--exceptions", default="",
+        help="optional exact m8shift.doctor-baseline.exceptions.v1 record")
+    dbcmp.add_argument("--json", action="store_true",
+                       help="emit m8shift.doctor-baseline.comparison.v1 JSON")
+    dbcmp.set_defaults(fn=cmd_doctor_baseline_compare)
+
+    fup = sub.add_parser(
+        "fleet-upgrade",
+        help="apply or resume one RFC 081 ordered kit-upgrade transaction")
+    fup.add_argument("--spec", required=True,
+                     help="path to a m8shift.fleet-upgrade.spec.v1 JSON document")
+    fup.add_argument("--source", required=True,
+                     help="verified release root whose checksums.sha256 identity is in the spec")
+    fup.add_argument("--resume", action="store_true",
+                     help="resume the matching durable operation from checkpoint evidence")
+    fup.add_argument("--json", action="store_true",
+                     help="emit the portable m8shift.fleet-upgrade.report.v1 JSON")
+    fup.add_argument("--interrupt-after", default="", help=argparse.SUPPRESS)
+    fup.add_argument("--fail-update-instance", default="", help=argparse.SUPPRESS)
+    fup.set_defaults(fn=cmd_fleet_upgrade)
 
     fleet = sub.add_parser(
         "fleet", help="plan and reconcile a declarative batch of exact agent identities")
@@ -13221,7 +16863,10 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
                      help="path to a m8shift.listener.profile.v1 JSON provider profile (argv array only)")
     lst.add_argument("--provider", action="store_true",
                      help="build the profile from this agent's .m8shift/providers.json entry instead of --cmd-file")
-    lst.add_argument("--backend", choices=LISTENER_BACKENDS, default="auto",
+    lst.add_argument("--from-plan", action="store_true",
+                     help="restore this lane from its last persisted validated plan; "
+                          "configuration overrides are refused")
+    lst.add_argument("--backend", choices=LISTENER_BACKENDS, default=None,
                      help="lifecycle backend: local detach, launchd LaunchAgent (macOS), "
                           "systemd user unit (Linux), or schtasks (Windows); auto probes the "
                           "host and falls back to local with a printed reason (probe facts "
@@ -13235,27 +16880,46 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
                      help="internal (written into generated service definitions): mark this "
                           "foreground loop as an OS-service payload that owns its own pid file "
                           "and log file (writer-side rotation); not for interactive use")
+    lst.add_argument("--workspace-root-snapshot", default="", help=argparse.SUPPRESS)
     lst.add_argument("--dry-run", action="store_true",
                      help="validate the profile and print the launch plan; writes no pid/state/log file")
-    lst.add_argument("--poll-interval", type=float, default=LISTENER_DEFAULT_POLL_S,
+    lst.add_argument("--poll-interval", type=float, default=None,
                      help="seconds between relay polls; fractional values allowed (default: 20)")
-    lst.add_argument("--max-ticks", type=int, default=0,
+    lst.add_argument("--max-ticks", type=int, default=None,
                      help="bound the loop to N iterations (test seam; 0 = unbounded)")
-    lst.add_argument("--max-retries", type=int, default=LISTENER_DEFAULT_MAX_RETRIES,
+    lst.add_argument("--max-retries", type=int, default=None,
                      help="consecutive failed turns before the listener persists a halted phase (default: 3)")
-    lst.add_argument("--max-backoff", type=int, default=LISTENER_MAX_BACKOFF_S,
+    lst.add_argument("--max-backoff", type=int, default=None,
                      help="cap in seconds on the 20/40/80/160/... failure backoff ladder (default: 300)")
     lst.add_argument("--foreground", action="store_true",
                      help="run the listener loop in this process instead of detaching")
+    lst.add_argument("--allow-ephemeral-runner", action="store_true",
+                     help="arm a lane whose runner lives inside a git worktree; "
+                          "refused by default because routine worktree cleanup "
+                          "kills such a lane silently, hours or days later")
+    lst.add_argument("--force", action="store_true",
+                     help="start a second listener for an agent that already has a "
+                          "live process on this relay; refused by default because a "
+                          "duplicate is invisible to status and survives stop --agent")
     lst.add_argument("--runner", default="",
                      help="path to the headless runner script the listener supervises "
                           "(default: examples/headless_runner.py beside this companion)")
     lst.set_defaults(fn=cmd_listener_start)
     lsp = listener_sub.add_parser(
         "stop", help="terminate one agent's listener process group and remove its pid file")
-    lsp.add_argument("--agent", required=True, help="agent name whose listener lane to stop")
+    # #370: still required for the ordinary single-lane stop -- the handler
+    # refuses when none of --agent/--all/--pid is given, so the existing contract
+    # is unchanged and the new modes do not have to pretend to name an agent.
+    lsp.add_argument("--agent", default="", help="agent name whose listener lane to stop")
     lsp.add_argument("--grace", type=float, default=10.0,
                      help="seconds to wait after TERM before the group KILL (default: 10)")
+    lsp.add_argument("--all", action="store_true",
+                     help="stop EVERY listener process polling this relay, including "
+                          "ones this instance did not start and duplicates the pid "
+                          "file cannot reach; never touches another relay's lanes")
+    lsp.add_argument("--pid", type=int,
+                     help="stop one listener process by pid, refusing it when that "
+                          "pid serves another relay")
     lsp.set_defaults(fn=cmd_listener_stop)
     lss = listener_sub.add_parser(
         "status", help="show alive/stale/dead/HALTED listener state for one agent")
@@ -13265,6 +16929,12 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
     lss.add_argument("--repair", action="store_true",
                      help="remove the pid file when it is stale (process dead); never touches a live listener")
     lss.set_defaults(fn=cmd_listener_status)
+    lsls = listener_sub.add_parser(
+        "list",
+        help="enumerate every listener process, classified by the relay it polls")
+    lsls.add_argument("--json", action="store_true",
+                      help="emit m8shift.listener.list.v1 instead of the human table")
+    lsls.set_defaults(fn=cmd_listener_list)
     lsl = listener_sub.add_parser("logs", help="print the tail of one agent's listener log")
     lsl.add_argument("--agent", required=True, help="agent name whose listener log to print")
     lsl.add_argument("--tail", type=int, default=50,

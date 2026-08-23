@@ -160,9 +160,10 @@ class TestRFC077ListenerSafeBoundary(unittest.TestCase):
         with mock.patch.object(runtime, "read_listener_state", return_value={}), \
                 mock.patch.object(runtime, "write_listener_state") as save, \
                 mock.patch.object(runtime, "remove_own_listener_pid"), \
-                mock.patch.object(runtime, "read_relay_lock_fields", return_value={
-                    "state": "AWAITING_CODEX", "holder": "codex", "session": "session-1",
-                }), \
+                mock.patch.object(runtime, "read_relay_lock_fields", return_value=(
+                    {"state": "AWAITING_CODEX", "holder": "codex", "session": "session-1"},
+                    "relay snapshot",
+                )), \
                 mock.patch.object(runtime, "read_usage_hold", return_value=(None, "")), \
                 mock.patch.object(runtime, "listener_completed_invocations", return_value=3), \
                 mock.patch.object(runtime, "listener_route_switches", return_value=0), \
@@ -285,9 +286,10 @@ class TestRFC077ListenerSafeBoundary(unittest.TestCase):
         with mock.patch.object(runtime, "read_listener_state", return_value={}), \
                 mock.patch.object(runtime, "write_listener_state"), \
                 mock.patch.object(runtime, "remove_own_listener_pid"), \
-                mock.patch.object(runtime, "read_relay_lock_fields", return_value={
-                    "state": "AWAITING_CODEX", "holder": "codex", "session": "session-1",
-                }), \
+                mock.patch.object(runtime, "read_relay_lock_fields", return_value=(
+                    {"state": "AWAITING_CODEX", "holder": "codex", "session": "session-1"},
+                    "relay snapshot",
+                )), \
                 mock.patch.object(runtime, "read_usage_hold", return_value=({
                     "resets_at": utc(300)
                 }, "")), \

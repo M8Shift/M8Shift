@@ -198,6 +198,7 @@ loop:
 ./m8shift.py status                                # lock + last turn (NON-blocking)
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # 本地实时监视（只读）
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # 只读的健康/安全/合约检查
+./m8shift.py verify-kit --source DIR [--json] # 对本地声明的工具包子集进行离线只读验证
 ./m8shift.py contract validate [--strict] [--json] # Stage 4 合约的只读校验
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # 只读简报：LOCK + 最近的轮次 + 记忆 + 任务
 ./m8shift.py peek <agent>  # 发给 <agent> 的最后一次交接（不是你的轮次则 rc 3）
@@ -221,6 +222,7 @@ loop:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py review-return <coordinator> --from <reviewer> --run RUN  # validated artifact-only review return
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
@@ -230,6 +232,7 @@ loop:
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # 将本班次绑定到唯一的项目中继（RFC 038 §9）；无需持笔；存在歧义且未给出封闭选择器时拒绝
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049：WORKING 持有者的保护性存活心跳（托管生产者；窗口 = max(120, min(2*N, TTL))；claim --refresh 仅记录审计心跳）
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
+./m8shift.py unclaim <agent> --reason "..."  # 撤销自己的 claim — 在同一轮恢复 AWAITING_<agent>；release 是交接
 ./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)
 ```

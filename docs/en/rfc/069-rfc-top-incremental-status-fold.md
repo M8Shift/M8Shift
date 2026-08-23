@@ -86,3 +86,25 @@ bounded prefix + anchors + delta and invoke TURN parsing only for carry + delta.
 Importing the engine is also tested for zero CLI output or other command-side
 effects. Python 3.8, non-TTY fallback, lockstep checks, checksums, and the full
 suite remain release gates.
+
+## Amendment — loaded TOP identity (#334)
+
+The long-lived consumer must distinguish the engine version in its status
+snapshot from the TOP bytes already loaded in its own process. A real POSIX TTY
+therefore performs exactly one self re-exec before alternate-screen/raw mode,
+stamping a validated loaded-version and canonical relay-root digest in hidden
+argv markers. Explicit `--root` or `M8SHIFT_ROOT` keeps launch-through-symlink or
+launch-outside-root use supported; an implicit ambiguous root is non-green.
+
+One daemon worker, never the render thread, reads at most 64 KiB from a canonical
+regular non-symlink `m8shift-top.py` whose total size is bounded to 1 MiB. It
+proves descriptor and pathname stability around the read and publishes
+`checking`, `fresh`, or `stale` evidence. Equal versions add no warning; any
+newer or older on-disk version renders `RESTART REQUIRED`; every absent,
+unreadable, symlink, non-regular, oversized, invalid, replaced, or ambiguous
+state is explicitly non-green. The header renders `CORE` and actually loaded
+`TOP` separately, and warning geometry is reserved before activity truncation.
+
+This amendment is read-only. It never signals, restarts, detaches, reparents, or
+otherwise mutates an active TUI. **Protocol impact: no**: the relay file, state
+machine, turns, commands, authority and operator obligations are unchanged.

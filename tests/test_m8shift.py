@@ -60,6 +60,90 @@ class TestPureFunctions(unittest.TestCase):
         spec.loader.exec_module(runtime)
         self.assertEqual(runtime.LISTENER_PHASES, cowork.LISTENER_PHASES)
 
+    def test_runner_status_vocabularies_stay_classifiable_by_listener(self):
+        """#385 — every status emitted by the runner must survive the listener
+        boundary, while listener-only classifications remain an explicit set.
+
+        A duplicated closed vocabulary had already drifted in both directions:
+        emitted statuses became generic ``run_failure`` and a retired label kept
+        being accepted.  Compare the complete families so the next addition
+        cannot silently repeat either failure mode.
+        """
+        modules = {}
+        for name, relative_path in (
+                ("runner", os.path.join("examples", "headless_runner.py")),
+                ("runtime", "m8shift-runtime.py")):
+            spec = importlib.util.spec_from_file_location(
+                "m8shift_%s_status_vocabulary_test" % name,
+                os.path.join(REPO, relative_path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            modules[name] = module
+        runner = modules["runner"]
+        runtime = modules["runtime"]
+        runner_statuses = set(
+            runner.SUCCESS_STATUSES
+            + runner.FAILURE_STATUSES
+            + runner.NEUTRAL_STATUSES
+            + runner.TERMINAL_FAILURE_STATUSES
+            + runner.PROVIDER_RATE_LIMIT_STATUSES
+        )
+        listener_only = {
+            "", "success", "failed_partial", "failed_missing_ledger", "timeout",
+            "run_failure", "infrastructure_failure", "runner_crash",
+            "runner_refused_argv",
+        }
+        self.assertEqual(runtime.LISTENER_CLASSIFICATIONS,
+                         runner_statuses | listener_only)
+        self.assertNotIn("review_artifact_invalid",
+                         runtime.LISTENER_CLASSIFICATIONS)
+
+    def test_reviewer_artifact_key_sets_stay_in_lockstep(self):
+        """#368 — the reviewer-artifact output contract is enforced by two closed
+        key sets, in the core and in the runtime, with no shared definition.
+
+        A mismatch does not present as a schema error. The runtime validator
+        returns None, the delivery is treated as failed, and the lane retries: the
+        observable symptom is a provider launched three times instead of once.
+        Extending only one side cost a full suite run to diagnose, so drift must
+        fail here instead."""
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_artifact_keys_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        self.assertEqual(runtime.REVIEW_ARTIFACT_OUTPUT_KEYS,
+                         cowork.REVIEW_ARTIFACT_OUTPUT_KEYS)
+        # Pin the content too: equal-but-wrong would satisfy the comparison alone.
+        self.assertEqual(
+            cowork.REVIEW_ARTIFACT_OUTPUT_KEYS,
+            frozenset({"sha256", "bytes", "lines", "text",
+                       "truncated", "original_bytes", "original_lines"}))
+        # Equality alone misses the regression #368 removed: either validator
+        # could inline a second, identical literal and leave every value-level
+        # assertion green.  Pin the dependency itself on both enforcement sites.
+        validators = {
+            "core": cowork._review_return_artifact,
+            "runtime": runtime.review_artifact_summary,
+        }
+        for name, validator in validators.items():
+            with self.subTest(validator=name):
+                self.assertIn("REVIEW_ARTIFACT_OUTPUT_KEYS",
+                              inspect.getsource(validator))
+
+    def test_both_reviewer_artifact_validators_refuse_an_unknown_key(self):
+        """The set is closed on both sides, not merely equal on both sides."""
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_artifact_closed_test", path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        for keys in (cowork.REVIEW_ARTIFACT_OUTPUT_KEYS,
+                     runtime.REVIEW_ARTIFACT_OUTPUT_KEYS):
+            with self.subTest(keys=sorted(keys)):
+                self.assertNotEqual(set(keys) | {"surprise"}, set(keys))
+                self.assertIsInstance(keys, frozenset)
+
     def test_provider_rate_limit_reset_horizon_is_bounded(self):
         path = os.path.join(REPO, "m8shift-runtime.py")
         spec = importlib.util.spec_from_file_location(
@@ -645,6 +729,29 @@ class TestPureFunctions(unittest.TestCase):
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), expected,
                                  f"{rel} diverged — regenerate it with scripts/gen_docs.py.")
+
+    def test_documentation_dod_requires_protocol_impact_sync(self):
+        """#344: documentation delivery explicitly dispositions protocol impact and
+        proves generated protocol synchronization when applicable."""
+        required = (
+            "protocol impact: yes/no",
+            'm8shift.PROTOCOL["en"]',
+            'm8shift.PROTOCOL_REFERENCE["en"]',
+            "scripts/gen_docs.py",
+            "test_protocol_docs_in_sync",
+            "no manual or unintended",
+        )
+        for rel in ("CONTRIBUTING.md", "docs/en/agents-guide.md"):
+            with self.subTest(rel=rel):
+                with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+                    text = f.read()
+                for needle in required:
+                    self.assertIn(needle, text,
+                                  f"{rel} dropped the documentation DoD gate: {needle!r}")
+        with open(os.path.join(REPO, "CONTRIBUTING.md"), encoding="utf-8") as f:
+            self.assertIn("remaining affected", f.read())
+        with open(os.path.join(REPO, "docs/en/agents-guide.md"), encoding="utf-8") as f:
+            self.assertIn("as applicable", f.read())
 
     def test_protocol_core_within_budget(self):
         """The bundled operational core stays small enough to read each session."""
@@ -4789,6 +4896,63 @@ class TestHistory(CLIBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("sessions.jsonl_invalid", r.stdout)
 
+    def test_doctor_accepts_valid_review_return_and_rejects_malformed_variants(self):
+        self.init()
+        sessions = os.path.join(self.d, "M8SHIFT.sessions.jsonl")
+        with open(sessions, encoding="utf-8") as fh:
+            baseline = fh.read()
+        session_id = self.lock()["session"]
+        valid = {
+            "event": "review_return",
+            "session_id": session_id,
+            "at": "2026-08-14T19:00:26Z",
+            "m8shift_version": "4.1.0",
+            "by": "codex",
+            "reviewer": "agy",
+            "run_id": "20260814T190001Z-agy-97c06e6c",
+            "outcome": "approve",
+            "evidence_kind": "decision",
+            "evidence_sha256": "a" * 64,
+            "turn": "1",
+        }
+
+        def findings_for(row):
+            with open(sessions, "w", encoding="utf-8") as fh:
+                fh.write(baseline + json.dumps(row, sort_keys=True) + "\n")
+            report = json.loads(self.cw("doctor", "--json").stdout)
+            return {finding["check"] for finding in report["findings"]}
+
+        self.assertNotIn("sessions.event_invalid", findings_for(valid))
+        valid_refusal = {
+            **valid,
+            "outcome": "permission_refused",
+            "evidence_kind": "permission_refused",
+        }
+        self.assertNotIn("sessions.event_invalid", findings_for(valid_refusal))
+        malformed = {
+            "unknown event": {**valid, "event": "future_review"},
+            "extra field": {**valid, "provider_text": "must not persist"},
+            "missing digest": {
+                key: value for key, value in valid.items() if key != "evidence_sha256"
+            },
+            "session": {**valid, "session_id": "other"},
+            "timestamp": {**valid, "at": "not-a-time"},
+            "version": {**valid, "m8shift_version": "next"},
+            "coordinator": {**valid, "by": "Codex"},
+            "reviewer": {**valid, "reviewer": "codex"},
+            "run": {**valid, "run_id": "bad/run"},
+            "turn type": {**valid, "turn": 1},
+            "turn zero": {**valid, "turn": "0"},
+            "digest": {**valid, "evidence_sha256": "A" * 64},
+            "decision outcome": {**valid, "outcome": "permission_refused"},
+            "refusal outcome": {
+                **valid, "evidence_kind": "permission_refused", "outcome": "approve",
+            },
+        }
+        for label, row in malformed.items():
+            with self.subTest(label=label):
+                self.assertIn("sessions.event_invalid", findings_for(row))
+
 
 class TestSessionReports(CLIBase):
     """Session reports are derived read-only memory, with explicit safe writes."""
@@ -5931,6 +6095,24 @@ class TestRFC047PhaseA(CLIBase):
     heartbeat guard."""
 
     RUNNER = os.path.join(REPO, "examples", "headless_runner.py")
+    TIMED_OUT_TERMINAL_WITNESSES = {
+        "approval_required": "test_approval_required_survives_timeout_without_retry",
+        "headless_permission_refused":
+            "test_headless_permission_refused_survives_timeout_without_retry",
+        "environment_blocked":
+            "test_environment_blocked_survives_timeout_without_retry",
+    }
+    TIMED_OUT_RATE_LIMIT_WITNESSES = {
+        "provider_rate_limited":
+            "test_provider_rate_limit_survives_timeout_without_retry",
+        "provider_rate_limited_reset_unknown":
+            "test_unknown_provider_rate_limit_survives_timeout_without_retry",
+    }
+    TIMED_OUT_NEUTRAL_WITNESSES = {
+        "external_transition":
+            "test_external_transition_survives_timeout_without_retry",
+        "suspended": "test_suspended_survives_timeout_without_retry",
+    }
 
     def _load_runner(self):
         import importlib.util
@@ -5967,6 +6149,18 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(lk["state"], "AWAITING_CLAUDE")
         self.assertEqual(lk["turn"], "1")
 
+    def awaiting_review_with_stale_handoff(self):
+        """Leave turn 3 with claude while turn 2 is an obsolete claude->codex ask."""
+        self.init()
+        self.assertEqual(self.turn(
+            "codex", "claude", ask="first exchange", done="turn one").returncode, 0)
+        self.assertEqual(self.turn(
+            "claude", "codex", ask="obsolete handoff", done="turn two").returncode, 0)
+        self.assertEqual(self.turn(
+            "codex", "claude", ask="review current change", done="turn three").returncode, 0)
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+        self.assertEqual(self.lock()["turn"], "3")
+
     def test_t1_non_completion_when_provider_exits_clean_without_touching_relay(self):
         # RFC 047 test 1: rc 0 + untouched relay while AWAITING_<me> is NOT success.
         self.awaiting_me()
@@ -5989,6 +6183,702 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(self.lock(), before)
         self.assertNotIn("claim --force", r.stdout + r.stderr)
 
+    def test_legacy_read_only_expectation_never_turns_clean_exit_into_success(self):
+        self.awaiting_me()
+        r = self.runner_once("pass", "--expected-transition", "none")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "unverified_read_only")
+        self.assertFalse(ended["success"])
+
+    def test_reviewer_artifact_delivery_is_verified_but_does_not_advance_relay(self):
+        self.awaiting_me()
+        before = self.md()
+        r = self.runner_once(
+            "print('APPROVE exact review')", "--review-delivery", "artifact",
+            "--run-id", "review-delivery-valid")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.md(), before, "review artifact mode must not mutate the relay")
+        ended = self.ended()
+        self.assertEqual(ended["status"], "review_delivered_pending")
+        self.assertTrue(ended["success"])
+        artifact_meta = ended["review_artifact"]
+        self.assertEqual(artifact_meta["path"], "reviews/review-delivery-valid.json")
+        self.assertRegex(artifact_meta["sha256"], r"^[0-9a-f]{64}$")
+        path = os.path.join(self.d, ".m8shift", "runtime", "reviews",
+                            "review-delivery-valid.json")
+        with open(path, encoding="utf-8") as fh:
+            artifact = json.load(fh)
+        self.assertEqual(artifact["agent"], "claude")
+        self.assertEqual(artifact["input"]["turn"], "1")
+        self.assertEqual(artifact["output"]["text"], "APPROVE exact review\n")
+        self.assertRegex(artifact["output"]["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_reviewer_artifact_freshness_survives_claim_but_not_a_new_turn(self):
+        self.awaiting_me()
+        run_id = "review-freshness"
+        r = self.runner_once(
+            "print('APPROVE review body')", "--review-delivery", "artifact",
+            "--run-id", run_id)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        status = subprocess.run(
+            [sys.executable, os.path.join(REPO, "m8shift-runtime.py"),
+             "review-delivery", "status", run_id, "--json"],
+            cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertTrue(json.loads(status.stdout)["fresh"])
+        returned = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertEqual(returned.returncode, 0, returned.stdout + returned.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        self.assertNotIn("APPROVE review body", self.md())
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        # The validated handback and coordinator claim edit only the LOCK, not
+        # the closed incoming turn; consumption therefore remains possible.
+        consumed = subprocess.run(
+            [sys.executable, os.path.join(REPO, "m8shift-runtime.py"),
+             "review-delivery", "consume", run_id, "--by", "codex"],
+            cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(consumed.returncode, 0, consumed.stdout + consumed.stderr)
+        self.assertEqual(consumed.stdout, "APPROVE review body\n")
+        self.assertEqual(self.cw("append", "codex", "--to", "claude",
+                                 "--ask", "next", "--done", "consumed").returncode, 0)
+        stale = subprocess.run(
+            [sys.executable, os.path.join(REPO, "m8shift-runtime.py"),
+             "review-delivery", "status", run_id, "--json"],
+            cwd=self.d, capture_output=True, text=True)
+        self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
+        self.assertEqual(json.loads(stale.stdout)["status"], "stale")
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"), encoding="utf-8") as fh:
+            session_rows = [json.loads(line) for line in fh if line.strip()]
+        review_return = [row for row in session_rows
+                         if row.get("event") == "review_return"][-1]
+        self.assertEqual(review_return["by"], "codex")
+        self.assertEqual(review_return["reviewer"], "claude")
+        self.assertEqual(review_return["run_id"], run_id)
+        self.assertEqual(review_return["outcome"], "approve")
+        self.assertEqual(review_return["evidence_kind"], "decision")
+        self.assertNotIn('"event": "force"', json.dumps(session_rows))
+        doctor = json.loads(self.cw("doctor", "--json").stdout)
+        self.assertNotIn(
+            "sessions.event_invalid",
+            {finding["check"] for finding in doctor["findings"]},
+        )
+
+    def test_review_return_peek_preserves_current_decision_route_across_claim(self):
+        self.awaiting_review_with_stale_handoff()
+        run_id = "review-return-current-decision"
+        delivered = self.runner_once(
+            "print('APPROVE current review')", "--review-delivery", "artifact",
+            "--run-id", run_id)
+        self.assertEqual(delivered.returncode, 0, delivered.stdout + delivered.stderr)
+        returned = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertEqual(returned.returncode, 0, returned.stdout + returned.stderr)
+
+        awaiting = self.cw("peek", "codex")
+        self.assertEqual(awaiting.returncode, 0, awaiting.stdout + awaiting.stderr)
+        self.assertIn("review_return=validated\n", awaiting.stdout)
+        self.assertIn("reviewer=claude\n", awaiting.stdout)
+        self.assertIn("run_id=%s\n" % run_id, awaiting.stdout)
+        self.assertIn("input_turn=3\n", awaiting.stdout)
+        self.assertIn("outcome=approve\n", awaiting.stdout)
+        self.assertIn("evidence_kind=decision\n", awaiting.stdout)
+        self.assertIn("review-delivery consume %s --by codex" % run_id,
+                      awaiting.stdout)
+        self.assertNotIn("obsolete handoff", awaiting.stdout)
+
+        return_note = self.lock()["note"]
+        claimed = self.cw("claim", "codex")
+        self.assertEqual(claimed.returncode, 0, claimed.stdout + claimed.stderr)
+        self.assertEqual(self.lock()["note"], return_note)
+        working = self.cw("peek", "codex")
+        self.assertEqual(working.returncode, 3, working.stdout + working.stderr)
+        self.assertEqual(working.stdout, awaiting.stdout)
+        self.assertNotIn("obsolete handoff", working.stdout)
+        tagged = self.cw("work-tag", "codex", "#354")
+        self.assertEqual(tagged.returncode, 0, tagged.stdout + tagged.stderr)
+        after_tag = self.cw("peek", "codex")
+        self.assertEqual(after_tag.returncode, 3,
+                         after_tag.stdout + after_tag.stderr)
+        self.assertEqual(after_tag.stdout, awaiting.stdout)
+
+        # Compatibility with a pickup performed by the pre-#354 core: that
+        # version overwrote the marker with the generic holder note.  The exact
+        # review_return -> claim session tail still proves the current route.
+        relay_path = os.path.join(self.d, "M8SHIFT.md")
+        with open(relay_path, encoding="utf-8") as fh:
+            relay = fh.read()
+        relay = re.sub(r"(?m)^note:\s+.*$", "note:     codex holds the pen",
+                       relay, count=1)
+        with open(relay_path, "w", encoding="utf-8") as fh:
+            fh.write(relay)
+        legacy_pickup = self.cw("peek", "codex")
+        self.assertEqual(legacy_pickup.returncode, 3,
+                         legacy_pickup.stdout + legacy_pickup.stderr)
+        self.assertEqual(legacy_pickup.stdout, awaiting.stdout)
+        self.assertNotIn("obsolete handoff", legacy_pickup.stdout)
+
+    def test_review_return_next_prints_permission_refusal_route_without_consume(self):
+        self.awaiting_review_with_stale_handoff()
+        run_id = "review-return-current-refusal"
+        message = (
+            'jetski: no output produced — a tool required the "read_file" '
+            'permission that headless mode cannot prompt for, so it was auto-denied. '
+            'Add an allow-rule under permissions.allow in settings.json (e.g. '
+            'read_file(<target>)). Alternatively, re-run with '
+            '--dangerously-skip-permissions to auto-approve all tools.')
+        refused = self.runner_once(
+            "print(%r)" % message, "--review-delivery", "artifact",
+            "--provider", "google-antigravity", "--run-id", run_id)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        returned = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertEqual(returned.returncode, 0, returned.stdout + returned.stderr)
+
+        resumed = self.cw("next", "codex", "--once")
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertIn("review_return=validated\n", resumed.stdout)
+        self.assertIn("run_id=%s\n" % run_id, resumed.stdout)
+        self.assertIn("outcome=permission_refused\n", resumed.stdout)
+        self.assertIn("evidence_kind=permission_refused\n", resumed.stdout)
+        self.assertIn("repair or relaunch the reviewer lane; do not consume",
+                      resumed.stdout)
+        self.assertNotIn("review-delivery consume", resumed.stdout)
+        self.assertNotIn("obsolete handoff", resumed.stdout)
+        self.assertEqual(self.lock()["state"], "WORKING_CODEX")
+
+    def test_review_return_peek_fails_closed_on_missing_malformed_or_foreign_event(self):
+        self.awaiting_review_with_stale_handoff()
+        run_id = "review-return-invalid-route"
+        delivered = self.runner_once(
+            "print('REVISE current review')", "--review-delivery", "artifact",
+            "--run-id", run_id)
+        self.assertEqual(delivered.returncode, 0, delivered.stdout + delivered.stderr)
+        returned = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertEqual(returned.returncode, 0, returned.stdout + returned.stderr)
+        ledger = os.path.join(self.d, "M8SHIFT.sessions.jsonl")
+        with open(ledger, encoding="utf-8") as fh:
+            original_rows = [json.loads(line) for line in fh if line.strip()]
+        review_index = max(
+            index for index, row in enumerate(original_rows)
+            if row.get("event") == "review_return")
+
+        variants = {}
+        variants["missing"] = original_rows[:review_index] + original_rows[review_index + 1:]
+        malformed = [dict(row) for row in original_rows]
+        malformed[review_index]["evidence_kind"] = "unknown"
+        variants["malformed"] = malformed
+        foreign = [dict(row) for row in original_rows]
+        foreign[review_index]["session_id"] = "20260101T000000Z-deadbeef"
+        variants["cross-session"] = foreign
+        wrong_turn = [dict(row) for row in original_rows]
+        wrong_turn[review_index]["turn"] = "2"
+        variants["wrong-turn"] = wrong_turn
+
+        for label, rows in variants.items():
+            with self.subTest(label=label):
+                with open(ledger, "w", encoding="utf-8") as fh:
+                    for row in rows:
+                        fh.write(json.dumps(row, sort_keys=True) + "\n")
+                peek = self.cw("peek", "codex")
+                self.assertNotEqual(peek.returncode, 0, peek.stdout + peek.stderr)
+                self.assertIn("review-return provenance is missing, stale, or invalid",
+                              peek.stderr)
+                self.assertNotIn("obsolete handoff", peek.stdout + peek.stderr)
+                self.assertNotIn("APPROVE", peek.stdout + peek.stderr)
+        with open(ledger, "w", encoding="utf-8") as fh:
+            for row in original_rows:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+
+    def test_review_return_next_claims_but_fails_closed_when_event_is_missing(self):
+        self.awaiting_review_with_stale_handoff()
+        run_id = "review-return-next-missing"
+        delivered = self.runner_once(
+            "print('APPROVE current review')", "--review-delivery", "artifact",
+            "--run-id", run_id)
+        self.assertEqual(delivered.returncode, 0, delivered.stdout + delivered.stderr)
+        returned = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertEqual(returned.returncode, 0, returned.stdout + returned.stderr)
+        ledger = os.path.join(self.d, "M8SHIFT.sessions.jsonl")
+        with open(ledger, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        rows = [row for row in rows if row.get("event") != "review_return"]
+        with open(ledger, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+
+        resumed = self.cw("next", "codex", "--once")
+        self.assertNotEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertIn("review-return provenance is missing, stale, or invalid",
+                      resumed.stderr)
+        self.assertNotIn("obsolete handoff", resumed.stdout + resumed.stderr)
+        self.assertEqual(self.lock()["state"], "WORKING_CODEX")
+        self.assertTrue(self.lock()["note"].startswith("review "))
+
+    def test_ordinary_peek_output_remains_exactly_the_latest_handoff(self):
+        self.init()
+        body = "ordinary body\nwith two lines"
+        handed = self.turn(
+            "codex", "claude", ask="ordinary ask", done="ordinary done",
+            files="a.py,b.py", body=body)
+        self.assertEqual(handed.returncode, 0, handed.stdout + handed.stderr)
+        turn = cowork.parse_turns(self.md())[-1]
+        expected = "".join(
+            "%s=%s\n" % (key, value) for key, value in turn["fields"].items())
+        expected += "\n%s\n" % turn["body"]
+        peek = self.cw("peek", "claude")
+        self.assertEqual(peek.returncode, 0, peek.stdout + peek.stderr)
+        self.assertEqual(peek.stdout, expected)
+
+    def test_review_return_rejects_wrong_coordinator_and_invalid_artifacts(self):
+        self.init("--agents", "codex,claude,agy")
+        self.assertEqual(self.cw("claim", "codex").returncode, 0)
+        handed = self.cw("append", "codex", "--to", "claude",
+                         "--ask", "review", "--done", "setup")
+        self.assertEqual(handed.returncode, 0, handed.stdout + handed.stderr)
+
+        run_id = "review-return-fail-closed"
+        delivered = self.runner_once(
+            "print('APPROVE exact review')", "--review-delivery", "artifact",
+            "--run-id", run_id)
+        self.assertEqual(delivered.returncode, 0, delivered.stdout + delivered.stderr)
+        before = self.lock()
+
+        wrong = self.cw(
+            "review-return", "agy", "--from", "claude", "--run", run_id)
+        self.assertNotEqual(wrong.returncode, 0, wrong.stdout + wrong.stderr)
+        self.assertIn("original coordinator", wrong.stderr)
+        self.assertEqual(self.lock(), before)
+
+        traversing_run = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", "../receipt")
+        self.assertNotEqual(
+            traversing_run.returncode, 0,
+            traversing_run.stdout + traversing_run.stderr)
+        self.assertIn("run id is invalid", traversing_run.stderr)
+        self.assertEqual(self.lock(), before)
+
+        artifact_path = os.path.join(
+            self.d, ".m8shift", "runtime", "reviews", run_id + ".json")
+        with open(artifact_path, encoding="utf-8") as fh:
+            artifact = json.load(fh)
+        artifact["output"]["text"] = "review without a decision\n"
+        artifact["output"]["bytes"] = len(
+            artifact["output"]["text"].encode("utf-8"))
+        artifact["output"]["lines"] = 1
+        artifact["output"]["sha256"] = hashlib.sha256(
+            artifact["output"]["text"].encode("utf-8")).hexdigest()
+        # #360: the artifact carries a truncation record and the schema refuses an
+        # inconsistent one, so a hand-built artifact must stay internally coherent
+        # or it is rejected on shape before this test reaches what it is probing.
+        artifact["output"]["truncated"] = False
+        artifact["output"]["original_bytes"] = artifact["output"]["bytes"]
+        artifact["output"]["original_lines"] = artifact["output"]["lines"]
+        with open(artifact_path, "w", encoding="utf-8") as fh:
+            json.dump(artifact, fh, sort_keys=True)
+        no_decision = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertNotEqual(
+            no_decision.returncode, 0, no_decision.stdout + no_decision.stderr)
+        self.assertIn("no valid bounded review decision", no_decision.stderr)
+        self.assertEqual(self.lock(), before)
+
+        artifact["output"]["text"] = "APPROVE mutated review\n"
+        artifact["output"]["bytes"] = len(
+            artifact["output"]["text"].encode("utf-8"))
+        artifact["output"]["lines"] = 1
+        artifact["output"]["sha256"] = "0" * 64
+        artifact["output"]["original_bytes"] = artifact["output"]["bytes"]
+        artifact["output"]["original_lines"] = artifact["output"]["lines"]
+        with open(artifact_path, "w", encoding="utf-8") as fh:
+            json.dump(artifact, fh, sort_keys=True)
+        mutated = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertNotEqual(mutated.returncode, 0, mutated.stdout + mutated.stderr)
+        self.assertIn("no valid bounded review decision", mutated.stderr)
+        self.assertEqual(self.lock(), before)
+
+    def test_review_return_rejects_stale_input_turn_without_lock_change(self):
+        self.awaiting_me()
+        run_id = "review-return-stale-input"
+        delivered = self.runner_once(
+            "print('REVISE exact review')", "--review-delivery", "artifact",
+            "--run-id", run_id)
+        self.assertEqual(delivered.returncode, 0, delivered.stdout + delivered.stderr)
+
+        relay_path = os.path.join(self.d, "M8SHIFT.md")
+        with open(relay_path, encoding="utf-8") as fh:
+            relay = fh.read()
+        self.assertIn("take a turn", relay)
+        with open(relay_path, "w", encoding="utf-8") as fh:
+            fh.write(relay.replace("take a turn", "changed input", 1))
+        before = self.lock()
+
+        stale = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertNotEqual(stale.returncode, 0, stale.stdout + stale.stderr)
+        self.assertIn("stale or bound to another input turn", stale.stderr)
+        self.assertEqual(self.lock(), before)
+
+    def test_review_return_rejects_mutated_permission_receipt(self):
+        self.awaiting_me()
+        run_id = "review-return-mutated-receipt"
+        message = (
+            'jetski: no output produced - a tool required the "run_command" '
+            'permission that headless mode cannot prompt for, so it was auto-denied. '
+            'Add an allow-rule under permissions.allow in settings.json (e.g. '
+            'run_command(<target>)). Alternatively, re-run with '
+            '--dangerously-skip-permissions to auto-approve all tools.')
+        refused = self.runner_once(
+            "print(%r)" % message,
+            "--review-delivery", "artifact", "--provider", "google-antigravity",
+            "--run-id", run_id)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        receipt_path = os.path.join(
+            self.d, ".m8shift", "runtime", "review-returns", run_id + ".json")
+        with open(receipt_path, encoding="utf-8") as fh:
+            receipt = json.load(fh)
+        receipt["outcome"]["evidence_ids"] = ["invented_permission_result"]
+        with open(receipt_path, "w", encoding="utf-8") as fh:
+            json.dump(receipt, fh, sort_keys=True)
+        before = self.lock()
+
+        returned = self.cw(
+            "review-return", "codex", "--from", "claude", "--run", run_id)
+        self.assertNotEqual(returned.returncode, 0, returned.stdout + returned.stderr)
+        self.assertIn("receipt outcome is invalid", returned.stderr)
+        self.assertEqual(self.lock(), before)
+
+    def test_turn_authoring_names_the_denied_permission_instead_of_non_completion(self):
+        """#359 — a provider that auto-denies a tool and exits zero must be reported
+        by the permission it was denied, not as a generic non-completion.
+
+        The lane spent fourteen hours halted on `max_retries_after_non_completion`
+        for exactly this condition: the reason described the relay boundary and
+        said nothing about the cause one layer down."""
+        agy_message = (
+            'jetski: no output produced — a tool required the "read_file" permission '
+            'that headless mode cannot prompt for, so it was auto-denied. Add an '
+            'allow-rule under permissions.allow in settings.json (e.g. '
+            'read_file(<target>)). Alternatively, re-run with '
+            '--dangerously-skip-permissions to auto-approve all tools.')
+        self.awaiting_me()
+        run = self.runner_once(
+            "print(%r)" % agy_message,
+            "--provider", "google-antigravity", "--run-id", "authoring-agy-permission")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "headless_permission_refused")
+        # The bounded permission name reaches the operator; the provider's raw
+        # line does not.
+        self.assertIn("read_file", ended["reason"])
+        self.assertNotIn("--dangerously-skip-permissions", ended["reason"])
+
+    def test_a_provider_that_truly_produces_nothing_is_still_non_completion(self):
+        """Positive control for the test above. Without it the new status would be
+        proven to exist, not proven to discriminate: a mutant that returned
+        `headless_permission_refused` unconditionally would pass that test alone."""
+        self.awaiting_me()
+        run = self.runner_once(
+            "pass", "--provider", "google-antigravity", "--run-id", "authoring-silent")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertEqual(self.ended()["status"], "non_completion")
+
+    def test_a_terminal_status_consumes_no_retry_and_stops_the_lane(self):
+        """#359 — TERMINAL_FAILURE_STATUSES had exactly one use, inside the branch
+        that increments the failure counter, with no break and no early return. The
+        name asserted a termination the code never performed, so a denied permission
+        was retried like a transient fault — three paid inferences for an outcome
+        already decided."""
+        agy_message = (
+            'jetski: no output produced — a tool required the "command" permission '
+            'that headless mode cannot prompt for, so it was auto-denied. Add an '
+            'allow-rule under permissions.allow in settings.json (e.g. '
+            'command(<target>)). Alternatively, re-run with '
+            '--dangerously-skip-permissions to auto-approve all tools.')
+        self.awaiting_me()
+        run = self.runner_once(
+            "print(%r)" % agy_message,
+            "--provider", "google-antigravity", "--run-id", "authoring-terminal")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("retry counter unchanged", run.stdout + run.stderr)
+        self.assertNotIn("1/3", run.stdout + run.stderr)
+
+    def test_review_truncation_keeps_a_complete_character_that_exactly_fits(self):
+        runtime = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "m8shift_runner_utf8_boundary_test",
+            os.path.join(REPO, "examples", "headless_runner.py")))
+        importlib.util.spec_from_file_location(
+            "m8shift_runner_utf8_boundary_test",
+            os.path.join(REPO, "examples", "headless_runner.py")).loader.exec_module(runtime)
+
+        self.assertEqual(
+            runtime.truncate_utf8_on_character_boundary("\u00e9x", 2),
+            ("\u00e9", b"\xc3\xa9"))
+
+    def test_review_truncation_refuses_an_empty_prefix_with_its_own_reason(self):
+        runtime = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "m8shift_runner_empty_truncation_test",
+            os.path.join(REPO, "examples", "headless_runner.py")))
+        importlib.util.spec_from_file_location(
+            "m8shift_runner_empty_truncation_test",
+            os.path.join(REPO, "examples", "headless_runner.py")).loader.exec_module(runtime)
+        plan = {"run_id": "empty-truncation", "agent": "agy", "provider": "p",
+                "agent_model": "m", "review_delivery": {"type": "artifact",
+                "max_output_bytes": 1},
+                "expected_transition": {"input": {"turn": "1"}}}
+        summary = {"_final_text": "\u00e9", "bytes": 2, "lines": 1}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt, error = runtime.write_review_artifact(tmp, plan, summary)
+
+        self.assertIsNone(receipt)
+        self.assertEqual(error, "review_artifact_truncation_empty")
+
+    def test_review_truncation_empty_is_a_failure_through_the_runner_loop(self):
+        """The artifact helper's reason must survive the complete runner loop.
+
+        A one-byte cap cannot hold the first two-byte UTF-8 character.  Loading the
+        real runner with that otherwise-valid cap exercises plan creation, artifact
+        delivery, verification findings, event emission, and final classification.
+        """
+        self.awaiting_me()
+        wrapper = """
+import importlib.util
+import sys
+
+runner_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("bounded_runner", runner_path)
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+runner.REVIEW_ARTIFACT_MAX_BYTES = 1
+sys.argv = [
+    runner_path, "claude", "--m8shift", "M8SHIFT.md", "--m8shift-py", "m8shift.py",
+    "--once", "--interval", "1", "--max-retries", "3",
+    "--review-delivery", "artifact", "--run-id", "review-truncation-empty",
+    "--cmd", sys.executable, "-c", "print(chr(233))",
+]
+raise SystemExit(runner.main())
+"""
+        run = subprocess.run(
+            [sys.executable, "-c", wrapper, self.RUNNER], cwd=self.d,
+            capture_output=True, text=True, timeout=30)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "review_artifact_truncation_empty")
+        self.assertEqual(
+            ended["runtime_findings"][0]["check"],
+            "headless.review_artifact_truncation_empty")
+        events = [row["event"] for row in self.rows()]
+        self.assertIn("run.verification_failed", events)
+
+    def test_an_oversized_review_is_truncated_and_delivered_not_destroyed(self):
+        """#360 — a bounded prefix of a review is a usable review with a stated
+        truncation; zero bytes is not.
+
+        Measured before the fix: a 93391-byte reviewer answer against a 65536-byte
+        cap left no file on disk, and all that survived were the measurements of a
+        destroyed document."""
+        runtime = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "m8shift_runner_truncation_test",
+            os.path.join(REPO, "examples", "headless_runner.py")))
+        importlib.util.spec_from_file_location(
+            "m8shift_runner_truncation_test",
+            os.path.join(REPO, "examples", "headless_runner.py")).loader.exec_module(runtime)
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = 41
+            plan = {"run_id": "trunc", "agent": "agy", "provider": "p", "agent_model": "m",
+                    "review_delivery": {"type": "artifact", "max_output_bytes": cap},
+                    "expected_transition": {"input": {"turn": "1"}}}
+            text = "\u00e9" * 40                      # 80 UTF-8 bytes
+            summary = {"_final_text": text, "bytes": len(text.encode()), "lines": 1}
+            receipt, error = runtime.write_review_artifact(tmp, plan, summary)
+            self.assertEqual(error, "", "an oversized review must be delivered, not refused")
+            self.assertIsNotNone(receipt)
+            with open(runtime.review_artifact_path(tmp, "trunc"), encoding="utf-8") as fh:
+                output = json.load(fh)["output"]
+            self.assertTrue(output["truncated"])
+            self.assertEqual(output["original_bytes"], 80)
+            self.assertLessEqual(output["bytes"], cap)
+            # The cut steps back to a character boundary, so the digest covers the
+            # stored text and no replacement character is invented.
+            self.assertEqual(
+                hashlib.sha256(output["text"].encode("utf-8")).hexdigest(), output["sha256"])
+            self.assertNotIn("\ufffd", output["text"])
+            self.assertTrue(receipt["truncated"])
+
+    def test_a_review_under_the_cap_carries_no_truncation_marks(self):
+        """Positive control. Without it, "nothing was truncated" would prove that
+        the field is never populated rather than that nothing needed truncating."""
+        runtime = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "m8shift_runner_truncation_control",
+            os.path.join(REPO, "examples", "headless_runner.py")))
+        importlib.util.spec_from_file_location(
+            "m8shift_runner_truncation_control",
+            os.path.join(REPO, "examples", "headless_runner.py")).loader.exec_module(runtime)
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = {"run_id": "small", "agent": "agy", "provider": "p", "agent_model": "m",
+                    "review_delivery": {"type": "artifact", "max_output_bytes": 65536},
+                    "expected_transition": {"input": {"turn": "1"}}}
+            text = "a short but complete review"
+            summary = {"_final_text": text, "bytes": len(text.encode()), "lines": 1}
+            receipt, error = runtime.write_review_artifact(tmp, plan, summary)
+            self.assertEqual(error, "")
+            with open(runtime.review_artifact_path(tmp, "small"), encoding="utf-8") as fh:
+                output = json.load(fh)["output"]
+            self.assertFalse(output["truncated"])
+            self.assertEqual(output["original_bytes"], output["bytes"])
+            self.assertEqual(output["text"], text)
+            self.assertFalse(receipt["truncated"])
+
+    def test_each_artifact_refusal_carries_its_own_reason(self):
+        """#360 — one label used to cover six conditions, two of them security
+        refusals. An operator could not tell a verbose reviewer from a symlink
+        planted in the runtime directory."""
+        runtime = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "m8shift_runner_reason_test",
+            os.path.join(REPO, "examples", "headless_runner.py")))
+        importlib.util.spec_from_file_location(
+            "m8shift_runner_reason_test",
+            os.path.join(REPO, "examples", "headless_runner.py")).loader.exec_module(runtime)
+        base = {"run_id": "reason", "agent": "agy", "provider": "p", "agent_model": "m",
+                "expected_transition": {"input": {"turn": "1"}}}
+        summary = {"_final_text": "text", "bytes": 4, "lines": 1}
+        seen = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = dict(base, review_delivery={"type": "artifact", "max_output_bytes": 0})
+            seen["budget"] = runtime.write_review_artifact(tmp, plan, summary)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = dict(base, review_delivery={"type": "artifact", "max_output_bytes": 64},
+                        expected_transition={"input": "not-a-dict"})
+            seen["input"] = runtime.write_review_artifact(tmp, plan, summary)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            real = os.path.join(tmp, "real")
+            os.makedirs(real)
+            link = os.path.join(tmp, "link")
+            os.symlink(real, link)
+            plan = dict(base, review_delivery={"type": "artifact", "max_output_bytes": 64})
+            seen["symlink"] = runtime.write_review_artifact(link, plan, summary)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = dict(base, review_delivery={"type": "artifact", "max_output_bytes": 64})
+            runtime.write_review_artifact(tmp, plan, summary)
+            seen["collision"] = runtime.write_review_artifact(tmp, plan, summary)[1]
+        for name, reason in seen.items():
+            with self.subTest(condition=name):
+                self.assertTrue(reason, "%s must refuse" % name)
+                self.assertNotEqual(reason, "review_artifact_invalid")
+        # The security refusal must not share a label with any size condition.
+        self.assertNotEqual(seen["symlink"], seen["budget"])
+        self.assertEqual(len({seen["budget"], seen["input"], seen["symlink"]}), 3)
+
+    def test_reviewer_empty_permission_and_provider_failures_are_distinct(self):
+        self.awaiting_me()
+        empty = self.runner_once(
+            "pass", "--review-delivery", "artifact", "--run-id", "review-empty")
+        self.assertEqual(empty.returncode, 1, empty.stdout + empty.stderr)
+        self.assertEqual(self.ended()["status"], "review_output_empty")
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "reviews", "review-empty.json")))
+
+        permission = self.runner_once(
+            "import sys\nprint('approval is required', file=sys.stderr)\nsys.exit(7)",
+            "--review-delivery", "artifact", "--run-id", "review-permission")
+        self.assertEqual(permission.returncode, 1, permission.stdout + permission.stderr)
+        self.assertEqual(self.ended()["status"], "review_permission_refused")
+
+        agy_message = (
+            'jetski: no output produced — a tool required the "read_file" permission '
+            'that headless mode cannot prompt for, so it was auto-denied. Add an '
+            'allow-rule under permissions.allow in settings.json (e.g. '
+            'read_file(<target>)). Alternatively, re-run with '
+            '--dangerously-skip-permissions to auto-approve all tools.')
+        agy = self.runner_once(
+            "print(%r)" % agy_message,
+            "--review-delivery", "artifact", "--provider", "google-antigravity",
+            "--run-id", "review-agy-permission")
+        self.assertEqual(agy.returncode, 1, agy.stdout + agy.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "review_permission_refused")
+        self.assertIn("headless_permission_refused", ended["output_signature_ids"])
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "reviews",
+            "review-agy-permission.json")))
+        receipt_path = os.path.join(
+            self.d, ".m8shift", "runtime", "review-returns",
+            "review-agy-permission.json")
+        self.assertTrue(os.path.exists(receipt_path))
+        with open(receipt_path, encoding="utf-8") as fh:
+            receipt = json.load(fh)
+        self.assertEqual(
+            receipt["schema"], "m8shift.review-return-receipt.v1")
+        self.assertEqual(
+            receipt["outcome"]["status"], "review_permission_refused")
+        self.assertIn(
+            "headless_permission_refused", receipt["outcome"]["evidence_ids"])
+        self.assertNotIn("jetski", json.dumps(receipt).lower())
+
+        agy_unsandboxed = agy_message.replace('"read_file"', '"unsandboxed"')
+        unsandboxed = self.runner_once(
+            "print(%r)" % agy_unsandboxed,
+            "--review-delivery", "artifact", "--provider", "google-antigravity",
+            "--run-id", "review-agy-unsandboxed")
+        self.assertEqual(
+            unsandboxed.returncode, 1, unsandboxed.stdout + unsandboxed.stderr)
+        self.assertEqual(self.ended()["status"], "review_permission_refused")
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "reviews",
+            "review-agy-unsandboxed.json")))
+
+        agy_other = agy_message.replace('"read_file"', '"write_to_file"')
+        other_permission = self.runner_once(
+            "print(%r)" % agy_other,
+            "--review-delivery", "artifact", "--provider", "google-antigravity",
+            "--run-id", "review-agy-other-permission")
+        self.assertEqual(
+            other_permission.returncode, 1,
+            other_permission.stdout + other_permission.stderr)
+        self.assertEqual(self.ended()["status"], "review_permission_refused")
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "reviews",
+            "review-agy-other-permission.json")))
+
+        provider = self.runner_once(
+            "import sys\nprint('provider failed', file=sys.stderr)\nsys.exit(7)",
+            "--review-delivery", "artifact", "--run-id", "review-provider-error")
+        self.assertEqual(provider.returncode, 1, provider.stdout + provider.stderr)
+        self.assertEqual(self.ended()["status"], "review_provider_error")
+
+        returned = self.cw(
+            "review-return", "codex", "--from", "claude", "--run",
+            "review-agy-other-permission")
+        self.assertEqual(returned.returncode, 0, returned.stdout + returned.stderr)
+        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        with open(os.path.join(self.d, "M8SHIFT.sessions.jsonl"),
+                  encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        review_return = [row for row in rows
+                         if row.get("event") == "review_return"][-1]
+        self.assertEqual(review_return["outcome"], "permission_refused")
+        self.assertEqual(review_return["evidence_kind"], "permission_refused")
+        self.assertNotIn("jetski", json.dumps(review_return).lower())
+
+    def test_reviewer_cannot_mutate_the_relay_instead_of_delivering_an_artifact(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import subprocess, sys\n"
+            "subprocess.check_call([sys.executable, 'm8shift.py', 'release', 'claude', "
+            "'--to', 'codex', '--force', '--reason', 'test external handoff'])\n"
+            "print('late review')\n",
+            "--review-delivery", "artifact", "--run-id", "review-stale")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "review_relay_mutated")
+        self.assertFalse(os.path.exists(os.path.join(
+            self.d, ".m8shift", "runtime", "reviews", "review-stale.json")))
+
     def test_t2_stuck_working_when_provider_claims_then_exits(self):
         # RFC 047 test 2: claim without append is a mid-turn crash, not progress.
         self.awaiting_me()
@@ -6002,6 +6892,203 @@ class TestRFC047PhaseA(CLIBase):
         self.assertEqual(lk["state"], "WORKING_CLAUDE")
         self.assertEqual(lk["holder"], "claude")
         self.assertNotIn("claim --force", r.stdout + r.stderr)
+
+    # ── #365 ── every member of TERMINAL_FAILURE_STATUSES, not just the one that
+    # motivated the exemption. Until #359 that tuple had a single use, inside the
+    # branch that increments the failure counter, so the name asserted a
+    # termination the code never performed; implementing it changed the behaviour
+    # of environment_blocked and approval_required, and only the third member was
+    # covered. A property proven on the member that motivated it is not proven on
+    # the others.
+
+    def test_an_ordinary_failure_still_consumes_a_retry(self):
+        """Positive control. Without it the exemption is proven to exist rather
+        than to discriminate: an implementation that never increments anything
+        passes every terminal test below."""
+        self.awaiting_me()
+        r = self.runner_once("print('no relay transition at all')\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "non_completion")
+        self.assertIn("(1/3)", r.stdout + r.stderr)
+        self.assertNotIn("retry counter unchanged", r.stdout + r.stderr)
+
+    def test_approval_required_consumes_no_retry(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import sys\n"
+            "print('approval is required: SYNTHETIC_PRIVATE_DETAIL', file=sys.stderr)\n"
+            "sys.exit(7)\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "approval_required")
+        self.assertNotIn("(1/3)", r.stdout + r.stderr)
+        self.assertIn("retry counter unchanged", r.stdout + r.stderr)
+
+    def test_headless_permission_refused_consumes_no_retry(self):
+        self.awaiting_me()
+        r = self.runner_once(
+            "print('jetski: no output produced \u2014 a tool required the \"read_file\" "
+            "permission that headless mode cannot prompt for, so it was auto-denied. "
+            "Add an allow-rule under permissions.allow in settings.json (e.g. "
+            "read_file(<target>)). Alternatively, re-run with "
+            "--dangerously-skip-permissions to auto-approve all tools.')\n",
+            "--provider", "google-antigravity")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.ended()["status"], "headless_permission_refused")
+        self.assertNotIn("(1/3)", r.stdout + r.stderr)
+        self.assertIn("retry counter unchanged", r.stdout + r.stderr)
+
+    def test_environment_blocked_consumes_no_retry(self):
+        """The write probe is driven by making the relay root read-only. That is
+        hermetic -- self.d is this test's own temporary directory -- but it does
+        NOT exercise probe_directory_writable's create-and-unlink path: os.access
+        refuses first, so the OSError branch below it stays uncovered. Stated
+        rather than left implied."""
+        self.awaiting_me()
+        os.chmod(self.d, 0o500)
+        try:
+            r = self.runner_once("print('nothing')\n")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertEqual(self.ended()["status"], "environment_blocked")
+            self.assertNotIn("(1/3)", r.stdout + r.stderr)
+            self.assertIn("retry counter unchanged", r.stdout + r.stderr)
+        finally:
+            os.chmod(self.d, 0o700)
+
+    # -- #382 -- A timeout is transport state, not a replacement for a terminal
+    # classification.  Each member of the named closed set gets a real runner
+    # witness; the coverage assertion makes a newly-added member fail closed until
+    # its timed-out witness is named too.
+
+    def _assert_terminal_status_survives_timeout(self, status, code, *extra,
+                                                 block_environment=False):
+        self.awaiting_me()
+        if block_environment:
+            os.chmod(self.d, 0o500)
+        try:
+            r = self.runner_once(
+                code, "--turn-timeout", "1", "--kill-grace", "0",
+                "--max-retries", "1", *extra, timeout=10)
+        finally:
+            if block_environment:
+                os.chmod(self.d, 0o700)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], status)
+        self.assertEqual(ended["verification_status"], status)
+        self.assertIn("retry counter unchanged", r.stdout + r.stderr)
+        events = [row["event"] for row in self.rows()]
+        self.assertIn("run.timeout", events)
+        self.assertNotIn("run.retry_cap", events)
+
+    def test_timed_out_terminal_witnesses_cover_the_closed_set(self):
+        runtime = self._load_runner()
+        self.assertEqual(
+            set(runtime.TERMINAL_FAILURE_STATUSES),
+            set(self.TIMED_OUT_TERMINAL_WITNESSES))
+        for method_name in self.TIMED_OUT_TERMINAL_WITNESSES.values():
+            self.assertTrue(callable(getattr(type(self), method_name, None)))
+
+    def test_approval_required_survives_timeout_without_retry(self):
+        self._assert_terminal_status_survives_timeout(
+            "approval_required",
+            "import sys, time\n"
+            "print('approval is required', file=sys.stderr, flush=True)\n"
+            "time.sleep(10)\n")
+
+    def test_headless_permission_refused_survives_timeout_without_retry(self):
+        self._assert_terminal_status_survives_timeout(
+            "headless_permission_refused",
+            "import time\n"
+            "print('jetski: no output produced — a tool required the \\\"read_file\\\" "
+            "permission that headless mode cannot prompt for, so it was auto-denied. "
+            "Add an allow-rule under permissions.allow in settings.json (e.g. "
+            "read_file(<target>)). Alternatively, re-run with "
+            "--dangerously-skip-permissions to auto-approve all tools.', flush=True)\n"
+            "time.sleep(10)\n",
+            "--provider", "google-antigravity")
+
+    def test_environment_blocked_survives_timeout_without_retry(self):
+        self._assert_terminal_status_survives_timeout(
+            "environment_blocked", "import time; time.sleep(10)\n",
+            block_environment=True)
+
+    # -- #387 -- Rate-limit and neutral classifications have the same no-retry
+    # doctrine as terminal failures.  A timeout describes how the provider was
+    # stopped; it must not replace the classification already established from
+    # bounded output or relay state.
+
+    def _assert_rate_limit_status_survives_timeout(self, status, message):
+        self.awaiting_me()
+        r = self.runner_once(
+            "import sys, time\n"
+            f"print({message!r}, file=sys.stderr, flush=True)\n"
+            "time.sleep(10)\n",
+            "--provider", "openai-codex", "--turn-timeout", "1",
+            "--kill-grace", "0", "--max-retries", "1", timeout=10)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], status)
+        self.assertEqual(ended["verification_status"], status)
+        self.assertIn("retry counter unchanged", r.stdout + r.stderr)
+        events = [row["event"] for row in self.rows()]
+        self.assertIn("run.timeout", events)
+        self.assertNotIn("run.retry_cap", events)
+
+    def test_timed_out_rate_limit_witnesses_cover_the_closed_set(self):
+        runtime = self._load_runner()
+        self.assertEqual(
+            set(runtime.PROVIDER_RATE_LIMIT_STATUSES),
+            set(self.TIMED_OUT_RATE_LIMIT_WITNESSES))
+        for method_name in self.TIMED_OUT_RATE_LIMIT_WITNESSES.values():
+            self.assertTrue(callable(getattr(type(self), method_name, None)))
+
+    def test_provider_rate_limit_survives_timeout_without_retry(self):
+        self._assert_rate_limit_status_survives_timeout(
+            "provider_rate_limited",
+            "You've hit your weekly usage limit. Try again at "
+            "Dec 31, 2099, 2:44 PM Europe/Paris.")
+
+    def test_unknown_provider_rate_limit_survives_timeout_without_retry(self):
+        self._assert_rate_limit_status_survives_timeout(
+            "provider_rate_limited_reset_unknown",
+            "You've hit your weekly usage limit. Try again at tomorrow CEST.")
+
+    def _assert_neutral_status_survives_timeout(self, status, expected_rc, code):
+        self.awaiting_me()
+        r = self.runner_once(
+            code, "--turn-timeout", "1", "--kill-grace", "0",
+            "--max-retries", "1", timeout=10)
+        self.assertEqual(r.returncode, expected_rc, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], status)
+        self.assertEqual(ended["verification_status"], status)
+        events = [row["event"] for row in self.rows()]
+        self.assertIn("run.timeout", events)
+        self.assertNotIn("run.retry_cap", events)
+
+    def test_timed_out_neutral_witnesses_cover_the_closed_set(self):
+        runtime = self._load_runner()
+        self.assertEqual(
+            set(runtime.NEUTRAL_STATUSES),
+            set(self.TIMED_OUT_NEUTRAL_WITNESSES))
+        for method_name in self.TIMED_OUT_NEUTRAL_WITNESSES.values():
+            self.assertTrue(callable(getattr(type(self), method_name, None)))
+
+    def test_external_transition_survives_timeout_without_retry(self):
+        self._assert_neutral_status_survives_timeout(
+            "external_transition", 3,
+            "import subprocess, sys, time\n"
+            "subprocess.check_call([sys.executable, 'm8shift.py', 'init', '--force'])\n"
+            "time.sleep(10)\n")
+
+    def test_suspended_survives_timeout_without_retry(self):
+        self._assert_neutral_status_survives_timeout(
+            "suspended", 4,
+            "import subprocess, sys, time\n"
+            "m = [sys.executable, 'm8shift.py']\n"
+            "subprocess.check_call(m + ['claim', 'claude'])\n"
+            "subprocess.check_call(m + ['pause', 'claude', '--reason', 'usage cooldown'])\n"
+            "time.sleep(10)\n")
 
     def test_approval_signature_is_terminal_only_when_exit_and_relay_corroborate(self):
         self.awaiting_me()
@@ -6309,6 +7396,248 @@ class TestRFC047PhaseA(CLIBase):
                                   "\nbody quotes:\n- x_run_id: run-2")
         self.assertFalse(hr.authored_by_me(quoted, "claude", "1", "run-2"))
 
+    # -- #377 -- `advanced` must certify that the premise is still current, not
+    # merely that this run authored something newer.  The incident: a run
+    # published an answer to a superseded premise and was recorded as a success.
+
+    def _turn_block(self, number, agent, fields="", body="body"):
+        header = f"- from:    {agent}\n{fields}" if fields else f"- from:    {agent}\n"
+        return (f"<!-- M8SHIFT:TURN {number} {agent} BEGIN -->\n"
+                f"{header}\n{body}\n"
+                f"<!-- M8SHIFT:TURN {number} {agent} END -->\n")
+
+    def test_authored_by_me_names_the_matched_turns(self):
+        """#377 requirement 0: the helper reports WHICH turns matched, so the
+        classifier can position the answer against its premise. Booleans cannot."""
+        hr = self._load_runner()
+        text = (self._turn_block(1, "codex")
+                + self._turn_block(2, "claude", "- x_run_id: run-a\n")
+                + self._turn_block(3, "codex")
+                + self._turn_block(4, "claude", "- x_run_id: run-a\n"))
+        self.assertEqual(list(hr.authored_by_me(text, "claude", "1", "run-a")), [2, 4])
+        self.assertEqual(list(hr.authored_by_me(text, "claude", "3", "run-a")), [4])
+        self.assertEqual(list(hr.authored_by_me(text, "claude", "4", "run-a")), [])
+
+    def test_advanced_requires_direct_successor_still_newest(self):
+        """#377 acceptance 1 (control) + 2 + 3, at the classifier."""
+        hr = self._load_runner()
+        expected = {"agent": "claude", "type": "core_state_advanced",
+                    "pre_turn": "1", "pre_state": "AWAITING_CLAUDE",
+                    "run_id": "run-x"}
+        mine = "- x_run_id: run-x\n"
+
+        # Control: direct successor of the premise, still the newest closed turn.
+        text = self._turn_block(1, "codex") + self._turn_block(2, "claude", mine)
+        status, reason = hr.classify_post_run(
+            expected, {"state": "AWAITING_CODEX", "holder": "claude", "turn": "2"}, text)
+        self.assertEqual(status, "advanced")
+
+        # Acceptance 2: newer than the premise but NOT its direct successor —
+        # an intervening turn superseded the premise.
+        text = (self._turn_block(1, "codex") + self._turn_block(2, "claude")
+                + self._turn_block(3, "codex") + self._turn_block(4, "claude", mine))
+        status, reason = hr.classify_post_run(
+            expected, {"state": "AWAITING_CODEX", "holder": "claude", "turn": "4"}, text)
+        self.assertEqual(status, "premise_superseded")
+        self.assertIn("intervening", reason)
+
+        # Ticket acceptance 3 RENOUNCED: direct successor no longer the newest
+        # is the RFC 047 t7 ping-pong contract (peer consumed the answer and
+        # replied) — success, never supersession. The stricter rule the ticket
+        # asked for contradicts that merged, review-hardened contract.
+        text = (self._turn_block(1, "codex") + self._turn_block(2, "claude", mine)
+                + self._turn_block(3, "codex"))
+        status, reason = hr.classify_post_run(
+            expected, {"state": "AWAITING_CLAUDE", "holder": "codex", "turn": "3"}, text)
+        self.assertEqual(status, "advanced")
+
+    def test_advanced_requires_the_exact_premise_block_when_digested(self):
+        """#377 acceptance 4: with the digest in place, a premise block that
+        changed between plan and append is not advanced even when the turn
+        numbers line up. Without the digest (legacy plan), numbers decide."""
+        hr = self._load_runner()
+        premise = self._turn_block(1, "codex")
+        answer = self._turn_block(2, "claude", "- x_run_id: run-x\n")
+        after = {"state": "AWAITING_CODEX", "holder": "claude", "turn": "2"}
+        digest = hr.turn_block_sha256(premise, 1)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        expected = {"agent": "claude", "type": "core_state_advanced",
+                    "pre_turn": "1", "pre_state": "AWAITING_CLAUDE",
+                    "run_id": "run-x", "premise_sha256": digest}
+
+        # Control: the block the plan digested is the block in the transcript.
+        status, _ = hr.classify_post_run(expected, after, premise + answer)
+        self.assertEqual(status, "advanced")
+
+        # The premise was rewritten under the same number: numbers align, bytes
+        # do not — the answer addresses a premise that no longer exists.
+        rewritten = self._turn_block(1, "codex", body="rewritten premise")
+        status, reason = hr.classify_post_run(expected, after, rewritten + answer)
+        self.assertEqual(status, "premise_superseded")
+        self.assertIn("changed between", reason)
+
+        # The premise block is gone entirely: fail closed, never certify blind.
+        status, reason = hr.classify_post_run(expected, after, answer)
+        self.assertEqual(status, "premise_superseded")
+        self.assertIn("no longer readable", reason)
+
+        # Legacy plan without the digest: the numeric rules alone decide.
+        legacy = dict(expected)
+        del legacy["premise_sha256"]
+        status, _ = hr.classify_post_run(legacy, after, rewritten + answer)
+        self.assertEqual(status, "advanced")
+
+    def test_plan_records_the_premise_digest_and_validates_it(self):
+        """#377: the immutable plan carries the SHA-256 of the exact pre-turn
+        block when the relay text was snapshotted, and rejects a malformed one."""
+        hr = self._load_runner()
+        premise = self._turn_block(3, "codex")
+        lk = {"state": "AWAITING_CLAUDE", "holder": "codex", "turn": "3"}
+        expected = hr.expected_post_run("claude", lk, "run-y", relay_text=premise)
+        self.assertEqual(expected.get("premise_sha256"),
+                         hr.turn_block_sha256(premise, 3))
+        # No snapshot -> no digest key, never a fabricated one.
+        bare = hr.expected_post_run("claude", lk, "run-y")
+        self.assertNotIn("premise_sha256", bare)
+        # An unreadable premise (turn block absent) -> no digest key either.
+        empty = hr.expected_post_run("claude", lk, "run-y", relay_text="")
+        self.assertNotIn("premise_sha256", empty)
+
+        plan = {
+            "schema": hr.RUN_PLAN_SCHEMA, "created_at": "now", "agent": "claude",
+            "argv": [sys.executable], "cwd": self.d, "run_id": "run-y",
+            "prompt_hash": "0" * 64, "env_allowlist": [], "timeout": 5,
+            "kill_grace": 1, "expected_transition": expected,
+        }
+        hr.validate_run_plan(plan)                        # digest form accepted
+        bad = dict(plan, expected_transition=dict(expected, premise_sha256="zz"))
+        with self.assertRaises(SystemExit):
+            hr.validate_run_plan(bad)
+
+    def test_core_launch_is_refused_when_the_premise_snapshot_fails(self):
+        """#393 review B1: a failed launch snapshot must refuse the launch, not
+        mint a digest-less current-schema plan that certifies by numbers alone —
+        indistinguishable from a restored legacy plan, it reopens the rewritten-
+        premise hole the digest exists to close."""
+        hr = self._load_runner()
+        self.awaiting_me()
+        argv = ["headless_runner.py", "claude", "--m8shift",
+                os.path.join(self.d, "M8SHIFT.md"), "--m8shift-py",
+                os.path.join(self.d, "m8shift.py"), "--once", "--interval", "1",
+                "--max-retries", "3", "--cmd", sys.executable, "-c", "pass"]
+        with mock.patch.object(hr, "read_relay_post_run") as snap, \
+                mock.patch.object(hr.subprocess, "Popen",
+                                  side_effect=OSError("gate breached")) as popen, \
+                mock.patch.object(hr.sys, "argv", argv), \
+                mock.patch.object(hr.os, "chdir"):
+            lk = hr.read_lock(os.path.join(self.d, "M8SHIFT.md"))
+            self.assertEqual(lk.get("state"), "AWAITING_CLAUDE")
+            snap.return_value = (None, None)
+            rc = hr.main()
+        self.assertEqual(rc, 5)
+        popen.assert_not_called()
+
+    def test_core_launch_is_refused_when_the_premise_block_is_unreadable(self):
+        """#393 review B1, residual form: a readable LOCK whose closed premise
+        block is absent from the snapshot text must refuse the launch exactly
+        like a failed snapshot — otherwise a fresh digest-less current-schema
+        plan is minted and a rewritten premise certifies by numbers alone.
+        Turn 0 stays the explicit digest-less fresh-start exception."""
+        hr = self._load_runner()
+        self.awaiting_me()
+        argv = ["headless_runner.py", "claude", "--m8shift",
+                os.path.join(self.d, "M8SHIFT.md"), "--m8shift-py",
+                os.path.join(self.d, "m8shift.py"), "--once", "--interval", "1",
+                "--max-retries", "3", "--cmd", sys.executable, "-c", "pass"]
+        lock = {"state": "AWAITING_CLAUDE", "holder": "codex", "turn": "1"}
+        text_without_turn_1 = self._turn_block(0, "system")
+        # side_effect, never a bare MagicMock: a gate witness must fail loudly,
+        # not hang the suite on a mocked child (#390's lesson, applied here).
+        with mock.patch.object(hr, "read_relay_post_run",
+                               return_value=(lock, text_without_turn_1)), \
+                mock.patch.object(hr.subprocess, "Popen",
+                                  side_effect=OSError("gate breached")) as popen, \
+                mock.patch.object(hr.sys, "argv", argv), \
+                mock.patch.object(hr.os, "chdir"):
+            rc = hr.main()
+        self.assertEqual(rc, 5)
+        popen.assert_not_called()
+
+    def test_a_run_that_authors_two_turns_is_not_certified(self):
+        """#393 review B2: `pre_turn + 1 in matched` accepted a provider that
+        exceeded the one-turn contract. The matched list must be exactly the
+        direct successor; the ordinary t7 shape (one turn + peer reply) stays
+        green, so this does not restore the renounced newest-turn rule."""
+        hr = self._load_runner()
+        mine = "- x_run_id: run-x\n"
+        expected = {"agent": "claude", "type": "core_state_advanced",
+                    "pre_turn": "1", "pre_state": "AWAITING_CLAUDE",
+                    "run_id": "run-x"}
+        text = (self._turn_block(1, "codex") + self._turn_block(2, "claude", mine)
+                + self._turn_block(3, "codex") + self._turn_block(4, "claude", mine))
+        status, reason = hr.classify_post_run(
+            expected, {"state": "AWAITING_CODEX", "holder": "claude", "turn": "4"}, text)
+        self.assertEqual(status, "premise_superseded")
+        self.assertIn("more than one turn", reason)
+
+    def test_certification_evidence_never_claims_the_newest_turn(self):
+        """#393 review B3: the plan's success_rule and the advanced reason must
+        describe what IS checked (direct successor, sole matched turn, premise
+        digest) — never the renounced newest-turn property. In the healthy t7
+        control the peer's turn is newest; attesting otherwise is false evidence
+        even where the status is rightly advanced."""
+        hr = self._load_runner()
+        rule = hr.expected_post_run(
+            "claude", {"state": "AWAITING_CLAUDE", "turn": "1"}, "run-x")["success_rule"]
+        self.assertNotIn("newest", rule)
+        mine = "- x_run_id: run-x\n"
+        expected = {"agent": "claude", "type": "core_state_advanced",
+                    "pre_turn": "1", "run_id": "run-x"}
+        text = (self._turn_block(1, "codex") + self._turn_block(2, "claude", mine)
+                + self._turn_block(3, "codex"))
+        status, reason = hr.classify_post_run(
+            expected, {"state": "AWAITING_CLAUDE", "holder": "codex", "turn": "3"}, text)
+        self.assertEqual(status, "advanced")
+        self.assertNotIn("newest", reason)
+        self.assertIn("direct successor", reason)
+
+    def test_premise_superseded_is_a_failure_through_the_runner_loop(self):
+        """#384's lesson, applied at birth: the new status must exist at every
+        observable surface, not only in the classifier's return value.
+
+        The child simulates the intervening-turn race: another producer of the
+        same identity takes the launch premise (turn 2, no x_run_id), the peer
+        answers it (turn 3), and only then does this run author its own turn
+        (turn 4). The answer's premise is turn 3 — the launch premise, turn 1,
+        was superseded twice over."""
+        hr = self._load_runner()
+        self.assertIn("premise_superseded", hr.FAILURE_STATUSES)
+        self.awaiting_me()
+        # The core auto-stamps x_run_id from M8SHIFT_RUN_ID on every append made
+        # in the child environment, so the intervening producer must run WITHOUT
+        # the variable — exactly like the interactive session it simulates.
+        r = self.runner_once(
+            "import os, subprocess, sys\n"
+            "m = [sys.executable, 'm8shift.py']\n"
+            "other = {k: v for k, v in os.environ.items() if k != 'M8SHIFT_RUN_ID'}\n"
+            "subprocess.check_call(m + ['claim', 'claude'], env=other)\n"
+            "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',\n"
+            "                          '--ask', 'other producer', '--done', 'took it'],\n"
+            "                      env=other)\n"
+            "subprocess.check_call(m + ['claim', 'codex'], env=other)\n"
+            "subprocess.check_call(m + ['append', 'codex', '--to', 'claude',\n"
+            "                          '--ask', 'new premise', '--done', 'peer'],\n"
+            "                      env=other)\n"
+            "subprocess.check_call(m + ['claim', 'claude'])\n"
+            "subprocess.check_call(m + ['append', 'claude', '--to', 'codex',\n"
+            "                          '--ask', 'stale answer', '--done', 'mine'])\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ended = self.ended()
+        self.assertEqual(ended["status"], "premise_superseded")
+        self.assertEqual(ended["verification_status"], "premise_superseded")
+        events = [row["event"] for row in self.rows()]
+        self.assertIn("run.verification_failed", events)
+
     def test_t8_claim_refresh_guard(self):
         # Core RFC 047 prerequisite: --refresh only EXTENDS an already-held WORKING lock.
         self.awaiting_me()   # AWAITING_CLAUDE — our turn, but no lock held yet
@@ -6415,10 +7744,11 @@ class ListenerCLIBase(CLIBase):
             "if sys.argv[1:] == ['--handshake']:",
             "    print(json.dumps({'schema': 'm8shift.runner.handshake.v1', "
             "'version': 'test', 'capabilities': ['bounded-tty-tee-v1', "
-            "'environment-write-probe-v1', 'runner-exit-v2'], 'options': "
+            "'environment-write-probe-v1', 'review-artifact-delivery-v1', "
+            "'runner-exit-v2'], 'options': "
             "['--agent-model', '--cmd', '--cwd', '--env-allowlist', '--m8shift', "
             "'--m8shift-py', '--once', '--resume-working', '--run-id', "
-            "'--runtime-dir', '--start-on-idle']}))",
+            "'--review-delivery', '--runtime-dir', '--start-on-idle']}))",
             "    sys.exit(0)",
             "with open('launches.txt', 'a', encoding='utf-8') as fh:",
             "    fh.write(json.dumps(sys.argv[1:]) + '\\n')",
@@ -6535,6 +7865,12 @@ class ListenerCLIBase(CLIBase):
         r = self.turn("claude", "codex")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+
+
+# #320: what the read-only test must keep refusing — a terminal classification.
+# Named so the assertion says WHY the label matters rather than pinning one value.
+TERMINAL_LIKE_STATUSES = ("environment_blocked", "approval_required",
+                          "headless_permission_refused")
 
 
 class TestListenerCompatibilityIncident(ListenerCLIBase):
@@ -6683,6 +8019,10 @@ class TestListenerCompatibilityIncident(ListenerCLIBase):
             plan = json.load(fh)
         self.assertEqual(plan["project_root"], os.path.realpath(self.d))
         self.assertEqual(plan["root_provenance"], "cli")
+        self.assertEqual(plan["relay_root"], os.path.realpath(self.d))
+        self.assertEqual(plan["relay_root_provenance"], "cli")
+        self.assertEqual(plan["workspace_root"], os.path.realpath(self.d))
+        self.assertEqual(plan["workspace_root_provenance"], "profile.cwd")
         self.assertTrue(plan["roots_consistent"])
         status = self.rt(
             "listener", "status", "--agent", "codex", "--json",
@@ -6691,7 +8031,141 @@ class TestListenerCompatibilityIncident(ListenerCLIBase):
         payload = json.loads(status.stdout)
         self.assertEqual(payload["project_root"], os.path.realpath(self.d))
         self.assertEqual(payload["root_provenance"], "cli")
+        self.assertEqual(payload["relay_root"], os.path.realpath(self.d))
+        self.assertEqual(payload["workspace_root"], os.path.realpath(self.d))
+        self.assertEqual(payload["workspace_root_provenance"], "profile.cwd")
         self.assertTrue(payload["roots_consistent"])
+
+    def test_external_workspace_root_runs_provider_but_keeps_sidecars_at_relay(self):
+        """#327: an external read-only reviewer remains a real invoker lane."""
+        self.awaiting_me()
+        workspace = tempfile.mkdtemp(prefix="m8shift-external-workspace-")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        evidence = os.path.join(workspace, "provider-cwd.json")
+        code = (
+            "import json, os\n"
+            "with open('provider-cwd.json', 'w', encoding='utf-8') as fh:\n"
+            "    json.dump({'cwd': os.getcwd(), "
+            "'relay_root': os.environ.get('M8SHIFT_ROOT', '')}, fh)\n"
+            "print('APPROVE external read-only review')\n"
+        )
+        profile = self.profile_path(
+            drop=("cwd",), argv=[sys.executable, "-c", code],
+            workspace_root=workspace, env_allowlist=[], review_delivery="artifact")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--backend", "local", "--poll-interval", "0.01")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        try:
+            deadline = time.monotonic() + 10
+            payload = {}
+            while time.monotonic() < deadline:
+                status = self.rt("listener", "status", "--agent", "claude", "--json")
+                self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+                payload = json.loads(status.stdout)
+                if payload.get("review_delivery_pending"):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(payload.get("process_resident"), payload)
+            self.assertEqual(payload.get("status"), "ALIVE")
+            self.assertEqual(payload.get("coverage"), "invoker")
+            self.assertTrue(payload.get("can_invoke_agent"))
+            self.assertTrue(payload.get("review_delivery_pending"), payload)
+            with open(evidence, encoding="utf-8") as fh:
+                launched = json.load(fh)
+            self.assertEqual(launched["cwd"], os.path.realpath(workspace))
+            self.assertEqual(launched["relay_root"], os.path.realpath(self.d))
+            self.assertFalse(os.path.exists(os.path.join(workspace, ".m8shift")))
+            plan_path = os.path.join(self.listeners_dir(), "claude.plan.json")
+            with open(plan_path, encoding="utf-8") as fh:
+                plan = json.load(fh)
+            self.assertEqual(plan["relay_root"], os.path.realpath(self.d))
+            self.assertEqual(plan["workspace_root"], os.path.realpath(workspace))
+            self.assertEqual(plan["workspace_root_provenance"], "profile.workspace_root")
+            self.assertEqual(payload["relay_root"], os.path.realpath(self.d))
+            self.assertEqual(payload["workspace_root"], os.path.realpath(workspace))
+        finally:
+            stopped = self.rt("listener", "stop", "--agent", "claude", "--grace", "2")
+            self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+
+    def test_workspace_root_conflict_escape_and_drift_refuse_before_sidecars(self):
+        """#327: two roots must be explicit, canonical, and pinned per launch."""
+        self.init()
+        workspace = tempfile.mkdtemp(prefix="m8shift-workspace-a-")
+        other = tempfile.mkdtemp(prefix="m8shift-workspace-b-")
+        external = tempfile.mkdtemp(prefix="m8shift-profile-escape-")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        self.addCleanup(shutil.rmtree, other, True)
+        self.addCleanup(shutil.rmtree, external, True)
+        plan_path = os.path.join(self.listeners_dir(), "claude.plan.json")
+
+        conflicting = self.profile_path(cwd=workspace, workspace_root=other)
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", conflicting,
+            "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cwd and workspace_root", result.stderr)
+        self.assertFalse(os.path.exists(plan_path))
+
+        missing = self.profile_path(
+            name="profile-missing-workspace.json", drop=("cwd",),
+            workspace_root=os.path.join(workspace, "missing"))
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", missing,
+            "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("workspace_root is not an existing directory", result.stderr)
+        self.assertFalse(os.path.exists(plan_path))
+
+        escaped = os.path.join(external, "profile.json")
+        with open(os.path.join(self.d, self.profile_path()), encoding="utf-8") as fh:
+            external_doc = json.load(fh)
+        with open(escaped, "w", encoding="utf-8") as fh:
+            json.dump(external_doc, fh)
+        link = os.path.join(self.d, "profile-escape.json")
+        os.symlink(escaped, link)
+        self.addCleanup(lambda: os.path.lexists(link) and os.unlink(link))
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", link,
+            "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("profile path", result.stderr)
+        self.assertFalse(os.path.exists(plan_path))
+
+        drift = self.profile_path(name="profile-drift.json", cwd=workspace)
+        path = os.path.join(self.d, drift)
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["cwd"] = other
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", drift,
+            "--workspace-root-snapshot", workspace, "--foreground", "--max-ticks", "1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("workspace root changed since plan", result.stderr)
+        self.assertFalse(os.path.exists(plan_path))
+
+    def test_read_only_reviewer_profile_never_receives_a_mutating_turn_prompt(self):
+        """#327/#336: an artifact reviewer receives an actual review contract."""
+        runtime = self._load_runtime()
+        profile = {
+            "argv": ["provider-cli", "$M8SHIFT_PROMPT"],
+            "cwd": self.d,
+            "workspace_root": self.d,
+            "env_allowlist": [],
+            "start_on_idle": False,
+            "agent_model": "",
+            "provider": "",
+            "review_delivery": "artifact",
+        }
+        argv = runtime.listener_runner_argv(
+            "agy", profile, self.RUNNER, "review-prompt")
+        provider_argv = argv[argv.index("--cmd") + 1:]
+        self.assertIn("read-only reviewer", provider_argv[-1])
+        self.assertIn("Do NOT claim, append", provider_argv[-1])
+        self.assertIn("captured artifact", provider_argv[-1])
+        self.assertNotIn("claim, work, append", provider_argv[-1])
 
     def legacy_runner(self, provider_marker):
         """Write a deterministic pre-handshake runner that rejects new flags."""
@@ -6879,7 +8353,14 @@ with open(%r, 'a', encoding='utf-8') as fh:
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         state = self.state_doc()
-        self.assertEqual(state["last_classification"], "non_completion")
+        # #320: with a pre-held reservation the same provider exit observes an
+        # unchanged WORKING_CLAUDE and is classified stuck_working rather than
+        # non_completion. Both are retryable failures, and what this test protects
+        # -- one failure, no raw provider text in the ledger, the bounded
+        # filesystem_read_only signature -- is unchanged. The label is derived from
+        # relay state, not from the read-only words this test is about.
+        self.assertIn(state["last_classification"], ("non_completion", "stuck_working"))
+        self.assertNotIn(state["last_classification"], TERMINAL_LIKE_STATUSES)
         self.assertEqual(state["consecutive_failures"], 1)
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
                   encoding="utf-8") as fh:
@@ -6890,6 +8371,33 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertGreater(ended["output_bytes"], 0)
         self.assertGreater(ended["output_lines"], 0)
         self.assertEqual(ended["output_signature_ids"], ["filesystem_read_only"])
+
+    def test_reviewer_listener_delivers_once_then_waits_for_coordinator_consumption(self):
+        self.awaiting_me()
+        marker = os.path.join(self.d, "reviewer-launches.txt")
+        code = (
+            "with open(%r, 'a', encoding='utf-8') as fh: fh.write('launch\\n')\n"
+            "print('APPROVE listener review')\n"
+        ) % marker
+        profile = self.profile_path(
+            argv=[sys.executable, "-c", code], cwd=self.d, env_allowlist=[],
+            review_delivery="artifact")
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", self.RUNNER, "--foreground", "--max-ticks", "3",
+            "--poll-interval", "0.01", "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(fh.readlines(), ["launch\n"])
+        state = self.state_doc()
+        self.assertEqual(state["last_classification"], "review_delivered_pending")
+        self.assertEqual(state["reason"], "review_delivery_pending")
+        self.assertEqual(state["consecutive_failures"], 0)
+        self.assertEqual(self.lock()["state"], "AWAITING_CLAUDE")
+        status = json.loads(self.rt("listener", "status", "--agent", "claude", "--json").stdout)
+        self.assertEqual(status["review_delivery"], "artifact")
+        self.assertTrue(status["review_delivery_pending"])
+
 
     def test_runner_rc2_is_terminal_and_classified_without_retry(self):
         self.awaiting_me()
@@ -6923,6 +8431,29 @@ with open(%r, 'a', encoding='utf-8') as fh:
                          "approval_required:provider_permission_allowlist")
         self.assertEqual(len(self.launches()), 1)
         self.assertIn("PROVIDER-PERMISSIONS.md", result.stdout)
+
+    def test_headless_permission_refused_halts_and_notifies_after_one_attempt(self):
+        """#385 — this terminal runner status has the same listener semantics as
+        its environment/approval siblings: preserve the diagnosis, halt without
+        retrying, and tell the operator how to resolve it safely."""
+        self.awaiting_me()
+        runner = self.stub_runner(
+            rc=1, ledger_status="headless_permission_refused")
+        result = self.rt(
+            "listener", "start", "--agent", "claude",
+            "--cmd-file", self.profile_path(), "--runner", runner,
+            "--foreground", "--max-ticks", "2", "--poll-interval", "0.01",
+            "--max-retries", "3", "--max-backoff", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["phase"], "halted")
+        self.assertEqual(state["last_classification"],
+                         "headless_permission_refused")
+        self.assertEqual(state["reason"],
+                         "headless_permission_refused:provider_permission_allowlist")
+        self.assertEqual(len(self.launches()), 1)
+        self.assertIn("permissions.allow", result.stdout)
+        self.assertNotIn("dangerously-skip-permissions", result.stdout)
 
     def test_provider_rate_limit_places_scoped_hold_without_consuming_retries(self):
         self.awaiting_me()
@@ -6986,6 +8517,67 @@ with open(%r, 'a', encoding='utf-8') as fh:
         with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
                   encoding="utf-8") as fh:
             self.assertNotIn(message, fh.read())
+
+    def test_timed_out_provider_rate_limit_still_places_scoped_hold(self):
+        """#387 — the runner's transport timeout must not hide the rate-limit
+        classification from the listener that owns the scoped usage hold."""
+        self.awaiting_me()
+        marker = os.path.join(self.d, "provider-timeout-launches.txt")
+        reset = (dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+                 + dt.timedelta(hours=6))
+        reset_text = reset.strftime("%Y-%m-%d %H:%M:%S+00:00")
+        reset_iso = reset.strftime("%Y-%m-%dT%H:%M:%SZ")
+        message = ("You've hit your weekly usage limit. Try again at "
+                   f"{reset_text}.")
+        code = (
+            "import sys, time\n"
+            "with open(%r, 'a', encoding='utf-8') as fh: fh.write('launch\\n')\n"
+            "print(%r, file=sys.stderr, flush=True)\n"
+            "time.sleep(10)\n"
+        ) % (marker, message)
+        profile = self.profile_path(
+            argv=[sys.executable, "-c", code], cwd=self.d,
+            env_allowlist=[], provider="openai-codex")
+
+        # The listener deliberately owns retry policy and therefore does not
+        # normally expose runner timeout tuning.  This transparent test wrapper
+        # narrows only the provider deadline while preserving the real runner's
+        # handshake and complete ledger/classification path.
+        real_runner = os.path.join(self.d, "examples", "headless_runner.py")
+        timeout_runner = os.path.join(self.d, "timeout_runner.py")
+        with open(timeout_runner, "w", encoding="utf-8") as fh:
+            fh.write(
+                "import os, sys\n"
+                f"runner = {real_runner!r}\n"
+                "argv = list(sys.argv[1:])\n"
+                "if argv != ['--handshake']:\n"
+                "    command = argv.index('--cmd')\n"
+                "    argv[command:command] = "
+                "['--turn-timeout', '1', '--kill-grace', '0']\n"
+                "os.execv(sys.executable, [sys.executable, runner, *argv])\n")
+
+        result = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", timeout_runner, "--foreground", "--max-ticks", "2",
+            "--poll-interval", "0.01", "--max-retries", "3",
+            "--max-backoff", "1", timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state_doc()
+        self.assertEqual(state["last_classification"], "provider_rate_limited")
+        self.assertEqual(state["consecutive_failures"], 0)
+        with open(marker, encoding="utf-8") as fh:
+            self.assertEqual(len(fh.readlines()), 1)
+        hold_path = os.path.join(
+            self.d, ".m8shift", "runtime", "usage-holds", "claude.json")
+        with open(hold_path, encoding="utf-8") as fh:
+            hold = json.load(fh)
+        self.assertEqual(hold["resets_at"], reset_iso)
+        with open(os.path.join(self.d, ".m8shift", "runtime", "runs.jsonl"),
+                  encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        self.assertIn("run.timeout", [row["event"] for row in rows])
+        ended = [row for row in rows if row["event"] == "run.ended"][-1]
+        self.assertEqual(ended["status"], "provider_rate_limited")
 
     def test_provider_rate_limit_unknown_reset_halts_once_without_retry_debit(self):
         self.awaiting_me()
@@ -7117,6 +8709,10 @@ with open(%r, 'a', encoding='utf-8') as fh:
         self.assertNotEqual(state["phase"], "halted")
 
     def test_listener_side_runner_launch_oserror_is_retryable_and_redacted(self):
+        # #320: the reservation is a real seam this in-process fixture must model,
+        # or the loop escapes the mock boundary and claims on a live relay.
+        # Reservation succeeds here; the release is asserted below, which this test
+        # could not do before there was anything to release.
         runtime = self._load_runtime()
         writes, messages = [], []
         profile = {"start_on_idle": False}
@@ -7124,11 +8720,16 @@ with open(%r, 'a', encoding='utf-8') as fh:
              mock.patch.object(runtime, "write_listener_state",
                                side_effect=lambda _agent, **kw: writes.append(dict(kw))), \
              mock.patch.object(runtime, "read_relay_lock_fields",
-                               return_value={"state": "AWAITING_CLAUDE", "holder": "claude"}), \
+                               return_value=({"state": "AWAITING_CLAUDE", "holder": "claude"},
+                                             "relay snapshot")), \
              mock.patch.object(runtime, "maybe_notify_stranded"), \
              mock.patch.object(runtime, "read_usage_hold", return_value=(None, "")), \
              mock.patch.object(runtime, "listener_runner_argv", return_value=["runner"]), \
              mock.patch.object(runtime, "new_listener_run_id", return_value="test-run"), \
+             mock.patch.object(runtime, "reserve_turn_before_launch",
+                               return_value=(True, "")) as reserve, \
+             mock.patch.object(runtime, "release_unused_reservation",
+                               return_value=True) as unreserve, \
              mock.patch.object(runtime.subprocess, "Popen",
                                side_effect=OSError("synthetic-sensitive-error")), \
              mock.patch.object(runtime, "listener_run_classification", return_value=""), \
@@ -7140,6 +8741,11 @@ with open(%r, 'a', encoding='utf-8') as fh:
                 "claude", profile, self.RUNNER, poll=0.01, max_ticks=1,
                 max_retries=3, max_backoff=1)
         self.assertEqual(rc, 0)
+        # A launch that never happened must not leave the turn reserved. This test
+        # did not assert it before #320 because there was nothing to release.
+        self.assertEqual(reserve.call_count, 1)
+        self.assertEqual(unreserve.call_count, 1,
+                         "a reservation whose launch failed must be given back")
         self.assertEqual(writes[-1]["last_classification"], "infrastructure_failure")
         self.assertEqual(writes[-1]["consecutive_failures"], 1)
         self.assertNotEqual(writes[-1]["phase"], "halted")
@@ -7324,6 +8930,165 @@ class TestRFC047ListenerPR1(ListenerCLIBase):
         self.assertEqual(preview[preview.index("--agent-model") + 1], "claude-opus-4-8")
         self.assertLess(preview.index("--agent-model"), preview.index("--cmd"))
         self.assertFalse(os.path.exists(self.listeners_dir()))
+
+    def _create_stopped_replay_plan(self, *, detached=False, **profile_overrides):
+        self.init()
+        profile = self.profile_path(**profile_overrides)
+        runner = self.stub_runner()
+        argv = [
+            "listener", "start", "--agent", "claude", "--cmd-file", profile,
+            "--runner", runner, "--backend", "local", "--poll-interval", "0.05",
+            "--max-retries", "4", "--max-backoff", "17",
+        ]
+        if detached:
+            result = self.rt(*argv)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            deadline = time.monotonic() + 5
+            payload = {}
+            while time.monotonic() < deadline:
+                status = self.rt("listener", "status", "--agent", "claude", "--json")
+                self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+                payload = json.loads(status.stdout)
+                if payload.get("process_resident") and payload.get("status") == "ALIVE":
+                    break
+                time.sleep(0.05)
+            self.assertTrue(payload.get("process_resident"), payload)
+            stopped = self.rt("listener", "stop", "--agent", "claude", "--grace", "2")
+            self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+        else:
+            result = self.rt(*argv, "--foreground", "--max-ticks", "1")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return (os.path.join(self.d, profile), os.path.join(self.d, runner),
+                os.path.join(self.listeners_dir(), "claude.plan.json"))
+
+    def test_listener_from_plan_restores_stopped_lane_and_preserves_exact_plan(self):
+        _profile, _runner, plan_path = self._create_stopped_replay_plan(detached=True)
+        with open(plan_path, "rb") as fh:
+            original_plan = fh.read()
+        plan = json.loads(original_plan)
+        self.assertEqual(plan["profile_identity"]["schema"],
+                         "m8shift.listener.profile-identity.v1")
+        self.assertEqual(plan["runner_identity"]["schema"],
+                         "m8shift.listener.executable-identity.v1")
+        self.assertEqual(plan["backend_identity"]["schema"],
+                         "m8shift.listener.backend-identity.v1")
+        self.assertFalse(plan["foreground"])
+        self.assertEqual(plan["poll_interval_seconds"], 0.05)
+        self.assertEqual(plan["max_retries"], 4)
+        self.assertEqual(plan["max_backoff_seconds"], 17)
+
+        restored = self.rt("listener", "start", "--agent", "claude", "--from-plan")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        try:
+            deadline = time.monotonic() + 5
+            payload = {}
+            while time.monotonic() < deadline:
+                status = self.rt("listener", "status", "--agent", "claude", "--json")
+                self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+                payload = json.loads(status.stdout)
+                if payload.get("process_resident") and payload.get("status") == "ALIVE":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(payload.get("status"), "ALIVE", payload)
+            self.assertTrue(payload.get("process_resident"), payload)
+            self.assertTrue(payload.get("can_invoke_agent"), payload)
+            self.assertEqual(payload.get("coverage"), "invoker")
+            self.assertTrue(payload.get("roots_consistent"), payload)
+            with open(plan_path, "rb") as fh:
+                self.assertEqual(fh.read(), original_plan)
+        finally:
+            self.rt("listener", "stop", "--agent", "claude", "--grace", "2")
+
+    def test_listener_from_plan_restores_external_workspace_root(self):
+        workspace = tempfile.mkdtemp(prefix="m8shift-restore-workspace-")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        _profile, _runner, plan_path = self._create_stopped_replay_plan(
+            detached=True, drop=("cwd",), workspace_root=workspace)
+        with open(plan_path, "rb") as fh:
+            plan_before = fh.read()
+        restored = self.rt("listener", "start", "--agent", "claude", "--from-plan")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        try:
+            deadline = time.monotonic() + 5
+            payload = {}
+            while time.monotonic() < deadline:
+                status = self.rt("listener", "status", "--agent", "claude", "--json")
+                self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+                payload = json.loads(status.stdout)
+                if payload.get("process_resident") and payload.get("status") == "ALIVE":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(payload.get("workspace_root"), os.path.realpath(workspace))
+            self.assertEqual(payload.get("workspace_root_provenance"),
+                             "profile.workspace_root")
+            self.assertTrue(payload.get("roots_consistent"), payload)
+            self.assertTrue(payload.get("can_invoke_agent"), payload)
+            with open(plan_path, "rb") as fh:
+                self.assertEqual(fh.read(), plan_before)
+            self.assertFalse(os.path.exists(os.path.join(workspace, ".m8shift")))
+        finally:
+            self.rt("listener", "stop", "--agent", "claude", "--grace", "2")
+
+    def test_listener_from_plan_refuses_changed_runner_before_sidecar_mutation(self):
+        _profile, runner, plan_path = self._create_stopped_replay_plan()
+        state_path = os.path.join(self.listeners_dir(), "claude.json")
+        with open(plan_path, "rb") as fh:
+            plan_before = fh.read()
+        with open(state_path, "rb") as fh:
+            state_before = fh.read()
+        with open(runner, "a", encoding="utf-8") as fh:
+            fh.write("\n# changed after validation\n")
+        result = self.rt("listener", "start", "--agent", "claude", "--from-plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("identity changed", result.stderr)
+        self.assertFalse(os.path.exists(self.pid_path()))
+        with open(plan_path, "rb") as fh:
+            self.assertEqual(fh.read(), plan_before)
+        with open(state_path, "rb") as fh:
+            self.assertEqual(fh.read(), state_before)
+
+    def test_listener_from_plan_refuses_changed_or_symlinked_profile(self):
+        profile, runner, _plan_path = self._create_stopped_replay_plan()
+        with open(profile, "a", encoding="utf-8") as fh:
+            fh.write("\n")
+        changed = self.rt("listener", "start", "--agent", "claude", "--from-plan")
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn("identity changed", changed.stderr)
+        self.assertFalse(os.path.exists(self.pid_path()))
+
+        # Recreate an attested regular profile, then replace it with a symlink to
+        # byte-identical content: digest equality must not bypass path identity.
+        with open(profile, "rb") as fh:
+            changed_bytes = fh.read()
+        with open(profile, "wb") as fh:
+            fh.write(changed_bytes[:-1])
+        refreshed = self.rt(
+            "listener", "start", "--agent", "claude", "--cmd-file",
+            os.path.relpath(profile, self.d), "--runner", os.path.relpath(runner, self.d),
+            "--backend", "local", "--foreground", "--max-ticks", "1",
+            "--poll-interval", "0.05")
+        self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+        target = profile + ".regular"
+        shutil.copy(profile, target)
+        os.unlink(profile)
+        os.symlink(target, profile)
+        symlinked = self.rt("listener", "start", "--agent", "claude", "--from-plan")
+        self.assertNotEqual(symlinked.returncode, 0)
+        self.assertIn("must not be a symlink", symlinked.stderr)
+        self.assertFalse(os.path.exists(self.pid_path()))
+
+    def test_listener_from_plan_refuses_unattested_legacy_v1_plan(self):
+        _profile, _runner, plan_path = self._create_stopped_replay_plan()
+        with open(plan_path, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        plan.pop("runner_identity")
+        with open(plan_path, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        result = self.rt("listener", "start", "--agent", "claude", "--from-plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lacks versioned identity", result.stderr)
+        self.assertIn("explicit listener start", result.stderr)
+        self.assertFalse(os.path.exists(self.pid_path()))
 
     def test_t3_start_refuses_live_pid_without_restart(self):
         # RFC 047 PR1 test 3 (RFC Phase-2 test 2): one listener per agent lane.
@@ -10444,6 +12209,11 @@ class TestRuntimeCompanion(CLIBase):
         self.assertTrue(row["response_saved"])
         self.assertEqual(row["response_sha256"], hashlib.sha256(response).hexdigest())
         self.assertEqual(row["response_bytes"], len(response))
+        self.assertTrue(row["child_started"])
+        self.assertEqual(row["child_returncode"], 0)
+        self.assertEqual(row["child_disposition"], "exited_zero_output")
+        self.assertFalse(row["child_timed_out"])
+        self.assertFalse(row["child_output_truncated"])
         durable = json.dumps(row, ensure_ascii=False)
         self.assertNotIn("ForeignProject", durable)
         self.assertNotIn("secret-value-12345678", durable)
@@ -10496,6 +12266,11 @@ class TestRuntimeCompanion(CLIBase):
         with open(ledger, encoding="utf-8") as fh:
             row = json.loads(next(line for line in fh if line.strip()))
         self.assertEqual(row["classification"], "launch_refused")
+        self.assertFalse(row["child_started"])
+        self.assertIsNone(row["child_returncode"])
+        self.assertEqual(row["child_disposition"], "not_started")
+        self.assertFalse(row["child_timed_out"])
+        self.assertFalse(row["child_output_truncated"])
         self.assertEqual(row["compiled_argv_sha256"], "")
         self.assertEqual(row["response_sink"], "invalid")
         self.assertNotIn(self.d, json.dumps(row))
@@ -10506,6 +12281,23 @@ class TestRuntimeCompanion(CLIBase):
             "completed", "timed_out", "launch_refused", "provider_failed",
             "invalid_output",
         })
+        self.assertEqual(runtime.CONSULT_CHILD_DISPOSITIONS, {
+            "not_started", "timed_out", "exited_zero_empty", "exited_zero_output",
+            "exited_nonzero_empty", "exited_nonzero_output",
+        })
+        legacy = {
+            "schema": runtime.CONSULT_SCHEMA,
+            "classification": "completed",
+        }
+        self.assertTrue(runtime.consult_record_is_valid(legacy))
+        self.assertFalse(runtime.consult_record_is_valid(legacy, require_child=True))
+        current = dict(legacy, child_started=True, child_returncode=0,
+                       child_timed_out=False, child_output_truncated=False,
+                       child_disposition="exited_zero_output",
+                       response_truncated=False)
+        self.assertTrue(runtime.consult_record_is_valid(current, require_child=True))
+        current["child_disposition"] = "not_started"
+        self.assertFalse(runtime.consult_record_is_valid(current, require_child=True))
         root = os.path.realpath(self.d)
         timeout = runtime.run_consult_process(
             [sys.executable, "-c", "import time; print('partial'); time.sleep(2)"],
@@ -10525,6 +12317,91 @@ class TestRuntimeCompanion(CLIBase):
         )
         self.assertEqual(len(bounded["stdout"]), 64)
         self.assertTrue(bounded["truncated"])
+
+    def test_consult_ledger_distinguishes_empty_child_dispositions_without_stderr(self):
+        self.init()
+        self.assertEqual(self.rt("init").returncode, 0)
+        provider = os.path.join(self.d, "consult-disposition-provider.py")
+        with open(provider, "w", encoding="utf-8") as fh:
+            fh.write(
+                "import sys, time\n"
+                "mode = sys.argv[1]\n"
+                "if mode == 'zero-empty': raise SystemExit(0)\n"
+                "if mode == 'nonzero-empty':\n"
+                "    sys.stderr.write('stderr-secret-must-not-persist')\n"
+                "    raise SystemExit(7)\n"
+                "if mode == 'timeout': time.sleep(3)\n"
+                "if mode == 'text': sys.stdout.write('APPROVE')\n"
+                "if mode == 'whitespace': sys.stdout.write('  ' + chr(10))\n"
+                "if mode == 'bounded': sys.stdout.write('x' * 4096)\n"
+            )
+        registry_path = os.path.join(self.d, ".m8shift", "providers.json")
+        brief = os.path.join(self.d, "brief.txt")
+        with open(brief, "w", encoding="utf-8") as fh:
+            fh.write("review")
+        ledger = os.path.join(self.d, ".m8shift", "runtime", "consults.jsonl")
+
+        cases = (
+            ("zero-empty", 5, 4096, 65, "invalid_output", 0,
+             "exited_zero_empty", False, False, True),
+            ("nonzero-empty", 5, 4096, 1, "provider_failed", 7,
+             "exited_nonzero_empty", False, False, True),
+            ("timeout", 1, 4096, 124, "timed_out", None,
+             "timed_out", True, False, True),
+            ("text", 5, 4096, 0, "completed", 0,
+             "exited_zero_output", False, False, False),
+            ("whitespace", 5, 4096, 65, "invalid_output", 0,
+             "exited_zero_output", False, False, True),
+            ("bounded", 5, 64, 0, "completed", 0,
+             "exited_zero_output", False, True, False),
+        )
+        for (mode, timeout, maximum, cli_rc, classification, child_rc,
+             disposition, timed_out, truncated, empty_note) in cases:
+            with self.subTest(mode=mode):
+                registry = {
+                    "schema": "m8shift.providers.v1", "examples": [],
+                    "agents": [{
+                        "name": "peer", "provider": "fixture", "mode": "local",
+                        "anchor": "AGENTS.md", "model": "UNSET",
+                        "argv": [sys.executable, provider, mode, "$M8SHIFT_PROMPT"],
+                        "capabilities": ["review"], "requires_env": [],
+                        "env_allowlist": [], "permissions": "read-only",
+                        "consult": {
+                            "argv": [sys.executable, provider, mode,
+                                     "--sandbox=read_only", "$M8SHIFT_PROMPT"],
+                            "attestation": {
+                                "sandbox": "read_only",
+                                "sandbox_argv": ["--sandbox=read_only"],
+                                "cwd": "$M8SHIFT_ROOT", "prompt": "literal",
+                            },
+                        },
+                    }],
+                }
+                with open(registry_path, "w", encoding="utf-8") as fh:
+                    json.dump(registry, fh)
+                result = self.rt(
+                    "consult", "--from", "codex", "--to", "peer",
+                    "--brief-file", brief, "--timeout", str(timeout),
+                    "--max-output-bytes", str(maximum),
+                )
+                self.assertEqual(result.returncode, cli_rc,
+                                 result.stdout + result.stderr)
+                with open(ledger, encoding="utf-8") as fh:
+                    row = json.loads([line for line in fh if line.strip()][-1])
+                self.assertEqual(row["classification"], classification)
+                self.assertTrue(row["child_started"])
+                if child_rc is not None:
+                    self.assertEqual(row["child_returncode"], child_rc)
+                elif timed_out:
+                    self.assertIsInstance(row["child_returncode"], (int, type(None)))
+                self.assertEqual(row["child_disposition"], disposition)
+                self.assertEqual(row["child_timed_out"], timed_out)
+                self.assertEqual(row["child_output_truncated"], truncated)
+                if empty_note:
+                    self.assertIn("an empty review is not a verdict", result.stderr)
+                durable = json.dumps(row, ensure_ascii=False)
+                self.assertNotIn("stderr-secret-must-not-persist", durable)
+                self.assertNotIn("stderr", row)
 
     def test_consult_mid_run_response_symlink_records_one_invalid_output(self):
         self.init()
@@ -11336,6 +13213,146 @@ class TestChecksumManifestCoverage(unittest.TestCase):
 
 # ───────────────────────── installer verify default ─────────────────────────
 
+# #390 — a gate witness may fail; it must never hang the gate. On one host the
+# global suite stalled inside an unbounded installer communicate() and produced
+# NO verdict at all, which reads as "still running" forever. Every installer
+# child now runs through this bounded, hermetic helper.
+INSTALLER_RUN_TIMEOUT_S = 120
+
+
+def run_installer(argv, *, timeout=None, env=None, cwd=None, check=False,
+                  capture_output=True, text=True, stdin=None):
+    """Bounded, hermetic runner for installer-family witnesses (#390).
+
+    - bounded: a stalled child fails THIS witness loudly (TimeoutExpired) inside
+      the bound instead of hanging the whole suite with no verdict;
+    - group kill: on timeout the WHOLE process group is killed, so a grandchild
+      holding the pipe ends cannot re-block the post-kill communicate();
+    - hermetic: inherited M8SHIFT_* relay identity is stripped from the child
+      environment — measured on the affected host as worsening the stall, and
+      an installer under test must not see the harness's relay identity anyway.
+    """
+    if timeout is None:
+        timeout = INSTALLER_RUN_TIMEOUT_S
+    child_env = dict(os.environ) if env is None else dict(env)
+    # Subtraction by bare prefix went transparent immediately: the installer
+    # CONFIGURES itself through M8SHIFT_INSTALL_*/M8SHIFT_HEADROOM_* variables.
+    # Keep those two documented input families; strip every other M8SHIFT_*
+    # (the harness's relay identity: AGENT/ROOT/BIN/RUN_ID/...).
+    child_env = {k: v for k, v in child_env.items()
+                 if not k.startswith("M8SHIFT_")
+                 or k.startswith(("M8SHIFT_INSTALL_", "M8SHIFT_HEADROOM_"))}
+    pipe = subprocess.PIPE if capture_output else None
+    proc = subprocess.Popen(argv, stdin=stdin, stdout=pipe, stderr=pipe,
+                            text=text, env=child_env, cwd=cwd,
+                            start_new_session=(os.name != "nt"))
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:  # pragma: no cover - exercised only on Windows hosts
+                proc.kill()
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            out, err = "", ""
+        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
+    result = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    if check and proc.returncode:
+        raise subprocess.CalledProcessError(
+            proc.returncode, argv, output=out, stderr=err)
+    return result
+
+
+class TestInstallerGateIntegrity(unittest.TestCase):
+    """#390 — the helper's three guarantees, each with its own witness."""
+
+    def test_a_stalled_child_fails_loudly_within_the_bound(self):
+        before = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_installer(["bash", "-c", "sleep 30"], timeout=1)
+        self.assertLess(time.monotonic() - before, 10,
+                        "the stalled child must fail loudly, never linger")
+
+    def test_a_grandchild_holding_the_pipe_cannot_reblock_the_kill(self):
+        """The measured stall shape: the direct child exits or dies but a
+        grandchild inherited the pipe ends. Returning loudly is not enough —
+        the grandchild must be DEAD, or it leaks into the very next witness
+        and recreates the order interaction this ticket is about."""
+        pidfile = os.path.join(tempfile.mkdtemp(prefix="m8shift-gate-"), "pid")
+        self.addCleanup(shutil.rmtree, os.path.dirname(pidfile), True)
+        before = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_installer(
+                ["bash", "-c",
+                 "(sleep 30; echo late) & echo $! > %s; sleep 30" % pidfile],
+                timeout=1)
+        self.assertLess(time.monotonic() - before, 10,
+                        "the stalled group must fail loudly, never linger")
+        with open(pidfile, encoding="utf-8") as fh:
+            grandchild = int(fh.read().strip())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(grandchild, signal.SIGKILL)   # leave no leak behind the red
+            self.fail("the grandchild survived the group kill and would leak "
+                      "into subsequent witnesses")
+
+    def test_the_default_bound_is_finite_and_the_env_is_hermetic(self):
+        self.assertLessEqual(INSTALLER_RUN_TIMEOUT_S, 300)
+        with mock.patch.dict(os.environ, {"M8SHIFT_AGENT": "claude",
+                                          "M8SHIFT_ROOT": "/probe",
+                                          "M8SHIFT_BIN": "probe"}):
+            r = run_installer(["bash", "-c", "env"])
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("M8SHIFT_", r.stdout)
+
+    def test_an_explicit_env_is_stripped_of_relay_identity_too(self):
+        env = dict(os.environ)
+        env["M8SHIFT_AGENT"] = "claude"
+        env["M8SHIFT_GATE_PROBE_MARKER"] = "kept-only-if-not-m8shift"
+        env["GATE_PROBE_MARKER"] = "yes"
+        r = run_installer(["bash", "-c", "env"], env=env)
+        self.assertIn("GATE_PROBE_MARKER=yes", r.stdout)
+        self.assertNotIn("M8SHIFT_AGENT", r.stdout)
+        self.assertNotIn("M8SHIFT_GATE_PROBE_MARKER", r.stdout)
+
+    def test_no_bare_subprocess_run_remains_in_the_installer_classes(self):
+        """Closed-boundary guard: a future installer witness that bypasses the
+        helper re-creates the unbounded hang. Source-level on purpose — the
+        property IS 'no unbounded call site exists in these classes'.
+
+        The guarded set is INVENTORIED, never hand-listed: the first version
+        enumerated four classes and silently missed the fifth
+        (_InstallerUpgradeDelegateTests) — a hand-written closed list, the exact
+        defect family this guard exists to prevent. Every class in this module
+        whose name carries 'Installer' is in scope, this guard class included
+        (the pattern is built by concatenation so its own source stays clean),
+        and the inventory floor makes an accidentally emptied family loud."""
+        pattern = "subprocess" + ".run("
+        module = sys.modules[type(self).__module__]
+        family = {}
+        for name, obj in vars(module).items():
+            if isinstance(obj, type) and "Installer" in name:
+                family[id(obj)] = obj
+        self.assertGreaterEqual(
+            len(family), 6,
+            "the installer-family inventory collapsed; this guard would be a "
+            "green that guards nothing")
+        for cls in family.values():
+            with self.subTest(cls=cls.__name__):
+                self.assertNotIn(pattern, inspect.getsource(cls))
+
+
 class TestInstallerVerifyDefault(unittest.TestCase):
     """install.sh verifies downloads by DEFAULT (mirrors install.ps1); --no-verify or a
     falsey M8SHIFT_INSTALL_VERIFY opts out, --verify/--checksums force it on. A tampered
@@ -11356,7 +13373,7 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         env = dict(os.environ)
         if env_extra:
             env.update(env_extra)
-        return subprocess.run(
+        return run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-worktree", "--no-init", *extra_args],
@@ -11388,7 +13405,7 @@ class TestInstallerVerifyDefault(unittest.TestCase):
         self.assertEqual(self._rc(["--no-verify"], {"M8SHIFT_INSTALL_VERIFY": "1"}), 0)
 
     def test_bash_syntax_ok(self):
-        result = subprocess.run(
+        result = run_installer(
             ["bash", "-n", os.path.join(REPO, "install.sh")],
             capture_output=True, text=True,
         )
@@ -11409,7 +13426,7 @@ class _InstallerUpgradeDelegateTests(unittest.TestCase):
             shutil.copy(os.path.join(REPO, name), self.src)
             shutil.copy(os.path.join(REPO, name), self.target)
         clean_env = {k: v for k, v in os.environ.items() if k != "M8SHIFT_ROOT"}
-        subprocess.run([sys.executable, os.path.join(self.target, "m8shift.py"),
+        run_installer([sys.executable, os.path.join(self.target, "m8shift.py"),
                         "init", "--agents", "claude,codex"], cwd=self.target,
                        check=True, capture_output=True, text=True, env=clean_env)
         # #252/v4: fixture versions are derived from VERSION, never pinned to a
@@ -11453,7 +13470,7 @@ class _InstallerUpgradeDelegateTests(unittest.TestCase):
                     out.write("%s  %s\n" % (hashlib.sha256(fh.read()).hexdigest(), name))
 
     def _run(self):
-        return subprocess.run(
+        return run_installer(
             ["bash", os.path.join(REPO, "install.sh"), "--upgrade",
              "--dir", self.target, "--source-dir", self.src, "--no-rtk"],
             capture_output=True, text=True,
@@ -11547,7 +13564,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         parent = tempfile.mkdtemp(prefix="m8shift-dry-parent-")
         self.addCleanup(shutil.rmtree, parent, True)
         target = os.path.join(parent, "target")
-        result = subprocess.run(
+        result = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--with-rtk", "--with-headroom", "--dry-run"],
@@ -11587,7 +13604,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         os.chmod(uname, 0o755)
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
-        result = subprocess.run(
+        result = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-verify", "--no-worktree", "--no-runtime", "--no-context", "--no-init", "--with-headroom"],
@@ -11618,7 +13635,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         def rc(extra):
             target = tempfile.mkdtemp(prefix="m8shift-bd-")
             self.addCleanup(shutil.rmtree, target, True)
-            return subprocess.run(
+            return run_installer(
                 ["bash", os.path.join(REPO, "install.sh"), "--dir", target,
                  "--base-url", "file://" + bare, "--no-worktree", "--no-runtime", "--no-context", "--no-init", *extra],
                 capture_output=True, text=True).returncode
@@ -11656,7 +13673,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         os.chmod(rtk, 0o755)
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
-        result = subprocess.run(
+        result = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-verify", "--no-worktree", "--no-init", "--with-rtk"],
@@ -11686,7 +13703,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         # Same reason as _fake_uname_and_cargo_env: the OS python3 on this PATH
         # may predate the supported floor, and this case is about RTK opt-in.
         env["PYTHON"] = sys.executable
-        result = subprocess.run(
+        result = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-verify", "--no-worktree", "--no-init", "--no-rtk"],
@@ -11722,7 +13739,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         target = tempfile.mkdtemp(prefix="m8shift-cargo-no-flag-")
         self.addCleanup(shutil.rmtree, target, True)
         marker = os.path.join(target, "cargo-called.txt")
-        result = subprocess.run(
+        result = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-verify", "--no-worktree", "--no-init", "--with-rtk"],
@@ -11749,7 +13766,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         env["PATH"] = bindir + os.pathsep + os.pathsep.join(
             p for p in ("/usr/bin", "/bin") if os.path.isdir(p))
         env["PYTHON"] = sys.executable
-        result = subprocess.run(
+        result = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-verify", "--no-worktree", "--with-rtk"],
@@ -11769,7 +13786,7 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         target = tempfile.mkdtemp(prefix="m8shift-cargo-allowed-")
         self.addCleanup(shutil.rmtree, target, True)
         marker = os.path.join(target, "cargo-called.txt")
-        result = subprocess.run(
+        result = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src,
              "--no-verify", "--no-worktree", "--no-init", "--with-rtk", "--allow-source-build"],
@@ -11802,7 +13819,7 @@ class TestInstallerMultiOSCore(unittest.TestCase):
     def test_help_prints_prerequisites_and_writes_nothing(self):
         cwd = tempfile.mkdtemp(prefix="m8shift-help-")
         self.addCleanup(shutil.rmtree, cwd, True)
-        r = subprocess.run(["bash", os.path.join(REPO, "install.sh"), "--help"],
+        r = run_installer(["bash", os.path.join(REPO, "install.sh"), "--help"],
                            cwd=cwd, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Prerequisites:", r.stdout)
@@ -11814,7 +13831,7 @@ class TestInstallerMultiOSCore(unittest.TestCase):
         parent = tempfile.mkdtemp(prefix="m8shift-mos-dry-")
         self.addCleanup(shutil.rmtree, parent, True)
         target = os.path.join(parent, "target")
-        r = subprocess.run(
+        r = run_installer(
             ["bash", os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src, "--dry-run"],
             capture_output=True, text=True)
@@ -11842,7 +13859,7 @@ class TestInstallerMultiOSCore(unittest.TestCase):
         env = dict(os.environ)
         env["PATH"] = bindir
         env["PYTHON"] = sys.executable
-        r = subprocess.run(
+        r = run_installer(
             [bash, os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src],
             capture_output=True, text=True, env=env)
@@ -11872,7 +13889,7 @@ class TestInstallerMultiOSCore(unittest.TestCase):
         target = os.path.join(parent, "target")
         env = {k: v for k, v in os.environ.items() if k != "PYTHON"}
         env["PATH"] = bindir                       # no python3 anywhere
-        r = subprocess.run(
+        r = run_installer(
             [bash, os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src, "--dry-run"],
             capture_output=True, text=True, env=env)
@@ -11883,7 +13900,7 @@ class TestInstallerMultiOSCore(unittest.TestCase):
         self.assertIn("No files were downloaded or written.", r.stdout)
         self.assertFalse(os.path.exists(target))
         # non-dry-run behavior is unchanged: same host, no plan, hard failure
-        r = subprocess.run(
+        r = run_installer(
             [bash, os.path.join(REPO, "install.sh"),
              "--dir", target, "--base-url", "file://" + self.src],
             capture_output=True, text=True, env=env)
@@ -11905,7 +13922,7 @@ class TestInstallerMultiOSCore(unittest.TestCase):
         env["PYTHON"] = sys.executable
         master, slave = os.openpty()
         try:
-            r = subprocess.run(
+            r = run_installer(
                 [bash, os.path.join(REPO, "install.sh"),
                  "--dir", os.path.join(bindir, "t1"),
                  "--base-url", "file://" + self.src, "--dry-run"],
@@ -11915,7 +13932,7 @@ class TestInstallerMultiOSCore(unittest.TestCase):
             os.close(slave)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("rtk: ask — will prompt", r.stdout)
-        r = subprocess.run(
+        r = run_installer(
             [bash, os.path.join(REPO, "install.sh"),
              "--dir", os.path.join(bindir, "t2"),
              "--base-url", "file://" + self.src, "--dry-run"],
@@ -12114,13 +14131,13 @@ class TestInstallerPs1Parity(unittest.TestCase):
             "[System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$t,[ref]$e)|Out-Null;"
             "exit $e.Count" % script.replace("'", "''")
         )
-        r = subprocess.run(["pwsh", "-NoProfile", "-Command", parse_cmd],
+        r = run_installer(["pwsh", "-NoProfile", "-Command", parse_cmd],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         parent = tempfile.mkdtemp(prefix="m8shift-ps1-dry-")
         self.addCleanup(shutil.rmtree, parent, True)
         target = os.path.join(parent, "target")
-        r = subprocess.run(["pwsh", "-NoProfile", "-File", script,
+        r = run_installer(["pwsh", "-NoProfile", "-File", script,
                             "-Dir", target, "-DryRun"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -12144,10 +14161,10 @@ class TestInstallerPs1Parity(unittest.TestCase):
             for name in files:
                 body = open(os.path.join(source, name), "rb").read()
                 out.write("%s  %s\n" % (hashlib.sha256(body).hexdigest(), name))
-        subprocess.run([sys.executable, os.path.join(source, "m8shift.py"), "init"],
+        run_installer([sys.executable, os.path.join(source, "m8shift.py"), "init"],
                        cwd=target, check=True, capture_output=True, text=True)
         relay = open(os.path.join(target, "M8SHIFT.md"), "rb").read()
-        r = subprocess.run(["pwsh", "-NoProfile", "-File", os.path.join(REPO, "install.ps1"),
+        r = run_installer(["pwsh", "-NoProfile", "-File", os.path.join(REPO, "install.ps1"),
                             "-Upgrade", "-Dir", target, "-SourceDir", source],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -13046,7 +15063,8 @@ class TestRFC040UsagePRA(CLIBase):
         by_name = {a["name"]: a for a in doc["adapters"]}
         self.assertEqual(set(by_name), {
             "claude-jsonl-scan", "claude-quota-keychain",
-            "codex-jsonl-scan", "codex-ratelimits", "tokscale-spend",
+            "codex-jsonl-scan", "codex-ratelimits", "agy-antigravity-quota",
+            "tokscale-spend",
         })
         for entry in by_name.values():
             self.assertFalse(entry["enabled"])          # DISABLED examples
@@ -13059,6 +15077,8 @@ class TestRFC040UsagePRA(CLIBase):
         self.assertIn("~/.codex/sessions", by_name["codex-jsonl-scan"]["scan_roots"])
         self.assertEqual(by_name["codex-ratelimits"]["kind"], "cli_json")
         self.assertIsInstance(by_name["codex-ratelimits"]["command"], list)
+        self.assertEqual(by_name["agy-antigravity-quota"]["command"][-2:],
+                         ["--bucket-prefix", "gemini-"])
         # Disabled means inert: snapshot performs no adapter runs/scans and writes no usage ledger.
         snap = self.rt("usage", "snapshot", "--json")
         self.assertEqual(snap.returncode, 0, snap.stdout + snap.stderr)
@@ -13565,7 +15585,7 @@ class TestRFC040UsagePRA(CLIBase):
         rows = {a["name"]: a for a in json.loads(r.stdout)["adapters"]}
         self.assertEqual(set(rows), {"claude-jsonl-scan", "claude-quota-keychain",
                                      "codex-jsonl-scan", "codex-ratelimits",
-                                     "tokscale-spend"})
+                                     "agy-antigravity-quota", "tokscale-spend"})
         for row in rows.values():
             self.assertFalse(row["enabled"])            # every scaffold example ships disabled
             self.assertFalse(row["identity_pinned"])
@@ -14692,6 +16712,1103 @@ class TestRFC040CodexRateLimitsAdapter(CLIBase):
         self.assertEqual(mod.main(out=out, read_limits=lambda: None), 0)
 
 
+class TestTurnReservation(unittest.TestCase):
+    """#320 — a turn is reserved before the expensive work, and the reservation is
+    given back when that work did not happen.
+
+    In the recorded incident a listener and an interactive session of the same
+    identity both took charge of one incoming turn: the pen mutex serialises
+    writes but reserved nothing while either was still reasoning."""
+
+    def relay(self):
+        root = tempfile.mkdtemp(prefix="m8shift-reserve-")
+        self.addCleanup(shutil.rmtree, root, True)
+        shutil.copy(os.path.join(REPO, "m8shift.py"), os.path.join(root, "m8shift.py"))
+        subprocess.run([sys.executable, "m8shift.py", "init", "--agents", "claude,codex"],
+                       cwd=root, capture_output=True, text=True)
+        return root
+
+    def core(self, root, *args):
+        return subprocess.run([sys.executable, "m8shift.py", *args],
+                              cwd=root, capture_output=True, text=True, timeout=30)
+
+    def lock(self, root):
+        out = self.core(root, "status", "--for", "claude").stdout
+        fields = {}
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in ("state", "holder", "turn"):
+                fields[parts[0]] = parts[1]
+        return fields
+
+    def awaiting_claude(self, root):
+        self.core(root, "claim", "codex")
+        self.core(root, "append", "codex", "--to", "claude",
+                  "--ask", "work", "--done", "setup")
+
+    def runtime(self, name="m8shift_runtime_reserve"):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        return runtime
+
+    def test_unclaim_restores_the_awaiting_state_without_rerouting_the_turn(self):
+        """`release` hands off: measured, releasing a turn addressed to claude
+        leaves the relay AWAITING_CODEX, so the turn changes recipient — one of the
+        harms this ticket names. A reservation needs the opposite."""
+        root = self.relay()
+        self.awaiting_claude(root)
+        before = self.lock(root)
+        self.assertEqual(before["state"], "AWAITING_CLAUDE")
+        self.core(root, "claim", "claude")
+        self.assertEqual(self.lock(root)["state"], "WORKING_CLAUDE")
+        result = self.core(root, "unclaim", "claude", "--reason", "work not done")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        after = self.lock(root)
+        self.assertEqual(after["state"], "AWAITING_CLAUDE")
+        self.assertEqual(after["holder"], "claude")
+        self.assertEqual(after["turn"], before["turn"], "the turn must not move")
+
+    def test_release_reroutes_where_unclaim_does_not(self):
+        """The control that gives the test above its meaning: without it, the
+        restoration could be a property of any handback."""
+        root = self.relay()
+        self.awaiting_claude(root)
+        self.core(root, "claim", "claude")
+        self.core(root, "release", "claude", "--to", "codex", "--force",
+                  "--reason", "handoff")
+        self.assertEqual(self.lock(root)["state"], "AWAITING_CODEX")
+
+    def test_unclaim_refuses_anyone_but_the_untouched_holder(self):
+        root = self.relay()
+        self.awaiting_claude(root)
+        not_holder = self.core(root, "unclaim", "claude", "--reason", "x")
+        self.assertNotEqual(not_holder.returncode, 0)
+        self.assertIn("does not hold a working lock", not_holder.stderr)
+        self.core(root, "claim", "claude")
+        no_reason = self.core(root, "unclaim", "claude")
+        self.assertNotEqual(no_reason.returncode, 0)
+        self.assertIn("--reason is required", no_reason.stderr)
+
+    def test_release_after_child_append_observes_unclaim_refusal(self):
+        """A child that authored the turn has consumed the reservation.
+
+        The listener's cleanup must report that there is nothing to release, and
+        the core refusal is observed explicitly: merely surviving the cleanup
+        would not prove that an advanced turn cannot be undone.
+        """
+        root = self.relay()
+        self.awaiting_claude(root)
+        before = self.lock(root)
+        self.assertEqual(self.core(root, "claim", "claude").returncode, 0)
+        child = self.core(root, "append", "claude", "--to", "codex",
+                          "--ask", "review", "--done", "child authored the turn")
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+
+        runtime = self.runtime("m8shift_runtime_reserve_advanced")
+        with mock.patch.object(runtime, "HERE", root), \
+             mock.patch.object(runtime, "CORE_PATH", os.path.join(root, "m8shift.py")):
+            released = runtime.release_unused_reservation("claude", before["turn"])
+        self.assertFalse(released, "an authored turn is no longer an unused reservation")
+
+        refused = self.core(
+            root, "unclaim", "claude", "--reason", "listener cleanup after child")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("does not hold a working lock", refused.stderr)
+        after = self.lock(root)
+        self.assertEqual(after["state"], "AWAITING_CODEX")
+        self.assertEqual(int(after["turn"]), int(before["turn"]) + 1)
+
+    def test_only_a_lane_that_authors_a_turn_reserves(self):
+        """A notify-only lane wakes a human and a review-delivery lane produces an
+        artifact the coordinator must consume. Neither writes a turn, and holding
+        the pen for them is the daemon dependency requirement 6 forbids. Both
+        exclusions come from tests that failed the first attempt."""
+        matrix = (
+            ("author", False, "none", 1),
+            ("notify-only", True, "none", 0),
+            ("review-artifact", False, "artifact", 0),
+        )
+        for lane, notify_only, review_delivery, expected_reservations in matrix:
+            with self.subTest(lane=lane):
+                runtime = self.runtime("m8shift_runtime_reserve_" + lane.replace("-", "_"))
+                profile = {
+                    "start_on_idle": False,
+                    "review_delivery": review_delivery,
+                }
+                with mock.patch.object(runtime, "read_listener_state", return_value={}), \
+                     mock.patch.object(runtime, "write_listener_state"), \
+                     mock.patch.object(runtime, "read_relay_lock_fields", return_value=(
+                         {"state": "AWAITING_CLAUDE", "holder": "claude", "turn": "7"},
+                         "relay snapshot")), \
+                     mock.patch.object(runtime, "maybe_notify_stranded"), \
+                     mock.patch.object(runtime, "review_delivery_pending_for",
+                                       return_value=False), \
+                     mock.patch.object(runtime, "emit_notification_nonfatal"), \
+                     mock.patch.object(runtime, "read_usage_hold", return_value=(None, "")), \
+                     mock.patch.object(runtime, "new_listener_run_id",
+                                       return_value="matrix-" + lane), \
+                     mock.patch.object(runtime, "listener_runner_argv",
+                                       return_value=["runner"]), \
+                     mock.patch.object(runtime, "reserve_turn_before_launch",
+                                       return_value=(True, "")) as reserve, \
+                     mock.patch.object(runtime, "release_unused_reservation",
+                                       return_value=False), \
+                     mock.patch.object(runtime.subprocess, "Popen",
+                                       side_effect=OSError("matrix launch stop")), \
+                     mock.patch.object(runtime, "listener_run_classification",
+                                       return_value=""), \
+                     mock.patch.object(runtime, "listener_emit"), \
+                     mock.patch.object(runtime, "remove_own_listener_pid"), \
+                     mock.patch.object(runtime.time, "sleep"):
+                    rc = runtime.run_listener_loop(
+                        "claude", profile, "runner", poll=0.01, max_ticks=1,
+                        max_retries=3, max_backoff=1, notify_only=notify_only)
+                self.assertEqual(rc, 0)
+                self.assertEqual(
+                    reserve.call_count, expected_reservations,
+                    "%s lane reservation count" % lane)
+
+class TestEphemeralRunnerRefusal(unittest.TestCase):
+    """#283 — a lane pinned to a git worktree destroys itself later.
+
+    One lane sat HALTED for seven days and twenty hours after routine worktree
+    cleanup removed the directory its runner lived in. The halt behaved correctly:
+    it failed closed, ran nothing, wrote the reason. What was missing was any
+    signal at ARMING time, the only moment the choice can still change."""
+
+    def runtime(self, name="m8shift_runtime_ephemeral"):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def git(self, root, *args):
+        return subprocess.run(["git", *args], cwd=root, capture_output=True,
+                              text=True, env=dict(os.environ,
+                                                  GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                                                  GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+
+    def incident_relay(self):
+        """The exact shape of the incident: a relay that is a git repository, with
+        a linked worktree inside it holding a copy of the runner."""
+        root = tempfile.mkdtemp(prefix="m8shift-ephemeral-")
+        self.addCleanup(shutil.rmtree, root, True)
+        for name in ("m8shift.py", "m8shift-runtime.py"):
+            shutil.copy(os.path.join(REPO, name), os.path.join(root, name))
+        os.makedirs(os.path.join(root, "examples"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "examples", "headless_runner.py"),
+                    os.path.join(root, "examples", "headless_runner.py"))
+        self.git(root, "init", "-q", ".")
+        self.git(root, "add", "-A")
+        self.git(root, "commit", "-qm", "init")
+        subprocess.run([sys.executable, "m8shift.py", "init", "--agents", "claude,codex"],
+                       cwd=root, capture_output=True, text=True)
+        self.git(root, "worktree", "add", "-q", "--detach", "wt-tmp", "HEAD")
+        return root, os.path.join(root, "wt-tmp", "examples", "headless_runner.py")
+
+    def start(self, root, runner, *extra):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "start", "--agent",
+             "claude", "--notify-only", "--backend", "local", "--runner", runner,
+             "--poll-interval", "0.2", *extra],
+            cwd=root, capture_output=True, text=True, timeout=60)
+
+    def test_a_runner_inside_a_worktree_is_refused_at_arming_time(self):
+        root, runner = self.incident_relay()
+        result = self.start(root, runner)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        combined = result.stdout + result.stderr
+        self.assertIn("lives inside the git worktree", combined)
+        self.assertIn("git worktree prune", combined)
+        self.assertIn("--allow-ephemeral-runner", combined)
+
+    def test_the_escape_hatch_survives_the_re_exec(self):
+        """The detached child re-runs `listener start --foreground`, so a refusal
+        the parent accepted fires again there and kills the lane at birth. An
+        escape hatch that does not survive the re-exec is not an escape hatch --
+        measured before the fix: the parent accepted, the child refused, no state
+        was ever written."""
+        root, runner = self.incident_relay()
+        self.addCleanup(lambda: subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "stop", "--all"],
+            cwd=root, capture_output=True, text=True, timeout=40))
+        result = self.start(root, runner, "--allow-ephemeral-runner")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("listener started", result.stdout)
+
+    def test_a_runner_outside_any_worktree_is_not_refused(self):
+        """Positive control: without it, a check that refused every runner would
+        pass the test above."""
+        root, _ = self.incident_relay()
+        self.addCleanup(lambda: subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "stop", "--all"],
+            cwd=root, capture_output=True, text=True, timeout=40))
+        runner = os.path.join(root, "examples", "headless_runner.py")
+        result = self.start(root, runner)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_main_working_tree_is_not_reported_as_a_worktree(self):
+        module = self.runtime()
+        root, runner = self.incident_relay()
+        self.assertEqual(
+            module.ephemeral_worktree_root(os.path.join(root, "examples")), "")
+        self.assertEqual(
+            os.path.realpath(module.ephemeral_worktree_root(runner)),
+            os.path.realpath(os.path.join(root, "wt-tmp")))
+
+    def test_a_dead_pid_counts_as_reaped_not_as_an_unmanaged_lane(self):
+        """Reporting "a lane may be running unmanaged" for a pid that is
+        demonstrably dead announces a worse situation than the real one and sends
+        an operator hunting a process that does not exist. Observed against the
+        shipped code before this fix."""
+        module = self.runtime("m8shift_runtime_reaped")
+        source = inspect.getsource(module.cmd_listener_start)
+        self.assertIn("if not reaped and not listener_pid_alive(pid):", source)
+
+
+class TestListenerCensusAndReach(unittest.TestCase):
+    """#370 — lanes are classified by the relay they poll, and reachable by more
+    than the one pid a file happens to record.
+
+    Five listener processes were read as competing on one relay when not one of
+    them watched it, and the recommended remedy would have terminated another
+    instance's lane."""
+
+    def runtime(self, name="m8shift_runtime_census_test"):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def rows(self, *specs):
+        return [{"pid": pid, "argv": argv} for pid, argv in specs]
+
+    def require_host_argv_census(self, module=None):
+        """Skip only integration witnesses whose premise is a readable host ps.
+
+        A denied argv census is already covered as a product state by pure tests;
+        it cannot exercise process discovery, duplicate reach, or tombstones.
+        """
+        module = module or self.runtime("m8shift_runtime_census_host_probe")
+        if module.fleet_upgrade_process_rows() is None:
+            self.skipTest("host denies the ps argv census required by this "
+                          "process-discovery integration witness")
+
+    def test_a_lane_is_classified_by_its_root_not_by_its_agent_name(self):
+        """The whole ticket in one assertion: two processes advertising --agent
+        claude, one serving this relay and one serving another."""
+        module = self.runtime()
+        here = os.path.realpath(module.HERE)
+        census = module.listener_process_census(rows=self.rows(
+            (1, ["python", "m8shift-runtime.py", "listener", "start",
+                 "--agent", "claude", "--project-root", here]),
+            (2, ["python", "m8shift-runtime.py", "listener", "start",
+                 "--agent", "claude", "--project-root", "/somewhere/else"]),
+            (3, ["python", "m8shift-runtime.py", "listener", "start",
+                 "--agent", "claude"]),
+        ))
+        by_pid = {entry["pid"]: entry["scope"] for entry in census}
+        self.assertEqual(by_pid[1], "this_relay")
+        self.assertEqual(by_pid[2], "other_relay")
+        # No root on the command line is its own state: unresolvable is not local.
+        self.assertEqual(by_pid[3], "unresolvable")
+
+    def test_a_process_that_is_not_a_listener_is_not_counted(self):
+        """Positive control. Without it, a classifier that returns every process
+        passes the test above."""
+        module = self.runtime("m8shift_runtime_census_control")
+        census = module.listener_process_census(rows=self.rows(
+            (10, ["python", "m8shift-runtime.py", "doctor"]),
+            (11, ["python", "some-other-tool.py", "listener", "start", "--agent", "claude"]),
+            (12, ["vim", "listener", "start"]),
+        ))
+        self.assertEqual(census, [])
+
+    def test_an_empty_census_and_an_impossible_one_do_not_look_alike(self):
+        """One means no lanes, the other means not measured. A host that cannot
+        expose an argv census returns None, never []."""
+        module = self.runtime("m8shift_runtime_census_absent")
+        self.assertEqual(module.listener_process_census(rows=[]), [])
+        self.assertIsNone(module.listener_process_census(
+            rows=None) if module.fleet_upgrade_process_rows() is None else None)
+
+    def test_ps_fallback_marks_the_census_degraded_and_keeps_the_marker(self):
+        """#380 killer: -axo output is usable positive evidence, never a clean
+        negative census. Mutating the first command back to -axo breaks this."""
+        module = self.runtime("m8shift_runtime_census_degraded")
+        failed = subprocess.CompletedProcess(["ps"], 1, stdout="", stderr="denied")
+        fallback = subprocess.CompletedProcess(
+            ["ps"], 0,
+            stdout=" 42 python m8shift-runtime.py listener start --agent claude\n",
+            stderr="")
+        with mock.patch.object(module.subprocess, "run",
+                               side_effect=[failed, fallback]) as run:
+            rows = module.fleet_upgrade_process_rows()
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [["ps", "-axww", "-o", "pid=,command="],
+             ["ps", "-axo", "pid=,command="]])
+        self.assertTrue(rows.degraded)
+        self.assertEqual(
+            rows.degradation_reason,
+            "ps_axww_unsupported_width_truncation_possible")
+        census = module.listener_process_census(rows=rows)
+        self.assertTrue(census.degraded)
+        self.assertEqual(census[0]["scope"], "unresolvable")
+
+    def test_stop_all_rc_distinguishes_third_party_uncertainty_from_bad_census(self):
+        """A reliable census with an unplaceable third-party row keeps #374's
+        rc 0. A width-degraded census returns rc 1 because --all cannot certify
+        that a truncated local lane is absent."""
+        module = self.runtime("m8shift_runtime_census_stop_policy")
+        args = argparse.Namespace(grace=0, agent=None, all=True, pid=None)
+        unresolved = {
+            "pid": 42, "agent": "claude", "root": "",
+            "scope": "unresolvable", "reason": "no_root_argument",
+        }
+        reliable = module.ProcessCensusRows([unresolved])
+        with mock.patch.object(module, "listener_process_census",
+                               return_value=reliable), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(module.cmd_listener_stop(args), 0)
+
+        degraded = module.ProcessCensusRows(
+            [], degraded=True,
+            degradation_reason="ps_axww_unsupported_width_truncation_possible")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(module, "listener_process_census",
+                               return_value=degraded), \
+                contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(module.cmd_listener_stop(args), 1)
+        self.assertIn("DEGRADED", err.getvalue())
+        self.assertIn("cannot certify this relay clean", err.getvalue())
+
+    def relay(self):
+        root = tempfile.mkdtemp(prefix="m8shift-census-")
+        self.addCleanup(shutil.rmtree, root, True)
+        for name in ("m8shift.py", "m8shift-runtime.py"):
+            shutil.copy(os.path.join(REPO, name), os.path.join(root, name))
+        os.makedirs(os.path.join(root, "examples"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "examples", "headless_runner.py"),
+                    os.path.join(root, "examples", "headless_runner.py"))
+        subprocess.run([sys.executable, "m8shift.py", "init", "--agents", "claude,codex"],
+                       cwd=root, capture_output=True, text=True)
+        return root
+
+    def start(self, root, *extra):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "start", "--agent",
+             "claude", "--notify-only", "--backend", "local",
+             "--poll-interval", "0.2", *extra],
+            cwd=root, capture_output=True, text=True, timeout=40)
+
+    def stop_all(self, root):
+        subprocess.run([sys.executable, "m8shift-runtime.py", "listener", "stop", "--all"],
+                       cwd=root, capture_output=True, text=True, timeout=40)
+
+    def test_start_reports_success_only_once_the_lane_is_observable(self):
+        """Measured before the fix: rc 0 in 0.48s with the state file appearing
+        about a second later, so any caller reading it immediately was racing."""
+        root = self.relay()
+        self.addCleanup(self.stop_all, root)
+        result = self.start(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = os.path.join(root, ".m8shift", "runtime", "listeners", "claude.json")
+        self.assertTrue(os.path.exists(state),
+                        "the state must exist the moment start claims success")
+
+    def test_a_duplicate_is_refused_even_when_no_pid_file_names_it(self):
+        """The case the pre-existing guard cannot see. That guard reads the pid
+        file; delete it -- a cleanup script, or `status --repair` on a file wrongly
+        judged stale -- and a second lane starts for the same agent. This one reads
+        the process table, so it catches what the file cannot.
+
+        An earlier draft removed this guard as redundant. It is not: the two read
+        different evidence and cover different failures."""
+        self.require_host_argv_census()
+        root = self.relay()
+        self.addCleanup(self.stop_all, root)
+        self.assertEqual(self.start(root).returncode, 0)
+        pid_file = os.path.join(root, ".m8shift", "runtime", "listeners", "claude.pid")
+        os.remove(pid_file)
+        blind = self.start(root)
+        self.assertNotEqual(blind.returncode, 0, blind.stdout + blind.stderr)
+        self.assertIn("no live pid file names it", blind.stdout + blind.stderr)
+        # --force is the stated escape and must actually work.
+        self.assertEqual(self.start(root, "--force").returncode, 0)
+
+    def test_the_pid_file_guard_still_covers_the_ordinary_case(self):
+        """Positive control for the test above: with the pid file intact, the older
+        guard fires and names --restart. If this one ever reports the process-table
+        message instead, the two guards have drifted into one."""
+        root = self.relay()
+        self.addCleanup(self.stop_all, root)
+        self.assertEqual(self.start(root).returncode, 0)
+        second = self.start(root)
+        self.assertIn("already running", second.stdout + second.stderr)
+        self.assertIn("--restart", second.stdout + second.stderr)
+
+    def test_a_lane_that_died_on_its_own_is_never_reaped_by_pid(self):
+        """A pid whose process our own wait loop watched die must not be signalled:
+        the OS may have handed that number to something else in the meantime, and
+        the kill would land on a stranger."""
+        module = self.runtime("m8shift_runtime_noinnocent")
+        self.assertFalse(module.should_reap_after_failed_start(False, True))
+        # The control: still alive and still unobservable IS ours to reap,
+        # otherwise the guard would simply disable reaping altogether.
+        self.assertTrue(module.should_reap_after_failed_start(False, False))
+        self.assertFalse(module.should_reap_after_failed_start(True, False))
+
+    def test_deadline_reap_revalidates_identity_before_any_signal(self):
+        """The child can exit after the last alive probe and its pid can be reused
+        before reap. A live replacement is not the process identity we spawned,
+        even when it now leads a group with the same numeric pid."""
+        module = self.runtime("m8shift_runtime_reap_identity")
+        spawned = ("linux:boot-a:100", 4242)
+        reused = ("linux:boot-a:101", 4242)
+        with mock.patch.object(module, "listener_process_identity",
+                               return_value=reused), \
+                mock.patch.object(module, "_posix_signal_group_or_pid") as signal_pid:
+            reaped = module.listener_terminate_group(
+                4242, 0.0, expected_identity=spawned)
+        self.assertFalse(reaped)
+        signal_pid.assert_not_called()
+
+    def test_listener_process_identity_binds_start_time_and_process_group(self):
+        """A pid-only or pgid-only token would accept reuse. The start reference
+        distinguishes incarnations; pgid binds the detached POSIX group we reap."""
+        module = self.runtime("m8shift_runtime_listener_identity")
+        with mock.patch.object(module, "fleet_process_start_ref",
+                               return_value="linux:boot-a:100"), \
+                mock.patch.object(module.os, "name", "posix"), \
+                mock.patch.object(module.os, "getpgid", return_value=4242):
+            self.assertEqual(module.listener_process_identity(4242),
+                             ("linux:boot-a:100", 4242))
+
+    def test_matching_identity_preserves_the_existing_reap_path(self):
+        """Positive control: identity hardening must not disable cleanup of the
+        same detached child and group that start actually created."""
+        module = self.runtime("m8shift_runtime_reap_identity_control")
+        spawned = ("linux:boot-a:100", 4242)
+        with mock.patch.object(module, "listener_process_identity",
+                               return_value=spawned), \
+                mock.patch.object(module.os, "name", "posix"), \
+                mock.patch.object(module, "listener_pid_alive", return_value=False), \
+                mock.patch.object(module, "_posix_signal_group_or_pid",
+                                  return_value=True) as signal_pid:
+            self.assertTrue(module.listener_terminate_group(
+                4242, 0.0, expected_identity=spawned))
+        self.assertEqual(signal_pid.call_args_list, [
+            mock.call(4242, module.signal.SIGTERM),
+            mock.call(4242, module.signal.SIGKILL),
+        ])
+
+    def test_stop_all_stays_idempotent_despite_a_process_it_cannot_place(self):
+        """Its authority is this relay. A third-party process nobody can place must
+        warn on stderr, not poison a deploy loop waiting for rc 0."""
+        self.require_host_argv_census()
+        root = self.relay()
+        self.addCleanup(self.stop_all, root)
+        result = subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "stop", "--all"],
+            cwd=root, capture_output=True, text=True, timeout=40)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_state_without_a_live_process_is_listed_as_a_tombstone(self):
+        """The process table is amnesiac: a lane killed by SIGKILL leaves it with no
+        trace. Its state file is the only evidence that a lane ran and did not stop
+        cleanly, so a census alone would report a clean relay over the remains."""
+        self.require_host_argv_census()
+        root = self.relay()
+        listeners = os.path.join(root, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        with open(os.path.join(listeners, "codex.json"), "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.listener.state.v1", "agent": "codex",
+                       "phase": "polling", "consecutive_failures": 0,
+                       "updated_at": "2026-01-01T00:00:00Z"}, fh)
+        payload = json.loads(subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "list", "--json"],
+            cwd=root, capture_output=True, text=True, timeout=40).stdout)
+        agents = [row["agent"] for row in payload["tombstones"]]
+        self.assertIn("codex", agents)
+
+    def test_a_live_lane_is_not_a_tombstone(self):
+        """Positive control: without it, every state file would qualify and the view
+        would prove nothing about the process being gone."""
+        self.require_host_argv_census()
+        root = self.relay()
+        self.addCleanup(self.stop_all, root)
+        self.assertEqual(self.start(root).returncode, 0)
+        payload = json.loads(subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "list", "--json"],
+            cwd=root, capture_output=True, text=True, timeout=40).stdout)
+        self.assertNotIn("claude", [row["agent"] for row in payload["tombstones"]])
+
+    def test_stop_all_reaches_the_duplicate_that_stop_agent_leaves_behind(self):
+        """The reach that did not exist: `stop --agent` terminates exactly the one
+        pid recorded, so the forced duplicate survives it."""
+        self.require_host_argv_census()
+        root = self.relay()
+        self.addCleanup(self.stop_all, root)
+        self.assertEqual(self.start(root).returncode, 0)
+        # The real shape of an invisible duplicate: a pid file that no longer
+        # reflects reality. Removing it is exactly what happens when a lane is
+        # started from another instance, or when a stale file is repaired away
+        # while the process it named is still running.
+        os.remove(os.path.join(root, ".m8shift", "runtime", "listeners", "claude.pid"))
+        self.assertEqual(self.start(root, "--force").returncode, 0)
+        listed = subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "list", "--json"],
+            cwd=root, capture_output=True, text=True, timeout=40)
+        payload = json.loads(listed.stdout)
+        local = [row for row in payload["processes"] if row["scope"] == "this_relay"]
+        self.assertGreaterEqual(len(local), 2, listed.stdout)
+        subprocess.run([sys.executable, "m8shift-runtime.py", "listener", "stop",
+                        "--agent", "claude"], cwd=root, capture_output=True,
+                       text=True, timeout=40)
+        after_single = json.loads(subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "list", "--json"],
+            cwd=root, capture_output=True, text=True, timeout=40).stdout)
+        still = [r for r in after_single["processes"] if r["scope"] == "this_relay"]
+        self.assertGreaterEqual(len(still), 1,
+                                "stop --agent must leave the duplicate behind; "
+                                "that behaviour is what --all exists to fix")
+        self.stop_all(root)
+        after_all = json.loads(subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "list", "--json"],
+            cwd=root, capture_output=True, text=True, timeout=40).stdout)
+        self.assertEqual(
+            [r for r in after_all["processes"] if r["scope"] == "this_relay"], [],
+            "stop --all must reach every lane on this relay")
+
+
+class TestListenerAttributionAndLifetime(unittest.TestCase):
+    """#370 / #372 — a lane must be able to name the relay it serves, and must not
+    outlive it.
+
+    Five listener processes on this machine were read as competing on one relay
+    when not one of them watched it: the agent name is the most legible thing on a
+    `ps` line and the least decisive. One had been polling a deleted directory for
+    1 day 23 hours."""
+
+    def relay(self, state):
+        """A minimal relay with one listener state file, driven through the CLI."""
+        root = tempfile.mkdtemp(prefix="m8shift-attr-")
+        self.addCleanup(shutil.rmtree, root, True)
+        shutil.copy(os.path.join(REPO, "m8shift.py"), os.path.join(root, "m8shift.py"))
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(root, "m8shift-runtime.py"))
+        subprocess.run([sys.executable, "m8shift.py", "init", "--agents", "claude,codex"],
+                       cwd=root, capture_output=True, text=True)
+        listeners = os.path.join(root, ".m8shift", "runtime", "listeners")
+        os.makedirs(listeners, exist_ok=True)
+        with open(os.path.join(listeners, "claude.json"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        return root
+
+    def status(self, root):
+        return subprocess.run(
+            [sys.executable, "m8shift-runtime.py", "listener", "status", "--agent", "claude"],
+            cwd=root, capture_output=True, text=True)
+
+    def session_of(self, root):
+        out = subprocess.run([sys.executable, "m8shift.py", "status", "--for", "claude"],
+                             cwd=root, capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            if line.strip().startswith("session"):
+                return line.split()[1]
+        return ""
+
+    BASE = {"schema": "m8shift.listener.state.v1", "agent": "claude",
+            "phase": "polling", "consecutive_failures": 0, "last_run_id": "",
+            "last_classification": "", "last_successful_run": "",
+            "start_on_idle": False, "notify_only": True, "review_delivery": "none",
+            "runtime_version": "4.1.0", "updated_at": "2026-07-21T22:17:17Z"}
+
+    def test_a_state_with_no_session_and_no_pid_is_reported_unattributable(self):
+        """The real file that prompted this: written 2026-07-21 under an older
+        schema, carrying neither. It was rendered as a lane for three weeks."""
+        root = self.relay(dict(self.BASE))
+        result = self.status(root)
+        self.assertIn("UNATTRIBUTABLE", result.stdout)
+        self.assertIn("no session and no process id", result.stdout)
+
+    def test_a_state_naming_another_relay_is_reported_orphaned(self):
+        root = self.relay(dict(self.BASE, process_pid=1,
+                               session="20200101T000000Z-deadbeef"))
+        result = self.status(root)
+        self.assertIn("ORPHANED", result.stdout)
+        self.assertIn("20200101T000000Z-deadbeef", result.stdout)
+
+    def test_a_state_naming_this_relay_is_reported_as_neither(self):
+        """Positive control. Without it, ORPHANED and UNATTRIBUTABLE would be proven
+        to appear rather than to discriminate: a classifier that labels everything
+        passes both tests above."""
+        root = self.relay(dict(self.BASE))
+        session = self.session_of(root)
+        self.assertTrue(session, "the fixture relay must have a session")
+        root2 = self.relay(dict(self.BASE, process_pid=1, session=session))
+        # Same session as its own relay: re-read the session of THIS root.
+        state_path = os.path.join(root2, ".m8shift", "runtime", "listeners", "claude.json")
+        with open(state_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["session"] = self.session_of(root2)
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        result = self.status(root2)
+        self.assertNotIn("ORPHANED", result.stdout)
+        self.assertNotIn("UNATTRIBUTABLE", result.stdout)
+
+    def test_a_listener_exits_when_its_root_is_gone_and_waits_when_it_is_not(self):
+        """The distinction is the whole point: a relay being written is neutral and
+        that behaviour is unchanged; a deleted root is not coming back."""
+        root = tempfile.mkdtemp(prefix="m8shift-gone-")
+        shutil.copy(os.path.join(REPO, "m8shift.py"), os.path.join(root, "m8shift.py"))
+        shutil.copy(os.path.join(REPO, "m8shift-runtime.py"),
+                    os.path.join(root, "m8shift-runtime.py"))
+        runtime = os.path.join(root, "m8shift-runtime.py")
+        # A real relay first: the loop only reaches the root check once started,
+        # and `listener start` refuses upfront when there is no relay at all.
+        subprocess.run([sys.executable, "m8shift.py", "init", "--agents", "claude,codex"],
+                       cwd=root, capture_output=True, text=True)
+        # The runner must live inside the relay: a runner resolving to another root
+        # is refused before launch as "mixed relay roots".
+        os.makedirs(os.path.join(root, "examples"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "examples", "headless_runner.py"),
+                    os.path.join(root, "examples", "headless_runner.py"))
+        profile = os.path.join(root, "listener-profile.json")
+        with open(profile, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.listener.profile.v1", "agent": "claude",
+                       "argv": [sys.executable, "-c", "pass"], "cwd": ".",
+                       "env_allowlist": ["HOME", "PATH"], "start_on_idle": False}, fh)
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift-runtime.py", "listener", "start",
+             "--agent", "claude", "--foreground", "--backend", "local",
+             "--cmd-file", "listener-profile.json",
+             "--runner", os.path.join("examples", "headless_runner.py"),
+             "--poll-interval", "0.05", "--max-ticks", "200"],
+            cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            time.sleep(0.8)
+            self.assertIsNone(
+                proc.poll(), "it must still be polling while its relay exists")
+            shutil.rmtree(root, ignore_errors=True)
+            out, _ = proc.communicate(timeout=20)
+            self.assertEqual(proc.returncode, 0, out)
+            self.assertIn("no longer exists", out)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=10)
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class TestLocalBranchVisibility(unittest.TestCase):
+    """#361 — local branches with no remote counterpart, classified by PATCH
+    IDENTITY. A count-based report flags every branch as unpublished work and
+    overstates several by two orders of magnitude; git cherry is the only measure
+    that separates real work from an absorbed shell."""
+
+    def runtime(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_local_branch_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def fake_git(self, refs, *, base="origin/main", cherry=None, cherry_rc=0):
+        import types
+
+        def run(argv):
+            reply = lambda rc, out: types.SimpleNamespace(
+                returncode=rc, stdout=out, stderr="")
+            if argv[1] == "for-each-ref":
+                return reply(0, "\n".join(refs))
+            if argv[1] == "rev-parse":
+                return reply(0 if base and argv[-1] == base else 1, "")
+            if argv[1] == "cherry":
+                return reply(cherry_rc, (cherry or {}).get(argv[3], ""))
+            return reply(1, "")
+        return run
+
+    def checks(self, findings):
+        return [row["check"] for row in findings]
+
+    def test_absorbed_is_not_reported_as_unpublished_work(self):
+        """The discrimination a count-based implementation gets wrong, so this is
+        the test that must fail if the check regresses to counting."""
+        module = self.runtime()
+        findings = module.local_branch_findings(run=self.fake_git(
+            ["work/real||2026-08-15",
+             "old/absorbed||2026-07-12",
+             "feat/tracked|origin/feat/tracked|2026-08-16"],
+            cherry={"work/real": "+ aaaaaa\n+ bbbbbb", "old/absorbed": "- cccccc"}))
+        self.assertEqual(
+            self.checks(findings), ["git.branch_unpublished", "git.branch_absorbed"])
+        self.assertIn("2 patch(es)", findings[0]["message"])
+        # A branch that tracks a remote is not this check's business at all.
+        self.assertNotIn("feat/tracked", json.dumps(findings))
+
+    def test_a_branch_naming_a_ticket_is_tied_to_it(self):
+        module = self.runtime()
+        findings = module.local_branch_findings(run=self.fake_git(
+            ["fix/361-branch-visibility||2026-08-15"],
+            cherry={"fix/361-branch-visibility": "+ aaaaaa"}))
+        self.assertIn("#361", findings[0]["message"])
+
+    def test_a_missing_comparison_base_is_reported_as_unmeasured_not_clean(self):
+        """Without this, git cherry fails for every branch, each one is skipped,
+        and a repository with no origin/main reports nothing at all -- which reads
+        as "no unpublished work" rather than "not measured"."""
+        module = self.runtime()
+        findings = module.local_branch_findings(
+            run=self.fake_git(["work/real||2026-08-15"], base=None))
+        self.assertEqual(self.checks(findings), ["git.branch_base_missing"])
+        self.assertIn("unmeasured", findings[0]["message"])
+
+    def test_a_branch_that_cannot_be_compared_is_reported_not_dropped(self):
+        module = self.runtime()
+        findings = module.local_branch_findings(
+            run=self.fake_git(["work/real||2026-08-15"], cherry_rc=1))
+        self.assertEqual(self.checks(findings), ["git.branch_unmeasured"])
+
+    def test_truncation_says_what_it_did_not_examine(self):
+        module = self.runtime()
+        refs = ["b%02d||2026-08-15" % i for i in range(7)]
+        findings = module.local_branch_findings(
+            limit=3, run=self.fake_git(refs, cherry={r.split("|")[0]: "+ a" for r in refs}))
+        self.assertEqual(findings[-1]["check"], "git.branch_report_truncated")
+        self.assertIn("4 further", findings[-1]["message"])
+
+    def test_nothing_is_reported_when_every_branch_tracks_a_remote(self):
+        """Positive control: an empty report must mean nothing was found, not that
+        the check never produces anything."""
+        module = self.runtime()
+        self.assertEqual(
+            module.local_branch_findings(run=self.fake_git(["a|origin/a|2026-08-16"])), [])
+
+
+class TestRFC040AntigravityQuotaAdapter(unittest.TestCase):
+    """#335 — direct Antigravity two-window quota with explicit group receipt."""
+
+    EXAMPLE_REL = os.path.join("examples", "usage-adapters", "antigravity-quota.py")
+    FIXTURE_REL = os.path.join(
+        "tests", "fixtures", "usage",
+        "antigravity-v2.6.0-quota-summary-redacted.json")
+    EXPIRED_FIXTURE_REL = os.path.join(
+        "tests", "fixtures", "usage",
+        "antigravity-expired-window-redacted.json")
+    NOW = "2026-01-01T00:00:00Z"
+
+    def _example(self):
+        import importlib.util
+        path = os.path.join(REPO, self.EXAMPLE_REL)
+        spec = importlib.util.spec_from_file_location("antigravity_quota", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _payload(self):
+        with open(os.path.join(REPO, self.FIXTURE_REL), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _expired_payload(self):
+        with open(os.path.join(REPO, self.EXPIRED_FIXTURE_REL),
+                  encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_real_fixture_pins_shape_method_version_and_normalized_resets(self):
+        payload = self._payload()
+        self.assertEqual(set(payload), {"capture", "response"})
+        self.assertEqual(set(payload["capture"]),
+                         {"clientVersion", "capturedOn", "resetTimes"})
+        self.assertEqual(payload["capture"]["clientVersion"], "2.6.0")
+        groups = payload["response"]["groups"]
+        self.assertEqual(len(groups), 2)
+        self.assertEqual({group["displayName"] for group in groups},
+                         {"Gemini Models", "Claude and GPT models"})
+        for group in groups:
+            self.assertEqual(len(group["buckets"]), 2)
+            self.assertEqual({bucket["window"] for bucket in group["buckets"]},
+                             {"weekly", "5h"})
+            for bucket in group["buckets"]:
+                self.assertIsInstance(bucket["bucketId"], str)
+                self.assertIsInstance(bucket["remainingFraction"], (int, float))
+                self.assertNotIsInstance(bucket["remainingFraction"], bool)
+                self.assertGreaterEqual(bucket["remainingFraction"], 0)
+                self.assertLessEqual(bucket["remainingFraction"], 1)
+                # Synthetic capture instant: every normalized reset is future.
+                self.assertGreater(bucket["resetTime"], self.NOW)
+
+    # ── #363 ── a window dropped while a sibling survives used to leave no trace:
+    # the document said "measured" and top simply showed one gauge fewer, with no
+    # reason anywhere. Per-bucket rejection is correct and unchanged; what is added
+    # is the record of what was dropped and why.
+
+    def _bucket(self, bucket_id, window, remaining, reset):
+        return {"bucketId": bucket_id, "window": window,
+                "remainingFraction": remaining, "resetTime": reset}
+
+    def _one_group(self, buckets):
+        return {"response": {"groups": [{"displayName": "G", "buckets": buckets}]}}
+
+    def test_an_expired_window_is_recorded_when_a_sibling_survives(self):
+        """The shape of the real payload: gemini-5h past its reset while
+        gemini-weekly is fresh."""
+        mod = self._example()
+        fixture = mod.build_fixture(self._one_group([
+            self._bucket("gemini-weekly", "weekly", 0.99, "2026-01-08T00:00:00Z"),
+            self._bucket("gemini-5h", "5h", 1, "2025-12-31T00:00:00Z"),
+        ]), self.NOW, "gemini-")
+        self.assertEqual(fixture["measurement"]["state"], "measured")
+        self.assertEqual([w["kind"] for w in fixture["windows"]], ["weekly"])
+        self.assertEqual(fixture["dropped"], [{"kind": "session_5h", "reason": "expired"}])
+
+    def test_an_out_of_bounds_window_is_recorded_with_its_own_reason(self):
+        """Two causes, two reasons: an expired window and a malformed one must not
+        collapse into the same record."""
+        mod = self._example()
+        fixture = mod.build_fixture(self._one_group([
+            self._bucket("gemini-weekly", "weekly", 0.99, "2026-01-08T00:00:00Z"),
+            self._bucket("gemini-5h", "5h", 1.5, "2026-01-08T00:00:00Z"),
+        ]), self.NOW, "gemini-")
+        self.assertEqual(fixture["measurement"]["state"], "measured")
+        self.assertEqual([w["kind"] for w in fixture["windows"]], ["weekly"])
+        self.assertEqual(fixture["dropped"],
+                         [{"kind": "session_5h", "reason": "out_of_bounds"}])
+
+    def test_an_unknown_window_is_recorded_with_a_null_kind(self):
+        """An invented label would read like a real window kind, so an
+        unrecognized window is recorded as null."""
+        mod = self._example()
+        fixture = mod.build_fixture(self._one_group([
+            self._bucket("gemini-weekly", "weekly", 0.99, "2026-01-08T00:00:00Z"),
+            self._bucket("gemini-monthly", "monthly", 0.5, "2026-01-08T00:00:00Z"),
+        ]), self.NOW, "gemini-")
+        self.assertEqual(fixture["dropped"], [{"kind": None, "reason": "invalid_type"}])
+
+    def test_a_fully_usable_payload_records_no_drops(self):
+        """Positive control. Without it, an empty record would prove the field is
+        never populated rather than that nothing was dropped."""
+        mod = self._example()
+        fixture = mod.build_fixture(self._one_group([
+            self._bucket("gemini-weekly", "weekly", 0.99, "2026-01-08T00:00:00Z"),
+            self._bucket("gemini-5h", "5h", 1, "2026-01-08T00:00:00Z"),
+        ]), self.NOW, "gemini-")
+        self.assertEqual(fixture["measurement"]["state"], "measured")
+        self.assertEqual(len(fixture["windows"]), 2)
+        self.assertEqual(fixture["dropped"], [])
+
+    def test_the_dropped_record_is_bounded(self):
+        mod = self._example()
+        buckets = [self._bucket("gemini-weekly", "weekly", 0.5, "2026-01-08T00:00:00Z")]
+        buckets += [self._bucket("gemini-x%d" % i, "bogus%d" % i, 0.5,
+                                 "2026-01-08T00:00:00Z")
+                    for i in range(mod.MAX_DROPPED_WINDOWS + 5)]
+        fixture = mod.build_fixture(self._one_group(buckets), self.NOW, "gemini-")
+        self.assertEqual(len(fixture["dropped"]), mod.MAX_DROPPED_WINDOWS)
+
+    def test_build_fixture_selects_bucket_prefix_not_groups_zero(self):
+        mod = self._example()
+        payload = self._payload()
+        payload["response"]["groups"].reverse()  # Gemini is deliberately NOT groups[0]
+        fx = mod.build_fixture(payload, self.NOW, "gemini-", "2.6.0")
+        self.assertEqual(fx["measurement"], {"state": "measured", "reason": None})
+        self.assertEqual({window["kind"] for window in fx["windows"]},
+                         {"weekly", "session_5h"})
+        self.assertEqual(fx["selection"], {
+            "strategy": "bucket_id_prefix",
+            "value": "gemini-",
+            "source_method": mod.RPC_METHOD,
+            "client_version": "2.6.0",
+        })
+        # Fractions are intentionally not pinned: verify the mapping relation.
+        source = {bucket["window"]: bucket for group in payload["response"]["groups"]
+                  for bucket in group["buckets"]
+                  if bucket["bucketId"].startswith("gemini-")}
+        by_kind = {window["kind"]: window for window in fx["windows"]}
+        self.assertAlmostEqual(by_kind["weekly"]["used_ratio"],
+                               1 - source["weekly"]["remainingFraction"])
+        self.assertAlmostEqual(by_kind["session_5h"]["used_ratio"],
+                               1 - source["5h"]["remainingFraction"])
+
+    def test_explicit_window_field_not_bucket_name_selects_window(self):
+        mod = self._example()
+        payload = {"response": {"groups": [{"buckets": [
+            {"bucketId": "gemini-alpha", "window": "weekly",
+             "remainingFraction": 0.5, "resetTime": "2026-01-08T00:00:00Z"},
+            {"bucketId": "gemini-beta", "window": "5h",
+             "remainingFraction": 0.5, "resetTime": "2026-01-01T05:00:00Z"},
+        ]}]}}
+        fx = mod.build_fixture(payload, self.NOW, "gemini-")
+        self.assertEqual([window["kind"] for window in fx["windows"]],
+                         ["weekly", "session_5h"])
+
+    def test_other_group_requires_its_own_explicit_prefix(self):
+        mod = self._example()
+        fx = mod.build_fixture(self._payload(), self.NOW, "3p-", "2.6.0")
+        self.assertEqual(fx["selection"]["value"], "3p-")
+        self.assertEqual({window["kind"] for window in fx["windows"]},
+                         {"weekly", "session_5h"})
+
+    def test_missing_ambiguous_and_bad_fields_fail_open(self):
+        mod = self._example()
+        missing = mod.build_fixture(self._payload(), self.NOW, "other-")
+        self.assertEqual(missing["measurement"], {
+            "state": "unavailable", "reason": "bucket_group_not_found"})
+        payload = self._payload()
+        payload["response"]["groups"].append({"buckets": [{
+            "bucketId": "gemini-extra", "window": "weekly",
+            "remainingFraction": 0.5,
+        }]})
+        ambiguous = mod.build_fixture(payload, self.NOW, "gemini-")
+        self.assertEqual(ambiguous["measurement"]["reason"],
+                         "ambiguous_bucket_group")
+        self.assertEqual(mod.build_fixture(self._payload(), self.NOW, "BAD PREFIX")
+                         ["measurement"]["reason"], "invalid_bucket_prefix")
+
+    def test_out_of_range_remaining_fraction_is_rejected_not_clamped(self):
+        mod = self._example()
+        for bad in (1.5, -0.3):
+            with self.subTest(remaining_fraction=bad):
+                payload = {"response": {"groups": [{"buckets": [{
+                    "bucketId": "gemini-weekly", "window": "weekly",
+                    "remainingFraction": bad,
+                    "resetTime": "2026-01-08T00:00:00Z",
+                }]}]}}
+                fx = mod.build_fixture(payload, self.NOW, "gemini-")
+                self.assertEqual(fx["windows"], [])
+                self.assertEqual(fx["measurement"], {
+                    "state": "unavailable", "reason": "no_usable_windows"})
+
+        control = {"response": {"groups": [{"buckets": [{
+            "bucketId": "gemini-weekly", "window": "weekly",
+            "remainingFraction": 0.99,
+            "resetTime": "2026-01-08T00:00:00Z",
+        }]}]}}
+        fx = mod.build_fixture(control, self.NOW, "gemini-")
+        self.assertEqual(fx["measurement"], {"state": "measured", "reason": None})
+        self.assertAlmostEqual(fx["windows"][0]["used_ratio"], 0.01)
+
+    def test_duplicate_window_kind_is_refused_as_ambiguous(self):
+        mod = self._example()
+        payload = {"response": {"groups": [{"buckets": [
+            {"bucketId": "gemini-weekly-a", "window": "weekly",
+             "remainingFraction": 0.99, "resetTime": "2026-01-08T00:00:00Z"},
+            {"bucketId": "gemini-weekly-b", "window": "weekly",
+             "remainingFraction": 0.10, "resetTime": "2026-01-08T00:00:00Z"},
+        ]}]}}
+        fx = mod.build_fixture(payload, self.NOW, "gemini-")
+        self.assertEqual(fx["windows"], [])
+        self.assertEqual(fx["measurement"], {
+            "state": "unavailable", "reason": "ambiguous_bucket_window"})
+
+    def test_expired_window_is_dropped_while_fresh_control_maps(self):
+        mod = self._example()
+        now = "2026-08-15T14:00:00Z"
+        payload = self._expired_payload()
+        fx = mod.build_fixture(payload, now, "gemini-", "2.6.0")
+        self.assertEqual(fx["measurement"], {"state": "measured", "reason": None})
+        self.assertEqual([window["kind"] for window in fx["windows"]],
+                         ["session_5h"])
+        self.assertGreater(fx["windows"][0]["resets_at"], now)
+
+        payload["response"]["groups"][0]["buckets"].pop()
+        expired_only = mod.build_fixture(payload, now, "gemini-", "2.6.0")
+        self.assertEqual(expired_only["windows"], [])
+        self.assertEqual(expired_only["measurement"], {
+            "state": "unavailable", "reason": "expired_bucket_window"})
+
+    def test_normalized_snapshot_persists_bounded_selection_receipt(self):
+        mod = self._example()
+        fixture = mod.build_fixture(self._payload(), self.NOW, "gemini-", "2.6.0")
+        import importlib.util
+        runtime_path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("agy_quota_runtime", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        snapshot, warnings = runtime.normalize_usage_snapshot(
+            fixture, agent="agy", adapter_name="agy-antigravity-quota", kind="cli_json")
+        self.assertEqual(warnings, [])
+        self.assertEqual(snapshot["source"]["selection"], fixture["selection"])
+        self.assertEqual(snapshot["source"]["provenance"], "official")
+        self.assertEqual({window["kind"] for window in snapshot["windows"]},
+                         {"weekly", "session_5h"})
+        self.assertIsNotNone(snapshot["remaining_ratio"])
+
+    def test_invalid_selection_receipt_is_dropped_not_copied(self):
+        mod = self._example()
+        fixture = mod.build_fixture(self._payload(), self.NOW, "gemini-", "2.6.0")
+        fixture["selection"]["account"] = "operator@example.invalid"
+        import importlib.util
+        runtime_path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location("agy_quota_runtime_bad", runtime_path)
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        snapshot, warnings = runtime.normalize_usage_snapshot(
+            fixture, agent="agy", adapter_name="agy-antigravity-quota", kind="cli_json")
+        self.assertNotIn("selection", snapshot["source"])
+        self.assertIn("selection", " ".join(warnings))
+        self.assertNotIn("operator@example.invalid", json.dumps(snapshot))
+
+    def test_main_never_echoes_raw_identity_or_csrf_material(self):
+        mod = self._example()
+        payload = self._payload()
+        payload["response"]["email"] = "operator@example.invalid"
+        payload["response"]["token"] = "SYNTH_SECRET_TOKEN_SHOULD_NOT_LEAK"
+        out = io.StringIO()
+        now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(mod.main("gemini-", read_summary=lambda: payload, out=out,
+                                  now=now, version_reader=lambda: "2.6.0"), 0)
+        text = out.getvalue()
+        self.assertNotIn("operator@example.invalid", text)
+        self.assertNotIn("SYNTH_SECRET", text)
+        self.assertEqual(json.loads(text)["selection"]["client_version"], "2.6.0")
+
+    def test_process_discovery_keeps_csrf_in_memory(self):
+        mod = self._example()
+        secret = "SYNTH_SECRET_TOKEN_SHOULD_NOT_LEAK"
+        calls = []
+
+        def fake_run(argv):
+            calls.append(argv)
+            if argv[0] == "pgrep":
+                return "4321\n"
+            if argv[:3] == ["ps", "-p", "4321"]:
+                return (mod.LANGUAGE_SERVER_MARKER
+                        + " --csrf_token " + secret + " --other value\n")
+            return None
+
+        original = mod._run_bounded
+        mod._run_bounded = fake_run
+        try:
+            self.assertEqual(mod._language_server_credentials(), (4321, secret))
+        finally:
+            mod._run_bounded = original
+        self.assertNotIn(secret, json.dumps(calls))
+
+    def test_main_unavailable_and_broken_stdout_stay_fail_open(self):
+        mod = self._example()
+        out = io.StringIO()
+        self.assertEqual(mod.main("gemini-", read_summary=lambda: None, out=out), 0)
+        self.assertEqual(json.loads(out.getvalue())["measurement"], {
+            "state": "unavailable", "reason": "language_server_unavailable"})
+
+        class BrokenOut:
+            def write(self, _text):
+                raise BrokenPipeError()
+
+        self.assertEqual(mod.main("gemini-", read_summary=lambda: None,
+                                  out=BrokenOut()), 0)
+
+
 class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
     """#103/#316 — disabled tokscale quota relay with legacy spend fallback,
     honest provenance, fail-open observation state, privacy filtering, and the
@@ -14961,6 +18078,85 @@ class TestRFC040TokscaleSpendAdapter(unittest.TestCase):
             "state": "unavailable", "reason": "adapter_unavailable"})
         self.assertEqual(fx["provenance"], "proxy_reported")
         self.assertNotIn("SECRET_IN_ERROR", out.getvalue())
+
+
+class TestRFC067UsageAdapterEnvironmentIsolation(unittest.TestCase):
+    """RFC 067 / #340 — a usage adapter receives only declared environment names.
+
+    The launcher builds the child environment; the adapter never inherits the
+    parent's. A decoy seeded in the parent must reach neither the child, nor the
+    raw stdout, while a declared name must arrive with its value intact — so an
+    implementation that hands over an empty environment cannot pass either."""
+
+    DECOY = "M8SHIFT_TEST_DECOY_SECRET"
+    DECOY_VALUE = "decoy-must-never-travel"
+    ALLOWED = "M8SHIFT_TEST_ALLOWED_NAME"
+    ALLOWED_VALUE = "allowed-value-intact"
+
+    def setUp(self):
+        path = os.path.join(REPO, "m8shift-runtime.py")
+        spec = importlib.util.spec_from_file_location(
+            "m8shift_runtime_adapter_env_test", path)
+        self.runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.runtime)
+        self._saved = {k: os.environ.get(k) for k in (self.DECOY, self.ALLOWED)}
+        os.environ[self.DECOY] = self.DECOY_VALUE
+        os.environ[self.ALLOWED] = self.ALLOWED_VALUE
+        self.addCleanup(self._restore_environ)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.script = os.path.join(self.tmp, "env-report.py")
+        with open(self.script, "w", encoding="utf-8") as fh:
+            fh.write("import json, os\n"
+                     "print(json.dumps({'schema': 'm8shift.usage.fixture.v1',\n"
+                     "                  'child_env': dict(os.environ)}))\n")
+
+    def _restore_environ(self):
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def entry(self, **extra):
+        return dict({"name": "env-report",
+                     "command": [sys.executable, self.script]}, **extra)
+
+    def declared_run(self):
+        doc, raw, err = self.runtime._run_usage_adapter_io(
+            self.entry(env_allowlist=[self.ALLOWED]))
+        self.assertEqual(err, "")
+        return doc["child_env"], raw
+
+    # The two halves are deliberately separate tests. Together in one function
+    # they could not discriminate: full inheritance and an empty environment are
+    # opposite defects, and each must redden exactly one of these.
+    def test_declared_name_arrives_with_its_value_intact(self):
+        child, _ = self.declared_run()
+        self.assertEqual(child.get(self.ALLOWED), self.ALLOWED_VALUE)
+
+    def test_the_decoy_reaches_neither_the_child_nor_the_output(self):
+        child, raw = self.declared_run()
+        self.assertNotIn(self.DECOY, child)
+        self.assertNotIn(self.DECOY_VALUE, raw)
+
+    def test_absent_allowlist_isolates_rather_than_inheriting(self):
+        doc, raw, err = self.runtime._run_usage_adapter_io(self.entry())
+        self.assertEqual(err, "")
+        child = doc["child_env"]
+        self.assertNotIn(self.DECOY, child)
+        self.assertNotIn(self.ALLOWED, child)
+        self.assertNotIn(self.DECOY_VALUE, raw)
+        # The base seed still reaches the child, so isolation is not starvation.
+        self.assertIn("PATH", child)
+
+    def test_unsupported_allowlist_shapes_refuse_before_launching(self):
+        for shape in ("ALL", [1, 2], ["HOME", 7], None, {"HOME": 1}):
+            with self.subTest(shape=shape):
+                doc, _, err = self.runtime._run_usage_adapter_io(
+                    self.entry(env_allowlist=shape))
+                self.assertIsNone(doc)
+                self.assertIn("must be a list of strings", err)
 
 
 class TestRFC040UsageBudget(CLIBase):
@@ -16234,6 +19430,27 @@ class TestRFC048PRB(CLIBase):
                     "runners": runners,
                 }, fh, indent=2)
 
+    def _legacy_runner_adoption_fixture(self):
+        """A pre-manifest runner whose own release bytes remain provable."""
+        self.init()
+        os.makedirs(os.path.join(self.d, ".m8shift"), exist_ok=True)
+        with open(os.path.join(self.d, ".m8shift", "kit.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.kit.v1",
+                "core": {"script": "m8shift.py", "version": cowork.VERSION},
+                "companions": [],
+            }, fh, indent=2)
+        rel = os.path.join("examples", "headless_runner.py")
+        self._copy_runner_sources([rel])
+        self._source_manifest([rel])
+        self._install_runner_targets([rel], stale=True, with_metadata=False)
+        target = os.path.join(self.d, rel)
+        with open(target, "rb") as fh:
+            target_sha = hashlib.sha256(fh.read()).hexdigest()
+        with open(os.path.join(self.d, "checksums.sha256"), "w", encoding="utf-8") as fh:
+            fh.write(target_sha + "  " + rel + "\n")
+        return rel
+
     # ── first hop + rebase ───────────────────────────────────────────────────
 
     def test_first_hop_old_target_updated_by_source_copy_from_outside(self):
@@ -16785,6 +20002,187 @@ class TestRFC048PRB(CLIBase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         _, comps = self._components(r)
         self.assertEqual(comps["runner"], "manual_review_required")
+
+    # ── #328: bounded legacy runner adoption ────────────────────────────────
+
+    def test_adopt_runner_dry_run_is_one_artifact_and_writes_nothing(self):
+        rel = self._legacy_runner_adoption_fixture()
+        before = self._snapshot(self.d)
+        r = self.update("--adopt-runner", "headless-runner", "--dry-run", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertTrue(d["dry_run"])
+        self.assertEqual(comps, {"runner": "updated"})
+        item = d["components"][0]["runners"][0]
+        self.assertEqual(item["path"], rel)
+        self.assertTrue(item["adoption"]["source_verified"])
+        self.assertEqual(self._snapshot(self.d), before)
+
+    def test_adopt_runner_replaces_one_pristine_legacy_runner_and_preserves_backups(self):
+        rel = self._legacy_runner_adoption_fixture()
+        prior_relay = self.read_target("M8SHIFT.md")
+        prior_protocol = self.read_target("M8SHIFT.protocol.md")
+        prior_anchor = self.read_target("AGENTS.md")
+        with open(os.path.join(self.d, rel), "rb") as fh:
+            legacy_bytes = fh.read()
+        with open(os.path.join(self.d, ".m8shift", "kit.json"), "rb") as fh:
+            prior_manifest = fh.read()
+        r = self.update("--adopt-runner", "headless-runner", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        d, comps = self._components(r)
+        self.assertEqual(comps, {"runner": "updated"})
+        adoption = d["components"][0]["runners"][0]["adoption"]
+        with open(os.path.join(self.d, rel), "rb") as fh:
+            installed_bytes = fh.read()
+        with open(os.path.join(self.src, rel), "rb") as fh:
+            self.assertEqual(installed_bytes, fh.read())
+        with open(os.path.join(self.d, adoption["runner_backup"]), "rb") as fh:
+            self.assertEqual(fh.read(), legacy_bytes)
+        with open(os.path.join(self.d, adoption["manifest_backup"]), "rb") as fh:
+            self.assertEqual(fh.read(), prior_manifest)
+        with open(os.path.join(self.d, ".m8shift", "kit.json"), encoding="utf-8") as fh:
+            entry = json.load(fh)["runners"][0]
+        self.assertEqual(entry["name"], "headless-runner")
+        self.assertEqual(entry["path"], rel)
+        self.assertEqual(entry["version"], cowork.VERSION)
+        self.assertEqual(entry["sha256"], adoption["source_sha256"])
+        self.assertEqual(self.read_target("M8SHIFT.md"), prior_relay)
+        self.assertEqual(self.read_target("M8SHIFT.protocol.md"), prior_protocol)
+        self.assertEqual(self.read_target("AGENTS.md"), prior_anchor)
+        with open(os.path.join(self.d, self.AUDIT_REL), encoding="utf-8") as fh:
+            audit = json.loads([line for line in fh if line.strip()][-1])
+        self.assertEqual(audit["runners_adopted"][0]["runner_backup"], adoption["runner_backup"])
+
+    def test_adopt_runner_registers_identical_bytes_and_preserves_other_manifest_fields(self):
+        rel = self._legacy_runner_adoption_fixture()
+        manifest = os.path.join(self.d, ".m8shift", "kit.json")
+        with open(manifest, encoding="utf-8") as fh:
+            prior = json.load(fh)
+        prior["core"]["local_note"] = "preserve-me"
+        prior["extension"] = {"operator": True}
+        prior["runners"] = [{
+            "name": "watch-status",
+            "path": "scripts/watch-status.sh",
+            "version": "3.99.0",
+            "sha256": "a" * 64,
+            "copied_at": "2026-01-01T00:00:00Z",
+            "source": "prior",
+        }]
+        with open(manifest, "w", encoding="utf-8") as fh:
+            json.dump(prior, fh, indent=2)
+        source = os.path.join(self.src, rel)
+        target = os.path.join(self.d, rel)
+        shutil.copyfile(source, target)
+        with open(source, "rb") as fh:
+            source_sha = hashlib.sha256(fh.read()).hexdigest()
+        with open(os.path.join(self.d, "checksums.sha256"), "w", encoding="utf-8") as fh:
+            fh.write(source_sha + "  " + rel + "\n")
+
+        r = self.update("--adopt-runner", "headless-runner", "--json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        adoption = json.loads(r.stdout)["components"][0]["runners"][0]["adoption"]
+        self.assertFalse(adoption["runner_replaced"])
+        with open(manifest, encoding="utf-8") as fh:
+            after = json.load(fh)
+        self.assertEqual(after["core"], prior["core"])
+        self.assertEqual(after["companions"], prior["companions"])
+        self.assertEqual(after["extension"], prior["extension"])
+        self.assertEqual(after["runners"][0], prior["runners"][0])
+        self.assertEqual(after["runners"][1]["name"], "headless-runner")
+        self.assertEqual(after["runners"][1]["sha256"], source_sha)
+
+    def test_adopt_runner_refuses_an_already_tracked_runner_without_writes(self):
+        self._legacy_runner_adoption_fixture()
+        first = self.update("--adopt-runner", "headless-runner", "--json")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        before = self._snapshot(self.d)
+        second = self.update("--adopt-runner", "headless-runner", "--json")
+        self.assertEqual(second.returncode, 1, second.stdout + second.stderr)
+        _, comps = self._components(second)
+        self.assertEqual(comps, {"runner": "manual_review_required"})
+        self.assertIn("already tracked", second.stdout + second.stderr)
+        self.assertEqual(self._snapshot(self.d), before)
+
+    def test_adopt_runner_restores_target_and_reports_backups_when_manifest_write_fails(self):
+        rel = self._legacy_runner_adoption_fixture()
+        target = os.path.join(self.d, rel)
+        manifest = os.path.join(self.d, ".m8shift", "kit.json")
+        with open(target, "rb") as fh:
+            target_before = fh.read()
+        with open(manifest, "rb") as fh:
+            manifest_before = fh.read()
+        checksums = cowork._source_checksums(self.src)
+        with mock.patch.object(cowork, "HERE", self.d), \
+                mock.patch.object(cowork, "_write_kit_manifest_document",
+                                  side_effect=OSError("injected manifest failure")):
+            result, detail, evidence = cowork._adopt_legacy_runner(
+                "headless-runner", self.src, checksums,
+                force=False, allow_downgrade=False, dry_run=False)
+        self.assertEqual(result, "refused")
+        self.assertIn("prior bytes retained in backup", detail)
+        with open(target, "rb") as fh:
+            self.assertEqual(fh.read(), target_before)
+        with open(manifest, "rb") as fh:
+            self.assertEqual(fh.read(), manifest_before)
+        for key in ("runner_backup", "manifest_backup"):
+            self.assertIn(key, evidence)
+            self.assertTrue(os.path.isfile(os.path.join(self.d, evidence[key])))
+
+    def test_adopt_runner_refuses_modified_target_without_dedicated_override(self):
+        rel = self._legacy_runner_adoption_fixture()
+        target = os.path.join(self.d, rel)
+        with open(target, "ab") as fh:
+            fh.write(b"\n# LOCAL LEGACY EDIT\n")
+        before = self._snapshot(self.d)
+        refused = self.update("--adopt-runner", "headless-runner", "--json")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        _, comps = self._components(refused)
+        self.assertEqual(comps, {"runner": "manual_review_required"})
+        self.assertEqual(self._snapshot(self.d), before)
+        forced = self.update("--adopt-runner", "headless-runner", "--force-adopt-runner", "--json")
+        self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
+        adoption = json.loads(forced.stdout)["components"][0]["runners"][0]["adoption"]
+        with open(os.path.join(self.d, adoption["runner_backup"]), "rb") as fh:
+            self.assertTrue(fh.read().endswith(b"# LOCAL LEGACY EDIT\n"))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_adopt_runner_refuses_symlinked_target_and_missing_verified_source(self):
+        rel = self._legacy_runner_adoption_fixture()
+        target = os.path.join(self.d, rel)
+        outside = os.path.join(self.out, "legacy-runner-outside.py")
+        with open(target, "rb") as fh:
+            outside_bytes = fh.read()
+        with open(outside, "wb") as fh:
+            fh.write(outside_bytes)
+        os.unlink(target)
+        os.symlink(outside, target)
+        refused = self.update("--adopt-runner", "headless-runner", "--json")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        _, comps = self._components(refused)
+        self.assertEqual(comps, {"runner": "refused"})
+        with open(outside, "rb") as fh:
+            self.assertEqual(fh.read(), outside_bytes)
+        os.unlink(target)
+        with open(target, "wb") as fh:
+            fh.write(outside_bytes)
+        os.unlink(os.path.join(self.src, rel))
+        missing = self.update("--adopt-runner", "headless-runner", "--json")
+        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
+        _, comps = self._components(missing)
+        self.assertEqual(comps, {"runner": "refused"})
+
+    def test_adopt_runner_help_and_option_conflicts_are_explicit(self):
+        help_result = self.update("--help")
+        self.assertEqual(help_result.returncode, 0, help_result.stdout + help_result.stderr)
+        self.assertIn("--adopt-runner", help_result.stdout)
+        self.assertIn("--force-adopt-runner", help_result.stdout)
+        rel = self._legacy_runner_adoption_fixture()
+        conflict = self.update("--adopt-runner", "headless-runner", "--components", "runner", "--json")
+        self.assertEqual(conflict.returncode, 1, conflict.stdout + conflict.stderr)
+        self.assertIn("bounded one-runner", conflict.stdout + conflict.stderr)
+        orphan_force = self.update("--force-adopt-runner", "--json")
+        self.assertEqual(orphan_force.returncode, 1, orphan_force.stdout + orphan_force.stderr)
+        self.assertIn("requires --adopt-runner", orphan_force.stdout + orphan_force.stderr)
 
     def test_doctor_source_skips_present_untracked_regular_runners(self):
         self.init()
@@ -22860,9 +26258,14 @@ class TestRFC052SessionBinding(CLIBase):
             "decline-turn": ["decline-turn", "claude", "--request", "1", "--reason", "r"],
             "steer-turn": ["steer-turn", "claude", "--from", "codex",
                            "--request", "1", "--reason", "r"],
+            "review-return": ["review-return", "claude", "--from", "codex",
+                              "--run", "review-1"],
             "pause": ["pause", "claude", "--reason", "r"],
             "resume": ["resume", "claude", "--reason", "r"],
             "release": ["release", "claude", "--to", "codex"],
+            # #320: unclaim mutates the LOCK, so it must refuse under session
+            # ambiguity exactly like every other mutator here.
+            "unclaim": ["unclaim", "claude", "--reason", "r"],
             "done": ["done", "claude"],
             "remember": ["remember", "claude", "note"],
             "work-tag": ["work-tag", "claude", "task:68"],
@@ -22888,14 +26291,15 @@ class TestRFC052SessionBinding(CLIBase):
         helpout = self._run("--help").stdout
         cmds = set(re.search(r"\{([a-z0-9,_-]+)\}", helpout).group(1).split(","))
         classified = ({"roster", "claim", "append", "next", "request-turn", "yield-turn",
-                       "decline-turn", "steer-turn", "pause", "resume", "release",
+                       "decline-turn", "steer-turn", "review-return", "pause", "resume", "release",
+                       "unclaim",                                    # #320: undoes one's own claim
                        "done", "remember", "work-tag", "cooldown", "archive", "task",
                        "decisions", "session", "heartbeat", "guard-exec",
                        "lease-keeper"}                               # gated mutators
                       | {"init", "update", "bind"}                   # special rules
                       | {"status", "may-i-write", "guard", "watch", "doctor",
-                         "contract", "recap", "peek", "log", "turn", "history",
-                         "time", "wait"})
+                         "verify-kit", "contract", "recap", "peek", "log", "turn",
+                         "history", "time", "wait"})
         self.assertEqual(cmds - classified, set(),
                          "unclassified CLI commands — extend the §9.2 matrix")
 
@@ -23743,6 +27147,1295 @@ class TestRFC049PRBListenerProducer(CLIBase):
         self.assertEqual([m for m in said if "failed" in m], [], said)
         self.assertFalse(os.path.exists(os.path.join(
             self.d, ".m8shift", "holder-heartbeats", "claude.json")))
+
+
+class TestRFC081FleetUpgrade(ListenerCLIBase):
+    def setUp(self):
+        super().setUp()
+        self.releases = []
+        self.targets = []
+        self.live_listeners = []
+
+    def tearDown(self):
+        for root, agent in self.live_listeners:
+            subprocess.run([
+                sys.executable, os.path.join(root, "m8shift-runtime.py"),
+                "listener", "stop", "--agent", agent, "--grace", "0.1",
+            ], cwd=root, capture_output=True, text=True, timeout=15)
+        for path in self.targets + self.releases:
+            shutil.rmtree(path, ignore_errors=True)
+        super().tearDown()
+
+    def make_release(self, version="4.1.0"):
+        root = tempfile.mkdtemp(prefix="m8shift-fleet-upgrade-source-")
+        self.releases.append(root)
+        for name in ("m8shift.py", "m8shift-runtime.py",
+                     os.path.join("examples", "headless_runner.py")):
+            with open(os.path.join(REPO, name), encoding="utf-8") as fh:
+                text = fh.read()
+            text = re.sub(r'(?m)^VERSION = "[0-9]+[.][0-9]+[.][0-9]+"',
+                          f'VERSION = "{version}"', text, count=1)
+            text = re.sub(r'(?m)^M8SHIFT_RUNNER_VERSION = "[0-9]+[.][0-9]+[.][0-9]+"',
+                          f'M8SHIFT_RUNNER_VERSION = "{version}"', text, count=1)
+            os.makedirs(os.path.dirname(os.path.join(root, name)), exist_ok=True)
+            with open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.chmod(os.path.join(root, name), 0o755)
+        rows = []
+        for name in (os.path.join("examples", "headless_runner.py"),
+                     "m8shift-runtime.py", "m8shift.py"):
+            with open(os.path.join(root, name), "rb") as fh:
+                rows.append(f"{hashlib.sha256(fh.read()).hexdigest()}  {name}\n")
+        manifest = os.path.join(root, "checksums.sha256")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.writelines(rows)
+        with open(manifest, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        return os.path.realpath(root), digest
+
+    def make_target(self, release, operation_id, *, paused=True, notify_agent=""):
+        root = tempfile.mkdtemp(prefix="m8shift-fleet-upgrade-target-")
+        self.targets.append(root)
+        shutil.copy(os.path.join(release, "m8shift.py"), root)
+        init = subprocess.run([
+            sys.executable, "m8shift.py", "init", "--agents", "claude,codex",
+            "--companions", "runtime", "--companion-source", release,
+        ], cwd=root, capture_output=True, text=True)
+        self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+        if notify_agent:
+            started = subprocess.run([
+                sys.executable, "m8shift-runtime.py", "listener", "start",
+                "--agent", notify_agent, "--notify-only", "--backend", "local",
+                "--poll-interval", "0.1",
+            ], cwd=root, capture_output=True, text=True, timeout=15)
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            self.live_listeners.append((os.path.realpath(root), notify_agent))
+        if paused:
+            claim = subprocess.run([
+                sys.executable, "m8shift.py", "claim", "codex",
+            ], cwd=root, capture_output=True, text=True)
+            self.assertEqual(claim.returncode, 0, claim.stdout + claim.stderr)
+            pause = subprocess.run([
+                sys.executable, "m8shift.py", "pause", "codex", "--reason", operation_id,
+            ], cwd=root, capture_output=True, text=True)
+            self.assertEqual(pause.returncode, 0, pause.stdout + pause.stderr)
+        return os.path.realpath(root)
+
+    def make_upgrade_spec(self, source, manifest_digest, instances,
+                          operation_id="upgrade-test", approvals=None):
+        with open(os.path.join(source, "m8shift.py"), encoding="utf-8") as fh:
+            source_text = fh.read()
+        version = re.search(
+            r'(?m)^VERSION = "([0-9]+[.][0-9]+[.][0-9]+)"', source_text
+        ).group(1)
+        doc = {
+            "schema": "m8shift.fleet-upgrade.spec.v1",
+            "operation_id": operation_id, "coordinator": "codex",
+            "policy": "ordered_fail_stop_retain_verified",
+            "source": {"version": version, "generation": int(version.split(".")[0]),
+                       "manifest_sha256": manifest_digest},
+            "allow_generation_changes": approvals or [],
+            "instances": [
+                {"id": instance_id, "root": root, "resume_relay": False}
+                for instance_id, root in instances
+            ],
+        }
+        path = os.path.join(self.d, f"{operation_id}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return path
+
+    def test_top_observation_reports_disk_failures_without_following_symlinks(self):
+        runtime = self._load_runtime()
+        root = tempfile.mkdtemp(prefix="m8shift-top-observation-")
+        self.targets.append(root)
+        path = os.path.join(root, "m8shift-top.py")
+        self.assertEqual(
+            runtime.fleet_upgrade_top_on_disk(root)["status"], "missing")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('VERSION = "4.1.7"\n')
+        observed = runtime.fleet_upgrade_top_on_disk(root)
+        self.assertEqual((observed["status"], observed["version"]),
+                         ("observed", "4.1.7"))
+        os.unlink(path)
+        os.symlink(__file__, path)
+        self.assertEqual(
+            runtime.fleet_upgrade_top_on_disk(root)["status"],
+            "symlink_refused")
+
+    def test_top_process_census_keeps_markers_after_unmatched_quote(self):
+        runtime = self._load_runtime()
+        root = tempfile.mkdtemp(prefix="m8shift-top-process-quote-")
+        self.targets.append(root)
+        digest = runtime.fleet_upgrade_path_digest(root)
+        command = (
+            " 42 /usr/bin/python3 /detached/m8shift-top.py --project \"foo "
+            f"{runtime.FLEET_UPGRADE_TOP_VERSION_FLAG}=4.1.0 "
+            f"{runtime.FLEET_UPGRADE_TOP_ROOT_FLAG}={digest}\n")
+        completed = subprocess.CompletedProcess(
+            ["ps"], 0, stdout=command, stderr="")
+        with mock.patch.object(runtime.subprocess, "run",
+                               return_value=completed):
+            rows = runtime.fleet_upgrade_process_rows()
+        self.assertEqual(len(rows), 1)
+        observed = runtime.fleet_upgrade_top_process_loaded(
+            root, process_rows=rows)
+        self.assertEqual(observed["status"], "observed")
+        self.assertEqual(observed["versions"], ["4.1.0"])
+
+    def test_top_process_observation_keeps_all_versions_and_legacy_uncertainty(self):
+        runtime = self._load_runtime()
+        root = tempfile.mkdtemp(prefix="m8shift-top-process-")
+        self.targets.append(root)
+        canonical = os.path.join(root, "m8shift-top.py")
+        with open(canonical, "w", encoding="utf-8") as fh:
+            fh.write('VERSION = "4.1.2"\n')
+        digest = runtime.fleet_upgrade_path_digest(root)
+
+        def marked(pid, version):
+            return {"pid": pid, "argv": [
+                sys.executable, "/detached/old-m8shift-top.py",
+                runtime.FLEET_UPGRADE_TOP_VERSION_FLAG + "=" + version,
+                runtime.FLEET_UPGRADE_TOP_ROOT_FLAG + "=" + digest,
+            ]}
+
+        observed = runtime.fleet_upgrade_top_process_loaded(
+            root, process_rows=[marked(11, "4.1.0"), marked(12, "4.1.1")])
+        self.assertEqual(observed["status"], "observed")
+        self.assertEqual(observed["versions"], ["4.1.0", "4.1.1"])
+        self.assertEqual(observed["process_count"], 2)
+
+        partial = runtime.fleet_upgrade_top_process_loaded(root, process_rows=[
+            marked(13, "4.1.0"),
+            {"pid": 14, "argv": [sys.executable, canonical]},
+        ])
+        self.assertEqual(partial["status"], "partial")
+        self.assertEqual(partial["legacy_count"], 1)
+        self.assertEqual(partial["versions"], ["4.1.0"])
+
+        legacy = runtime.fleet_upgrade_top_process_loaded(
+            root, process_rows=[{"pid": 15, "argv": [sys.executable, canonical]}])
+        self.assertEqual(legacy["status"], "unobservable")
+        self.assertEqual(legacy["versions"], [])
+        absent = runtime.fleet_upgrade_top_process_loaded(
+            root, process_rows=[{"pid": 16, "argv": ["python", "other.py"]}])
+        self.assertEqual(absent["status"], "absent")
+        with mock.patch.object(runtime, "fleet_upgrade_process_rows",
+                               return_value=None):
+            unavailable = runtime.fleet_upgrade_top_process_loaded(root)
+        self.assertEqual(unavailable["status"], "unobservable")
+
+    def test_terminal_checkpoint_persists_top_evidence_without_red_upgrade(self):
+        runtime = self._load_runtime()
+        top = {
+            "top_on_disk": {"status": "observed", "version": "4.1.1",
+                            "observed_at": "2026-08-14T20:00:00Z"},
+            "top_process_loaded": {
+                "status": "observed", "versions": ["4.1.0"],
+                "process_count": 1, "legacy_count": 0, "invalid_count": 0,
+                "observed_at": "2026-08-14T20:00:00Z"},
+            "restart_required": True,
+            "observed_at": "2026-08-14T20:00:00Z",
+        }
+        operation = {
+            "operation_id": "top-checkpoint", "coordinator": "codex",
+            "policy": runtime.FLEET_UPGRADE_POLICY,
+            "source_public": {"version": "4.1.1"},
+            "inventory_sha256": "a" * 64, "state": "complete",
+            "updated_at": "2026-08-14T20:00:00Z",
+            "instances": [{
+                "id": "relay-a", "root": self.d, "root_digest": "b" * 64,
+                "phase": "terminal", "outcome": "updated", "reason": "",
+                "kit": {}, "restore_set": [],
+            }],
+        }
+        with mock.patch.object(runtime, "fleet_upgrade_top_observation",
+                               return_value=top) as capture, \
+                mock.patch.object(runtime, "fleet_upgrade_process_rows",
+                                  return_value=[]) as census, \
+                mock.patch.object(runtime, "write_fleet_json_atomic") as write:
+            runtime.fleet_upgrade_checkpoint(operation)
+        census.assert_called_once_with()
+        capture.assert_called_once_with(self.d, process_rows=[])
+        write.assert_called_once()
+        report = runtime.fleet_upgrade_public_report(operation)
+        self.assertTrue(report["green"])
+        row = report["instances"][0]
+        self.assertEqual(row["top_on_disk"]["version"], "4.1.1")
+        self.assertEqual(row["top_process_loaded"]["versions"], ["4.1.0"])
+        self.assertTrue(row["top_restart_required"])
+        markdown = runtime.fleet_upgrade_report_markdown(report)
+        self.assertIn("4.1.0", markdown)
+        self.assertIn("required", markdown)
+        self.assertIn("does not make an otherwise verified fleet upgrade red",
+                      markdown)
+
+    @staticmethod
+    def target_snapshot(root):
+        paths = ("m8shift.py", "m8shift-runtime.py", "M8SHIFT.md",
+                 os.path.join(".m8shift", "kit.json"))
+        result = {}
+        for rel in paths:
+            with open(os.path.join(root, rel), "rb") as fh:
+                result[rel] = hashlib.sha256(fh.read()).hexdigest()
+        return result
+
+    def test_already_current_and_second_resume_are_mutation_free_and_private(self):
+        source, digest = self.make_release()
+        target = self.make_target(source, "upgrade-current")
+        spec = self.make_upgrade_spec(
+            source, digest, [("relay-a", target)], "upgrade-current")
+        before = self.target_snapshot(target)
+        first = self.rt("fleet-upgrade", "--spec", spec, "--source", source, "--json")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        report = json.loads(first.stdout)
+        self.assertTrue(report["green"])
+        self.assertEqual(report["instances"][0]["outcome"], "already_current")
+        self.assertNotIn(target, first.stdout)
+        operation_dir = os.path.join(
+            self.d, ".m8shift", "runtime", "fleet-upgrades", "upgrade-current")
+        report_json = os.path.join(operation_dir, "report.json")
+        report_md = os.path.join(operation_dir, "report.md")
+        self.assertTrue(os.path.isfile(report_json))
+        self.assertTrue(os.path.isfile(report_md))
+        with open(report_json, encoding="utf-8") as fh:
+            saved_report = json.load(fh)
+        with open(report_md, encoding="utf-8") as fh:
+            markdown = fh.read()
+        self.assertEqual(saved_report, report)
+        self.assertNotIn(target, markdown)
+        self.assertNotIn(source, markdown)
+        self.assertIn(report["instances"][0]["root_digest"], markdown)
+        self.assertEqual(self.target_snapshot(target), before)
+        second = self.rt("fleet-upgrade", "--spec", spec, "--source", source,
+                         "--resume", "--json")
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout), report)
+        self.assertEqual(self.target_snapshot(target), before)
+
+    def test_all_member_preflight_halts_before_first_mutation(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        first = self.make_target(old_source, "upgrade-preflight")
+        invalid = self.make_target(old_source, "upgrade-preflight", paused=False)
+        before = self.target_snapshot(first)
+        spec = self.make_upgrade_spec(new_source, new_digest, [
+            ("relay-a", first), ("relay-b", invalid),
+        ], "upgrade-preflight")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", new_source, "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["green"])
+        self.assertEqual([row["outcome"] for row in report["instances"]],
+                         ["not_started", "excluded"])
+        self.assertEqual(self.target_snapshot(first), before)
+
+    def test_generation_change_requires_exact_instance_approval(self):
+        old_source, _old_digest = self.make_release("3.61.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-generation")
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-generation")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", new_source, "--json")
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "excluded")
+        self.assertEqual(report["instances"][0]["reason"], "preflight_refused")
+        self.assertNotIn(target, result.stdout)
+        state_path = os.path.join(
+            self.d, ".m8shift", "runtime", "fleet-upgrades",
+            "upgrade-generation", "operation.json")
+        with open(state_path, encoding="utf-8") as fh:
+            private = json.load(fh)
+        self.assertIn("Generation change", private["instances"][0]["private_reason"])
+
+    def test_approved_generation_change_updates_exact_instance(self):
+        old_source, _old_digest = self.make_release("3.61.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-generation-approved")
+        approvals = [{
+            "instance_id": "relay-a", "from": 3, "to": 4,
+            "approval_ref": "operator-approved-3-to-4",
+        }]
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)],
+            "upgrade-generation-approved", approvals=approvals)
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", new_source, "--json", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["green"])
+        self.assertEqual(report["instances"][0]["outcome"], "updated")
+        self.assertEqual(cowork._parse_script_version(
+            os.path.join(target, "m8shift.py")), "4.1.1")
+
+    def test_archive_leaf_target_is_explicitly_excluded(self):
+        source, digest = self.make_release("4.1.0")
+        original = self.make_target(source, "upgrade-archive")
+        parent = tempfile.mkdtemp(prefix="m8shift-fleet-upgrade-archive-parent-")
+        self.targets.append(parent)
+        archive = os.path.join(parent, "backup")
+        os.rename(original, archive)
+        archive = os.path.realpath(archive)
+        spec = self.make_upgrade_spec(
+            source, digest, [("relay-a", archive)], "upgrade-archive")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", source, "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "excluded")
+        self.assertEqual(report["instances"][0]["reason"], "preflight_refused")
+
+    def test_companion_name_and_script_pair_is_closed_before_argv_render(self):
+        source, digest = self.make_release("4.1.0")
+        target = self.make_target(source, "upgrade-companion-injection")
+        kit_path = os.path.join(target, ".m8shift", "kit.json")
+        with open(kit_path, encoding="utf-8") as fh:
+            kit = json.load(fh)
+        kit["companions"][0]["name"] = "runtime,top"
+        with open(kit_path, "w", encoding="utf-8") as fh:
+            json.dump(kit, fh)
+        spec = self.make_upgrade_spec(
+            source, digest, [("relay-a", target)],
+            "upgrade-companion-injection")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", source, "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "excluded")
+        state_path = os.path.join(
+            self.d, ".m8shift", "runtime", "fleet-upgrades",
+            "upgrade-companion-injection", "operation.json")
+        with open(state_path, encoding="utf-8") as fh:
+            private = json.load(fh)
+        self.assertIn("companion row is invalid",
+                      private["instances"][0]["private_reason"])
+
+    def test_pause_note_operation_id_match_is_token_bounded(self):
+        source, digest = self.make_release("4.1.0")
+        target = self.make_target(source, "upgrade-op10")
+        spec = self.make_upgrade_spec(
+            source, digest, [("relay-a", target)], "upgrade-op1")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", source, "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "excluded")
+        state_path = os.path.join(
+            self.d, ".m8shift", "runtime", "fleet-upgrades",
+            "upgrade-op1", "operation.json")
+        with open(state_path, encoding="utf-8") as fh:
+            private = json.load(fh)
+        self.assertIn("not bound", private["instances"][0]["private_reason"])
+
+    def test_interruption_after_update_resumes_from_exact_target_bytes(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-resume")
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-resume")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:verifying", "--json")
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        self.assertEqual(cowork._parse_script_version(
+            os.path.join(target, "m8shift.py")), "4.1.1")
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json")
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        report = json.loads(resumed.stdout)
+        self.assertTrue(report["green"])
+        self.assertEqual(report["instances"][0]["outcome"], "updated")
+
+    def test_interruption_before_update_proves_rollback_without_replaying_update(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-before-update")
+        before = self.target_snapshot(target)
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-before-update")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:updating", "--json")
+        self.assertEqual(interrupted.returncode, 75)
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json")
+        self.assertEqual(resumed.returncode, 1)
+        report = json.loads(resumed.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "rolled_back")
+        self.assertEqual(self.target_snapshot(target), before)
+
+    def test_resume_revalidates_source_before_first_target_mutation(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-source-reverify")
+        before = self.target_snapshot(target)
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)],
+            "upgrade-source-reverify")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:stopping_listeners", "--json")
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        with open(os.path.join(new_source, "m8shift.py"), "a", encoding="utf-8") as fh:
+            fh.write("\n# source changed after preflight\n")
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json")
+        self.assertEqual(resumed.returncode, 1)
+        self.assertIn("source checksum mismatch", resumed.stderr)
+        self.assertEqual(self.target_snapshot(target), before)
+
+    def test_relay_drift_after_cohort_preflight_refuses_before_kit_mutation(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-relay-drift")
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-relay-drift")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:stopping_listeners", "--json")
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        relay_path = os.path.join(target, "M8SHIFT.md")
+        marker = "\n<!-- concurrent relay drift fixture -->\n"
+        with open(relay_path, "a", encoding="utf-8") as fh:
+            fh.write(marker)
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json")
+        self.assertEqual(resumed.returncode, 1, resumed.stdout + resumed.stderr)
+        report = json.loads(resumed.stdout)
+        self.assertEqual(report["state"], "needs_reconciliation")
+        self.assertEqual(report["instances"][0]["reason"],
+                         "pre_mutation_evidence_drift")
+        self.assertEqual(cowork._parse_script_version(
+            os.path.join(target, "m8shift.py")), "4.1.0")
+        with open(relay_path, encoding="utf-8") as fh:
+            self.assertTrue(fh.read().endswith(marker))
+
+    def test_malformed_operation_checkpoint_fails_closed_on_resume(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-bad-checkpoint")
+        before = self.target_snapshot(target)
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)],
+            "upgrade-bad-checkpoint")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:stopping_listeners", "--json")
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        state_path = os.path.join(
+            self.d, ".m8shift", "runtime", "fleet-upgrades",
+            "upgrade-bad-checkpoint", "operation.json")
+        with open(state_path, encoding="utf-8") as fh:
+            operation = json.load(fh)
+        operation["instances"][0]["phase"] = "invented_phase"
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(operation, fh)
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json")
+        self.assertEqual(resumed.returncode, 1)
+        self.assertIn("instance phase is invalid", resumed.stderr)
+        self.assertEqual(self.target_snapshot(target), before)
+
+    def test_alive_notify_only_listener_restores_from_explicitly_migrated_plan(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(
+            old_source, "upgrade-listener", notify_agent="claude")
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-listener")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", new_source, "--json", timeout=30)
+        state_path = os.path.join(
+            self.d, ".m8shift", "runtime", "fleet-upgrades",
+            "upgrade-listener", "operation.json")
+        private_reason = ""
+        if os.path.exists(state_path):
+            with open(state_path, encoding="utf-8") as fh:
+                private_reason = json.load(fh)["instances"][0].get("private_reason", "")
+        self.assertEqual(result.returncode, 0,
+                         result.stdout + result.stderr + "\n" + private_reason)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "updated")
+        status = subprocess.run([
+            sys.executable, os.path.join(target, "m8shift-runtime.py"),
+            "listener", "status", "--agent", "claude", "--json",
+        ], cwd=target, capture_output=True, text=True, timeout=15)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertTrue(payload["process_resident"])
+        self.assertTrue(payload["status"].startswith("ALIVE"))
+        self.assertTrue(payload["notify_only"])
+        plan_path = os.path.join(
+            target, ".m8shift", "runtime", "listeners", "claude.plan.json")
+        with open(plan_path, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        self.assertEqual(plan["upgrade_lineage"]["operation_id"], "upgrade-listener")
+        self.assertEqual(plan["upgrade_lineage"]["source_manifest_sha256"], new_digest)
+
+    def test_dead_listener_with_old_plan_is_neither_stopped_nor_started(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(
+            old_source, "upgrade-dead-listener", notify_agent="claude")
+        stopped = subprocess.run([
+            sys.executable, os.path.join(target, "m8shift-runtime.py"),
+            "listener", "stop", "--agent", "claude", "--grace", "0.1",
+        ], cwd=target, capture_output=True, text=True, timeout=15)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-dead-listener")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", new_source, "--json", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "updated")
+        status = subprocess.run([
+            sys.executable, os.path.join(target, "m8shift-runtime.py"),
+            "listener", "status", "--agent", "claude", "--json",
+        ], cwd=target, capture_output=True, text=True, timeout=15)
+        self.assertFalse(json.loads(status.stdout)["process_resident"])
+        self.assertEqual(report["instances"][0]["listener_classes"], [])
+
+    def test_resident_halted_listener_refuses_whole_preflight(self):
+        source, digest = self.make_release("4.1.0")
+        target = self.make_target(
+            source, "upgrade-halted-listener", notify_agent="claude")
+        state_path = os.path.join(
+            target, ".m8shift", "runtime", "listeners", "claude.json")
+        with open(state_path, encoding="utf-8") as fh:
+            state = json.load(fh)
+        state["phase"] = "halted"
+        state["reason"] = "synthetic_halted_fixture"
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        spec = self.make_upgrade_spec(
+            source, digest, [("relay-a", target)], "upgrade-halted-listener")
+        result = self.rt("fleet-upgrade", "--spec", spec,
+                         "--source", source, "--json", timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "excluded")
+        self.assertEqual(report["instances"][0]["reason"], "preflight_refused")
+
+    def test_tampered_migrated_plan_is_non_green_listener_restore_failure(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(
+            old_source, "upgrade-plan-tamper", notify_agent="claude")
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-plan-tamper")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:restoring_listeners", "--json",
+            timeout=30)
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        plan_path = os.path.join(
+            target, ".m8shift", "runtime", "listeners", "claude.plan.json")
+        with open(plan_path, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        plan["tampered"] = True
+        with open(plan_path, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json", timeout=30)
+        self.assertEqual(resumed.returncode, 1, resumed.stdout + resumed.stderr)
+        report = json.loads(resumed.stdout)
+        self.assertFalse(report["green"])
+        self.assertEqual(report["instances"][0]["outcome"],
+                         "updated_but_listener_down")
+        self.assertEqual(report["instances"][0]["reason"],
+                         "listener_restore_failed")
+
+    def test_whole_restore_set_is_validated_before_any_listener_is_stopped(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(
+            old_source, "upgrade-restore-set", notify_agent="claude")
+        second = subprocess.run([
+            sys.executable, os.path.join(target, "m8shift-runtime.py"),
+            "listener", "start", "--agent", "codex", "--notify-only",
+            "--backend", "local", "--poll-interval", "0.1",
+        ], cwd=target, capture_output=True, text=True, timeout=15)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.live_listeners.append((target, "codex"))
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-restore-set")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:stopping_listeners", "--json",
+            timeout=30)
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        later_plan = os.path.join(
+            target, ".m8shift", "runtime", "listeners", "codex.plan.json")
+        with open(later_plan, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        plan["tampered"] = True
+        with open(later_plan, "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json", timeout=30)
+        self.assertEqual(resumed.returncode, 1)
+        self.assertIn("plan changed before stop", resumed.stderr)
+        for agent in ("claude", "codex"):
+            status = subprocess.run([
+                sys.executable, os.path.join(target, "m8shift-runtime.py"),
+                "listener", "status", "--agent", agent, "--json",
+            ], cwd=target, capture_output=True, text=True, timeout=15)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            payload = json.loads(status.stdout)
+            self.assertTrue(payload["process_resident"], (agent, payload))
+            self.assertTrue(payload["status"].startswith("ALIVE"), (agent, payload))
+
+    def test_partial_listener_stop_resumes_from_per_lane_write_ahead_intent(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(
+            old_source, "upgrade-partial-stop", notify_agent="claude")
+        second = subprocess.run([
+            sys.executable, os.path.join(target, "m8shift-runtime.py"),
+            "listener", "start", "--agent", "codex", "--notify-only",
+            "--backend", "local", "--poll-interval", "0.1",
+        ], cwd=target, capture_output=True, text=True, timeout=15)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.live_listeners.append((target, "codex"))
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-partial-stop")
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:listener_stopped:claude", "--json",
+            timeout=30)
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        states = {}
+        for agent in ("claude", "codex"):
+            status = subprocess.run([
+                sys.executable, os.path.join(target, "m8shift-runtime.py"),
+                "listener", "status", "--agent", agent, "--json",
+            ], cwd=target, capture_output=True, text=True, timeout=15)
+            states[agent] = json.loads(status.stdout)["process_resident"]
+        self.assertEqual(states, {"claude": False, "codex": True})
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json", timeout=40)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        report = json.loads(resumed.stdout)
+        self.assertEqual(report["instances"][0]["outcome"], "updated")
+        for agent in ("claude", "codex"):
+            status = subprocess.run([
+                sys.executable, os.path.join(target, "m8shift-runtime.py"),
+                "listener", "status", "--agent", agent, "--json",
+            ], cwd=target, capture_output=True, text=True, timeout=15)
+            payload = json.loads(status.stdout)
+            self.assertTrue(payload["process_resident"], (agent, payload))
+            self.assertTrue(payload["status"].startswith("ALIVE"), (agent, payload))
+
+    def test_resume_adopts_exact_relay_state_reached_before_terminal_checkpoint(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        target = self.make_target(old_source, "upgrade-resume-relay")
+        spec = self.make_upgrade_spec(
+            new_source, new_digest, [("relay-a", target)], "upgrade-resume-relay")
+        with open(spec, encoding="utf-8") as fh:
+            spec_doc = json.load(fh)
+        spec_doc["instances"][0]["resume_relay"] = True
+        with open(spec, "w", encoding="utf-8") as fh:
+            json.dump(spec_doc, fh)
+        interrupted = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--interrupt-after", "relay-a:relay_resumed", "--json", timeout=30)
+        self.assertEqual(interrupted.returncode, 75, interrupted.stdout + interrupted.stderr)
+        status = subprocess.run([
+            sys.executable, "m8shift.py", "status", "--for", "codex",
+        ], cwd=target, capture_output=True, text=True, timeout=15)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("AWAITING_CODEX", status.stdout)
+        resumed = self.rt("fleet-upgrade", "--spec", spec, "--source", new_source,
+                          "--resume", "--json", timeout=30)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        report = json.loads(resumed.stdout)
+        self.assertTrue(report["green"])
+        self.assertEqual(report["instances"][0]["outcome"], "updated")
+
+    def test_plan_rollback_restores_exact_original_json_bytes(self):
+        runtime = self._load_runtime()
+        root = tempfile.mkdtemp(prefix="m8shift-fleet-plan-byte-rollback-")
+        self.targets.append(root)
+        plan_path = os.path.join(root, "claude.plan.json")
+        original = (json.dumps({
+            "schema": "m8shift.listener.plan.v1", "agent": "claude",
+            "formatting": "intentionally noncanonical",
+        }, ensure_ascii=False, indent=4) + "\n").encode("utf-8")
+        migrated = runtime.canonical_json_bytes({
+            "schema": "m8shift.listener.plan.v1", "agent": "claude",
+            "formatting": "migrated",
+        })
+        with open(plan_path, "wb") as fh:
+            fh.write(migrated)
+        migration = {
+            "old_sha256": hashlib.sha256(original).hexdigest(),
+            "new_sha256": hashlib.sha256(migrated).hexdigest(),
+            "old_plan_text": original.decode("utf-8"),
+            "new_plan": {}, "applied": True,
+        }
+        lane = {
+            "agent": "claude", "plan_file": "claude.plan.json",
+            "plan_sha256": migration["new_sha256"],
+            "plan_migration": migration,
+        }
+        instance = {"root": root, "restore_set": [lane]}
+        with mock.patch.object(runtime, "fleet_upgrade_checkpoint"):
+            runtime.fleet_upgrade_restore_original_plans(
+                {"operation_id": "test-byte-rollback"}, instance)
+        with open(plan_path, "rb") as fh:
+            self.assertEqual(fh.read(), original)
+        self.assertEqual(lane["plan_sha256"], migration["old_sha256"])
+        self.assertFalse(migration["applied"])
+
+    def test_failed_instance_rolls_back_and_leaves_later_root_untouched(self):
+        old_source, _old_digest = self.make_release("4.1.0")
+        new_source, new_digest = self.make_release("4.1.1")
+        first = self.make_target(old_source, "upgrade-fail-stop")
+        later = self.make_target(old_source, "upgrade-fail-stop")
+        first_before = self.target_snapshot(first)
+        later_before = self.target_snapshot(later)
+        spec = self.make_upgrade_spec(new_source, new_digest, [
+            ("relay-a", first), ("relay-b", later),
+        ], "upgrade-fail-stop")
+        result = self.rt(
+            "fleet-upgrade", "--spec", spec, "--source", new_source,
+            "--fail-update-instance", "relay-a", "--json", timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual([row["outcome"] for row in report["instances"]],
+                         ["rolled_back", "not_started"])
+        self.assertEqual(self.target_snapshot(first), first_before)
+        self.assertEqual(self.target_snapshot(later), later_before)
+
+
+class TestDoctorBaselineDrift(ListenerCLIBase):
+    def setUp(self):
+        super().setUp()
+        self.init("--agents", "claude,codex")
+        kit_path = os.path.join(self.d, ".m8shift", "kit.json")
+        os.makedirs(os.path.dirname(kit_path), exist_ok=True)
+        with open(kit_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "schema": "m8shift.kit.v1",
+                "core": {"script": "m8shift.py", "version": VERSION},
+                "companions": [], "runners": [],
+            }, fh)
+
+    def doctor_fixture(self, name, findings, version=VERSION):
+        path = os.path.join(self.d, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "m8shift_version": version, "ok": not findings,
+                "severity_min": "info", "adoption": {},
+                "findings": findings,
+            }, fh)
+        return path
+
+    def capture(self, fixture, name="baseline.json", ttl=3600):
+        rel = os.path.join(".m8shift", "runtime", "doctor-baselines", name)
+        result = self.rt(
+            "doctor-baseline", "capture", "--output", rel,
+            "--ttl-seconds", str(ttl), "--doctor-json", fixture, "--json")
+        return result, os.path.join(self.d, rel)
+
+    @staticmethod
+    def finding(check="listener.dead", severity="warning", path="lane/agy",
+                message="listener is dead", fix_hint="restart it"):
+        row = {"check": check, "severity": severity, "message": message}
+        if path:
+            row["path"] = path
+        if fix_hint:
+            row["fix_hint"] = fix_hint
+        return row
+
+    def test_capture_and_wording_only_compare_are_portable_and_green(self):
+        pre = self.doctor_fixture("pre.json", [self.finding(message="old wording")])
+        captured, baseline_path = self.capture(pre)
+        self.assertEqual(captured.returncode, 0, captured.stdout + captured.stderr)
+        summary = json.loads(captured.stdout)
+        self.assertEqual(summary["schema"], "m8shift.doctor-baseline.v1")
+        self.assertFalse(os.path.isabs(summary["output"]))
+        with open(baseline_path, encoding="utf-8") as fh:
+            baseline = json.load(fh)
+        serialized = json.dumps(baseline)
+        self.assertNotIn("old wording", serialized)
+        self.assertNotIn("restart it", serialized)
+        self.assertEqual(baseline["findings"][0]["count"], 1)
+        post = self.doctor_fixture("post.json", [
+            self.finding(message="new wording", fix_hint="different hint")])
+        compared = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path,
+            "--current-json", post, "--json")
+        self.assertEqual(compared.returncode, 0, compared.stdout + compared.stderr)
+        report = json.loads(compared.stdout)
+        self.assertTrue(report["green"])
+        self.assertEqual(report["counts"], {
+            "accepted": 0, "blocking": 0, "introduced": 0,
+            "preexisting": 1, "resolved": 0,
+        })
+        self.assertNotIn(self.d, compared.stdout)
+
+    def test_multiset_resolved_and_new_listener_failure_classification(self):
+        warning = self.finding()
+        pre = self.doctor_fixture("pre-multi.json", [warning, warning])
+        captured, baseline_path = self.capture(pre, "multi.json")
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        post = self.doctor_fixture("post-multi.json", [warning, self.finding(
+            check="listener.halted", severity="error", message="new failure")])
+        compared = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path,
+            "--current-json", post, "--json")
+        self.assertEqual(compared.returncode, 1, compared.stdout + compared.stderr)
+        report = json.loads(compared.stdout)
+        self.assertFalse(report["green"])
+        self.assertEqual(report["counts"]["preexisting"], 1)
+        self.assertEqual(report["counts"]["resolved"], 1)
+        self.assertEqual(report["counts"]["introduced"], 1)
+        self.assertEqual(report["counts"]["blocking"], 1)
+
+    def test_exact_fresh_exception_accepts_only_its_bounded_count(self):
+        pre = self.doctor_fixture("pre-exception.json", [])
+        captured, baseline_path = self.capture(pre, "exception.json")
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        introduced = self.finding(check="listener.halted", severity="error")
+        post = self.doctor_fixture("post-exception.json", [introduced, introduced])
+        with open(baseline_path, encoding="utf-8") as fh:
+            baseline = json.load(fh)
+        runtime = self._load_runtime()
+        with open(post, encoding="utf-8") as fh:
+            normalized = runtime.doctor_baseline_normalize(json.load(fh))
+        exception_path = os.path.join(self.d, "exceptions.json")
+        created = dt.datetime.strptime(
+            baseline["captured_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=dt.timezone.utc)
+        exceptions = {
+            "schema": "m8shift.doctor-baseline.exceptions.v1",
+            "baseline_sha256": runtime.doctor_baseline_digest(baseline),
+            "root_digest": baseline["root_digest"], "accepted_by": "operator",
+            "decision_ref": "issue-332-review",
+            "created_at": baseline["captured_at"],
+            "expires_at": (created + dt.timedelta(minutes=30)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"),
+            "exceptions": [{
+                "finding_key": normalized[0]["key"],
+                "max_introduced": 2, "reason": "bounded test exception",
+            }],
+        }
+        with open(exception_path, "w", encoding="utf-8") as fh:
+            json.dump(exceptions, fh)
+        accepted = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path,
+            "--current-json", post, "--exceptions", exception_path, "--json")
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        report = json.loads(accepted.stdout)
+        self.assertEqual(report["counts"]["accepted"], 2)
+        self.assertEqual(report["counts"]["blocking"], 0)
+        exceptions["exceptions"][0]["max_introduced"] = 1
+        with open(exception_path, "w", encoding="utf-8") as fh:
+            json.dump(exceptions, fh)
+        bounded = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path,
+            "--current-json", post, "--exceptions", exception_path, "--json")
+        self.assertEqual(bounded.returncode, 1, bounded.stdout + bounded.stderr)
+        self.assertEqual(json.loads(bounded.stdout)["counts"]["blocking"], 1)
+
+    def test_introduced_info_is_visible_but_versions_may_change(self):
+        runtime = self._load_runtime()
+        instant = dt.datetime(2026, 8, 14, 12, 0, tzinfo=dt.timezone.utc)
+        context = {
+            "root_digest": "1" * 64, "session": "session-a", "turn": 4,
+            "core_version": "4.1.1", "kit_version": "4.1.1",
+        }
+        current = {
+            "m8shift_version": "4.1.1",
+            "findings": [self.finding(
+                check="upgrade.note", severity="info", path="",
+                message="informational change")],
+        }
+        baseline = {
+            "schema": runtime.DOCTOR_BASELINE_SCHEMA,
+            "normalizer": runtime.DOCTOR_BASELINE_NORMALIZER,
+            "root_digest": context["root_digest"],
+            "core_version": "3.61.0", "kit_version": "3.61.0",
+            "session": context["session"], "turn": 3,
+            "captured_at": "2026-08-14T11:00:00Z",
+            "expires_at": "2026-08-14T13:00:00Z",
+            "doctor_payload_sha256": "2" * 64, "findings": [],
+        }
+        report = runtime.doctor_baseline_compare(
+            baseline, current, context, instant=instant)
+        self.assertTrue(report["green"])
+        self.assertEqual(report["counts"]["introduced"], 1)
+        self.assertEqual(report["counts"]["blocking"], 0)
+        self.assertEqual(report["baseline_core_version"], "3.61.0")
+        self.assertEqual(report["current_core_version"], "4.1.1")
+
+    def test_live_capture_human_compare_and_output_overwrite_guard(self):
+        rel = os.path.join(
+            ".m8shift", "runtime", "doctor-baselines", "live.json")
+        captured = self.rt(
+            "doctor-baseline", "capture", "--output", rel,
+            "--ttl-seconds", "3600")
+        self.assertEqual(captured.returncode, 0, captured.stdout + captured.stderr)
+        self.assertIn("doctor baseline captured", captured.stdout)
+        baseline_path = os.path.join(self.d, rel)
+        compared = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path)
+        self.assertEqual(compared.returncode, 0, compared.stdout + compared.stderr)
+        self.assertIn("green: yes", compared.stdout)
+        repeated = self.rt(
+            "doctor-baseline", "capture", "--output", rel,
+            "--ttl-seconds", "3600")
+        self.assertEqual(repeated.returncode, 2)
+        self.assertIn("already exists", repeated.stderr)
+        outside = self.rt(
+            "doctor-baseline", "capture", "--output", "outside.json",
+            "--ttl-seconds", "3600")
+        self.assertEqual(outside.returncode, 2)
+        self.assertIn("under .m8shift/runtime", outside.stderr)
+
+    def test_stale_cross_root_turn_and_corrupt_baselines_fail_closed(self):
+        pre = self.doctor_fixture("pre-invalid.json", [])
+        captured, baseline_path = self.capture(pre, "invalid.json")
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        post = self.doctor_fixture("post-invalid.json", [])
+        with open(baseline_path, encoding="utf-8") as fh:
+            pristine = json.load(fh)
+        variants = []
+        stale = dict(pristine)
+        stale["captured_at"] = "2020-01-01T00:00:00Z"
+        stale["expires_at"] = "2020-01-01T01:00:00Z"
+        variants.append(stale)
+        other_root = dict(pristine)
+        other_root["root_digest"] = "0" * 64
+        variants.append(other_root)
+        future_turn = dict(pristine)
+        future_turn["turn"] = 999
+        variants.append(future_turn)
+        corrupt = json.loads(json.dumps(pristine))
+        corrupt["findings"] = [{
+            "key": "0" * 64, "check": "listener.dead", "severity": "warning",
+            "path": "lane/agy", "count": 0,
+        }]
+        variants.append(corrupt)
+        split_version = dict(pristine)
+        split_version["kit_version"] = "9.9.9"
+        variants.append(split_version)
+        invalid_session = dict(pristine)
+        invalid_session["session"] = "invalid session"
+        variants.append(invalid_session)
+        for index, variant in enumerate(variants):
+            path = os.path.join(self.d, f"invalid-{index}.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(variant, fh)
+            with self.subTest(index=index):
+                result = self.rt(
+                    "doctor-baseline", "compare", "--baseline", path,
+                    "--current-json", post, "--json")
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertFalse(json.loads(result.stdout)["green"])
+
+    def test_absolute_and_traversing_doctor_paths_are_rejected_on_capture(self):
+        for index, path in enumerate((
+                "/etc/passwd", "../foreign", "nested/../foreign", "C:\\secret")):
+            fixture = self.doctor_fixture(
+                f"bad-path-{index}.json", [self.finding(path=path)])
+            result, _baseline = self.capture(fixture, f"bad-path-{index}.json")
+            with self.subTest(path=path):
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("path", result.stderr)
+
+    def test_json_input_rejects_symlinks_and_path_identity_swaps(self):
+        runtime = self._load_runtime()
+        payload = self.doctor_fixture("stable-input.json", [])
+        symlink = os.path.join(self.d, "input-link.json")
+        os.symlink(payload, symlink)
+        with self.assertRaisesRegex(ValueError, "non-symlink"):
+            runtime.doctor_baseline_read_json(symlink, "doctor fixture")
+        original = os.lstat(payload)
+        swapped = mock.Mock(
+            st_dev=original.st_dev, st_ino=original.st_ino + 1,
+            st_mode=original.st_mode, st_size=original.st_size)
+        with mock.patch.object(
+                runtime.os, "lstat", side_effect=(original, swapped)):
+            with self.assertRaisesRegex(ValueError, "stable bounded"):
+                runtime.doctor_baseline_read_json(payload, "doctor fixture")
+
+    def test_expired_or_wrong_baseline_exception_record_is_invalid_input(self):
+        pre = self.doctor_fixture("pre-expired-exception.json", [])
+        captured, baseline_path = self.capture(pre, "expired-exception.json")
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        post = self.doctor_fixture("post-expired-exception.json", [self.finding()])
+        with open(baseline_path, encoding="utf-8") as fh:
+            baseline = json.load(fh)
+        exception_path = os.path.join(self.d, "expired-exceptions.json")
+        invalid = {
+            "schema": "m8shift.doctor-baseline.exceptions.v1",
+            "baseline_sha256": "0" * 64,
+            "root_digest": baseline["root_digest"], "accepted_by": "operator",
+            "decision_ref": "issue-332-expired",
+            "created_at": "2020-01-01T00:00:00Z",
+            "expires_at": "2020-01-01T01:00:00Z", "exceptions": [],
+        }
+        with open(exception_path, "w", encoding="utf-8") as fh:
+            json.dump(invalid, fh)
+        result = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path,
+            "--current-json", post, "--exceptions", exception_path, "--json")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("different baseline", json.loads(result.stdout)["error"])
+        runtime = self._load_runtime()
+        invalid["baseline_sha256"] = runtime.doctor_baseline_digest(baseline)
+        invalid["created_at"] = baseline["captured_at"]
+        invalid["expires_at"] = baseline["captured_at"]
+        with open(exception_path, "w", encoding="utf-8") as fh:
+            json.dump(invalid, fh)
+        expired = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path,
+            "--current-json", post, "--exceptions", exception_path, "--json")
+        self.assertEqual(expired.returncode, 2, expired.stdout + expired.stderr)
+        self.assertIn("stale", json.loads(expired.stdout)["error"])
+
+    def test_exception_record_rejects_absent_or_non_blocking_finding_keys(self):
+        pre = self.doctor_fixture("pre-exact-exception.json", [])
+        captured, baseline_path = self.capture(pre, "exact-exception.json")
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        post = self.doctor_fixture("post-exact-exception.json", [self.finding()])
+        with open(baseline_path, encoding="utf-8") as fh:
+            baseline = json.load(fh)
+        runtime = self._load_runtime()
+        created = dt.datetime.strptime(
+            baseline["captured_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=dt.timezone.utc)
+        exceptions = {
+            "schema": runtime.DOCTOR_BASELINE_EXCEPTIONS_SCHEMA,
+            "baseline_sha256": runtime.doctor_baseline_digest(baseline),
+            "root_digest": baseline["root_digest"], "accepted_by": "operator",
+            "decision_ref": "issue-332-exact",
+            "created_at": baseline["captured_at"],
+            "expires_at": (created + dt.timedelta(minutes=30)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"),
+            "exceptions": [{
+                "finding_key": "0" * 64, "max_introduced": 1,
+                "reason": "must not silently match nothing",
+            }],
+        }
+        exception_path = os.path.join(self.d, "exact-exceptions.json")
+        with open(exception_path, "w", encoding="utf-8") as fh:
+            json.dump(exceptions, fh)
+        absent = self.rt(
+            "doctor-baseline", "compare", "--baseline", baseline_path,
+            "--current-json", post, "--exceptions", exception_path, "--json")
+        self.assertEqual(absent.returncode, 2, absent.stdout + absent.stderr)
+        self.assertIn("absent finding key", json.loads(absent.stdout)["error"])
+
+
+class TestVerifyKitSubset(CLIBase):
+    def setUp(self):
+        super().setUp()
+        self.source = os.path.realpath(tempfile.mkdtemp(prefix="m8shift-verify-source-"))
+        self.init()
+
+    def tearDown(self):
+        shutil.rmtree(self.source, ignore_errors=True)
+        super().tearDown()
+
+    @staticmethod
+    def _sha(path):
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+
+    @staticmethod
+    def _bytes(path):
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def source_release(self, rels=()):
+        selected = ["m8shift.py", *rels]
+        for rel in selected:
+            source = os.path.join(REPO, rel)
+            target = os.path.join(self.source, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(source, target)
+        with open(os.path.join(self.source, "checksums.sha256"), "w", encoding="utf-8") as fh:
+            for rel in sorted(selected):
+                fh.write("%s  %s\n" % (self._sha(os.path.join(self.source, rel)), rel))
+        return {rel: self._sha(os.path.join(self.source, rel)) for rel in selected}
+
+    def install_local(self, rel):
+        target = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(os.path.join(self.source, rel), target)
+
+    @staticmethod
+    def component(kind, name, rel, digest, version=VERSION):
+        return {
+            "name": name, "script" if kind == "companion" else "path": rel,
+            "version": version, "sha256": digest,
+            "copied_at": "2026-08-14T12:00:00Z", "source": "verified-release",
+        }
+
+    def write_kit(self, companions=(), runners=(), **extra):
+        doc = {
+            "schema": "m8shift.kit.v1",
+            "core": {"script": "m8shift.py", "version": VERSION},
+            "companions": list(companions), "runners": list(runners),
+        }
+        doc.update(extra)
+        path = os.path.join(self.d, ".m8shift", "kit.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+
+    def verify(self, *extra):
+        return self.cw("verify-kit", "--source", self.source, *extra)
+
+    def test_subset_success_ignores_undeclared_release_components(self):
+        runtime_rel = "m8shift-runtime.py"
+        runner_rel = os.path.join("examples", "headless_runner.py")
+        digests = self.source_release((runtime_rel, runner_rel))
+        self.install_local(runtime_rel)
+        companion = self.component(
+            "companion", "runtime", runtime_rel, digests[runtime_rel])
+        self.write_kit(companions=(companion,))
+        result = self.verify("--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["schema"], "m8shift.verify-kit.report.v1")
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            [(row["id"], row["result"]) for row in report["components"]],
+            [("core:core", "success"), ("companion:runtime", "success")])
+        self.assertNotIn(self.source, result.stdout)
+
+    def test_missing_runner_and_altered_companion_are_distinct(self):
+        runtime_rel = "m8shift-runtime.py"
+        runner_rel = os.path.join("examples", "headless_runner.py")
+        digests = self.source_release((runtime_rel, runner_rel))
+        self.install_local(runtime_rel)
+        with open(os.path.join(self.d, runtime_rel), "a", encoding="utf-8") as fh:
+            fh.write("\n# local drift\n")
+        companion = self.component(
+            "companion", "runtime", runtime_rel, digests[runtime_rel])
+        runner = self.component(
+            "runner", "headless-runner", runner_rel, digests[runner_rel])
+        self.write_kit(companions=(companion,), runners=(runner,))
+        result = self.verify("--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        rows = {row["id"]: row["result"] for row in json.loads(result.stdout)["components"]}
+        self.assertEqual(rows["companion:runtime"], "drift")
+        self.assertEqual(rows["runner:headless-runner"], "missing")
+
+    def test_stale_unsupported_and_incomplete_kit_manifests_fail_closed(self):
+        self.source_release()
+        self.write_kit(unexpected=True)
+        unsupported = self.verify("--json")
+        self.assertEqual(unsupported.returncode, 2, unsupported.stdout + unsupported.stderr)
+        self.assertEqual(json.loads(unsupported.stdout)["result_id"],
+                         "unsupported_manifest_fields")
+        path = os.path.join(self.d, ".m8shift", "kit.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "m8shift.kit.v1", "core": {
+                "script": "m8shift.py", "version": VERSION}}, fh)
+        incomplete = self.verify("--json")
+        self.assertEqual(incomplete.returncode, 2, incomplete.stdout + incomplete.stderr)
+        self.assertEqual(json.loads(incomplete.stdout)["result_id"], "incomplete_manifest")
+
+    def test_invalid_source_manifest_fails_before_component_verdict(self):
+        self.source_release()
+        self.write_kit()
+        with open(os.path.join(self.source, "checksums.sha256"), "w", encoding="utf-8") as fh:
+            fh.write("not-a-checksum\n")
+        result = self.verify("--json")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["result_id"], "invalid_source_manifest")
+        self.assertEqual(report["components"], [])
+
+    def test_entire_source_release_is_verified_even_outside_local_subset(self):
+        runtime_rel = "m8shift-runtime.py"
+        self.source_release((runtime_rel,))
+        self.write_kit()
+        with open(os.path.join(self.source, runtime_rel), "a", encoding="utf-8") as fh:
+            fh.write("\n# corrupted undeclared source component\n")
+        before_relay = self._bytes(os.path.join(self.d, "M8SHIFT.md"))
+        before_kit = self._bytes(os.path.join(self.d, ".m8shift", "kit.json"))
+        result = self.verify("--json")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["result_id"], "invalid_source_manifest")
+        self.assertEqual(self._bytes(os.path.join(self.d, "M8SHIFT.md")), before_relay)
+        self.assertEqual(
+            self._bytes(os.path.join(self.d, ".m8shift", "kit.json")), before_kit)
+
+    def test_manifest_hash_and_version_mismatch_are_component_results(self):
+        runtime_rel = "m8shift-runtime.py"
+        digests = self.source_release((runtime_rel,))
+        self.install_local(runtime_rel)
+        stale_hash = self.component("companion", "runtime", runtime_rel, "0" * 64)
+        self.write_kit(companions=(stale_hash,))
+        hash_result = self.verify("--json")
+        self.assertEqual(hash_result.returncode, 1, hash_result.stdout + hash_result.stderr)
+        row = next(row for row in json.loads(hash_result.stdout)["components"]
+                   if row["id"] == "companion:runtime")
+        self.assertEqual(row["result"], "manifest_sha_mismatch")
+        stale_version = self.component(
+            "companion", "runtime", runtime_rel, digests[runtime_rel], version="4.0.0")
+        self.write_kit(companions=(stale_version,))
+        version_result = self.verify("--json")
+        self.assertEqual(version_result.returncode, 1,
+                         version_result.stdout + version_result.stderr)
+        row = next(row for row in json.loads(version_result.stdout)["components"]
+                   if row["id"] == "companion:runtime")
+        self.assertEqual(row["result"], "version_mismatch")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_local_component_and_ancestor_symlinks_are_reported(self):
+        runner_rel = os.path.join("examples", "headless_runner.py")
+        digests = self.source_release((runner_rel,))
+        runner = self.component(
+            "runner", "headless-runner", runner_rel, digests[runner_rel])
+        self.write_kit(runners=(runner,))
+        outside = tempfile.mkdtemp(prefix="m8shift-verify-outside-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        shutil.copy2(os.path.join(self.source, runner_rel),
+                     os.path.join(outside, "headless_runner.py"))
+        os.symlink(outside, os.path.join(self.d, "examples"))
+        result = self.verify("--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        runner_row = next(row for row in json.loads(result.stdout)["components"]
+                          if row["id"] == "runner:headless-runner")
+        self.assertEqual(runner_row["result"], "symlink")
+
+    def test_source_missing_declared_component_and_human_output_have_stable_ids(self):
+        self.source_release()
+        runner_rel = os.path.join("examples", "headless_runner.py")
+        runner = self.component("runner", "headless-runner", runner_rel, "1" * 64)
+        self.write_kit(runners=(runner,))
+        result = self.verify()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("runner:headless-runner", result.stdout)
+        self.assertIn("source_mismatch", result.stdout)
+
+    def test_permission_errors_are_redacted_and_classified_unreadable(self):
+        secret = os.path.join(self.d, "private-component.py")
+        with open(secret, "w", encoding="utf-8") as fh:
+            fh.write("private\n")
+        denied = PermissionError(13, "Permission denied", secret)
+        with mock.patch.object(cowork.os, "lstat", side_effect=denied):
+            with self.assertRaises(cowork.VerifyKitError) as caught:
+                cowork._verify_kit_snapshot(secret, "local component")
+        self.assertEqual(caught.exception.result_id, "unreadable")
+        self.assertNotIn(secret, str(caught.exception))
+        with mock.patch.object(cowork.os, "open", side_effect=denied):
+            with self.assertRaises(cowork.VerifyKitError) as caught:
+                cowork._verify_kit_snapshot(secret, "local component")
+        self.assertEqual(caught.exception.result_id, "unreadable")
+        self.assertNotIn(secret, str(caught.exception))
 
 
 class TestRFC072FleetPlan(ListenerCLIBase):

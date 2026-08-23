@@ -310,6 +310,32 @@ Default components for PR B:
 core,protocol,pack,anchors,runner-if-installed
 ```
 
+### Amendment #328 — bounded pre-manifest runner adoption
+
+`update --adopt-runner headless-runner|watch-status` is deliberately outside the
+component selector. It recovers one known runner that already exists at its
+canonical target path but is absent from `kit.json`; it is not a broad
+`init --force-companions` substitute.
+
+Before a non-dry-run replacement, the implementation MUST:
+
+- require a regular, non-symlinked, root-confined source and target;
+- require and verify the selected source release's `checksums.sha256` entry;
+- parse the source runner version and retain normal downgrade refusal;
+- treat the target as pristine only if its bytes match the target release's own
+  `checksums.sha256` entry. A missing or mismatched target entry is
+  `manual_review_required` unless `--force-adopt-runner` is explicit;
+- write unique backup copies of the prior runner and prior `kit.json` before
+  replacement, beneath `.m8shift/backups/runner-adoption/`;
+- atomically merge only the selected `runners[]` entry, with source/version/
+  digest provenance, then record the backup paths as adoption evidence in the
+  bounded update audit row.
+
+`--adopt-runner` MUST reject combinations with `--components`, `--companions`,
+or `--force-generated`. It MUST NOT refresh the core, protocol, pack, anchors,
+other runners, relay journal, or provider profiles. Its dry-run emits the same
+verification result without creating a backup or changing the manifest.
+
 ### Safety rules
 
 `update` MUST:
@@ -329,6 +355,10 @@ core,protocol,pack,anchors,runner-if-installed
 - for runner artifacts, require `.m8shift/kit.json` metadata (`runners[]`
   name/path/version/sha256/source) to prove the currently installed checksum
   before automatic refresh; otherwise report `manual_review_required`;
+- for the separate `--adopt-runner` recovery, require a verified source release
+  checksum and preserve both the legacy runner and prior manifest before any
+  explicit replacement; a target whose own checksum entry cannot prove its
+  current bytes requires `--force-adopt-runner`;
 - refuse downgrade unless `--allow-downgrade`;
 - refuse malformed generated markers unless `--force-generated`;
 - keep `--force-generated` distinct from `init --force` because `init --force`
@@ -415,6 +445,10 @@ component results, refused/skipped reasons, and whether companions/runners were 
 - Windows/self-replacement path stages or refuses cleanly without partial update.
 - `--dry-run --json` writes nothing and reports a complete plan.
 - Audit row has a documented schema and is readable by diagnostics.
+- `--adopt-runner` dry-run leaves the target byte-for-byte unchanged; successful
+  adoption changes only the selected runner and its manifest/audit evidence;
+  modified, symlinked, and missing-source cases refuse before mutation; the
+  dedicated force flag is required only for an unproven local target.
 
 ## Security considerations
 

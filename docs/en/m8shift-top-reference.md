@@ -32,14 +32,40 @@ The header identifies the data being viewed:
 - **M8SHIFT** is the dashboard wordmark.
 - **Project** is the initialized project name, so an operator can distinguish
   terminals before acting elsewhere.
-- **Version** is the `m8shift.py` engine version that produced the snapshot, not
-  a dashboard-only release number.
+- **CORE** is the `m8shift.py` engine version that produced the snapshot.
+- **TOP** is the version actually loaded by the long-lived dashboard process.
+  It is not inferred from the file currently on disk.
 - **Session** is the immutable identifier of the current relay session.
 - **Clock** is the render time. It uses the local timezone by default and UTC
   when invoked with `--utc`.
 
 The frame is structural, not decorative: after ANSI colour codes are removed,
 every line remains exactly the selected terminal width.
+
+### Loaded code and the canonical file
+
+Before entering alternate-screen or raw-keyboard mode, a real interactive POSIX
+invocation performs one self re-exec with hidden, validated process markers for
+the loaded TOP version and selected relay-root digest. Those markers are
+observability evidence only: they do not grant relay authority and are never
+used to signal or restart the process. A dashboard launched outside the relay
+root, or through a symlink, must select its intended relay explicitly with
+`--root DIR` or `M8SHIFT_ROOT`.
+
+A single daemon worker compares the loaded version with the canonical
+`<root>/m8shift-top.py`. The read is bounded, refuses a symlink or non-regular
+target, and verifies stable descriptor/path identity before and after the read.
+The render loop never waits for this worker. Its states are explicit:
+
+- `fresh` with equal versions is green and needs no extra row;
+- a different newer **or older** on-disk version renders `TOP RESTART REQUIRED`;
+- `checking` and `stale` retain their honest freshness instead of presenting old
+  evidence as current; and
+- missing, unreadable, symlinked, non-regular, oversized, invalid, replaced, or
+  ambiguously rooted targets render `TOP CHECK NON-GREEN`.
+
+The warning row is reserved before activity truncation. Restarting remains a
+human action: TOP never stops, detaches, reparents, or replaces an active TUI.
 
 ## PEN and TTL
 
@@ -97,6 +123,10 @@ There is one AGENTS row per relay member:
   consumed-ratio guard bands (below 60% green, 60% to below 85% yellow, 85% or
   more red). If the provider supplies a reset instant, it appears beside the
   remaining percentage. A known model at zero remaining is labelled exhausted.
+  When a provider exposes several model groups, the normalized source receipt
+  records the explicit group selector; `top` never treats `groups[0]` as agent
+  identity. The Antigravity reference adapter selects a configured `bucketId`
+  prefix and uses the endpoint's explicit `window` field for these two columns.
 
 Usage is advisory. It does not change claimability, relay state, or the pen.
 

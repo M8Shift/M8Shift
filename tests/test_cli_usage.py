@@ -27,6 +27,7 @@ PYTHON_ENTRY_POINTS = (
     "examples/headless_runner.py",
     "examples/usage-adapters/claude-oauth-usage.py",
     "examples/usage-adapters/codex-ratelimits.py",
+    "examples/usage-adapters/antigravity-quota.py",
     "examples/usage-adapters/tokscale-spend.py",
     "scripts/m8shift-self-update.py",
     "scripts/scrub-check.py",

@@ -37,8 +37,11 @@ out of scope by construction:
   supplies credentials. The other **runtime boundary** is the operator's opt-in, disabled-by-
   default reference adapters under `examples/usage-adapters/`: one of them
   (`claude-oauth-usage.py`) *does* make an HTTPS call to the provider's own
-  quota endpoint with the operator's credential — read in memory, emitted only
-  as an aggregate fixture, never persisted. M8Shift runs such an adapter as a
+  quota endpoint with the operator's credential. Another
+  (`antigravity-quota.py`) makes a bounded loopback call to the provider's local
+  language server and reads its CSRF token from process metadata. Both secrets
+  stay in memory and only aggregate fixtures are emitted, never raw responses
+  or credentials. M8Shift runs such an adapter as a
   plain argv and reads its stdout; M8Shift itself still opens no socket. Local
   OS notifiers/hooks are host-local best-effort side effects. See RFC 040.
 - **No daemon, no privilege.** Nothing runs as a service the tool installs
