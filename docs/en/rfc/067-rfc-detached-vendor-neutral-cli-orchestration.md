@@ -207,6 +207,21 @@ requested -> resolved -> provider_projection -> applied_observation
 - `applied_observation` records what the launched process demonstrably received
   or what an independent host boundary enforced.
 
+**Shared launch primitives do not own isolation (#340).** A bounded subprocess
+helper reused by several callers MUST NOT assume, impose, or default an
+environment policy: the caller that launches a governed child selects the policy
+and supplies it explicitly. A primitive that isolates for every caller silently
+changes the callers that were never in scope, and a primitive that isolates for
+none leaves each caller's default to chance.
+
+This applies beyond the attempt plan. Usage adapters (RFC 040) are launched by
+the runtime companion outside any attempt, and were therefore outside this
+contract while appearing to be inside it — the field existed and never reached
+the launch. They are now bound by it: their launcher constructs the child
+environment from a declared allowlist, and an absent declaration yields the base
+seed rather than inheritance. An unsupported policy shape is reported as
+unsupported and refuses the launch; it is never applied in a weakened form.
+
 No stage may be reported as another. In particular, a successful configuration
 parse or zero process exit is not applied-policy attestation.
 

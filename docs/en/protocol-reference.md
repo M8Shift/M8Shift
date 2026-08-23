@@ -130,10 +130,11 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ```
 ./m8shift.py init [--name PROJECT] [--agents a,b,c…] [--lang <code>] [--force]  # (re)generate the kit; --lang = a language BUNDLED in this file (core = en; build more with m8shift-i18n.py)
 ./m8shift.py roster add <agent> --by <holder>  # holder-only live enrollment; changes only LOCK agents and never edits anchors
-./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
+./m8shift.py update --target DIR [--source DIR] [--components core,protocol,pack,anchors,runner,companions] [--adopt-runner headless-runner|watch-status [--force-adopt-runner]] [--dry-run] [--json] [--allow-downgrade] [--allow-working] [--force-generated]  # RFC 048: source-driven local update — run the NEW source copy; every write lands in --target
 ./m8shift.py status [--for <agent>] [--brief]      # lock + last turn + optional next-action hint
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # local read-only live monitor
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # read-only health/lint/security checks (never repairs or steals the pen)
+./m8shift.py verify-kit --source DIR [--json] # offline read-only verification of the locally declared installed-kit subset
 ./m8shift.py contract validate [--strict] [--json] # read-only Stage-4 contract validation
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N] [--brief]  # read-only briefing: LOCK + last turns + memory + tasks
 ./m8shift.py peek <agent>  # last handoff addressed to <agent> (rc 3 if not your turn)
@@ -158,6 +159,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py review-return <coordinator> --from <reviewer> --run RUN  # validated review-evidence handback; then claim (consume decisions only)
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
@@ -167,6 +169,7 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # pin this shift to ONE project relay (RFC 038 §9); penless; refuses under ambiguity without the closed selector
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: protective liveness beat for a WORKING holder (managed producers; window = max(120, min(2*N, TTL)); claim --refresh records audit-only beats)
 ./m8shift.py release <agent> --to <other> [--force --reason "why"]  # hand off without a body (does NOT re-increment turn)
+./m8shift.py unclaim <agent> --reason "..."                 # RFC/#320: undo your OWN untouched claim — restores AWAITING_<agent> at the SAME turn; release hands off and would change the recipient
 ./m8shift.py done <agent> [--force --reason "why"]  # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)
 ```
@@ -209,6 +212,28 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   executing. Merge, close, tag, deletion, mirror, force push, and other
   destructive/integration actions cannot be mandated, and human exact-head merge
   authorization remains separate.
+- **Artifact-only reviewer return:** `review-return <coordinator> --from <reviewer>
+  --run <id>` is the closed return edge for an explicitly read-only reviewer. It is
+  accepted only while the named reviewer is the idle `AWAITING` holder, the latest
+  closed turn was authored by the coordinator and handed to that reviewer, and
+  stable regular non-symlink evidence binds the exact run, reviewer, and input-turn
+  digest. Evidence is either a bounded decision artifact with exact output digest
+  and explicit `APPROVE`, `REVISE`, or `REJECT`, or a redacted immutable permission-
+  refusal receipt containing only a closed runner evidence id and no provider text.
+  Success changes only the LOCK to `AWAITING_<coordinator>` and records a redacted
+  `review_return` event; it adds no turn, copies no provider text, grants no pen, and
+  does not consume the artifact. The coordinator must claim before consuming a
+  decision artifact; a refusal outcome has no response to consume. Any identity,
+  freshness, digest, shape, size, coordinator, decision, or refusal-evidence mismatch
+  refuses without changing the LOCK. Until the next authored turn, `peek` and the
+  claim-plus-peek path in `next` render only the current redacted return provenance
+  (coordinator, reviewer, run, input turn, outcome, evidence kind, and next action).
+  The return note survives that coordinator claim and must intersect one exact current-
+  session `review_return` event; missing, malformed, stale, cross-session, or wrong-turn
+  evidence fails closed instead of falling back to an older handoff. A return already
+  claimed by an older core is recognized only from the exact `review_return` then
+  coordinator-`claim` event tail, followed at most by same-window work tags. Ordinary
+  turn handoffs keep their existing output.
 - `append` is accepted **only from `WORKING_<you>`**; it writes the turn and
   hands off. `--body -` reads the body from stdin; `--body f.md` from a file;
   without `--body`, the turn has only the header. Bodies are capped at 256 KiB
@@ -274,6 +299,17 @@ uncommitted changes, as a reminder to coordinate before generated writes land.
   to manual review. Locally edited tracked runners require manual review unless
   the operator deliberately uses `--force-generated`. Each real run appends a
   bounded audit row (`m8shift.update.audit.v1`) to `.m8shift/update-audit.jsonl`.
+
+  **Legacy runner adoption (#328).** `update --adopt-runner
+  headless-runner|watch-status` is the intentionally narrower recovery route
+  for one known runner already on disk but absent from `kit.json`. It requires a
+  checksum-verified source runner and a regular, confined target; it accepts the
+  target as unmodified only when it matches the target release's own
+  `checksums.sha256` entry. Otherwise `--force-adopt-runner` is required and
+  first preserves unique runner and manifest backups. This operation is mutually
+  exclusive with component/companion/generated refreshes, merges only the one
+  runner manifest entry, writes backup evidence into the audit row, and never
+  invokes `init` or changes relay/protocol/anchor state.
 
 ---
 

@@ -41,7 +41,7 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 OFFLINE_ENV = {
     "HEADROOM_OFFLINE": "1",
     "HF_HUB_OFFLINE": "1",

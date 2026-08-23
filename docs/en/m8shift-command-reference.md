@@ -55,6 +55,12 @@ Parameters:
 - `--target DIR` (required): project to update; use `.` explicitly for the current directory.
 - `--source DIR`: source release or checkout; defaults to the running script's directory.
 - `--components NAME,...`: `core`, `protocol`, `pack`, `anchors`, `runner`, or `companions`.
+- `--adopt-runner {headless-runner,watch-status}`: adopt exactly one existing
+  pre-manifest runner from the verified source release. It is a bounded recovery
+  operation, not an `init` shortcut.
+- `--force-adopt-runner`: permit that adoption to replace target runner bytes
+  which do not match the target's local checksum manifest. The prior runner and
+  `kit.json` are saved first.
 - `--companions NAME,...`: companions to refresh or install.
 - `--dry-run`: print the plan without writing.
 - `--json`: emit machine-readable results.
@@ -66,6 +72,25 @@ Parameters:
 ```bash
 python3 /opt/m8shift/m8shift.py update --target ./my-project --dry-run
 ```
+
+For a legacy runner that is present on disk but absent from `kit.json`, use the
+separate, one-artifact operation:
+
+```bash
+python3 /opt/m8shift/m8shift.py update --target ./my-project \
+  --source /opt/m8shift --adopt-runner headless-runner --dry-run
+```
+
+Adoption requires a regular, non-symlinked known target and a source
+`checksums.sha256` entry that matches the source runner before any write. The
+target is considered pristine only when its bytes match that target's own
+`checksums.sha256` entry; otherwise it returns `manual_review_required` until
+the explicit `--force-adopt-runner` override is supplied. A real adoption saves
+unique copies of the prior runner and manifest under
+`.m8shift/backups/runner-adoption/`, merges the one `runners[]` manifest entry,
+and records the backup evidence in `.m8shift/update-audit.jsonl`. It cannot be
+combined with `--components`, `--companions`, or `--force-generated`, and never
+refreshes the core, protocol, pack, anchors, relay, or other runner.
 
 ## `status`
 
@@ -154,6 +179,32 @@ Parameters:
 
 ```bash
 ./m8shift.py doctor --lint --json
+```
+
+## `verify-kit`
+
+Purpose: verify, offline and without mutation, that only the core, companions,
+and runners declared by the local `.m8shift/kit.json` match a complete source
+release. The command verifies every entry in the source `checksums.sha256`
+before comparing the declared local subset; an adopter is not required to
+contain every release file.
+
+Parameters:
+
+- `--source DIR` (required): absolute canonical path to a separately obtained
+  release directory containing `m8shift.py` and `checksums.sha256`.
+- `--json`: emit `m8shift.verify-kit.report.v1` JSON.
+
+Exit status is `0` when every declared component matches, `1` for component
+results such as `missing`, `symlink`, `drift`, `version_mismatch`,
+`manifest_sha_mismatch`, or `source_mismatch`, and `2` when the source or kit
+evidence is malformed, incomplete, unsupported, unstable, oversized, or
+otherwise cannot support a verdict. JSON output contains root digests rather
+than raw local paths and stable component ids such as `core:core` and
+`companion:runtime`.
+
+```bash
+./m8shift.py verify-kit --source /opt/m8shift-release --json
 ```
 
 ## `contract`
@@ -412,6 +463,36 @@ Parameters: `AGENT` receives the turn; `--from AGENT` names the idle holder;
 ./m8shift.py steer-turn agent-a --from agent-b --request 3 --force --reason "operator reassignment"
 ```
 
+## `review-return`
+
+Purpose: return one validated artifact-only review from an idle read-only
+reviewer to the coordinator that authored the current closed handoff.
+
+Parameters: `AGENT` is the original coordinator; `--from AGENT` names the current
+`AWAITING` reviewer; `--run RUN` selects the immutable reviewer artifact.
+
+The command validates either the exact input/output digests plus an explicit
+`APPROVE`, `REVISE`, or `REJECT`, or a redacted immutable permission-refusal
+receipt bound to the exact input turn. It changes only
+`AWAITING_<reviewer>` to `AWAITING_<coordinator>`, records a redacted event, adds
+no turn, grants no pen, and prints no provider text. The coordinator must then
+claim. A decision artifact is consumed with `m8shift-runtime.py review-delivery
+consume`; a refusal receipt contains no response and is followed by lane repair or
+relaunch.
+
+Until the coordinator authors the next turn, `peek <coordinator>` and `next
+<coordinator>` show only the current redacted return provenance and its next action.
+They verify the LOCK against the matching current-session `review_return` event and
+fail closed on missing, malformed, stale, cross-session, or wrong-turn evidence;
+they never fall back to an older handoff. The generated return note survives the
+coordinator claim. Ordinary turn-backed handoffs retain their existing output.
+
+```bash
+./m8shift.py review-return agent-a --from reviewer --run review-20260814
+./m8shift.py claim agent-a
+python3 m8shift-runtime.py review-delivery consume review-20260814 --by agent-a
+```
+
 ## `remember`
 
 Purpose: append one durable advisory note without taking the pen.
@@ -496,6 +577,7 @@ overrides ownership or unread-turn checks and requires `--reason TEXT`.
 
 ```bash
 ./m8shift.py release agent-a --to agent-b
+- `./m8shift.py unclaim <agent> --reason "..."` — undo your own untouched claim; restores `AWAITING_<agent>` at the same turn, reroutes nothing, refused unless you hold it.
 ```
 
 ## `done`

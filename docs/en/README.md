@@ -144,6 +144,7 @@ Localized documentation should link to these canonical RFCs instead of duplicati
 | [078-rfc-freshness-first-class.md](rfc/078-rfc-freshness-first-class.md) | Draft design rule with a shipped behavioural detector: freshness is owned by the producing component, a cache of a remote authority is not the remote, and one frame carries one truth. |
 | [079-rfc-out-of-roster-observer.md](rfc/079-rfc-out-of-roster-observer.md) | Draft: a non-roster agent invoked read-only for an audit, whose findings enter the record as attributed evidence rather than as a relay turn. |
 | [080-rfc-pen-holder-instance-binding.md](rfc/080-rfc-pen-holder-instance-binding.md) | Draft: binds the pen to the holding instance rather than the roster name, given that every CLI command is a new process and that recovery is indistinguishable from concurrent drive at the lock. |
+| [081-rfc-reentrant-fleet-kit-upgrade-transaction.md](rfc/081-rfc-reentrant-fleet-kit-upgrade-transaction.md) | Implemented ordered, re-entrant, fail-stop kit rollout across explicit independent relay roots, with crash-consistent evidence, exact ALIVE listener restoration and approved runner-plan migration. |
 
 ## Security docs
 

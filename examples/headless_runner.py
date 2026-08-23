@@ -90,21 +90,29 @@ class RunnerInfrastructureError(Exception):
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
 HANDSHAKE_SCHEMA = "m8shift.runner.handshake.v1"
 HANDSHAKE_CAPABILITIES = (
     "bounded-tty-tee-v1",
     "environment-write-probe-v1",
+    "review-artifact-delivery-v1",
     "runner-exit-v2",
 )
 HANDSHAKE_OPTIONS = (
     "--agent-model", "--cmd", "--cwd", "--env-allowlist",
     "--m8shift", "--m8shift-py", "--once", "--resume-working",
-    "--provider", "--run-id", "--runtime-dir", "--start-on-idle",
+    "--provider", "--review-delivery", "--run-id", "--runtime-dir",
+    "--start-on-idle",
 )
 TEE_CAPTURE_LIMIT = 64 * 1024
+REVIEW_ARTIFACT_SCHEMA = "m8shift.review-artifact.v1"
+REVIEW_ARTIFACT_DIRNAME = "reviews"
+# A reviewer artefact is an explicit opt-in exception to the usual rule that
+# provider output never reaches durable sidecars.  Keep its maximum equal to the
+# tee cap: accepting a larger stream would silently persist only its tail.
+REVIEW_ARTIFACT_MAX_BYTES = TEE_CAPTURE_LIMIT
 ENVIRONMENT_SIGNATURES = {
     "filesystem_read_only": (
         "read-only file system",
@@ -120,6 +128,10 @@ ENVIRONMENT_SIGNATURES = {
         "approval required to run",
         "requires approval before",
         "permission request was not approved",
+    ),
+    "headless_permission_refused": (
+        "headless mode cannot prompt for, so it was auto-denied",
+        "add an allow-rule under permissions.allow in settings.json",
     ),
 }
 DEFAULT_HEARTBEAT_MARGIN_S = 5 * 60
@@ -143,10 +155,27 @@ TURN_BLOCK_RE = re.compile(
 )
 TURN_FIELD_RE = re.compile(r"^- ([a-z_][a-z0-9_]*):\s*(.*?)\s*$")
 # RFC 047 total classification vocabulary (verify_post_run status values).
-SUCCESS_STATUSES = ("completed", "advanced", "not_required")
-FAILURE_STATUSES = ("non_completion", "stuck_working", "invalid_relay")
+# ``review_delivered_pending`` proves a bounded reviewer artefact exists, but
+# deliberately does NOT claim that the relay advanced.  ``none`` is retained
+# only to read legacy plans; it is never a success because rc=0 proves nothing.
+SUCCESS_STATUSES = ("completed", "advanced", "review_delivered_pending")
+FAILURE_STATUSES = (
+    "non_completion", "stuck_working", "invalid_relay", "unverified_read_only",
+    # #377: the run authored a turn, but its premise was superseded (or the
+    # answer was outrun) before certification — authored is not certified.
+    "premise_superseded",
+    "review_output_empty", "review_permission_refused", "review_provider_error",
+    "review_artifact_stale", "review_relay_mutated",
+    # #360: one label used to cover six conditions, including two security
+    # refusals. Distinct reasons, so a verbose reviewer is never mistaken for a
+    # planted symlink.
+    "review_artifact_budget_invalid", "review_artifact_input_invalid",
+    "review_artifact_unsafe_path", "review_artifact_write_failed",
+    "review_artifact_truncation_empty", "review_return_receipt_invalid",
+)
 NEUTRAL_STATUSES = ("external_transition", "suspended")
-TERMINAL_FAILURE_STATUSES = ("environment_blocked", "approval_required")
+TERMINAL_FAILURE_STATUSES = ("environment_blocked", "approval_required",
+                             "headless_permission_refused")
 PROVIDER_RATE_LIMIT_STATUSES = (
     "provider_rate_limited",
     "provider_rate_limited_reset_unknown",
@@ -440,6 +469,34 @@ def confirmed_approval_required(output_summary, returncode, relay_status,
                  output_summary.get("final_signature_ids", ())))
 
 
+AGY_HEADLESS_PERMISSION_RE = re.compile(
+    r'^jetski: no output produced\s+[\N{EM DASH}-]\s+a tool required the '
+    r'"([a-z][a-z0-9_.:-]{0,63})" permission that headless mode cannot prompt '
+    r'for, so it was auto-denied\. add an allow-rule under permissions\.allow '
+    r'in settings\.json \(e\.g\. .+\)\. alternatively, re-run with '
+    r'--dangerously-skip-permissions to auto-approve all tools\.\s*$',
+    re.IGNORECASE)
+
+
+def confirmed_headless_permission_refusal(provider, output_summary):
+    """Recognize AGY's exact headless refusal even though that CLI exits zero.
+
+    Returns the bounded permission name when recognized, otherwise None. The name
+    comes from the pattern's own capture group, so it carries that pattern's
+    length and character bounds and is safe to render; the provider's raw line is
+    never propagated."""
+    if provider != "google-antigravity" \
+            or "headless_permission_refused" not in output_summary.get(
+                "final_signature_ids", ()):
+        return None
+    lines = [line.strip() for line in str(
+        output_summary.get("_final_text", "")).splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
+    match = AGY_HEADLESS_PERMISSION_RE.fullmatch(lines[0])
+    return match.group(1) if match else None
+
+
 def read_lock(m8shift_path):
     """Return the LOCK fields as a dict, or None if the file/markers are missing."""
     try:
@@ -486,9 +543,12 @@ def parse_turn_records(text):
 
 
 def authored_by_me(m8shift_text_or_path, me, pre_turn, run_id=""):
-    """RFC 047 authorship rule: True iff the transcript contains a turn authored by
-    `me` with int(n) > int(pre_turn). When ``run_id`` is supplied, that closed turn
-    must also carry the exact ``x_run_id`` field exported to this runner child.
+    """RFC 047 authorship rule, positioned for #377: the sorted turn numbers
+    authored by `me` with int(n) > int(pre_turn). When ``run_id`` is supplied,
+    each matched turn must also carry the exact ``x_run_id`` field exported to
+    this runner child. An empty list keeps the historical boolean contract for
+    callers that only ask WHETHER something was authored; the numbers let the
+    classifier ask WHERE the answer sits relative to its premise.
 
     Accepts either the relay text or a path to it. `pre_turn` is parsed defensively:
     a non-integer pre-turn means authorship can never be established (the caller's
@@ -496,22 +556,23 @@ def authored_by_me(m8shift_text_or_path, me, pre_turn, run_id=""):
     """
     text = m8shift_text_or_path
     if text is None:
-        return False
+        return []
     if "\n" not in text and os.path.isfile(text):
         try:
             with open(text, encoding="utf-8") as f:
                 text = f.read()
         except OSError:
-            return False
+            return []
     try:
         pre = int(str(pre_turn).strip())
     except (TypeError, ValueError):
-        return False
-    return any(
-        record["agent"] == me
+        return []
+    return sorted(
+        record["number"]
+        for record in parse_turn_records(text)
+        if record["agent"] == me
         and record["number"] > pre
         and (not run_id or record["fields"].get("x_run_id") == run_id)
-        for record in parse_turn_records(text)
     )
 
 
@@ -570,6 +631,253 @@ def run_plan_path(runtime_dir, run_id):
 
 def sha256_text(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def turn_block_sha256(relay_text, turn_number):
+    """SHA-256 of the exact closed turn block, or None when it cannot be read.
+
+    One recognition of one signature: the review input fingerprint and the #377
+    premise digest must never grow separate parsers of the same block format.
+    """
+    turn = _turn_int(turn_number)
+    if turn is None or not isinstance(relay_text, str):
+        return None
+    for match in TURN_BLOCK_RE.finditer(relay_text):
+        if int(match.group("number")) == turn:
+            return sha256_text(match.group(0))
+    return None
+
+
+def review_input_snapshot(lock, relay_text):
+    """Bind a reviewer artefact to the exact closed handoff it read.
+
+    The LOCK itself changes when the coordinator claims the incoming turn, so a
+    full-file digest would make every honest consumption look stale.  The input
+    fingerprint is instead the exact closed turn referenced by the entry LOCK.
+    The entry state/holder remain recorded for audit, while freshness later
+    requires the same turn number and turn bytes.
+    """
+    turn = _turn_int(lock.get("turn", ""))
+    if turn is None or not isinstance(relay_text, str):
+        raise ValueError("review input has no valid relay turn")
+    digest = turn_block_sha256(relay_text, turn)
+    if digest is None:
+        raise ValueError("review input turn is absent or not structurally closed")
+    return {
+        "state": lock.get("state", ""),
+        "holder": lock.get("holder", ""),
+        "turn": str(turn),
+        "turn_sha256": digest,
+    }
+
+
+def review_artifact_path(runtime_dir, run_id):
+    return os.path.join(runtime_dir, REVIEW_ARTIFACT_DIRNAME, f"{run_id}.json")
+
+
+def review_artifact_relpath(run_id):
+    return f"{REVIEW_ARTIFACT_DIRNAME}/{run_id}.json"
+
+
+REVIEW_RETURN_RECEIPT_SCHEMA = "m8shift.review-return-receipt.v1"
+REVIEW_RETURN_RECEIPT_DIRNAME = "review-returns"
+
+
+def review_return_receipt_path(runtime_dir, run_id):
+    return os.path.join(runtime_dir, REVIEW_RETURN_RECEIPT_DIRNAME, f"{run_id}.json")
+
+
+def review_return_receipt_relpath(run_id):
+    return f"{REVIEW_RETURN_RECEIPT_DIRNAME}/{run_id}.json"
+
+
+def review_output_lines(text):
+    return len(text.splitlines()) if text else 0
+
+
+def truncate_utf8_on_character_boundary(text, max_bytes):
+    """Largest prefix of `text` whose UTF-8 encoding fits in `max_bytes`, cut on a
+    character boundary.
+
+    Cutting on a byte boundary and decoding with errors="replace" desynchronizes
+    the artifact: the recorded byte count and digest describe the raw prefix while
+    the stored text re-encodes to something longer, with U+FFFD standing where a
+    character was severed. Measured on 40 French accented characters capped at 41
+    bytes: 41 bytes recorded, 43 bytes actually stored, two different digests. A
+    receipt whose digest does not cover what it seals is worse than no digest, so
+    the cut steps back to the start of the severed character and the strict decode
+    below is guaranteed to succeed."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, encoded
+    # Decoding the bounded prefix with ``ignore`` discards only an incomplete
+    # trailing code point.  Re-encoding then gives the exact bytes represented
+    # by the returned text.  Looking only at the last byte is insufficient: the
+    # final byte of a *complete* multibyte character is also a continuation byte.
+    cut_text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    cut = cut_text.encode("utf-8")
+    return cut_text, cut
+
+
+def write_review_artifact(runtime_dir, plan, output_summary):
+    """Create one private, immutable, bounded reviewer artefact.
+
+    This is deliberately separate from the normal run ledger: the ledger keeps
+    only stable metadata and digests, while an explicitly declared reviewer
+    delivery is allowed to retain its final response for the coordinator.
+    """
+    delivery = plan.get("review_delivery") or {}
+    text = output_summary.get("_final_text", "")
+    if not isinstance(text, str) or not text.strip():
+        return None, "review_output_empty"
+    encoded = text.encode("utf-8")
+    max_bytes = delivery.get("max_output_bytes", REVIEW_ARTIFACT_MAX_BYTES)
+    if not isinstance(max_bytes, int) or max_bytes < 1:
+        return None, "review_artifact_budget_invalid"
+    # #360: over the cap the review is TRUNCATED and delivered, never destroyed.
+    # A bounded prefix of a review is a usable review with a stated truncation;
+    # zero bytes is not. The measurements of a discarded document -- 93391 bytes,
+    # 436 lines -- were all that survived the previous behaviour.
+    original_bytes = max(len(encoded), output_summary.get("bytes", 0))
+    original_lines = max(review_output_lines(text), output_summary.get("lines", 0))
+    text, encoded = truncate_utf8_on_character_boundary(text, max_bytes)
+    if not encoded:
+        return None, "review_artifact_truncation_empty"
+    truncated = len(encoded) < original_bytes
+    input_snapshot = (plan.get("expected_transition") or {}).get("input")
+    if not isinstance(input_snapshot, dict):
+        return None, "review_artifact_input_invalid"
+    artifact = {
+        "schema": REVIEW_ARTIFACT_SCHEMA,
+        "created_at": iso_now(),
+        "run_id": plan["run_id"],
+        "agent": plan["agent"],
+        "provider": plan.get("provider", ""),
+        "agent_model": plan.get("agent_model", ""),
+        "input": input_snapshot,
+        "output": {
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "bytes": len(encoded),
+            "lines": review_output_lines(text),
+            "text": text,
+            # The digest above covers exactly these bytes, truncated or not.
+            "truncated": truncated,
+            "original_bytes": original_bytes,
+            "original_lines": original_lines,
+        },
+    }
+    path = review_artifact_path(runtime_dir, plan["run_id"])
+    directory = os.path.dirname(path)
+    try:
+        if os.path.islink(runtime_dir) or os.path.islink(directory):
+            # A security refusal, not a size problem. Collapsed into one label an
+            # operator could not tell a verbose reviewer from a planted symlink.
+            return None, "review_artifact_unsafe_path"
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        if os.path.islink(directory) or os.path.lexists(path):
+            return None, "review_artifact_unsafe_path"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(artifact, fh, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        return None, "review_artifact_write_failed"
+    body = canonical_json(artifact)
+    return {
+        "schema": REVIEW_ARTIFACT_SCHEMA,
+        "path": review_artifact_relpath(plan["run_id"]),
+        "sha256": sha256_text(body),
+        "output_sha256": artifact["output"]["sha256"],
+        "output_bytes": artifact["output"]["bytes"],
+        "truncated": truncated,
+        "original_bytes": original_bytes,
+        "input": dict(input_snapshot),
+    }, ""
+
+
+def write_review_return_receipt(runtime_dir, plan, output_summary, returncode,
+                                evidence_id=""):
+    """Persist one redacted refusal receipt that can only return routing.
+
+    This is not a review artifact and contains no provider text. It gives the
+    original coordinator stable evidence for the narrow core `review-return`
+    edge after a reviewer provider permission refusal.
+    """
+    input_snapshot = (plan.get("expected_transition") or {}).get("input")
+    allowed_evidence = {
+        "headless_permission_refused", "approval_required",
+        "environment_write_probe",
+    }
+    evidence_ids = allowed_evidence.intersection(
+        set(output_summary.get("signature_ids", ()))
+        | set(output_summary.get("final_signature_ids", ())))
+    if evidence_id:
+        evidence_ids.add(evidence_id)
+    evidence_ids = sorted(evidence_ids)
+    if not isinstance(input_snapshot, dict) or not evidence_ids \
+            or not isinstance(returncode, int):
+        return None, "review_return_receipt_invalid"
+    receipt = {
+        "schema": REVIEW_RETURN_RECEIPT_SCHEMA,
+        "created_at": iso_now(),
+        "run_id": plan["run_id"],
+        "agent": plan["agent"],
+        "provider": plan.get("provider", ""),
+        "input": input_snapshot,
+        "outcome": {
+            "status": "review_permission_refused",
+            "evidence_ids": evidence_ids,
+            "provider_returncode": returncode,
+        },
+    }
+    path = review_return_receipt_path(runtime_dir, plan["run_id"])
+    directory = os.path.dirname(path)
+    try:
+        if os.path.islink(runtime_dir) or os.path.islink(directory):
+            return None, "review_return_receipt_invalid"
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        if os.path.islink(directory) or os.path.lexists(path):
+            return None, "review_return_receipt_invalid"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(receipt, fh, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        return None, "review_return_receipt_invalid"
+    body = canonical_json(receipt)
+    return {
+        "schema": REVIEW_RETURN_RECEIPT_SCHEMA,
+        "path": review_return_receipt_relpath(plan["run_id"]),
+        "sha256": sha256_text(body),
+        "input": dict(input_snapshot),
+        "outcome": "review_permission_refused",
+    }, ""
 
 
 def canonical_json(data):
@@ -648,6 +956,12 @@ def validate_run_plan(plan):
         raise SystemExit("run plan kill_grace must be a non-negative integer")
     if not isinstance(plan.get("resume_working", False), bool):
         raise SystemExit("run plan resume_working must be a boolean")
+    premise_digest = plan["expected_transition"].get("premise_sha256") \
+        if isinstance(plan["expected_transition"], dict) else None
+    if premise_digest is not None and (
+            not isinstance(premise_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", premise_digest)):
+        raise SystemExit("run plan premise_sha256 must be a sha256 hex digest")
     agent_model = plan.get("agent_model", "")
     if not isinstance(agent_model, str) or (agent_model and not MODEL_ID_RE.fullmatch(agent_model)):
         raise SystemExit("run plan agent_model must be a valid 1-128 character model id")
@@ -656,8 +970,31 @@ def validate_run_plan(plan):
         raise SystemExit("run plan provider must be a safe provider id")
     resolve_argv(plan["argv"])
     expected = plan["expected_transition"]
-    if not isinstance(expected, dict) or expected.get("type") not in {"core_state_advanced", "none"}:
-        raise SystemExit("run plan expected_transition must be an object with type core_state_advanced or none")
+    if (not isinstance(expected, dict)
+            or expected.get("type") not in {"core_state_advanced", "none", "review_artifact"}):
+        raise SystemExit("run plan expected_transition must be an object with type "
+                         "core_state_advanced, none, or review_artifact")
+    delivery = plan.get("review_delivery", {"type": "none"})
+    if not isinstance(delivery, dict) or delivery.get("type") not in {"none", "artifact"}:
+        raise SystemExit("run plan review_delivery must be an object with type none or artifact")
+    if delivery.get("type") == "artifact":
+        required_delivery = {"type", "schema", "path", "max_output_bytes"}
+        if set(delivery) != required_delivery or delivery.get("schema") != REVIEW_ARTIFACT_SCHEMA:
+            raise SystemExit("run plan review_delivery artifact fields are invalid")
+        if (delivery.get("path") != review_artifact_relpath(plan["run_id"])
+                or not isinstance(delivery.get("max_output_bytes"), int)
+                or not 1 <= delivery["max_output_bytes"] <= REVIEW_ARTIFACT_MAX_BYTES):
+            raise SystemExit("run plan review_delivery artifact path or bound is invalid")
+        input_snapshot = expected.get("input")
+        if (expected.get("type") != "review_artifact" or not isinstance(input_snapshot, dict)
+                or set(input_snapshot) != {"state", "holder", "turn", "turn_sha256"}
+                or not isinstance(input_snapshot.get("state"), str)
+                or not isinstance(input_snapshot.get("holder"), str)
+                or _turn_int(input_snapshot.get("turn")) is None
+                or not re.fullmatch(r"[0-9a-f]{64}", input_snapshot.get("turn_sha256", ""))):
+            raise SystemExit("run plan review_delivery input fingerprint is invalid")
+    elif expected.get("type") == "review_artifact":
+        raise SystemExit("run plan review_artifact expectation requires artifact delivery")
     command = plan.get("command", {})
     if command:
         if command.get("shell") is not False:
@@ -667,8 +1004,8 @@ def validate_run_plan(plan):
     return True
 
 
-def expected_post_run(me, lk, run_id=""):
-    return {
+def expected_post_run(me, lk, run_id="", relay_text=None):
+    expected = {
         "type": "core_state_advanced",
         "pre_state": lk.get("state", ""),
         "pre_holder": lk.get("holder", ""),
@@ -676,10 +1013,18 @@ def expected_post_run(me, lk, run_id=""):
         "agent": me,
         "run_id": run_id,
         "stuck_state": f"WORKING_{me.upper()}",
-        "success_rule": ("post relay is DONE OR the transcript contains a turn authored "
-                         "by this agent with n > pre_turn and x_run_id matching this run "
-                         "(RFC 047)"),
+        "success_rule": ("post relay is DONE OR this agent authored exactly the "
+                         "direct successor of pre_turn (sole matched turn, "
+                         "x_run_id bound, premise digest verified when present) "
+                         "(RFC 047, #377)"),
     }
+    # #377: identify the premise, never merely position it. The digest is only
+    # recorded when the launch snapshot could actually read the pre-turn block;
+    # a fabricated or absent digest must not exist, so the key is conditional.
+    premise = turn_block_sha256(relay_text, lk.get("turn", ""))
+    if premise:
+        expected["premise_sha256"] = premise
+    return expected
 
 
 def resume_eligible(args, me, me_working, lk):
@@ -691,19 +1036,36 @@ def resume_eligible(args, me, me_working, lk):
                 and lk.get("holder", "") == me)
 
 
-def make_run_plan(args, run_id, me, lk, resumed=False):
+def make_run_plan(args, run_id, me, lk, resumed=False, relay_text=None):
     argv = resolve_argv(list(args.cmd))
     cwd = os.path.abspath(args.cwd)
     if not os.path.isdir(cwd):
         raise SystemExit(f"--cwd is not a directory: {args.cwd}")
-    expected = expected_post_run(me, lk, run_id)
-    if args.expected_transition == "none":
+    expected = expected_post_run(me, lk, run_id, relay_text=relay_text)
+    review_delivery = getattr(args, "review_delivery", "none")
+    if review_delivery == "artifact":
+        try:
+            input_snapshot = review_input_snapshot(lk, relay_text)
+        except ValueError as exc:
+            raise RunnerInfrastructureError("review_input_unavailable") from exc
+        expected = {
+            "type": "review_artifact",
+            "pre_state": lk.get("state", ""),
+            "pre_holder": lk.get("holder", ""),
+            "pre_turn": lk.get("turn", ""),
+            "agent": me,
+            "run_id": run_id,
+            "success_rule": ("a non-empty bounded review artifact with digest exists "
+                             "for the unchanged input turn; relay advancement is not success"),
+            "input": input_snapshot,
+        }
+    elif args.expected_transition == "none":
         expected = {
             "type": "none",
             "pre_state": lk.get("state", ""),
             "pre_turn": lk.get("turn", ""),
             "agent": me,
-            "success_rule": "read-only run; no relay state transition required",
+            "success_rule": "legacy read-only run; no verifiable delivery contract",
         }
     return {
         "schema": RUN_PLAN_SCHEMA,
@@ -720,6 +1082,12 @@ def make_run_plan(args, run_id, me, lk, resumed=False):
         "kill_grace": args.kill_grace,
         "resume_working": bool(resumed),
         "expected_transition": expected,
+        "review_delivery": ({
+            "type": "artifact",
+            "schema": REVIEW_ARTIFACT_SCHEMA,
+            "path": review_artifact_relpath(run_id),
+            "max_output_bytes": REVIEW_ARTIFACT_MAX_BYTES,
+        } if review_delivery == "artifact" else {"type": "none"}),
         "command": {
             "argv": argv,
             "shell": False,
@@ -766,13 +1134,65 @@ def classify_post_run(expected, after, post_text):
     if after is None or not after.get("state", ""):
         return "invalid_relay", "post-run LOCK is missing or invalid after the bounded re-read"
     if expected.get("type") == "none":
-        return "not_required", "read-only run; no relay state transition required"
+        return "unverified_read_only", (
+            "read-only run has no verifiable delivery contract; provider rc=0 is insufficient"
+        )
+    if expected.get("type") == "review_artifact":
+        try:
+            current_input = review_input_snapshot(after, post_text)
+        except ValueError:
+            return "review_artifact_stale", "the reviewed input turn is no longer available"
+        entry = expected.get("input") or {}
+        if (current_input.get("turn") != entry.get("turn")
+                or current_input.get("turn_sha256") != entry.get("turn_sha256")):
+            if authored_by_me(post_text, me, expected.get("pre_turn", ""),
+                              expected.get("run_id", "")):
+                return "review_relay_mutated", "reviewer authored a relay turn instead of artifact delivery"
+            return "review_artifact_stale", "relay input changed while the reviewer was running"
+        if (after.get("state") != entry.get("state")
+                or after.get("holder") != entry.get("holder")):
+            return "review_relay_mutated", "relay LOCK changed during reviewer artifact delivery"
+        return "review_ready", "review input is unchanged; validate and store the artifact"
     state = after.get("state", "")
     if state == "DONE":
         return "completed", "relay session is DONE"
-    if authored_by_me(post_text, me, expected.get("pre_turn", ""),
-                      expected.get("run_id", "")):
-        return "advanced", "this run authored a turn newer than the pre-run turn"
+    authored = authored_by_me(post_text, me, expected.get("pre_turn", ""),
+                              expected.get("run_id", ""))
+    if authored:
+        # #377: authorship alone proved a turn was written; it never proved the
+        # premise was still current. The incident behind #320: a run published
+        # an answer to a superseded premise and was recorded as a success.
+        pre = _turn_int(expected.get("pre_turn"))
+        successor = None if pre is None else pre + 1
+        if successor not in authored:
+            return "premise_superseded", (
+                "this run authored a turn, but an intervening turn superseded "
+                "the premise between the launch snapshot and the answer")
+        if len(authored) > 1:
+            # #393 review B2: a runner child has a one-turn contract. Two turns
+            # under the same run id mean the certification cannot bind one answer
+            # to the premise — the second answered a premise this plan never saw.
+            return "premise_superseded", (
+                "this run authored more than one turn; certification binds one "
+                "answer to one premise and cannot cover a multi-turn run")
+        # Deliberately NOT required: that the authored answer is still the newest
+        # closed turn. RFC 047 t7 (review B2) protects ping-pong — a peer that
+        # consumes the answer and replies within the run window is success, not
+        # supersession. The #377 ticket's acceptance 3 asked for the stricter
+        # rule; it is renounced here because it contradicts that merged contract.
+        plan_digest = expected.get("premise_sha256", "")
+        if plan_digest:
+            current = turn_block_sha256(post_text, pre)
+            if current is None:
+                return "premise_superseded", (
+                    "the premise block is no longer readable in the post-run "
+                    "transcript; refusing to certify against an unverifiable premise")
+            if current != plan_digest:
+                return "premise_superseded", (
+                    "the premise block changed between the plan snapshot and the "
+                    "authored answer; the answer addresses a premise that no longer exists")
+        return "advanced", ("this run authored exactly the direct successor of "
+                            "its premise")
     pre_turn = _turn_int(expected.get("pre_turn"))
     post_turn = _turn_int(after.get("turn"))
     same = pre_turn is not None and post_turn == pre_turn
@@ -797,12 +1217,35 @@ def classify_post_run(expected, after, post_text):
     return "external_transition", "relay moved to another state outside this run's authorship"
 
 
+def verification_finding(status, run_id, reason):
+    if status not in FAILURE_STATUSES:
+        return None
+    if status.startswith("review_"):
+        return {
+            "severity": "error",
+            "check": f"headless.{status}",
+            "message": f"run {run_id} reviewer delivery failed ({status}: {reason})",
+            "hint": "Inspect the bounded reviewer result and relay freshness; no relay recovery is automatic.",
+        }
+    return {
+        "severity": "error",
+        "check": "headless.post_run_core_state",
+        "message": (
+            f"run {run_id} ended without relay completion or authorship "
+            f"(status={status}: {reason})"
+        ),
+        "hint": "Inspect the relay and agent output; no automatic force recovery is performed.",
+    }
+
+
 def verify_post_run(plan, after, post_text=None):
     """Classify a finished run against its immutable plan (RFC 047).
 
     `after` is the post-run LOCK dict (None = invalid/missing after the bounded
     re-read in read_relay_post_run); `post_text` is the post-run relay text used
-    for the authorship check. Success statuses: completed / advanced / not_required.
+    for the authorship check. A reviewer artefact first reaches the internal
+    ``review_ready`` state, then becomes success only after bounded persistence.
+    Success statuses: completed / advanced / review_delivered_pending.
     Failures (retryable): non_completion / stuck_working / invalid_relay.
     Neutral (never burn retries): external_transition / suspended.
     """
@@ -814,17 +1257,7 @@ def verify_post_run(plan, after, post_text=None):
         "turn": (after or {}).get("turn", ""),
     }
     ok = status in SUCCESS_STATUSES
-    finding = None
-    if status in FAILURE_STATUSES:
-        finding = {
-            "severity": "error",
-            "check": "headless.post_run_core_state",
-            "message": (
-                f"run {plan['run_id']} ended without relay completion or authorship "
-                f"(status={status}: {reason})"
-            ),
-            "hint": "Inspect the relay and agent output; no automatic force recovery is performed.",
-        }
+    finding = verification_finding(status, plan["run_id"], reason)
     return {
         "ok": ok,
         "status": status,
@@ -833,6 +1266,41 @@ def verify_post_run(plan, after, post_text=None):
         "finding": finding,
         "reason": reason,
     }
+
+
+def set_verification_status(plan, verification, status, reason, *, artifact=None,
+                            return_receipt=None, provider_terminal=None):
+    """Return one redacted, ledger-safe verification update."""
+    result = dict(verification)
+    result.update({
+        "ok": status in SUCCESS_STATUSES,
+        "status": status,
+        "reason": reason,
+        "finding": verification_finding(status, plan["run_id"], reason),
+    })
+    if artifact is not None:
+        result["review_artifact"] = artifact
+    if return_receipt is not None:
+        result["review_return_receipt"] = return_receipt
+    if provider_terminal is not None:
+        result["provider_terminal"] = provider_terminal
+    return result
+
+
+def finalize_review_delivery(plan, verification, output_summary, returncode, runtime_dir):
+    """Finish a ready reviewer run without granting it a relay-write success."""
+    if verification.get("status") != "review_ready":
+        return verification
+    if returncode != 0:
+        return set_verification_status(
+            plan, verification, "review_provider_error", "provider exited non-zero before delivery")
+    artifact, error = write_review_artifact(runtime_dir, plan, output_summary)
+    if error:
+        return set_verification_status(plan, verification, error, error)
+    return set_verification_status(
+        plan, verification, "review_delivered_pending",
+        "bounded reviewer artifact delivered; coordinator consumption is still pending",
+        artifact=artifact)
 
 
 def run_ledger_has_event(args, run_id, event):
@@ -931,6 +1399,9 @@ def validate_args(args):
     if args.resume_working and not args.once:
         raise SystemExit("--resume-working requires --once (it is a one-shot recovery "
                          "launch for an already-held WORKING lock, not a polling mode)")
+    if args.review_delivery == "artifact" and not args.once:
+        raise SystemExit("--review-delivery artifact requires --once; a listener must suppress "
+                         "duplicate delivery for the unchanged input turn")
     if args.agent_model and not MODEL_ID_RE.fullmatch(args.agent_model):
         raise SystemExit("invalid agent model: expected a 1-128 character safe model id")
     if args.provider and not PROVIDER_RE.fullmatch(args.provider):
@@ -1022,7 +1493,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "exit codes (RFC 047, one-shot --once):\n"
-            "  0  success — post-run classification is completed, advanced, or not_required\n"
+            "  0  success — relay completed/advanced, or a verified reviewer artifact is pending\n"
             "  1  run failure — non_completion, stuck_working, invalid_relay, partial/ledger\n"
             "     failure, or the consecutive-failure retry cap was reached\n"
             "  2  argv refusal — argparse rejected the runner invocation\n"
@@ -1078,7 +1549,9 @@ def main():
                    help="validated provider adapter id for terminal-output classification")
     p.add_argument("--expected-transition", choices=("core_state_advanced", "none"),
                    default="core_state_advanced",
-                   help="post-run relay transition expectation; default requires core state progress")
+                   help="post-run relay transition expectation; none is legacy and never succeeds without proof")
+    p.add_argument("--review-delivery", choices=("none", "artifact"), default="none",
+                   help="explicit reviewer mode: artifact persists a bounded final response without moving the relay")
     p.add_argument("--no-run-log", action="store_true",
                    help="disable .m8shift/runtime/runs.jsonl lifecycle logging")
     p.add_argument("--once", action="store_true",
@@ -1101,11 +1574,17 @@ def main():
     fails = 0
     if args.dry_run:
         lk0 = read_lock(args.m8shift) or {"state": "IDLE", "turn": "0"}
+        relay_text0 = None
+        if args.review_delivery == "artifact":
+            snapshot_lock, relay_text0 = read_relay_post_run(args.m8shift, attempts=1)
+            if snapshot_lock is not None:
+                lk0 = snapshot_lock
         try:
             plan = make_run_plan(args, validate_run_id(args.run_id or new_run_id(me)), me, lk0,
-                                 resumed=resume_eligible(args, me, me_working, lk0))
+                                 resumed=resume_eligible(args, me, me_working, lk0),
+                                 relay_text=relay_text0)
         except RunnerInfrastructureError:
-            raise SystemExit("provider executable is unavailable")
+            raise SystemExit("provider executable or reviewer input is unavailable")
         print(json.dumps({"agent": me, "cmd": plan["argv"], "run_plan": plan, "runner_version": VERSION}, sort_keys=True))
         return 0
 
@@ -1127,6 +1606,46 @@ def main():
             time.sleep(args.interval)
             continue
 
+        # Snapshot the relay before launch.  A second read keeps the immutable
+        # plan tied to one real relay state rather than to a stale lock observed
+        # at the top of this loop — and #377 digests the pre-turn block from it,
+        # so `advanced` later certifies against an identified premise.
+        snapshot_lock, relay_text = read_relay_post_run(args.m8shift, attempts=1)
+        if snapshot_lock is None:
+            # #393 review B1: launching without the snapshot would mint a
+            # current-schema plan with no premise digest — indistinguishable from
+            # a restored legacy plan, it reopens the rewritten-premise hole the
+            # digest exists to close. Artifact or core, the launch is refused.
+            log("relay snapshot is unavailable or invalid before provider launch; "
+                "refusing to launch without an identified premise.")
+            if args.once:
+                return 5
+            time.sleep(args.interval)
+            continue
+        lk = snapshot_lock
+        state = lk.get("state", "")
+        resumed = resume_eligible(args, me, me_working, lk)
+        my_turn = state == me_awaiting or (state == "IDLE" and args.start_on_idle) or resumed
+        if not my_turn:
+            time.sleep(args.interval)
+            continue
+        # #393 review B1, residual form: a readable LOCK whose closed premise
+        # block is absent from the very text just snapshotted would still mint a
+        # digest-less current-schema plan. A nonzero premise that cannot be
+        # digested refuses the launch; turn 0 is the explicit fresh-start
+        # exception (a just-initialized relay may have no closed block yet).
+        premise_turn = _turn_int(lk.get("turn", ""))
+        if premise_turn is None or (
+                premise_turn > 0
+                and turn_block_sha256(relay_text, premise_turn) is None):
+            log(f"the closed block for premise turn {lk.get('turn', '')!r} is not "
+                "readable in the launch snapshot; refusing to launch without an "
+                "identified premise.")
+            if args.once:
+                return 5
+            time.sleep(args.interval)
+            continue
+
         # It is our turn: run the headless agent for exactly one turn (static argv).
         if resumed:
             log(f"state={state} → resume-working: finishing the held turn (no claim; "
@@ -1135,12 +1654,13 @@ def main():
             log(f"state={state} → running the agent for one turn.")
         run_id = validate_run_id(args.run_id or new_run_id(me))
         try:
-            plan = make_run_plan(args, run_id, me, lk, resumed=resumed)
+            plan = make_run_plan(args, run_id, me, lk, resumed=resumed,
+                                 relay_text=relay_text)
         except RunnerInfrastructureError:
-            log("could not resolve the provider executable (provider_executable_unavailable).")
+            log("could not resolve the provider executable or reviewer input (launch_preflight_failed).")
             append_run_event(args, "run.launch_failed", run_id, me,
-                             detail="provider_executable_unavailable",
-                             signature_id="provider_executable_unavailable")
+                             detail="launch_preflight_failed",
+                             signature_id="launch_preflight_failed")
             return 5
         try:
             plan_path = write_run_plan(args.runtime_dir, plan)
@@ -1201,7 +1721,69 @@ def main():
         terminal = classify_provider_terminal_output(
             plan.get("provider", ""), output_summary.get("_final_text", ""),
             proc.returncode, verification.get("ok", False))
-        if status in FAILURE_STATUSES and confirmed_environment_block(
+        review_delivery = (plan.get("review_delivery") or {}).get("type") == "artifact"
+        if review_delivery and status == "review_ready":
+            # Reviewer delivery has distinct terminal outcomes.  A clean provider
+            # exit alone remains insufficient: only finalize_review_delivery can
+            # turn this into a successful (but relay-pending) result.
+            permission_refused = (
+                confirmed_headless_permission_refusal(
+                    plan.get("provider", ""), output_summary)
+                or (proc.returncode not in (None, 0)
+                    and "approval_required" in output_summary.get("signature_ids", ())
+                    and (timed_out or "approval_required" in
+                         output_summary.get("final_signature_ids", ())))
+            )
+            environment_refused = confirmed_environment_block(
+                pre_environment, post_environment)
+            if environment_refused or permission_refused:
+                receipt, receipt_error = write_review_return_receipt(
+                    args.runtime_dir, plan, output_summary, proc.returncode,
+                    evidence_id=("environment_write_probe"
+                                 if environment_refused else ""))
+                if receipt_error:
+                    verification = set_verification_status(
+                        plan, verification, receipt_error,
+                        "reviewer permission refusal could not produce routing evidence")
+                else:
+                    verification = set_verification_status(
+                        plan, verification, "review_permission_refused",
+                        "reviewer provider cannot write the declared artifact or requires permission",
+                        return_receipt=receipt)
+            elif terminal is not None:
+                verification = set_verification_status(
+                    plan, verification, terminal["status"], terminal["reason"],
+                    provider_terminal=terminal["metadata"])
+            elif not timed_out:
+                verification = finalize_review_delivery(
+                    plan, verification, output_summary, proc.returncode, args.runtime_dir)
+            status = verification["status"]
+            reason = verification.get("reason", "")
+        elif status in FAILURE_STATUSES and confirmed_headless_permission_refusal(
+                plan.get("provider", ""), output_summary):
+            # #359: the provider auto-denied a tool and exited zero, so the relay
+            # never moved. Reported as non_completion this is indistinguishable
+            # from a crash, a timeout or a quota wall — and it is deterministic,
+            # so retrying spends paid inference on an outcome already decided.
+            refused = confirmed_headless_permission_refusal(
+                plan.get("provider", ""), output_summary)
+            status = "headless_permission_refused"
+            reason = f"provider auto-denied permission: {refused}"
+            verification = dict(verification)
+            verification.update({
+                "ok": False,
+                "status": status,
+                "reason": reason,
+                "finding": {
+                    "severity": "error",
+                    "check": "headless.permission_refused",
+                    "message": f"provider auto-denied the {refused!r} permission",
+                    "hint": (f"Grant {refused!r} under permissions.allow for this "
+                             "provider, then restart the listener; retrying "
+                             "cannot change a denied permission."),
+                },
+            })
+        elif status in FAILURE_STATUSES and confirmed_environment_block(
                 pre_environment, post_environment):
             status = "environment_blocked"
             reason = "write_probe_denied"
@@ -1253,6 +1835,10 @@ def main():
                              "operator must verify the reset before restarting"),
                 },
             })
+        if verification.get("review_artifact"):
+            output_fields["review_artifact"] = verification["review_artifact"]
+        if verification.get("review_return_receipt"):
+            output_fields["review_return_receipt"] = verification["review_return_receipt"]
         post_snapshot = verification["actual"]
         pre_snapshot = {
             "state": lk.get("state", ""),
@@ -1274,7 +1860,16 @@ def main():
         process_ok = proc.returncode == 0
         success = (not timed_out) and process_ok and verification["ok"] and ledger_ok
         once_rc = 1
-        if timed_out and status != "approval_required":
+        # A timeout is transport state, not a replacement for a classification
+        # whose own doctrine already says no retry.  Keep all three closed sets
+        # explicit so adding a member changes this branch only through its named
+        # policy constant (and the per-member witnesses fail closed).
+        timeout_preserved_statuses = (
+            TERMINAL_FAILURE_STATUSES
+            + PROVIDER_RATE_LIMIT_STATUSES
+            + NEUTRAL_STATUSES
+        )
+        if timed_out and status not in timeout_preserved_statuses:
             fails += 1
             once_rc = 5
             append_run_event(args, "run.ended", run_id, me, status="timeout",
@@ -1307,9 +1902,18 @@ def main():
             # non_completion / stuck_working / invalid_relay are run failures even
             # when the provider exited rc 0 — never force-recovered, only retried.
             rate_limited = status in PROVIDER_RATE_LIMIT_STATUSES
-            if not rate_limited:
+            # A terminal status names a condition the same call cannot resolve --
+            # a denied permission, a blocked workspace, a required approval. The
+            # tuple has always been named terminal; until #359 it was folded into
+            # the ordinary retry branch, so the name promised a termination the
+            # code never performed. Neither it nor a rate limit consumes a retry.
+            terminal = status in TERMINAL_FAILURE_STATUSES
+            if not rate_limited and not terminal:
                 fails += 1
                 log(f"run classified {status}: {reason} ({fails}/{args.max_retries}).")
+            elif terminal:
+                log(f"run classified {status}: {reason} (terminal; retry counter "
+                    "unchanged, lane stopping).")
             else:
                 log(f"run classified {status}: {reason} (retry counter unchanged).")
             if status == "non_completion":
@@ -1325,10 +1929,12 @@ def main():
                              reason=reason,
                              provider_terminal=verification.get("provider_terminal"),
                              runtime_findings=findings, **output_fields)
-            if rate_limited:
+            if rate_limited or terminal:
                 return 1
         elif success:
-            fails = 0  # completed / advanced / not_required — authored, real progress.
+            # completed/advanced are relay progress; review_delivered_pending is
+            # only a verified sidecar delivery and must not be narrated as one.
+            fails = 0
             append_run_event(args, "run.ended", run_id, me, status=status,
                              returncode=proc.returncode, relay_state=post_snapshot["state"],
                              relay_turn=post_snapshot["turn"],

@@ -200,6 +200,7 @@ Garanzia:
 ./m8shift.py status                                # lock + last turn (NON-blocking)
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # monitor live locale, sola lettura
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # controlli salute/sicurezza/contratti in sola lettura
+./m8shift.py verify-kit --source DIR [--json] # verifica offline e in sola lettura del sottoinsieme locale del kit
 ./m8shift.py contract validate [--strict] [--json] # validazione dei contratti Stage 4 in sola lettura
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # briefing in sola lettura: LOCK + ultimi turni + memoria + task
 ./m8shift.py peek <agent>  # ultima consegna indirizzata a <agent> (rc 3 se non è il tuo turno)
@@ -223,6 +224,7 @@ Garanzia:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py review-return <coordinator> --from <reviewer> --run RUN  # validated artifact-only review return
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
@@ -232,6 +234,7 @@ Garanzia:
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # vincola questo turno a UN relay di progetto (RFC 038 §9); senza penna; rifiuta in ambiguità senza il selettore chiuso
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049: battito di vivacità protettivo di un detentore WORKING (produttori gestiti; finestra = max(120, min(2*N, TTL)); claim --refresh registra solo battiti di audit)
 ./m8shift.py release <agent> --to <other> [--force]  # hand off without a body (does NOT re-increment turn)
+./m8shift.py unclaim <agent> --reason "..."  # annulla la TUA STESSA presa — ripristina AWAITING_<agent> allo stesso turno; release passa il testimone
 ./m8shift.py done <agent> [--force]                 # close the session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge old closed turns (never turn #0)
 ```

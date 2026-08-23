@@ -331,6 +331,28 @@ Findings:
 The checks remain advisory. Missing runner does not make the core relay invalid; it only
 means autonomous headless listening is not actually available.
 
+## Amendment #328 — legacy runner recovery after adoption
+
+An older installed kit can contain a canonical runner file without a matching
+`kit.json` `runners[]` entry. Normal update deliberately refuses to guess about
+that file. The recovery surface is `update --adopt-runner
+headless-runner|watch-status`, which adopts exactly one known runner and never
+re-runs `init`.
+
+The source runner must be a regular, non-symlinked file whose entry matches the
+source release's mandatory `checksums.sha256`. The existing target must also be
+regular and confined to its canonical relative path. It is accepted as pristine
+only when it matches the target's own checksum manifest; an absent or mismatched
+entry requires the dedicated `--force-adopt-runner` override. Before replacing
+bytes, the command saves unique copies of both the runner and the previous
+manifest under `.m8shift/backups/runner-adoption/`.
+
+On success it atomically records just that runner's name, canonical path,
+version, digest, and source in `kit.json`, and carries the backup paths in the
+bounded update audit evidence. It cannot be combined with component/companion
+refreshes or generated-file repair, and it does not alter anchors, protocol,
+profiles, relay history, or another runner.
+
 ## Generated agent instructions / anchors
 
 The generated stanza should include:

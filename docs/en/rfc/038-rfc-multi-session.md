@@ -144,7 +144,8 @@ or infer one):
 
 - **A1 ambiguity layer — every mutator, agentless included**: `claim` (incl.
   `--refresh`), `append`, `next` (treated as mutating BEFORE it polls/claims),
-  `request-turn`, `yield-turn`, `decline-turn`, `steer-turn`, `pause`, `cooldown`,
+  `request-turn`, `yield-turn`, `decline-turn`, `steer-turn`, `review-return`,
+  `pause`, `cooldown`,
   `resume`, `release`, `done`, `remember`, `task add/done/drop`, `archive`,
   `decisions target --set`, `decisions scaffold`, and `session report --write`.
   An **agentless mutator under unresolved ambiguity always refuses** — no agent
@@ -153,7 +154,8 @@ or infer one):
 - **A3 binding layer — actor-bearing mutators only**: the per-agent binding
   verification applies exactly where the command has a validated actor argument
   (`claim`, `append`, `next` via its agent, `request-turn`/`yield-turn`/
-  `decline-turn`/`steer-turn`, `pause`/`resume`/`release`/`done`, `remember`,
+  `decline-turn`/`steer-turn`/`review-return`,
+  `pause`/`resume`/`release`/`done`, `remember`,
   task mutations). `may-i-write` reports binding validity read-only. Acceptance
   tests must pin BOTH branches (an agentless write refused under ambiguity even
   when a binding exists; an actor-bearing write resolved by its own binding).

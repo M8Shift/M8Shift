@@ -1966,6 +1966,18 @@ core relay mutations beyond the existing `cooldown`/runtime contract.
       "timeout_s": 15,
       "failure_policy": "warn_open",
       "provenance_preference": ["official"]
+    },
+    {
+      "name": "agy-antigravity-quota",
+      "agent": "agy",
+      "provider": "google-antigravity",
+      "kind": "cli_json",
+      "enabled": false,
+      "//": "Disabled by default: direct local quota summary with explicit model-group selection",
+      "command": ["python3", "examples/usage-adapters/antigravity-quota.py", "--bucket-prefix", "gemini-"],
+      "timeout_s": 10,
+      "failure_policy": "warn_open",
+      "provenance_preference": ["official"]
     }
   ]
 }
@@ -1974,6 +1986,17 @@ core relay mutations beyond the existing `cooldown`/runtime contract.
 The exact manifest may include additional fields already supported by the
 runtime companion, but these entries define the expected default catalog:
 disabled, explicit, provider-neutral, and fail-open.
+
+The Antigravity adapter is an explicit loopback-network boundary, not ambient
+companion authority. It discovers the running language server, keeps its CSRF
+token and raw response in memory only, and calls
+`exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary`. The
+response contains two groups of two buckets, so the configured `bucketId`
+prefix selects exactly one group; array position and display labels never do.
+The provider's `window` field is the sole weekly/5h discriminator. A bounded
+selection receipt is persisted in the normalized snapshot so later readers can
+audit the prefix, source method, and client version without receiving identity
+or credential material.
 
 ### Claude quota adapter — macOS Keychain, not plaintext credentials
 
@@ -2050,7 +2073,26 @@ Phase 4 reuses the existing hardened adapter runner contract:
   output, ledgers, exceptions, reports, or relay turns;
 - provider/network behavior stays in `m8shift-runtime.py` adapters and example
   scripts, never in core `m8shift.py`;
-- disabled adapters perform no Keychain, filesystem-log, CLI, or network access.
+- disabled adapters perform no Keychain, filesystem-log, CLI, or network access;
+- **the child environment is constructed, never inherited (#340).** The launcher
+  builds a fresh mapping from a fixed base — `HOME`, `PATH`, `LANG`, `LC_ALL`,
+  `LC_CTYPE`, `TERM`, `USER` — plus the names an adapter entry declares in
+  `env_allowlist`. An absent `env_allowlist` yields the base and nothing else; it
+  MUST NOT be read as permission to inherit. A malformed `env_allowlist` — any
+  value that is not a list of strings — refuses the launch rather than degrading
+  to a wider environment.
+
+The argv guard and the environment guard answer different questions and neither
+substitutes for the other: argv constrains what an adapter is *told* to do,
+`env_allowlist` constrains what it is *given*. An adapter that needs a secret
+declares a host-side reference; it never receives one because the launcher
+happened to have it.
+
+Note that a child process may still observe platform-injected variables the
+launcher never set (on macOS, `__CF_USER_TEXT_ENCODING`). The guarantee is that
+**no ambient variable of the parent is passed**, not that the child's environment
+equals the declared set exactly; a conformance test asserting set equality will
+fail for reasons unrelated to this policy.
 
 If an adapter wants to expose an account identifier, it must expose only a stable
 hash or redact it entirely. The default examples should omit identity.

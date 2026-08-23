@@ -166,13 +166,13 @@ This matrix is total over the canonical state and event sets. `same` means no
 authority change. `refuse` means fail atomically with no mutation. Where a cell
 contains a guard, failure of that guard means `refuse`.
 
-| Current state | dispatch(scope,target) | acquire(actor) | coordinated-write(actor) | refresh-or-beat(actor) | operator-wait(actor) | transfer(actor,target) | request-turn(requester) | pause(actor) | resume(actor,target) | close(actor) | recover(recoverer) | solo-override(soloer) | observe-or-wait |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `IDLE` | `AWAITING_target`; authorized scope | `WORKING_actor`; rostered and scoped | refuse | refuse | refuse | refuse | `AWAITING_requester`; authorized request | `PAUSED`; authorized reason | refuse | `DONE`; completion authority | refuse | refuse | same; listening continues |
-| `WORKING_h` | refuse | same only for `h` idempotent reacquire; others refuse | same; only `h`, ownership reverified | same; only `h`, matching current window | same plus marker; only `h`, typed event | `AWAITING_target`; only `h`, immutable turn committed | same; durable request only, holder decides | `PAUSED`; only `h`, checkpoint and reason | refuse | `DONE`; only `h`, completion gates pass | `WORKING_recoverer`; only guarded stale or explicit live override | refuse | same; non-holder read-only |
-| `AWAITING_a` | refuse | `WORKING_a`; exact target and unread turn retained | refuse | refuse | refuse | refuse | same; request recorded, no theft | `PAUSED`; authorized, pending turn preserved | refuse | `DONE`; explicit closure authority and pending work disposition | refuse | `AWAITING_soloer`; authorized episode, original handoff preserved | same; target listener remains armed |
-| `PAUSED` | refuse | refuse | refuse | refuse | refuse | refuse | same; request recorded for operator | same; idempotent reason update only by authority | `IDLE` or `AWAITING_target`; authorized and preserved continuation restored | `DONE`; explicit closure authority | refuse | `AWAITING_soloer`; only authorized bounded episode | same; listening continues |
-| `DONE` | refuse | refuse | refuse | refuse | refuse | refuse | refuse | refuse | refuse | same; idempotent close | refuse | refuse | same; terminal observation only |
+| Current state | dispatch(scope,target) | acquire(actor) | coordinated-write(actor) | refresh-or-beat(actor) | operator-wait(actor) | transfer(actor,target) | return-review(coordinator,evidence) | request-turn(requester) | pause(actor) | resume(actor,target) | close(actor) | recover(recoverer) | solo-override(soloer) | observe-or-wait |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `IDLE` | `AWAITING_target`; authorized scope | `WORKING_actor`; rostered and scoped | refuse | refuse | refuse | refuse | refuse | `AWAITING_requester`; authorized request | `PAUSED`; authorized reason | refuse | `DONE`; completion authority | refuse | refuse | same; listening continues |
+| `WORKING_h` | refuse | same only for `h` idempotent reacquire; others refuse | same; only `h`, ownership reverified | same; only `h`, matching current window | same plus marker; only `h`, typed event | `AWAITING_target`; only `h`, immutable turn committed | refuse | same; durable request only, holder decides | `PAUSED`; only `h`, checkpoint and reason | refuse | `DONE`; only `h`, completion gates pass | `WORKING_recoverer`; only guarded stale or explicit live override | refuse | same; non-holder read-only |
+| `AWAITING_a` | refuse | `WORKING_a`; exact target and unread turn retained | refuse | refuse | refuse | refuse | `AWAITING_coordinator`; original handoff plus fresh bounded decision or refusal evidence; no turn or pen | same; request recorded, no theft | `PAUSED`; authorized, pending turn preserved | refuse | `DONE`; explicit closure authority and pending work disposition | refuse | `AWAITING_soloer`; authorized episode, original handoff preserved | same; target listener remains armed |
+| `PAUSED` | refuse | refuse | refuse | refuse | refuse | refuse | refuse | same; request recorded for operator | same; idempotent reason update only by authority | `IDLE` or `AWAITING_target`; authorized and preserved continuation restored | `DONE`; explicit closure authority | refuse | `AWAITING_soloer`; only authorized bounded episode | same; listening continues |
+| `DONE` | refuse | refuse | refuse | refuse | refuse | refuse | refuse | refuse | refuse | refuse | same; idempotent close | refuse | refuse | same; terminal observation only |
 
 ### 2.6 Lease-event transition table
 
@@ -494,6 +494,14 @@ an old decision.
   is evidence, not review.
 - Review outcomes MUST be one of `approve`, `revise`, `reject`, or `waive`.
   Waiver requires an authorized actor, rationale, scope, and residual risk.
+- A deliberately read-only reviewer MAY deliver a bounded decision artifact or a
+  redacted permission-refusal receipt without acquiring the pen. Only the original
+  coordinator MAY return the awaiting route, and only when stable evidence binds the
+  exact reviewer, run, complete closed input record, and either a closed decision or
+  refusal outcome. The return adds no turn and grants no pen; malformed or stale
+  evidence MUST leave routing unchanged. Provider text MUST NOT enter the authority
+  record or evidence ledger. The coordinator MUST acquire after return; only a
+  decision artifact has a response to consume.
 - A ticket, branch, local commit, draft review, or unpushed revision MUST NOT be
   reported as delivered.
 

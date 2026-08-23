@@ -199,6 +199,7 @@ loop:
 ./m8shift.py status                                # ロック + 直近のターン（非ブロッキング）
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # ローカルのライブ監視（読み取り専用）
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # ヘルス/セキュリティ/契約の読み取り専用診断
+./m8shift.py verify-kit --source DIR [--json] # ローカルで宣言されたキット部分のオフライン読み取り専用検証
 ./m8shift.py contract validate [--strict] [--json] # Stage 4 契約の読み取り専用検証
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # 読み取り専用の要約：LOCK + 直近のターン + メモリ + タスク
 ./m8shift.py peek <agent>  # <agent> 宛の最後のハンドオフ（自分の番でなければ rc 3）
@@ -222,6 +223,7 @@ loop:
 ./m8shift.py yield-turn <holder> --request N --to <agent>       # accept a cooperative turn request
 ./m8shift.py decline-turn <holder> --request N --reason "..."   # decline a cooperative turn request
 ./m8shift.py steer-turn <agent> --from <holder> --request N --force --reason "..."  # redirect idle AWAITING holder
+./m8shift.py review-return <coordinator> --from <reviewer> --run RUN  # validated artifact-only review return
 ./m8shift.py pause <holder> --reason "..."       # park an open session with no active task (state=PAUSED)
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."       # resume PAUSED for a specific agent before claim
@@ -231,6 +233,7 @@ loop:
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # このシフトを一つのプロジェクトリレーに固定（RFC 038 §9）。ペン不要。曖昧な場合はクローズドセレクタなしでは拒否
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049：WORKING保持者を保護する生存ハートビート（管理プロデューサー用。ウィンドウ = max(120, min(2*N, TTL))。claim --refresh は監査用のみ）
 ./m8shift.py release <agent> --to <other> [--force]  # 本文なしで引き継ぐ（ターンを再インクリメントしない）
+./m8shift.py unclaim <agent> --reason "..."  # 自分のclaimを取り消す — 同じターンでAWAITING_<agent>に戻す。releaseは引き継ぎ
 ./m8shift.py done <agent> [--force]                 # セッションを閉じる（state=DONE）
 ./m8shift.py archive [--keep N]                     # 古い閉じたターンを削除（ターン #0 は決して削除しない）
 ```

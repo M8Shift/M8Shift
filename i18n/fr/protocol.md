@@ -240,6 +240,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py status [--for <agent>]                # verrou + dernier tour + action suivante
 ./m8shift.py watch [--for <agent>] [--interval N] [--clear] [--changes-only]  # surveillance locale live, lecture seule
 ./m8shift.py doctor [--lint] [--json] [--security] [--contracts] # diagnostics santé/sécurité/contrats en lecture seule
+./m8shift.py verify-kit --source DIR [--json] # vérification hors ligne et en lecture seule du sous-ensemble local du kit
 ./m8shift.py contract validate [--strict] [--json] # validation read-only des contrats Stage 4
 ./m8shift.py recap [--turns N] [--memory N] [--tasks N]  # briefing lecture seule : LOCK + derniers tours + mémoire + tâches
 ./m8shift.py peek <agent>  # dernière passation adressée à <agent> (rc 3 si pas ton tour)
@@ -263,6 +264,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py yield-turn <détenteur> --request N --to <agent>       # accepte une demande coopérative de tour
 ./m8shift.py decline-turn <détenteur> --request N --reason "..."   # refuse une demande coopérative de tour
 ./m8shift.py steer-turn <agent> --from <détenteur> --request N --force --reason "..."  # redirige un détenteur idle AWAITING
+./m8shift.py review-return <coordinateur> --from <relecteur> --run RUN  # retour validé d'une revue par artefact
 ./m8shift.py pause <détenteur> --reason "..."       # met la session ouverte en attente utilisateur (state=PAUSED)
 ./m8shift.py cooldown --until ISO --reason "..." [--for agent] [--source SOURCE] [--wait-interval N] [--replace]
 ./m8shift.py resume <agent> --reason "..."          # reprend PAUSED pour un agent précis avant claim
@@ -272,6 +274,7 @@ Si l'autre agent crashe en tenant le stylo, le verrou resterait coincé. Garde-f
 ./m8shift.py bind <agent> [--candidate env|script] [--show|--clear|--list]  # épingle ce shift sur UN relais projet (RFC 038 §9) ; sans stylo ; refuse sous ambiguïté sans le sélecteur fermé
 ./m8shift.py heartbeat <agent> --source runtime-listener|wrapper --cadence-seconds N  # RFC 049 : battement de vivacité protecteur d'un porteur WORKING (producteurs managés ; fenêtre = max(120, min(2*N, TTL)) ; claim --refresh n'enregistre que des battements d'audit)
 ./m8shift.py release <agent> --to <autre> [--force --reason "pourquoi"]  # repasser la main sans corps
+./m8shift.py unclaim <agent> --reason "..."  # annule VOTRE PROPRE prise — restaure AWAITING_<agent> au même tour ; release passe la main
 ./m8shift.py done <agent> [--force --reason "pourquoi"]  # clore la session (state=DONE)
 ./m8shift.py archive [--keep N]                     # purge les vieux tours clôturés (jamais le tour #0)
 ```

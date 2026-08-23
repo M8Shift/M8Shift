@@ -79,6 +79,27 @@ After editing the English protocol template **or** a pack, regenerate the docs s
 python3 scripts/gen_docs.py
 ```
 
+## Documentation Definition of Done
+
+Every documentation change records a **protocol impact: yes/no** disposition in its
+tracking item or merge request. This makes an unchanged protocol an explicit decision,
+not an accidental omission.
+
+When the disposition is **yes**:
+
+1. update the canonical embedded source in `m8shift.PROTOCOL["en"]` and/or
+   `m8shift.PROTOCOL_REFERENCE["en"]` rather than editing generated protocol docs by hand;
+2. run `python3 scripts/gen_docs.py` and inspect the generated diff;
+3. run
+   `python3 -m unittest tests.test_m8shift.TestPureFunctions.test_protocol_docs_in_sync`;
+4. deliver only when `test_protocol_docs_in_sync` passes and no manual or unintended
+   generated drift remains.
+
+The remaining affected specs, RFC status, guides, examples, and release notes must be
+updated in the same change. A **no** disposition still requires the author and reviewer
+to verify that the documentation does not alter relay states, commands, invariants, or
+operator obligations described by the embedded protocol.
+
 ## Versioning (GoRoCo)
 
 M8Shift uses **GoRoCo** (`Génération.Révision.Correction`), published as

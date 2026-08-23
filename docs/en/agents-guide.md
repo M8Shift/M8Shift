@@ -74,6 +74,13 @@ rubber-stamps the first:
   honesty*);
 - a **human maintainer arbitrates** the genuine disagreements.
 
+Each of those claims is backed by primary sources, verified one by one, in
+[Evidence for adversarial review](evidence-for-adversarial-review.md) — which also records what each
+source does *not* license us to say. Two are worth knowing before you rely on this section: model
+self-preference scales **linearly** with a model's ability to recognise its own output, which is why
+"a different vendor" is a requirement rather than a taste; and the automation-bias claim above is the
+one still unsourced there.
+
 > [!WARNING]
 > The trap is the mirror image of the benefit: if the two agents simply *agree* — especially
 > the same model talking to itself — you get an **echo chamber** that produces *false*
@@ -223,9 +230,16 @@ Every change follows the same branch-based flow.
 4. **Tests, systematically.** Read the code, review it, and **add or update tests for
    every behavioral change**. `python3 -m unittest discover -s tests` must be green on
    the branch before review.
-5. **Documentation, systematically.** Update the affected docs in the same change:
-   specs, RFC status, protocol/reference, `docs/`, and regenerate derived docs with
-   `scripts/gen_docs.py` when the protocol changes.
+5. **Documentation Definition of Done.** Update every affected documentation surface in
+   the same change (as applicable: specs, RFC status, protocol/reference, `docs/`,
+   examples, and release notes). Record a **protocol impact: yes/no** disposition in the
+   tracking item or MR. When the answer is yes, update the canonical
+   `m8shift.PROTOCOL["en"]` and/or `m8shift.PROTOCOL_REFERENCE["en"]`, run
+   `python3 scripts/gen_docs.py`, inspect the generated diff, and require
+   `test_protocol_docs_in_sync` to pass with no manual or unintended generated drift
+   remaining before delivery. A no disposition must be reviewed against relay states,
+   commands, invariants, and operator obligations; it is not permission to skip the
+   assessment.
 6. **Push the exact branch head to the forge** and open a **merge request** to `main`.
    The MR description links the issue and lists the logical commits. A network-isolated
    author instead hands the committed SHA to the named forge-gateway role and labels it

@@ -32,6 +32,19 @@ All orchestration stays in `m8shift-runtime.py`, its existing generic runner,
 and ignored `.m8shift/runtime/` sidecars. `m8shift.py` gains no process,
 provider, credential, model, scheduler, or recovery authority.
 
+### External relay-instance boundary (#327)
+
+An instance may keep the versioned kit, passive relay, and runtime store outside
+the project checkout a provider edits.  In that topology `relay_root` remains
+the exclusive authority for `M8SHIFT.md`, the core/runner/runtime, profiles,
+plans, PID/state/log sidecars, and all M8Shift writes.  A validated listener
+profile separately carries canonical `workspace_root` (with legacy `cwd` as its
+compatible spelling) solely for the provider child.  The runtime injects the
+already selected relay root as `M8SHIFT_ROOT`; it never discovers a relay from
+the workspace.  Root provenance is observable, and profile/runner symlink
+escape, missing paths, conflicting root selection, or a workspace change between
+the parent plan and detached/service payload fail before provider launch.
+
 ## 2. Decisions inherited unchanged
 
 RFC 067 D1–D16 remain binding. This implementation uses:

@@ -21,9 +21,11 @@ import re
 import shutil
 import signal
 import select
+import stat
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -34,7 +36,7 @@ except ImportError:  # pragma: no cover - unavailable on Windows
     termios = None
     tty_module = None
 
-VERSION = "4.1.0"  # lockstep with m8shift.py; required for companion install/update
+VERSION = "4.2.0"  # lockstep with m8shift.py; required for companion install/update
 
 ALT_ON = "\x1b[?1049h\x1b[?25l"
 ALT_OFF = "\x1b[?25h\x1b[?1049l"
@@ -47,9 +49,246 @@ ACTIVITY_BUFFER_EDGE = "<older turns on disk — peek/journal>"
 TURN_SCHEMA = "m8shift.turn/1"
 TURN_MARKER = b"<!-- M8SHIFT:TURN "
 TURN_BEGIN_RE = re.compile(r"M8SHIFT:TURN (\d+) ([a-z][a-z0-9_-]*) BEGIN")
+TOP_IDENTITY_SCHEMA = "m8shift.top-identity/1"
+TOP_IDENTITY_PREFIX_MAX = 64 * 1024
+TOP_IDENTITY_FILE_MAX = 1024 * 1024
+TOP_PROCESS_VERSION_FLAG = "--top-process-loaded-version"
+TOP_PROCESS_ROOT_FLAG = "--top-process-root-digest"
+TOP_VERSION_RE = re.compile(rb'(?m)^VERSION\s*=\s*"([0-9]+[.][0-9]+[.][0-9]+)"')
 _active = False
 _keyboard_fd = None
 _keyboard_attrs = None
+
+
+def _top_observed_at(value=None):
+    stamp = value or datetime.now(timezone.utc)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _top_identity_result(status, loaded_version, observed_at, **fields):
+    row = {
+        "schema": TOP_IDENTITY_SCHEMA,
+        "status": status,
+        "process_loaded": loaded_version,
+        "on_disk": "",
+        "relation": "unknown",
+        "restart_required": False,
+        "observed_at": _top_observed_at(observed_at),
+        "freshness": "observed",
+    }
+    row.update(fields)
+    return row
+
+
+def inspect_top_identity(root, loaded_version=VERSION, observed_at=None,
+                         root_explicit=True):
+    """Compare this process version with one canonical on-disk top, read-only.
+
+    The open descriptor and pathname must identify the same bounded regular
+    file before and after the prefix read.  A top launched from elsewhere is
+    valid when the relay root was selected explicitly; only the canonical
+    target under that root is compared.
+    """
+    observed_at = observed_at or datetime.now(timezone.utc)
+    selected = os.path.abspath(root)
+    canonical = os.path.realpath(selected)
+    if not root_explicit and selected != canonical:
+        return _top_identity_result(
+            "ambiguous_root", loaded_version, observed_at,
+            detail="implicit relay root resolves through a symlink")
+    canonical_top = os.path.join(canonical, "m8shift-top.py")
+    if (not root_explicit
+            and os.path.realpath(os.path.abspath(__file__)) !=
+            os.path.realpath(canonical_top)):
+        return _top_identity_result(
+            "ambiguous_root", loaded_version, observed_at,
+            detail="top launched outside the implicit relay root")
+    try:
+        root_info = os.stat(canonical)
+    except OSError:
+        return _top_identity_result(
+            "ambiguous_root", loaded_version, observed_at,
+            detail="relay root is unavailable")
+    if not stat.S_ISDIR(root_info.st_mode):
+        return _top_identity_result(
+            "ambiguous_root", loaded_version, observed_at,
+            detail="relay root is not a directory")
+
+    path = canonical_top
+    try:
+        before_path = os.lstat(path)
+    except FileNotFoundError:
+        return _top_identity_result("missing", loaded_version, observed_at)
+    except OSError:
+        return _top_identity_result("unreadable", loaded_version, observed_at)
+    if stat.S_ISLNK(before_path.st_mode):
+        return _top_identity_result("symlink_refused", loaded_version, observed_at)
+    if not stat.S_ISREG(before_path.st_mode):
+        return _top_identity_result("non_regular", loaded_version, observed_at)
+    if before_path.st_size > TOP_IDENTITY_FILE_MAX:
+        return _top_identity_result("oversized", loaded_version, observed_at)
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(path, flags)
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode)
+                or opened.st_size > TOP_IDENTITY_FILE_MAX
+                or (opened.st_dev, opened.st_ino) !=
+                (before_path.st_dev, before_path.st_ino)):
+            return _top_identity_result(
+                "changed_during_read", loaded_version, observed_at)
+        chunks, remaining = [], TOP_IDENTITY_PREFIX_MAX
+        while remaining:
+            chunk = os.read(fd, min(8192, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        opened_after = os.fstat(fd)
+    except OSError:
+        return _top_identity_result("unreadable", loaded_version, observed_at)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    try:
+        after_path = os.lstat(path)
+    except OSError:
+        return _top_identity_result(
+            "changed_during_read", loaded_version, observed_at)
+    identity_before = (opened.st_dev, opened.st_ino, opened.st_size,
+                       getattr(opened, "st_mtime_ns", int(opened.st_mtime * 1000000000)))
+    identity_after = (opened_after.st_dev, opened_after.st_ino, opened_after.st_size,
+                      getattr(opened_after, "st_mtime_ns",
+                              int(opened_after.st_mtime * 1000000000)))
+    if (identity_before != identity_after
+            or stat.S_ISLNK(after_path.st_mode)
+            or not stat.S_ISREG(after_path.st_mode)
+            or (after_path.st_dev, after_path.st_ino) !=
+            (opened_after.st_dev, opened_after.st_ino)):
+        return _top_identity_result(
+            "changed_during_read", loaded_version, observed_at)
+    match = TOP_VERSION_RE.search(b"".join(chunks))
+    if match is None:
+        return _top_identity_result("version_invalid", loaded_version, observed_at)
+    on_disk = match.group(1).decode("ascii")
+    loaded_parts = tuple(int(part) for part in loaded_version.split(".")) \
+        if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", loaded_version or "") else None
+    disk_parts = tuple(int(part) for part in on_disk.split("."))
+    if loaded_parts is None:
+        return _top_identity_result(
+            "loaded_version_invalid", loaded_version, observed_at,
+            on_disk=on_disk)
+    relation = ("equal" if disk_parts == loaded_parts else
+                "newer_on_disk" if disk_parts > loaded_parts else "older_on_disk")
+    return _top_identity_result(
+        "equal" if relation == "equal" else "skew",
+        loaded_version, observed_at, on_disk=on_disk, relation=relation,
+        restart_required=(relation != "equal"))
+
+
+class TopIdentityMonitor:
+    """Never let a slow script-path probe block the terminal render loop."""
+
+    def __init__(self, inspector=inspect_top_identity):
+        self.inspector = inspector
+        self._lock = threading.Lock()
+        self._inflight = False
+        self._result = None
+        self._completed = None
+        self._next_due = 0.0
+
+    def _inspect(self, root, root_explicit):
+        try:
+            result = self.inspector(root, root_explicit=root_explicit)
+        except Exception:
+            result = _top_identity_result(
+                "unreadable", VERSION, datetime.now(timezone.utc))
+        with self._lock:
+            self._result = result
+            self._completed = time.monotonic()
+            self._inflight = False
+
+    def snapshot(self, root, interval=2, root_explicit=True, clock=time.monotonic):
+        current = clock()
+        with self._lock:
+            if not self._inflight and current >= self._next_due:
+                self._inflight = True
+                self._next_due = current + max(.1, interval)
+                threading.Thread(
+                    target=self._inspect, args=(root, root_explicit),
+                    name="m8shift-top-identity", daemon=True,
+                ).start()
+            result = dict(self._result) if self._result is not None else \
+                _top_identity_result(
+                    "checking", VERSION, datetime.now(timezone.utc),
+                    freshness="checking")
+            completed = self._completed
+            inflight = self._inflight
+        if completed is not None:
+            age = max(0.0, current - completed)
+            result["age_seconds"] = round(age, 3)
+            result["freshness"] = (
+                "stale" if age > max(5.0, 3.0 * max(.1, interval)) else "fresh")
+            if inflight:
+                result["refresh_in_progress"] = True
+        return result
+
+
+def _top_root_digest(root):
+    return hashlib.sha256(os.path.realpath(os.path.abspath(root)).encode("utf-8")).hexdigest()
+
+
+def _top_process_exec_argv(script, raw_argv, root):
+    """Place fixed identity markers first so long user argv cannot hide them."""
+    return [
+        sys.executable, os.path.abspath(script),
+        TOP_PROCESS_VERSION_FLAG + "=" + VERSION,
+        TOP_PROCESS_ROOT_FLAG + "=" + _top_root_digest(root),
+    ] + list(raw_argv)
+
+
+def _validate_top_process_markers(version, root_digest, root):
+    if (version is None) != (root_digest is None):
+        raise RuntimeError("incomplete top process identity markers")
+    if version is None:
+        return False
+    if version != VERSION or root_digest != _top_root_digest(root):
+        raise RuntimeError("top process identity markers do not match loaded code/root")
+    return True
+
+
+def _top_marker_count(argv, flag):
+    return sum(1 for item in argv
+               if item == flag or item.startswith(flag + "="))
+
+
+def _top_identity_warning(identity):
+    """Return one stable warning payload, or an empty string when fully green."""
+    if not isinstance(identity, dict):
+        return ""
+    status = identity.get("status") or "unknown"
+    freshness = identity.get("freshness") or "unknown"
+    restart = identity.get("restart_required") is True
+    if status == "equal" and freshness in ("fresh", "observed") and not restart:
+        return ""
+    loaded = identity.get("process_loaded") or "unknown"
+    on_disk = identity.get("on_disk") or "unknown"
+    prefix = "TOP RESTART REQUIRED" if restart else "TOP CHECK NON-GREEN"
+    parts = [prefix, "loaded %s" % loaded]
+    if on_disk != "unknown":
+        parts.append("on disk %s" % on_disk)
+    parts += [status, "freshness %s" % freshness]
+    if isinstance(identity.get("age_seconds"), (int, float)):
+        parts.append("age %.1fs" % identity["age_seconds"])
+    return " · ".join(parts)
 
 
 def _enable_keyboard(stream=None):
@@ -575,8 +814,10 @@ def _activity_capacity(snapshot, width, height):
     # RFC 064's permanent global TIME strip consumes one physical row.
     has_gateway_row = (isinstance(snapshot.get("gateway"), dict)
                        or _review_wait_candidate(snapshot) is not None)
+    has_top_warning = bool(_top_identity_warning(snapshot.get("top_identity")))
     fixed_rows = ((14 if max(24, width) >= 100 else 17) + agent_rows
-                  + (1 if has_gateway_row else 0))
+                  + (1 if has_gateway_row else 0)
+                  + (1 if has_top_warning else 0))
     return max(0, height - fixed_rows)
 
 
@@ -848,11 +1089,24 @@ def _render_stacked(snapshot, width, now=None, interval=2, utc=False,
     bottom = "└" + "─" * inner + "┘"
     clock = _display_time(now or datetime.now(timezone.utc), utc, "%H:%M:%S")
     version = _value(snapshot.get("m8shift_version"))
-    header = "M8SHIFT · %s · %s · session %s · %s" % (
-        _value(snapshot.get("project")), version,
-        _value(snapshot.get("session")), clock)
+    top_identity = snapshot.get("top_identity")
+    top_version = (_value(top_identity.get("process_loaded"))
+                   if isinstance(top_identity, dict) else "")
+    if top_version:
+        header = "M8SHIFT · %s · CORE %s · TOP %s · session %s · %s" % (
+            _value(snapshot.get("project")), version, top_version,
+            _value(snapshot.get("session")), clock)
+    else:
+        header = "M8SHIFT · %s · %s · session %s · %s" % (
+            _value(snapshot.get("project")), version,
+            _value(snapshot.get("session")), clock)
     header_row = paint(row(header), version, cyan)
+    if top_version:
+        header_row = paint(header_row, top_version, cyan)
     lines = [top, _paint_wordmark(header_row, colored)]
+    top_warning = _top_identity_warning(top_identity)
+    if top_warning:
+        lines.append(row(top_warning, red if "RESTART REQUIRED" in top_warning else amber))
 
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
@@ -1068,12 +1322,23 @@ def _render_wide(snapshot, width, now=None, interval=2, utc=False,
 
     clock = _display_time(now or datetime.now(timezone.utc), utc, "%H:%M:%S")
     version = _value(snapshot.get("m8shift_version"))
+    top_identity = snapshot.get("top_identity")
+    top_version = (_value(top_identity.get("process_loaded"))
+                   if isinstance(top_identity, dict) else "")
+    identity = ("CORE %s · TOP %s" % (version, top_version)
+                if top_version else version)
     header = framed("┌", "┐", "─ M8SHIFT · %s · %s · session %s " % (
-        _value(snapshot.get("project")), version,
+        _value(snapshot.get("project")), identity,
         _value(snapshot.get("session"))), " %s ─" % clock)
     if version != "unavailable":
         header = paint(header, version, cyan)
     lines = [_paint_wordmark(header, colored), blank]
+    top_warning = _top_identity_warning(top_identity)
+    if top_warning:
+        warning_line = content((("  " + top_warning, 0),))
+        lines.append(paint(
+            warning_line, top_warning,
+            red if "RESTART REQUIRED" in top_warning else amber))
 
     holder = _value(snapshot.get("holder"))
     state = _value(snapshot.get("state"))
@@ -1652,14 +1917,33 @@ when a scrolling status stream is intended.""",
                    help="relay project root (default: $M8SHIFT_ROOT or current directory)")
     p.add_argument("--engine", metavar="PATH", default=os.environ.get("M8SHIFT_ENGINE"),
                    help="m8shift.py engine path (default: <root>/m8shift.py)")
+    p.add_argument(TOP_PROCESS_VERSION_FLAG, default=None, help=argparse.SUPPRESS)
+    p.add_argument(TOP_PROCESS_ROOT_FLAG, default=None, help=argparse.SUPPRESS)
     raw_argv = sys.argv[1:] if argv is None else list(argv)
     tty = sys.stdout.isatty() and sys.stdin.isatty()
     if not raw_argv and not tty:
         p.print_help()
         return 0
     args, extra = p.parse_known_args(raw_argv)
+    version_markers = _top_marker_count(raw_argv, TOP_PROCESS_VERSION_FLAG)
+    root_markers = _top_marker_count(raw_argv, TOP_PROCESS_ROOT_FLAG)
+    if version_markers != root_markers or version_markers > 1:
+        raise RuntimeError("duplicate or incomplete top process identity markers")
+    process_marked = _validate_top_process_markers(
+        getattr(args, TOP_PROCESS_VERSION_FLAG.lstrip("-").replace("-", "_")),
+        getattr(args, TOP_PROCESS_ROOT_FLAG.lstrip("-").replace("-", "_")),
+        args.root)
     engine = args.engine or os.path.join(args.root, "m8shift.py")
     no_alt = args.plain or os.environ.get("TERM") == "dumb" or os.environ.get("M8SHIFT_NO_ALT_SCREEN")
+    root_explicit = (bool(os.environ.get("M8SHIFT_ROOT"))
+                     or any(item == "--root" or item.startswith("--root=")
+                            for item in raw_argv))
+    # ``argv`` is the unit-test/library seam. The real CLI always enters with
+    # argv=None and performs exactly one identity-stamping exec before raw mode.
+    if argv is None and tty and not no_alt and os.name == "posix" and not process_marked:
+        os.execve(sys.executable,
+                  _top_process_exec_argv(__file__, raw_argv, args.root),
+                  dict(os.environ))
     if not tty or no_alt or os.name == "nt":
         forwarded = (["--interval", str(args.interval)] if "--interval" not in extra else []) + extra
         return scroll_fallback(engine, args.root, forwarded)
@@ -1694,6 +1978,7 @@ when a scrolling status stream is intended.""",
         old[winch] = signal.signal(winch, resize)
     enter()
     status_reader = IncrementalStatusReader(engine, args.root)
+    top_identity_monitor = TopIdentityMonitor()
     previous = None
     scroll_offset = 0
     expanded = False
@@ -1722,6 +2007,9 @@ when a scrolling status stream is intended.""",
                 # rebuilding the selected entry from the refreshed snapshot.
                 reader_cache.clear()
                 snap = status_reader.load(provision)
+                snap["top_identity"] = top_identity_monitor.snapshot(
+                    args.root, interval=args.interval,
+                    root_explicit=root_explicit)
                 agent_count = len(snap.get("agents") or [])
                 # The first payload may reveal a different agent count than
                 # the conservative startup estimate. Treat that calibration
