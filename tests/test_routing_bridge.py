@@ -35,7 +35,7 @@ class BridgeTests(unittest.TestCase):
         for value in ({"authority": "executor", "launch": False},
                       {"authority": "advisory", "launch": True}):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                bridge.merge_recommendations({}, value)
+                bridge.merge_recommendations(self.policy(), value)
 
     def test_stronger_runtime_effort_wins(self):
         out = bridge.merge_recommendations(self.policy("low"), {
@@ -51,7 +51,7 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("invalid_runtime_effort", out["resolution_reasons"])
 
     def test_no_model_is_not_actionable(self):
-        out = bridge.merge_recommendations({}, {
+        out = bridge.merge_recommendations(self.policy(), {
             "ok": True, "authority": "advisory", "launch": False, "picked": ""})
         self.assertTrue(out["requires_manual_resolution"])
 
