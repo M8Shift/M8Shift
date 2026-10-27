@@ -13744,8 +13744,8 @@ def main():
                    help="single-line summary of what you just did (empty = the — placeholder)")
     a.add_argument("--files", default="",
                    help="files touched this turn, comma-separated (empty = the — placeholder)")
-    a.add_argument("--body", default="",
-                   help="free turn body: a file path, or - to read stdin (empty = header-only turn)")
+    a.add_argument("--body-file", "--body", dest="body", default="", metavar="PATH|-",
+                   help="read turn body from PATH or - for stdin (legacy alias: --body; not literal text)")
     a.add_argument("--allow-large-body", action="store_true",
                    help=f"allow --body content above {MAX_BODY_BYTES} bytes")
     a.add_argument("--wait", action="store_true",
