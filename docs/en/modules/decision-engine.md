@@ -26,3 +26,31 @@ Effort values are advisory and require provider-specific mapping.
 - No LLM-based risk classification is implemented: the caller supplies risk and complexity.
 - A runtime adapter, external JEV advisor, audit log and benchmarks are deferred to later phases.
 - The existing pen remains the sole authority for write access.
+
+## P2: bridge to the existing runtime router
+
+The repository already has an authoritative **advisory** recommendation implementation:
+`m8shift-runtime.py route recommend`, backed by
+`.m8shift/routing/models.json` and `.m8shift/routing/skills.json`.
+The new deterministic policy must **not** replace that model registry or its
+capability/context floor checks.
+
+`m8shift-routing-bridge.py` is a read-only composition layer:
+
+```sh
+python3 m8shift-routing-bridge.py "Review an auth migration" \
+  --task-type review --risk high --complexity high
+python3 -m unittest discover -s tests -p 'test_routing_bridge.py'
+```
+
+Use a task type declared by the project's `routing/skills.json`.
+The bridge asks the existing runtime for a recommendation, then combines it with
+risk/effort/approval advice from `m8shift-decision.py`. Its output is never
+launch authority. Runtime manifest errors produce `runtime_ok=false` and
+`requires_manual_resolution=true`. The caller must separately validate model
+availability, provider mapping, approvals, and actual pen ownership.
+
+**P2 limitation:** the two policies are composed, not automatically reconciled.
+The bridge may report different effort levels from the native runtime and the
+risk policy. A future explicit policy arbitration step must fail closed on
+disagreement, never silently downgrade the stronger safety requirement.
