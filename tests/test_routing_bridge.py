@@ -9,17 +9,23 @@ bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
 class BridgeTests(unittest.TestCase):
+    @staticmethod
+    def policy(effort="high"):
+        return {"schema": "m8shift.routing.v1", "decision": {"effort": effort, "advisor_required": False, "human_approval_required": False}}
+
     def test_valid_advisory_result(self):
-        policy = {"decision": {"human_approval_required": True}}
+        policy = {"schema": "m8shift.routing.v1", "decision": {"human_approval_required": True, "advisor_required": True, "effort": "xhigh"}}
         out = bridge.merge_recommendations(policy, {
             "ok": True, "authority": "advisory", "launch": False,
             "picked": "example-model", "effort": "high"})
         self.assertEqual(out["runtime_model"], "example-model")
         self.assertTrue(out["policy"]["decision"]["human_approval_required"])
         self.assertFalse(out["launch"])
+        self.assertEqual(out["effective_effort"], "xhigh")
+        self.assertTrue(out["requires_manual_resolution"])
 
     def test_manifest_error_fails_closed(self):
-        out = bridge.merge_recommendations({}, {
+        out = bridge.merge_recommendations(self.policy(), {
             "ok": False, "authority": "advisory", "launch": False,
             "reason": "routing manifest error"})
         self.assertIsNone(out["runtime_model"])
@@ -30,6 +36,19 @@ class BridgeTests(unittest.TestCase):
                       {"authority": "advisory", "launch": True}):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 bridge.merge_recommendations({}, value)
+
+    def test_stronger_runtime_effort_wins(self):
+        out = bridge.merge_recommendations(self.policy("low"), {
+            "ok": True, "authority": "advisory", "launch": False,
+            "picked": "example-model", "effort": "max"})
+        self.assertEqual(out["effective_effort"], "max")
+
+    def test_invalid_runtime_effort_fails_closed(self):
+        out = bridge.merge_recommendations(self.policy(), {
+            "ok": True, "authority": "advisory", "launch": False,
+            "picked": "example-model", "effort": "unknown"})
+        self.assertIsNone(out["effective_effort"])
+        self.assertIn("invalid_runtime_effort", out["resolution_reasons"])
 
     def test_no_model_is_not_actionable(self):
         out = bridge.merge_recommendations({}, {
