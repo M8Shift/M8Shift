@@ -50,6 +50,31 @@ class BridgeTests(unittest.TestCase):
         self.assertIsNone(out["effective_effort"])
         self.assertIn("invalid_runtime_effort", out["resolution_reasons"])
 
+    def test_tier_mapping_selects_only_runtime_feasible_model(self):
+        out = bridge.merge_recommendations({
+            "schema": "m8shift.routing.v1",
+            "decision": {"effort": "high", "model_tier": "advanced",
+                         "advisor_required": False, "human_approval_required": False}
+        }, {"ok": True, "authority": "advisory", "launch": False,
+            "picked": "cheap", "effort": "medium",
+            "feasible": [{"id": "cheap", "tier": "economy"},
+                         {"id": "safe", "tier": "flagship"}]})
+        self.assertEqual(out["compatible_model"], "safe")
+        self.assertEqual(out["required_tier"], "flagship")
+        self.assertFalse(out["requires_manual_resolution"])
+        self.assertFalse(out["launch"])
+
+    def test_missing_high_tier_model_fails_closed(self):
+        out = bridge.merge_recommendations({
+            "schema": "m8shift.routing.v1",
+            "decision": {"effort": "high", "model_tier": "advanced",
+                         "advisor_required": False, "human_approval_required": False}
+        }, {"ok": True, "authority": "advisory", "launch": False,
+            "picked": "cheap", "effort": "medium",
+            "feasible": [{"id": "cheap", "tier": "economy"}]})
+        self.assertIsNone(out["compatible_model"])
+        self.assertTrue(out["requires_manual_resolution"])
+
     def test_no_model_is_not_actionable(self):
         out = bridge.merge_recommendations(self.policy(), {
             "ok": True, "authority": "advisory", "launch": False, "picked": ""})
