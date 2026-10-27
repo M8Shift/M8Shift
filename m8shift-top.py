@@ -1907,6 +1907,7 @@ def main(argv=None):
 Agent orientation: use --help first in automation; pass --plain explicitly only
 when a scrolling status stream is intended.""",
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     p.add_argument("--interval", type=int, default=2,
                    help="refresh interval in seconds (default: 2)")
     p.add_argument("--plain", action="store_true",
