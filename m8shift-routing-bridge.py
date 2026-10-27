@@ -22,6 +22,8 @@ def load_decision(path=None):
     return module
 
 EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+TIER_ORDER = ("economy", "balanced", "flagship")
+POLICY_TIERS = {"economy": "economy", "balanced": "balanced", "advanced": "flagship"}
 
 def merge_recommendations(policy, runtime):
     """Conservatively arbitrate two advisory policies; never authorize execution."""
@@ -48,25 +50,39 @@ def merge_recommendations(policy, runtime):
     else:
         effective_effort = None
         effort_source = "invalid_runtime_effort"
-    # The existing router has not proved that picked satisfies the policy's
-    # generic model tier. Never mark a selection as ready for execution.
+    required_tier = POLICY_TIERS.get(decision.get("model_tier"))
+    feasible = runtime.get("feasible") if ok else None
+    eligible = []
+    if required_tier is not None and isinstance(feasible, list):
+        for row in feasible:
+            if not isinstance(row, dict):
+                continue
+            model_id, tier = row.get("id"), row.get("tier")
+            if (isinstance(model_id, str) and model_id.strip()
+                    and tier in TIER_ORDER
+                    and TIER_ORDER.index(tier) >= TIER_ORDER.index(required_tier)):
+                eligible.append(model_id)
+    compatible_model = eligible[0] if eligible else None
     reasons = []
     if not ok: reasons.append("runtime_manifest_or_routing_error")
     if not picked: reasons.append("no_runtime_model")
     if effective_effort is None: reasons.append("invalid_runtime_effort")
     if decision.get("human_approval_required"): reasons.append("human_approval_required")
     if decision.get("advisor_required"): reasons.append("advisor_required")
-    reasons.append("model_tier_capability_mapping_not_verified")
+    if required_tier is None: reasons.append("invalid_policy_tier")
+    if not compatible_model: reasons.append("no_compatible_model")
+    if not isinstance(feasible, list): reasons.append("missing_feasible_evidence")
     return {
         "schema": "m8shift.routing.bridge.v1",
         "status": "proposed", "authority": "advisory", "launch": False,
         "runtime_ok": ok, "runtime_model": picked,
+        "compatible_model": compatible_model, "required_tier": required_tier,
         "runtime_reason": runtime.get("reason", ""),
         "runtime_effort": runtime_effort or "",
         "effective_effort": effective_effort,
         "effort_source": effort_source,
         "policy": policy,
-        "requires_manual_resolution": True,
+        "requires_manual_resolution": bool(reasons),
         "resolution_reasons": reasons,
         "note": "No model launch or approval is authorized by this result"
     }
