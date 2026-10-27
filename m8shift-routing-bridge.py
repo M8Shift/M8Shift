@@ -21,25 +21,53 @@ def load_decision(path=None):
     spec.loader.exec_module(module)
     return module
 
+EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
 def merge_recommendations(policy, runtime):
-    """Never convert a runtime fail-safe into an executable model choice."""
-    if not isinstance(runtime, dict):
-        raise ValueError("runtime result must be an object")
+    """Conservatively arbitrate two advisory policies; never authorize execution."""
+    if not isinstance(runtime, dict) or not isinstance(policy, dict):
+        raise ValueError("recommendations must be objects")
     if runtime.get("authority") != "advisory" or runtime.get("launch") is not False:
         raise ValueError("runtime recommendation has unexpected authority")
+    decision = policy.get("decision")
+    if policy.get("schema") != "m8shift.routing.v1" or not isinstance(decision, dict):
+        raise ValueError("invalid decision policy schema")
+    required_effort = decision.get("effort")
+    if required_effort not in EFFORT_ORDER:
+        raise ValueError("invalid policy effort")
     ok = runtime.get("ok") is True
     picked = runtime.get("picked") if ok else None
+    picked = picked.strip() if isinstance(picked, str) and picked.strip() else None
+    runtime_effort = runtime.get("effort") if ok else None
+    if runtime_effort in (None, ""):
+        effective_effort = required_effort
+        effort_source = "policy_only"
+    elif runtime_effort in EFFORT_ORDER:
+        effective_effort = max((runtime_effort, required_effort), key=EFFORT_ORDER.index)
+        effort_source = "maximum_of_policies"
+    else:
+        effective_effort = None
+        effort_source = "invalid_runtime_effort"
+    # The existing router has not proved that picked satisfies the policy's
+    # generic model tier. Never mark a selection as ready for execution.
+    reasons = []
+    if not ok: reasons.append("runtime_manifest_or_routing_error")
+    if not picked: reasons.append("no_runtime_model")
+    if effective_effort is None: reasons.append("invalid_runtime_effort")
+    if decision.get("human_approval_required"): reasons.append("human_approval_required")
+    if decision.get("advisor_required"): reasons.append("advisor_required")
+    reasons.append("model_tier_capability_mapping_not_verified")
     return {
         "schema": "m8shift.routing.bridge.v1",
-        "status": "proposed",
-        "authority": "advisory",
-        "launch": False,
-        "runtime_ok": ok,
-        "runtime_model": picked if isinstance(picked, str) and picked.strip() else None,
+        "status": "proposed", "authority": "advisory", "launch": False,
+        "runtime_ok": ok, "runtime_model": picked,
         "runtime_reason": runtime.get("reason", ""),
-        "runtime_effort": runtime.get("effort", "") if ok else "",
+        "runtime_effort": runtime_effort or "",
+        "effective_effort": effective_effort,
+        "effort_source": effort_source,
         "policy": policy,
-        "requires_manual_resolution": not ok or not picked,
+        "requires_manual_resolution": True,
+        "resolution_reasons": reasons,
         "note": "No model launch or approval is authorized by this result"
     }
 
