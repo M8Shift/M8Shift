@@ -27155,16 +27155,35 @@ class TestRFC081FleetUpgrade(ListenerCLIBase):
         self.releases = []
         self.targets = []
         self.live_listeners = []
+        # Registered before any target can start, including failed setup paths.
+        self.addCleanup(self.cleanup_fleet_resources)
 
-    def tearDown(self):
+    def cleanup_fleet_resources(self):
+        from _fleet_fixture_cleanup import owned_listener_processes
+        errors = []
         for root, agent in self.live_listeners:
-            subprocess.run([
-                sys.executable, os.path.join(root, "m8shift-runtime.py"),
-                "listener", "stop", "--agent", agent, "--grace", "0.1",
-            ], cwd=root, capture_output=True, text=True, timeout=15)
-        for path in self.targets + self.releases:
-            shutil.rmtree(path, ignore_errors=True)
-        super().tearDown()
+            try:
+                stopped = subprocess.run([
+                    sys.executable, "-B", os.path.join(root, "m8shift-runtime.py"),
+                    "--project-root", root, "listener", "stop", "--agent", agent,
+                    "--grace", "0.1",
+                ], cwd=root, capture_output=True, text=True, timeout=15)
+                if stopped.returncode != 0:
+                    errors.append("listener stop failed: root=%s agent=%s rc=%s" %
+                                  (root, agent, stopped.returncode))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                errors.append("listener stop failed: root=%s agent=%s error=%s" %
+                              (root, agent, type(exc).__name__))
+        # Do not erase the fixture before proving its resident process is gone.
+        # Scope the census to this test's roots; another parallel test is not ours.
+        leaked = owned_listener_processes(self.targets)
+        if leaked:
+            errors.append("fleet fixture process leak: pids=%s roots=%s" %
+                          (leaked, self.targets))
+        else:
+            for path in self.targets + self.releases:
+                shutil.rmtree(path, ignore_errors=True)
+        self.assertFalse(errors, "\n".join(errors))
 
     def make_release(self, version="4.1.0"):
         root = tempfile.mkdtemp(prefix="m8shift-fleet-upgrade-source-")
@@ -27203,13 +27222,15 @@ class TestRFC081FleetUpgrade(ListenerCLIBase):
         ], cwd=root, capture_output=True, text=True)
         self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
         if notify_agent:
+            # Starting may daemonize before failing or timing out. Own cleanup
+            # before invocation, not after its return-code assertion.
+            self.live_listeners.append((os.path.realpath(root), notify_agent))
             started = subprocess.run([
                 sys.executable, "m8shift-runtime.py", "listener", "start",
                 "--agent", notify_agent, "--notify-only", "--backend", "local",
                 "--poll-interval", "0.1",
             ], cwd=root, capture_output=True, text=True, timeout=15)
             self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            self.live_listeners.append((os.path.realpath(root), notify_agent))
         if paused:
             claim = subprocess.run([
                 sys.executable, "m8shift.py", "claim", "codex",

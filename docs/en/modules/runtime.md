@@ -411,3 +411,17 @@ from empty output.
 - Module reference: [RFC 045 — Module reference and executable examples](../rfc/045-rfc-module-reference-examples.md).
 - Related: [RFC 034 — Companion adapter interface](../rfc/034-rfc-companion-adapter-interface.md), [RFC 037 — Agent context compression backends](../rfc/037-rfc-agent-context-compression-backends.md), [RFC 042 — Compression backend routing](../rfc/042-rfc-compression-backend-routing.md), [RFC 044 — Complete initialization and companion install](../rfc/044-rfc-complete-init-companion-install.md), [RFC 023 — Agent token footprint](../rfc/023-rfc-agent-token-footprint.md).
 - Tests: [`tests/test_m8shift_headroom.py`](../../../tests/test_m8shift_headroom.py) (headroom estimation and checkpoint records); [`tests/test_m8shift.py`](../../../tests/test_m8shift.py) `TestRFC047ListenerPR1` / `TestRFC047ListenerPR2` (listener lifecycle, backoff, halted persistence, backend selection/fallback, rotation, doctor findings), `TestRFC047PhaseA` (runner classification and `claim --refresh`), `TestRFC072FleetPlan` (fleet plan/apply/lifecycle, durable survivor adoption, restart-once, defer-unverified, fail-closed empty-ref lanes, stale-control takeover, immutable jobs and integrator gates), and the `TestRuntimeCompanion` adapter-registry conformance tests (`test_agent_cli_adapter_registry_dispatch_and_live_gemini`, `test_gemini_adapter_launch_bytes_and_fail_closed_key_requirement`, `test_managed_adapter_launch_is_byte_identical_to_pre_registry_compiler`).
+
+
+### Fleet-upgrade test cleanup
+
+The fleet harness registers cleanup before starting a listener, including the
+case where startup daemonizes and then reports failure or times out. Cleanup
+attempts every registered stop, records nonzero stops, and checks the process
+list for scripts under the exact fixture roots before deleting them. A surviving
+process or unavailable census fails the test rather than silently removing the
+evidence. The witness is scoped to owned roots, not every similarly named
+process on a shared host; it never kills another test's or an operator's listener.
+The regression includes a genuine listener launched before an injected startup
+timeout, and a positive/negative process-census control. POSIX `ps` is required
+for this harness witness; absence is an explicit test skip, not measured coverage.
