@@ -16,7 +16,7 @@ PLAN_SHA256 = "1a2b81c740215f38760de82053b1e6f069be716ca3ccaa23c883d836ed66da04"
 WORK = Path("product").resolve()
 EVIDENCE = Path("evidence").resolve()
 HEX = re.compile(r"[0-9a-f]{40}\Z")
-ALLOWED = re.compile(r"(?:m8shift(?:-[a-z-]+)?\.py|examples/headless_runner\.py|tests/_[a-z_]+\.py|tests/test_[a-z_]+\.py|docs/en/[A-Za-z0-9_./-]+\.md|checksums\.sha256)\Z")
+ALLOWED = re.compile(r"(?:m8shift(?:-[a-z-]+)?\.py|examples/headless_runner\.py|tests/_[a-z_]+\.py|tests/test_[a-z0-9_]+\.py|docs/en/[A-Za-z0-9_./-]+\.md|checksums\.sha256)\Z")
 
 
 def git(*args, data=None):
