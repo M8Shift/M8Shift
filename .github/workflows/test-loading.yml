@@ -1,0 +1,26 @@
+name: Exact-tip test discovery
+on:
+  pull_request:
+    branches: [main, release/4.5.0-integration]
+    paths:
+      - scripts/check-test-loading.py
+      - tests/test_test_loading.py
+      - .github/workflows/test-loading.yml
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version-file: .python-version
+      - name: Regression tests
+        run: python -m unittest discover -s tests -p 'test_test_loading.py' -v
+      - name: Verify exact-tip discovery
+        run: python scripts/check-test-loading.py --commit HEAD
