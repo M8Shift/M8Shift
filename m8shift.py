@@ -10213,14 +10213,33 @@ def cmd_turn(args):
     if args.number < 0:
         print("turn number must be non-negative.", file=sys.stderr)
         return 2
-    _text, turns = all_turns(include_archive=True)
-    turn = next((item for item in turns if item["n"] == args.number), None)
-    if turn is None:
+    text = load_or_die()
+    matches = [item for item in parse_turns(text) if item["n"] == args.number]
+    source = "live"
+    session = get_lock(text).get("session") or None
+    if not matches and os.path.exists(ARCHIVE):
+        # Turn numbers restart with each session. Never let a prefixed archive
+        # shadow the live handoff, and never guess between archived homonyms.
+        source, session = "archive", None
+        try:
+            matches = [item for item in parse_turns(read(ARCHIVE))
+                       if item["n"] == args.number]
+        except (OSError, UnicodeError):
+            print("turn archive could not be read.", file=sys.stderr)
+            return 1
+    if not matches:
         print("turn #%d not found." % args.number, file=sys.stderr)
         return 3
+    if len(matches) != 1:
+        print("turn #%d is ambiguous: %d matches in %s; no turn selected." %
+              (args.number, len(matches), source), file=sys.stderr)
+        return 4
+    turn = matches[0]
     fields = turn["fields"]
     payload = {
         "schema": "m8shift.turn/1",
+        "source": source,
+        "session": session,
         "turn": turn["n"],
         "agent": fields.get("from", turn["agent"]),
         "to": fields.get("to", "none"),
@@ -10230,6 +10249,8 @@ def cmd_turn(args):
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
+        if source == "archive":
+            print("archived turn; session identity is not recorded", file=sys.stderr)
         print("#%d %s -> %s" % (payload["turn"], payload["agent"], payload["to"]))
         print(payload["done"])
     return 0

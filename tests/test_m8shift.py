@@ -3273,6 +3273,7 @@ class TestReadCommands(CLIBase):
         payload = json.loads(fetched.stdout)
         self.assertEqual(payload, {
             "schema": "m8shift.turn/1", "turn": 1,
+            "source": "live", "session": self.lock()["session"],
             "agent": "claude", "to": "codex", "at": mock.ANY,
             "done": complete,
         })
