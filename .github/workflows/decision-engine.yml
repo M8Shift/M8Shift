@@ -8,19 +8,41 @@ on:
       - 'tests/test_routing_bridge.py'
       - '.github/workflows/decision-engine.yml'
   workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: decision-engine-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   decision-unit:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
+      - name: Record exact source under test
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source-commit.txt
+          git archive --format=tar.gz --output=evidence/public-source.tar.gz HEAD
+          sha256sum evidence/public-source.tar.gz > evidence/source-archive.sha256
       - name: Compile decision modules
         run: python -m py_compile m8shift-decision.py m8shift-routing-bridge.py
       - name: Unit tests
+        shell: bash
         run: |
-          python -m unittest discover -s tests -p 'test_decision_engine.py' -v
-          python -m unittest discover -s tests -p 'test_routing_bridge.py' -v
+          set -o pipefail
+          python -m unittest discover -s tests -p 'test_decision_engine.py' -v 2>&1 | tee evidence/decision-tests.txt
+          python -m unittest discover -s tests -p 'test_routing_bridge.py' -v 2>&1 | tee evidence/bridge-tests.txt
+      - name: Preserve source and validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decision-engine-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
