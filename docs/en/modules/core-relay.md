@@ -203,3 +203,15 @@ Tests (`tests/`): [`tests/test_m8shift.py`](../../../tests/test_m8shift.py) — 
 core relay suite covering init, claim/append mutex, turns/archive, ledgers, memory,
 tasks, cooperative turn requests, pause/resume/cooldown, session reports, and the
 read-only `doctor`/`contract` checks.
+
+## Lease-keeper test evidence (#540)
+
+The integration fixtures keep their child alive until the test has observed a
+protective wrapper heartbeat and refreshed lease. A fixed child sleep is not a
+synchronization mechanism. After exit, the last heartbeat file may legitimately
+contain an audit-only claim refresh; its final source is not the live invariant.
+Deterministic witnesses separately force an exit during refresh, an exit before
+the first beat, and authority loss. A protective beat after an observed exit
+makes those witnesses fail. Every fixture has bounded waits and explicit child
+cleanup. Protocol impact: no; these changes strengthen test synchronization
+without changing lease or heartbeat semantics.

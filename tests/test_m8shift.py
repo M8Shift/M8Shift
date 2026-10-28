@@ -1900,45 +1900,112 @@ class TestMutexGuards(CLIBase):
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
         before = self.lock()["expires"]
         evidence = os.path.join(self.d, "keeper-env.json")
+        release = os.path.join(self.d, "child-may-exit")
         child = (
-            "import json,os,sys,time; "
+            "import json,os,sys,time\n"
             "json.dump({k: os.environ.get(k) for k in "
-            "('M8SHIFT_AGENT','M8SHIFT_ROOT','M8SHIFT_BIN')}, "
-            "open(sys.argv[1], 'w')); time.sleep(1.8)"
+            "('M8SHIFT_AGENT','M8SHIFT_ROOT','M8SHIFT_BIN')}, open(sys.argv[1], 'w'))\n"
+            "deadline=time.monotonic()+45\n"
+            "while not os.path.exists(sys.argv[2]):\n"
+            "    if time.monotonic()>deadline: raise SystemExit(9)\n"
+            "    time.sleep(.02)\n"
         )
-        kept = self.cw("lease-keeper", "claude", "--cadence-seconds", "1", "--",
-                       sys.executable, "-c", child, evidence)
-        self.assertEqual(kept.returncode, 0, kept.stdout + kept.stderr)
-        self.assertGreater(self.lock()["expires"], before)
-        with open(evidence, encoding="utf-8") as fh:
-            env = json.load(fh)
-        self.assertEqual(env["M8SHIFT_AGENT"], "claude")
-        self.assertEqual(os.path.realpath(env["M8SHIFT_ROOT"]), os.path.realpath(self.d))
-        heartbeat = os.path.join(
-            self.d, ".m8shift", "holder-heartbeats", "claude.json")
-        with open(heartbeat, encoding="utf-8") as fh:
-            beat = json.load(fh)
-        self.assertEqual((beat["source"], beat["cadence_seconds"], beat["protective"]),
-                         ("wrapper", 1, True))
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift.py", "lease-keeper", "claude",
+             "--cadence-seconds", "1", "--", sys.executable, "-c", child,
+             evidence, release], cwd=self.d, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        try:
+            heartbeat = os.path.join(self.d, ".m8shift", "holder-heartbeats", "claude.json")
+            deadline = time.monotonic() + 20
+            observed = None
+            while time.monotonic() < deadline:
+                self.assertIsNone(proc.poll(), "keeper exited before a live protective beat")
+                try:
+                    with open(heartbeat, encoding="utf-8") as fh:
+                        beat = json.load(fh)
+                    with open(evidence, encoding="utf-8") as fh:
+                        env = json.load(fh)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    beat = {}
+                if ((beat.get("source"), beat.get("cadence_seconds"), beat.get("protective"))
+                        == ("wrapper", 1, True) and self.lock()["expires"] > before):
+                    observed = beat
+                    break
+                time.sleep(.02)
+            self.assertIsNotNone(observed, "no live protective beat and refreshed lease within 20s")
+            self.assertEqual(env["M8SHIFT_AGENT"], "claude")
+            self.assertEqual(os.path.realpath(env["M8SHIFT_ROOT"]), os.path.realpath(self.d))
+            # Release the child only AFTER observing the promised live invariant.
+            # The final on-disk beat may legitimately be audit-only claim-refresh.
+            with open(release, "w", encoding="ascii") as fh:
+                fh.write("exit\n")
+            stdout, stderr = proc.communicate(timeout=15)
+            self.assertEqual(proc.returncode, 0, stdout + stderr)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate(timeout=5)
 
     def test_lease_keeper_stops_child_when_refresh_loses_authority(self):
         self.init()
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        release = os.path.join(self.d, "child-may-handoff")
+        handoff = os.path.join(self.d, "child-handed-off")
+        escaped = os.path.join(self.d, "child-survived-authority-loss")
         child = (
-            "import os,subprocess,sys,time; "
-            "subprocess.run([sys.executable, os.environ['M8SHIFT_BIN'], "
-            "'append', 'claude', '--to', 'codex', '--done', 'child handed off'], "
-            "env=os.environ, check=True, stdout=subprocess.DEVNULL); time.sleep(5)"
+            "import os,subprocess,sys,time\n"
+            "deadline=time.monotonic()+45\n"
+            "while not os.path.exists(sys.argv[1]):\n"
+            "    if time.monotonic()>deadline: raise SystemExit(9)\n"
+            "    time.sleep(.02)\n"
+            "subprocess.run([sys.executable,os.environ['M8SHIFT_BIN'],'append','claude',"
+            "'--to','codex','--done','child handed off'],env=os.environ,check=True,"
+            "stdout=subprocess.DEVNULL)\n"
+            "open(sys.argv[2],'w').write('handed off')\n"
+            "time.sleep(30)\n"
+            "open(sys.argv[3],'w').write('unmanaged child survived')\n"
         )
-        started = time.monotonic()
-        stopped = self.cw("lease-keeper", "claude", "--cadence-seconds", "1", "--",
-                          sys.executable, "-c", child)
-        elapsed = time.monotonic() - started
-        self.assertEqual(stopped.returncode, 4, stopped.stdout + stopped.stderr)
-        self.assertLess(elapsed, 4.0, "authority loss did not stop the child promptly")
-        self.assertIn("claim --refresh failed", stopped.stderr)
-        self.assertIn("child stopped", stopped.stderr)
-        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift.py", "lease-keeper", "claude",
+             "--cadence-seconds", "1", "--", sys.executable, "-c", child,
+             release, handoff, escaped], cwd=self.d, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        try:
+            heartbeat = os.path.join(self.d, ".m8shift", "holder-heartbeats", "claude.json")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                self.assertIsNone(proc.poll(), "keeper exited before handoff was enabled")
+                try:
+                    with open(heartbeat, encoding="utf-8") as fh:
+                        beat = json.load(fh)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    beat = {}
+                if beat.get("source") == "wrapper" and beat.get("protective") is True:
+                    break
+                time.sleep(.02)
+            else:
+                self.fail("no protective beat before enabling handoff within 20s")
+            with open(release, "w", encoding="ascii") as fh:
+                fh.write("handoff\n")
+            stdout, stderr = proc.communicate(timeout=20)
+            self.assertEqual(proc.returncode, 4, stdout + stderr)
+            self.assertFalse(os.path.exists(escaped), "unmanaged child was allowed to continue")
+            self.assertIn("failed", stderr)
+            self.assertIn("child stopped", stderr)
+            self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate(timeout=5)
 
     def test_force_refused_on_fresh_lock(self):
         """NR-1: claim --force does not steal a non-stale lock."""
