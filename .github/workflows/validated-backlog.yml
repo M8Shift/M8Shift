@@ -1,4 +1,4 @@
-name: Validate backlog patches without updating refs
+name: Validate backlog integration without updating refs
 on:
   push:
     branches: [maintenance/validated-backlog-20261028]
@@ -29,19 +29,17 @@ jobs:
           python-version: '3.12'
       - name: Install pinned test runner
         run: python -m pip install --disable-pip-version-check --require-hashes -r product/.github/requirements-ci-test.txt
-      - name: Apply checked patches and validate exact trees
-        run: |
-          cat .maintenance/part0 .maintenance/part1 .maintenance/part2 .maintenance/part3 > .maintenance/changes.json.gz.b64
-          python .maintenance/prepare_objects.py prepare
-      - name: Create immutable Git objects only
-        run: python .maintenance/prepare_objects.py publish-objects
+      - name: Compose exact candidate and run integration checks
+        run: python .maintenance/integrate.py prepare
+      - name: Create immutable integration objects only
+        run: python .maintenance/integrate.py publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Retain validation evidence
+      - name: Retain integration evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: validated-backlog-evidence
+          name: integration-evidence
           path: evidence/
           if-no-files-found: error
           retention-days: 7
