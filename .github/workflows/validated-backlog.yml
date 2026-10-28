@@ -1,0 +1,45 @@
+name: Validate backlog patches without updating refs
+on:
+  push:
+    branches: [maintenance/validated-backlog-20261028]
+    paths:
+      - '.maintenance/**'
+      - '.github/workflows/validated-backlog.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.repository == 'M8Shift/M8Shift' && github.ref == 'refs/heads/maintenance/validated-backlog-20261028'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 390b5d20bb8ce6086b66b3b30892196d594546d1
+          path: product
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install pinned test runner
+        run: python -m pip install --disable-pip-version-check --require-hashes -r product/.github/requirements-ci-test.txt
+      - name: Apply checked patches and validate exact trees
+        run: python .maintenance/prepare_objects.py prepare
+      - name: Create immutable Git objects only
+        run: python .maintenance/prepare_objects.py publish-objects
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Retain validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: validated-backlog-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
