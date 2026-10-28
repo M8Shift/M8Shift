@@ -8,6 +8,7 @@ import argparse
 import json
 import sys
 
+VERSION = "4.2.0"
 SCHEMA = "m8shift.routing.v1"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 RISK_LEVELS = ("low", "moderate", "high", "critical")
@@ -41,7 +42,7 @@ def decide(task, *, risk="low", complexity="low", failures=0,
     if failures >= 4 or risk == "critical":
         effort = "max"
     tier = "advanced" if score >= 2 else ("balanced" if score == 1 else "economy")
-    strategy = ("parallel" if independent_parts and risk not in ("high", "critical")
+    strategy = ("parallel" if independent_parts and score <= 1
                 else "delegate" if score <= 1 and has_tests else "direct")
     advisor = risk in ("high", "critical") or complexity in ("high", "critical") or failures >= 2
     approval = risk == "critical"
@@ -62,6 +63,7 @@ def decide(task, *, risk="low", complexity="low", failures=0,
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     p.add_argument("task")
     p.add_argument("--risk", choices=RISK_LEVELS, default="low")
     p.add_argument("--complexity", choices=RISK_LEVELS, default="low")

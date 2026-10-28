@@ -2,6 +2,10 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _ambient_env  # noqa: E402,F401 - purge before importing the product
 
 MODULE = Path(__file__).resolve().parents[1] / "m8shift-decision.py"
 spec = importlib.util.spec_from_file_location("m8shift_decision", MODULE)
@@ -38,6 +42,15 @@ class DecisionTests(unittest.TestCase):
                 engine.decide("Task", **kwargs)
         with self.assertRaises(ValueError):
             engine.decide("  ")
+
+    def test_escalated_task_never_parallelizes(self):
+        for kwargs in ({"failures": 2}, {"complexity": "high"}, {"risk": "high"}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(engine.decide("Task", independent_parts=True, **kwargs)["decision"]["strategy"], "direct")
+
+    def test_task_text_is_not_returned(self):
+        import json
+        self.assertNotIn("PRIVATE_TASK_SENTINEL", json.dumps(engine.decide("PRIVATE_TASK_SENTINEL")))
 
     def test_repeatable(self):
         self.assertEqual(engine.decide("Same task", has_tests=True), engine.decide("Same task", has_tests=True))
