@@ -264,6 +264,8 @@ function Test-DownloadedFile([string]$Name, [string]$Path, [bool]$VerifyDownload
 }
 
 function Resolve-Python {
+    # Candidate probes use nonzero exits as data; keep this override local.
+    $PSNativeCommandUseErrorActionPreference = $false
     $candidates = @(
         @{ Exe = "py"; Prefix = @("-3.15") },
         @{ Exe = "python3.15"; Prefix = @() },
