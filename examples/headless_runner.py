@@ -913,11 +913,12 @@ def normalize_env_allowlist(raw):
 def resolve_argv(argv):
     if isinstance(argv, str):
         raise SystemExit("command argv must be an array, not a shell string")
-    if not isinstance(argv, list) or not all(isinstance(arg, str) and arg for arg in argv):
+    if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) and arg for arg in argv):
         raise SystemExit("command argv must be a non-empty list of non-empty strings")
     exe = argv[0]
     if any(ch.isspace() for ch in exe):
-        raise SystemExit("argv[0] must be one executable token, not a shell command")
+        raise SystemExit("--cmd expects an executable followed by separate arguments, not a quoted "
+                         "shell command; pass sh -c explicitly or use a script for pipes/redirection")
     if os.path.isabs(exe):
         if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
             raise RunnerInfrastructureError("provider_executable_unavailable")
@@ -1511,9 +1512,14 @@ def main():
             "  the normal table (authored newer turn => advanced; still WORKING same turn =>\n"
             "  stuck_working). The marker is never exported for AWAITING/IDLE launches.\n"
             "\n"
+            "--cmd consumes separate argv tokens; it never evaluates a shell string.\n"
+            "Keep runner options before --cmd. Quote individual arguments, not the whole command.\n"
+            "For pipelines/redirection, invoke an explicit shell or a script.\n"
+            "\n"
             "examples:\n"
             "  headless_runner.py agent-a --once --cmd codex exec --full-auto\n"
             "  headless_runner.py agent-b --start-on-idle --cmd claude -p\n"
+            "  headless_runner.py agent-a --once --cmd sh -c \"command-one | command-two\"\n"
         ),
     )
     p.add_argument("--version", action="version", version=f"headless_runner.py {VERSION}")
@@ -1559,7 +1565,8 @@ def main():
     p.add_argument("--dry-run", action="store_true",
                    help="validate configuration, print the command argv as JSON, then exit")
     p.add_argument("--cmd", metavar="COMMAND", nargs=argparse.REMAINDER, required=True,
-                   help="the headless agent command (static argv; runs ONE turn)")
+                   help="executable followed by separate argument tokens, not one quoted shell string; "
+                        "for pipes/redirection use explicit sh -c or a script (runs ONE turn)")
     if len(sys.argv) == 1:
         p.print_help()
         return 0
