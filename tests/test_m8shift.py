@@ -262,7 +262,8 @@ class TestPureFunctions(unittest.TestCase):
         send.assert_not_called()
 
     def test_usage_watch_stale_lock_race_has_one_winner(self):
-        """Two stale breakers cannot both return ownership of different inodes."""
+        """Synchronize stale observations, not merely failed exclusive opens."""
+        import queue
         path = os.path.join(REPO, "m8shift-runtime.py")
         spec = importlib.util.spec_from_file_location("m8shift_runtime_lock_test", path)
         runtime = importlib.util.module_from_spec(spec)
@@ -274,28 +275,33 @@ class TestPureFunctions(unittest.TestCase):
                 json.dump({"pid": 999999, "token": "stale"}, fh)
 
             real_open, real_unlink = os.open, os.unlink
-            observed = 0
-            unlinks = 0
-            guard = threading.Lock()
-            both_observed = threading.Event()
+            real_read = runtime.read_json_diagnostic
+            both_read_stale = threading.Barrier(2, timeout=10)
             fresh_created = threading.Event()
             second_unlinked = threading.Event()
+            release = threading.Event()
+            guard = threading.Lock()
+            outcomes = queue.Queue()
+            errors = queue.Queue()
+            unlinks = 0
+
+            def racing_read(target, default):
+                doc, error = real_read(target, default)
+                if target == lock_path and not error and doc.get("token") == "stale":
+                    # Both stale decisions must be fixed before either unlinks.
+                    # An O_EXCL failure alone does not establish that fact.
+                    both_read_stale.wait()
+                return doc, error
 
             def racing_open(target, flags, *args, **kwargs):
-                nonlocal observed
-                try:
-                    fd = real_open(target, flags, *args, **kwargs)
-                except FileExistsError:
-                    if target == lock_path:
-                        with guard:
-                            observed += 1
-                            if observed == 2:
-                                both_observed.set()
-                        self.assertTrue(both_observed.wait(2))
-                    raise
-                if target == lock_path and observed >= 2 and not fresh_created.is_set():
-                    fresh_created.set()
-                    self.assertTrue(second_unlinked.wait(2))
+                fd = real_open(target, flags, *args, **kwargs)
+                with guard:
+                    first_replacement = target == lock_path and not fresh_created.is_set()
+                    if first_replacement:
+                        fresh_created.set()
+                if first_replacement and not second_unlinked.wait(10):
+                    os.close(fd)
+                    raise AssertionError("second stale breaker did not unlink the replacement")
                 return fd
 
             def racing_unlink(target, *args, **kwargs):
@@ -305,44 +311,60 @@ class TestPureFunctions(unittest.TestCase):
                 with guard:
                     unlinks += 1
                     ordinal = unlinks
-                if ordinal == 1:
-                    return real_unlink(target, *args, **kwargs)
                 if ordinal == 2:
-                    self.assertTrue(fresh_created.wait(2))
+                    if not fresh_created.wait(10):
+                        raise AssertionError("replacement inode was not created")
                     try:
                         return real_unlink(target, *args, **kwargs)
                     finally:
                         second_unlinked.set()
                 return real_unlink(target, *args, **kwargs)
 
-            successes, failures = [], []
-            release = threading.Event()
-
             def contender():
+                token = None
                 try:
-                    token = runtime.acquire_usage_watch_lock("claude")
-                    successes.append(token)
-                    release.wait(3)
-                    runtime.release_usage_watch_lock("claude", token)
-                except ValueError as exc:
-                    failures.append(str(exc))
+                    try:
+                        token = runtime.acquire_usage_watch_lock("claude")
+                    except ValueError as exc:
+                        outcomes.put(("busy", str(exc)))
+                        return
+                    outcomes.put(("acquired", token))
+                    if not release.wait(15):
+                        raise AssertionError("test did not release the winning lease")
+                except BaseException as exc:
+                    errors.put(exc)
+                    outcomes.put(("error", type(exc).__name__))
+                finally:
+                    if token is not None:
+                        try:
+                            runtime.release_usage_watch_lock("claude", token)
+                        except BaseException as exc:
+                            errors.put(exc)
 
             with mock.patch.object(runtime.os, "open", side_effect=racing_open), \
                     mock.patch.object(runtime.os, "unlink", side_effect=racing_unlink), \
-                    mock.patch.object(runtime, "fleet_process_start_ref",
-                                      side_effect=lambda pid: "ref-%s" % pid):
+                    mock.patch.object(runtime, "read_json_diagnostic", side_effect=racing_read), \
+                    mock.patch.object(runtime, "fleet_process_start_ref", side_effect=lambda pid: "ref-%s" % pid):
                 threads = [threading.Thread(target=contender) for _ in range(2)]
                 for thread in threads:
                     thread.start()
-                deadline = time.monotonic() + 3
-                while not successes and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                for thread in threads:
-                    thread.join(timeout=2.5)
-                release.set()
-                for thread in threads:
-                    thread.join(timeout=1)
-            self.assertEqual((len(successes), len(failures)), (1, 1))
+                observed = []
+                collision_observed = False
+                try:
+                    for _ in threads:
+                        observed.append(outcomes.get(timeout=15))
+                    collision_observed = fresh_created.is_set() and second_unlinked.is_set()
+                finally:
+                    release.set()
+                    both_read_stale.abort()
+                    fresh_created.set()
+                    second_unlinked.set()
+                    for thread in threads:
+                        thread.join(timeout=15)
+                self.assertFalse(any(thread.is_alive() for thread in threads), "test leaked a contender")
+            self.assertTrue(errors.empty(), list(errors.queue))
+            self.assertEqual(sorted(kind for kind, _value in observed), ["acquired", "busy"])
+            self.assertTrue(collision_observed, "the intended inode collision was not exercised")
 
     def test_usage_watch_lock_busy_is_reported_without_traceback(self):
         path = os.path.join(REPO, "m8shift-runtime.py")
