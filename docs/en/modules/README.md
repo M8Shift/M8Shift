@@ -1,5 +1,8 @@
 # Module reference
 
+Source version: **4.5.0**. Integration-candidate status and validation gates are
+recorded in the [release notes](../release-v4.5.0.md).
+
 M8Shift ships a small toolkit, not only `m8shift.py`. This section gives **one reference
 page per shipped script**: what it owns, its command surface, the files it reads and
 writes, safe examples, and failure modes. Load the single page for the module you need
@@ -15,6 +18,7 @@ reads state M8Shift already stores, never writes the `LOCK`, and never routes wo
 |------|--------|-------------------|
 | [Core relay](./core-relay.md) | `m8shift.py` | one-pen relay, `LOCK`, turn ledger, session reports, task board, shared memory, core `doctor`, companion install (RFC 044) |
 | [Runtime companion](./runtime.md) | `m8shift-runtime.py` | runtime presence, operator inbox, progress, notifications, provider registry, model/task routing, retention, local reports, headless listener lifecycle (RFC 047) |
+| [Advisory decision engine](./decision-engine.md) | `m8shift-decision.py`, `m8shift-routing-bridge.py` | optional policy and capability-checked native-routing advice; no provider launch or relay write authority |
 | [Context companion](./context.md) | `m8shift-context.py` | context packs, redacted compression/retrieval records, adapter execution (builtin digest + RTK filter + optional Headroom/Kompress) |
 | [Worktree toolbox](./worktree.md) | `m8shift-worktree.py` | isolated degree-2 feature lanes and serialized integration |
 | [Headroom adapter launcher](./headroom.md) | `m8shift-headroom.py` | optional offline Headroom/Kompress launcher (`m8shift-transform`) |

@@ -7,6 +7,7 @@ on:
       - 'tests/test_decision_engine.py'
       - 'tests/test_routing_bridge.py'
       - '.github/workflows/decision-engine.yml'
+      - '.python-version'
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,10 +24,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: '3.12'
+          python-version-file: .python-version
+          check-latest: true
       - name: Record exact source under test
         run: |
           mkdir -p evidence
+          python --version > evidence/python-version.txt
           git rev-parse HEAD > evidence/source-commit.txt
           git archive --format=tar.gz --output=evidence/public-source.tar.gz HEAD
           sha256sum evidence/public-source.tar.gz > evidence/source-archive.sha256

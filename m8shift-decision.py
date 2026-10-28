@@ -8,7 +8,7 @@ import argparse
 import json
 import sys
 
-VERSION = "4.2.0"
+VERSION = "4.5.0"
 SCHEMA = "m8shift.routing.v1"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 RISK_LEVELS = ("low", "moderate", "high", "critical")
@@ -77,7 +77,7 @@ def main(argv=None):
                         failures=args.failures, independent_parts=args.independent_parts,
                         has_tests=args.has_tests, budget=args.budget)
     except ValueError as exc:
-        p.error(str(exc))
+        return p.error(str(exc))
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

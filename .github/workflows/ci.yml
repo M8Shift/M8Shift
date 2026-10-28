@@ -30,10 +30,11 @@ jobs:
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.x"
+          python-version-file: .python-version
+          check-latest: true
 
-      - name: Install test runner
-        run: python -m pip install --disable-pip-version-check --require-hashes -r .github/requirements-ci-test.txt
+      - name: Record the interpreter
+        run: python --version
 
       - name: Byte-compile every tracked module
         run: git ls-files -z '*.py' | xargs -0 python -m py_compile
@@ -65,19 +66,18 @@ jobs:
             --denylist "$RUNNER_TEMP/denylist.txt" --all --refs-pull
 
   test:
-    name: Test (py${{ matrix.python }})
+    name: Test (supported Python)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # The supported floor (3.12) and the current interpreter.
-        python: ["3.12", "3.14"]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: ${{ matrix.python }}
+          # One maintained minor, latest stable bugfix; never a floating 3.x.
+          python-version-file: .python-version
+          check-latest: true
+      - name: Record the interpreter
+        run: python --version
       - name: Install test runner
         run: python -m pip install --disable-pip-version-check --require-hashes -r .github/requirements-ci-test.txt
       - name: Run the full test suite

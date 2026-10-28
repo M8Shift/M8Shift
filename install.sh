@@ -11,7 +11,8 @@
 #
 # This script installs M8Shift into the current project directory by downloading the
 # standalone CLI files, then runs `m8shift.py init`. Core install requires only
-# Python 3.12+, one downloader (curl/wget/Python urllib), write permission in the
+# Python 3.15.x (sole supported series; 3.12+ compatibility fallback), one
+# downloader (curl/wget/Python urllib), write permission in the
 # target directory, and SHA-256 support. It does not use sudo, does not modify PATH,
 # does not create a daemon, and needs no package manager. Optional helpers (git for
 # worktree features, RTK, Headroom) are advisory: absent or unsupported ones degrade
@@ -47,7 +48,7 @@ VERIFY_DOWNLOADS=1   # resolved after arg parsing (verification is ON by default
 CHECKSUMS_URL="${M8SHIFT_INSTALL_CHECKSUMS_URL:-}"
 CHECKSUMS_TEXT=""
 EXPECTED_SHA256S=""
-PYTHON_BIN="${PYTHON:-python3}"
+PYTHON_BIN="${PYTHON:-}"
 HELPER_FAILURES=""   # opt-in helper failures never block the core install (#24)
 
 usage() {
@@ -296,7 +297,8 @@ rtk_host_asset() {
 print_prerequisites() {
   cat <<EOF
 Prerequisites:
-  core install: Python 3.12+ (stdlib only), write permission in the target directory,
+  core install: Python 3.15.x (sole supported series, stdlib only), write permission
+    in the target directory; Python 3.12+ remains an unsupported compatibility fallback,
     one downloader (curl, wget, or Python urllib), and SHA-256 support (sha256sum,
     shasum, or Python hashlib) for the default verification.
   shell: bash — macOS standard Terminal, Linux, WSL, or Git Bash on Windows; native
@@ -499,6 +501,18 @@ fi
 # Python status is COMPUTED here but only fatal outside --dry-run: the plan-only
 # path stays lockstep with install.ps1 -DryRun and prints an honest status line
 # instead of dying, so a python-less review/CI host can still read the plan.
+# An explicit PYTHON is authoritative. Otherwise prefer the maintained minor even
+# when an older generic python3 is earlier on PATH; do not rewrite PATH or install it.
+if [ -z "$PYTHON_BIN" ]; then
+  for python_candidate in python3.15 python3 python; do
+    if command -v "$python_candidate" >/dev/null 2>&1 &&
+       "$python_candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 15) else 1)' >/dev/null 2>&1; then
+      PYTHON_BIN="$python_candidate"
+      break
+    fi
+  done
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+fi
 PYTHON_OK=1
 PYTHON_STATUS=""
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -509,6 +523,10 @@ elif ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (
   PYTHON_STATUS="TOO OLD — 3.12+ required (reports: $("$PYTHON_BIN" --version 2>&1 || printf unknown))"
 else
   PYTHON_STATUS="ok ($("$PYTHON_BIN" --version 2>&1 || printf unknown))"
+  if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 15) else 1)' >/dev/null 2>&1; then
+    PYTHON_STATUS="UNSUPPORTED COMPATIBILITY FALLBACK ($("$PYTHON_BIN" --version 2>&1 || printf unknown)); use Python 3.15.x"
+    printf 'warning: Python 3.15.x is the sole maintained version; %s is a compatibility fallback with no CI or support guarantee.\n' "$PYTHON_BIN" >&2
+  fi
 fi
 if [ "$DRY_RUN" -ne 1 ] && [ "$PYTHON_OK" -ne 1 ]; then
   case "$PYTHON_STATUS" in

@@ -1,6 +1,6 @@
 # Advisory decision engine
 
-Version: 4.2.0 source companion. Protocol impact: **no**.
+Version: 4.5.0 source companion. Protocol impact: **no**.
 
 The engine and bridge are opt-in command-line companions. They do not acquire
 or route the pen, launch a provider, change permissions, write the relay or

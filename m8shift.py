@@ -144,7 +144,7 @@ def scaffold_write_gate(confirm_script_dir=False, script_dir=None, command="init
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "4.2.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "4.5.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -7338,7 +7338,8 @@ def _install_report():
     }
     return {
         "python": {"version": "%d.%d.%d" % sys.version_info[:3], "floor": "3.12",
-                   "ok": sys.version_info >= (3, 12)},
+                   "ok": sys.version_info >= (3, 12),
+                   "supported_minor": "3.15", "supported": sys.version_info[:2] == (3, 15)},
         "core": {"script": "m8shift.py", "present": core_present,
                  "version": (_parse_script_version(core_path) if core_present else None),
                  "engine_version": VERSION},
@@ -7361,8 +7362,14 @@ def _install_doctor_findings(report):
     if not report["python"]["ok"]:
         out.append(doctor_finding(
             "install.python_floor", "warning",
-            "Python %s is below the supported floor 3.12." % report["python"]["version"],
-            "", "install Python 3.12+ and run m8shift.py through that interpreter"))
+            "Python %s is below the technical compatibility floor 3.12." % report["python"]["version"],
+            "", "install the supported Python 3.15.x and run m8shift.py through that interpreter"))
+    elif not report["python"]["supported"]:
+        out.append(doctor_finding(
+            "install.python_support", "info",
+            "Python %s is a compatibility fallback, not a maintained interpreter; "
+            "only Python 3.15.x receives CI and support." % report["python"]["version"],
+            "", "use Python 3.15.x for a supported installation"))
     if not report["core"]["present"]:
         out.append(doctor_finding(
             "install.core_missing", "warning",
@@ -7402,8 +7409,9 @@ def _print_install_report(rep):
     """Human rendering of the `doctor --install` snapshot (report, not findings)."""
     print("── install (read-only) ────────────────")
     py = rep["python"]
-    print("  python     %s (floor %s: %s)"
-          % (py["version"], py["floor"], "ok" if py["ok"] else "BELOW FLOOR"))
+    print("  python     %s (compatibility floor %s: %s; supported %s.x: %s)"
+          % (py["version"], py["floor"], "ok" if py["ok"] else "BELOW FLOOR",
+             py["supported_minor"], "yes" if py["supported"] else "NO — unsupported fallback"))
     core = rep["core"]
     if core["present"]:
         print("  core       %s v%s (engine v%s)"

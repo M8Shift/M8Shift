@@ -13442,6 +13442,17 @@ class TestInstallerGateIntegrity(unittest.TestCase):
             with self.subTest(cls=cls.__name__):
                 self.assertNotIn(pattern, inspect.getsource(cls))
 
+    def test_testcase_classes_have_one_module_binding(self):
+        """Both pytest and unittest discover aliases of the same TestCase class."""
+        module = sys.modules[type(self).__module__]
+        bindings = {}
+        for name, obj in vars(module).items():
+            if (isinstance(obj, type) and issubclass(obj, unittest.TestCase)
+                    and obj.__module__ == module.__name__):
+                bindings.setdefault(id(obj), []).append(name)
+        duplicates = [names for names in bindings.values() if len(names) > 1]
+        self.assertEqual(duplicates, [], "duplicate TestCase bindings repeat every test")
+
 
 class TestInstallerVerifyDefault(unittest.TestCase):
     """install.sh verifies downloads by DEFAULT (mirrors install.ps1); --no-verify or a
@@ -13888,8 +13899,6 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         self.assertIn("install --git https://github.com/rtk-ai/rtk --tag v0.43.0 --locked rtk", calls)
 
 
-TestInstallerUpgradeDelegate = _InstallerUpgradeDelegateTests
-
 # ───────────────────────── multi-OS core install (#24) ──────────────────────
 
 class TestInstallerMultiOSCore(unittest.TestCase):
@@ -14268,7 +14277,7 @@ class TestDoctorInstall(CLIBase):
     OPTIONAL helper is info, so `doctor --lint` stays green on a
     healthy-but-minimal install. Never networks, never repairs, never writes."""
 
-    INSTALL_IDS = {"install.python_floor", "install.core_missing",
+    INSTALL_IDS = {"install.python_floor", "install.python_support", "install.core_missing",
                    "install.manifest_invalid", "install.manifest_drift",
                    "install.git_absent", "install.helper_absent"}
 
@@ -14304,7 +14313,26 @@ class TestDoctorInstall(CLIBase):
         for f in d["findings"]:
             if f["check"].startswith("install."):
                 self.assertEqual(f["severity"], "info", f)
-                self.assertIn(f["check"], ("install.helper_absent", "install.git_absent"))
+                self.assertIn(f["check"], ("install.helper_absent", "install.git_absent",
+                                         "install.python_support"))
+
+    def test_python_support_distinguishes_compatible_fallback_from_below_floor(self):
+        for version, compatible, supported in (
+                ((3, 11, 18), False, False), ((3, 12, 16), True, False),
+                ((3, 15, 2), True, True), ((3, 16, 0), True, False)):
+            with self.subTest(version=version):
+                with mock.patch.object(cowork.sys, "version_info", version):
+                    report = cowork._install_report()
+                self.assertEqual(report["python"]["ok"], compatible)
+                self.assertEqual(report["python"]["supported"], supported)
+                findings = {finding["check"]: finding for finding in
+                            cowork._install_doctor_findings(report)}
+                self.assertEqual("install.python_floor" in findings, not compatible)
+                self.assertEqual("install.python_support" in findings,
+                                 compatible and not supported)
+                if compatible and not supported:
+                    self.assertEqual(findings["install.python_support"]["severity"], "info")
+                    self.assertIn("3.15.x", findings["install.python_support"]["fix_hint"])
 
     def test_without_flag_no_install_key_and_no_install_findings(self):
         self.init()

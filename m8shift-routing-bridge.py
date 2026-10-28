@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "4.2.0"
+VERSION = "4.5.0"
 HERE = Path(__file__).resolve().parent
 EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 TIER_ORDER = ("economy", "balanced", "flagship")
@@ -258,6 +258,8 @@ def _run_runtime(command, root, timeout):
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
+                    # The child exited between wait and kill; the wait below
+                    # still reaps it before propagating the original failure.
                     pass
             else:
                 proc.kill()
