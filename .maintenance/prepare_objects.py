@@ -12,7 +12,7 @@ import urllib.request
 
 REPO = "M8Shift/M8Shift"
 BASE = "390b5d20bb8ce6086b66b3b30892196d594546d1"
-PLAN_SHA256 = "1a2b81c740215f38760de82053b1e6f069be716ca3ccaa23c883d836ed66da04"
+PLAN_SHA256 = "a94993319d17165b8eb1871e57a64a9192ae8636fe622c7088d32afdfeb567e5"
 WORK = Path("product").resolve()
 EVIDENCE = Path("evidence").resolve()
 HEX = re.compile(r"[0-9a-f]{40}\Z")

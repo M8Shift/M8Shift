@@ -30,7 +30,9 @@ jobs:
       - name: Install pinned test runner
         run: python -m pip install --disable-pip-version-check --require-hashes -r product/.github/requirements-ci-test.txt
       - name: Apply checked patches and validate exact trees
-        run: python .maintenance/prepare_objects.py prepare
+        run: |
+          cat .maintenance/part0 .maintenance/part1 .maintenance/part2 .maintenance/part3 > .maintenance/changes.json.gz.b64
+          python .maintenance/prepare_objects.py prepare
       - name: Create immutable Git objects only
         run: python .maintenance/prepare_objects.py publish-objects
         env:
