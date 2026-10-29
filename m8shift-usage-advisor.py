@@ -7,6 +7,7 @@ apply a hold, launch a model, or write any persistent state.
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 
@@ -22,7 +23,7 @@ def advice(report):
     if report.get("verdict") not in ("ok", "near_limit", "limit_hit", "unknown"):
         raise ValueError("invalid_verdict")
     result = []
-    if report["verdict"] == "ok" and any(isinstance(row, dict) and row.get("classification") in ("near_limit", "limit_hit") for row in report["agents"]):
+    if report["verdict"] in ("ok", "unknown") and any(isinstance(row, dict) and row.get("classification") == "near_limit" for row in report["agents"]):
         raise ValueError("inconsistent_guard_verdict")
     seen = set()
     for row in report["agents"]:
@@ -40,7 +41,8 @@ def advice(report):
         if row.get("stale") is not False:
             continue
         ratio = row.get("decision_ratio")
-        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 <= ratio <= 1:
+        if (isinstance(ratio, bool) or not isinstance(ratio, (int, float))
+                or not math.isfinite(ratio) or not 0 <= ratio <= 1):
             continue
         window = row.get("decision_window")
         if window is not None and not isinstance(window, dict):
