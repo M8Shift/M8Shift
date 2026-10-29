@@ -60,6 +60,17 @@ class CheckpointAdviceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inconsistent_guard_verdict"):
             advisor.advice(report)
 
+    def test_nonfinite_ratio_never_advises(self):
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(value=value):
+                self.assertEqual(advisor.advice(self.report(ratio=value))["advisories"], [])
+
+    def test_unknown_verdict_with_near_limit_row_refused(self):
+        report = self.report()
+        report["verdict"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "inconsistent_guard_verdict"):
+            advisor.advice(report)
+
     def test_stable_recommendation_key(self):
         a = advisor.advice(self.report())["advisories"][0]
         b = advisor.advice(self.report(ratio=0.9))["advisories"][0]
