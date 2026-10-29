@@ -22,6 +22,8 @@ def advice(report):
     if report.get("verdict") not in ("ok", "near_limit", "limit_hit", "unknown"):
         raise ValueError("invalid_verdict")
     result = []
+    if report["verdict"] == "ok" and any(isinstance(row, dict) and row.get("classification") in ("near_limit", "limit_hit") for row in report["agents"]):
+        raise ValueError("inconsistent_guard_verdict")
     seen = set()
     for row in report["agents"]:
         if not isinstance(row, dict):
@@ -40,7 +42,18 @@ def advice(report):
         ratio = row.get("decision_ratio")
         if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 <= ratio <= 1:
             continue
-        key = hashlib.sha256(f"{agent}:near_limit".encode("ascii")).hexdigest()
+        window = row.get("decision_window")
+        if window is not None and not isinstance(window, dict):
+            raise ValueError("invalid_decision_window")
+        window = window or {}
+        kind = window.get("kind", "unknown")
+        resets_at = window.get("resets_at")
+        if not isinstance(kind, str) or len(kind) > 64 or not re.fullmatch(r"[A-Za-z0-9_.-]+", kind):
+            raise ValueError("invalid_window_kind")
+        if resets_at is not None and (not isinstance(resets_at, str) or len(resets_at) > 64):
+            raise ValueError("invalid_window_reset")
+        binding = json.dumps([agent, kind, resets_at], separators=(",", ":"), ensure_ascii=True)
+        key = hashlib.sha256(binding.encode("ascii")).hexdigest()
         result.append({
             "schema": "m8shift.usage.checkpoint-advice.v1",
             "authority": "advisory",
@@ -50,6 +63,8 @@ def advice(report):
             "task_type": None,
             "decision_ratio": ratio,
             "recommendation_key": key,
+            "window_kind": kind,
+            "resets_at": resets_at,
             "message": "Usage near limit: checkpoint the current work unit or plan a cooldown. No alternate agent was selected."
         })
     return {"schema": "m8shift.usage.checkpoint-report.v1",
