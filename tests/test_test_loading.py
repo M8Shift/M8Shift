@@ -6,6 +6,9 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _ambient_env  # noqa: E402,F401 - purge before product imports
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check-test-loading.py"
 
 
