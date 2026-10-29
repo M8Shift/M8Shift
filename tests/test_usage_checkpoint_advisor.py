@@ -45,6 +45,21 @@ class CheckpointAdviceTests(unittest.TestCase):
             with self.subTest(report=report), self.assertRaises(ValueError):
                 advisor.advice(report)
 
+    def test_different_windows_produce_different_keys(self):
+        first = self.report()
+        second = self.report()
+        first["agents"][0]["decision_window"] = {"kind": "weekly", "resets_at": "2026-11-01T00:00:00Z"}
+        second["agents"][0]["decision_window"] = {"kind": "weekly", "resets_at": "2026-11-08T00:00:00Z"}
+        a = advisor.advice(first)["advisories"][0]["recommendation_key"]
+        b = advisor.advice(second)["advisories"][0]["recommendation_key"]
+        self.assertNotEqual(a, b)
+
+    def test_inconsistent_ok_verdict_is_rejected(self):
+        report = self.report()
+        report["verdict"] = "ok"
+        with self.assertRaisesRegex(ValueError, "inconsistent_guard_verdict"):
+            advisor.advice(report)
+
     def test_stable_recommendation_key(self):
         a = advisor.advice(self.report())["advisories"][0]
         b = advisor.advice(self.report(ratio=0.9))["advisories"][0]
