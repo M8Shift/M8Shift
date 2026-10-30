@@ -9,7 +9,7 @@ name: Lint
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/4.5.0-integration]
     paths:
       - '**/*.py'
       - '**/*.sh'
@@ -17,7 +17,7 @@ on:
       - '.github/workflows/**'
       - '.python-version'
   pull_request:
-    branches: [main]
+    branches: [main, release/4.5.0-integration]
     paths:
       - '**/*.py'
       - '**/*.sh'
