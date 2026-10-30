@@ -9,14 +9,14 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/4.5.0-integration]
     # Skip runs that only touch non-code assets.
     paths:
       - '**/*.py'
       - '.github/workflows/codeql.yml'
       - '.github/codeql/**'
   pull_request:
-    branches: [main]
+    branches: [main, release/4.5.0-integration]
     paths:
       - '**/*.py'
       - '.github/workflows/codeql.yml'
