@@ -144,7 +144,7 @@ def scaffold_write_gate(confirm_script_dir=False, script_dir=None, command="init
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "4.2.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "4.5.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -7338,7 +7338,8 @@ def _install_report():
     }
     return {
         "python": {"version": "%d.%d.%d" % sys.version_info[:3], "floor": "3.12",
-                   "ok": sys.version_info >= (3, 12)},
+                   "ok": sys.version_info >= (3, 12),
+                   "supported_minor": "3.15", "supported": sys.version_info[:2] == (3, 15)},
         "core": {"script": "m8shift.py", "present": core_present,
                  "version": (_parse_script_version(core_path) if core_present else None),
                  "engine_version": VERSION},
@@ -7361,8 +7362,14 @@ def _install_doctor_findings(report):
     if not report["python"]["ok"]:
         out.append(doctor_finding(
             "install.python_floor", "warning",
-            "Python %s is below the supported floor 3.12." % report["python"]["version"],
-            "", "install Python 3.12+ and run m8shift.py through that interpreter"))
+            "Python %s is below the technical compatibility floor 3.12." % report["python"]["version"],
+            "", "install the supported Python 3.15.x and run m8shift.py through that interpreter"))
+    elif not report["python"]["supported"]:
+        out.append(doctor_finding(
+            "install.python_support", "info",
+            "Python %s is a compatibility fallback, not a maintained interpreter; "
+            "only Python 3.15.x receives CI and support." % report["python"]["version"],
+            "", "use Python 3.15.x for a supported installation"))
     if not report["core"]["present"]:
         out.append(doctor_finding(
             "install.core_missing", "warning",
@@ -7402,8 +7409,9 @@ def _print_install_report(rep):
     """Human rendering of the `doctor --install` snapshot (report, not findings)."""
     print("── install (read-only) ────────────────")
     py = rep["python"]
-    print("  python     %s (floor %s: %s)"
-          % (py["version"], py["floor"], "ok" if py["ok"] else "BELOW FLOOR"))
+    print("  python     %s (compatibility floor %s: %s; supported %s.x: %s)"
+          % (py["version"], py["floor"], "ok" if py["ok"] else "BELOW FLOOR",
+             py["supported_minor"], "yes" if py["supported"] else "NO — unsupported fallback"))
     core = rep["core"]
     if core["present"]:
         print("  core       %s v%s (engine v%s)"
@@ -10213,14 +10221,33 @@ def cmd_turn(args):
     if args.number < 0:
         print("turn number must be non-negative.", file=sys.stderr)
         return 2
-    _text, turns = all_turns(include_archive=True)
-    turn = next((item for item in turns if item["n"] == args.number), None)
-    if turn is None:
+    text = load_or_die()
+    matches = [item for item in parse_turns(text) if item["n"] == args.number]
+    source = "live"
+    session = get_lock(text).get("session") or None
+    if not matches and os.path.exists(ARCHIVE):
+        # Turn numbers restart with each session. Never let a prefixed archive
+        # shadow the live handoff, and never guess between archived homonyms.
+        source, session = "archive", None
+        try:
+            matches = [item for item in parse_turns(read(ARCHIVE))
+                       if item["n"] == args.number]
+        except (OSError, UnicodeError):
+            print("turn archive could not be read.", file=sys.stderr)
+            return 1
+    if not matches:
         print("turn #%d not found." % args.number, file=sys.stderr)
         return 3
+    if len(matches) != 1:
+        print("turn #%d is ambiguous: %d matches in %s; no turn selected." %
+              (args.number, len(matches), source), file=sys.stderr)
+        return 4
+    turn = matches[0]
     fields = turn["fields"]
     payload = {
         "schema": "m8shift.turn/1",
+        "source": source,
+        "session": session,
         "turn": turn["n"],
         "agent": fields.get("from", turn["agent"]),
         "to": fields.get("to", "none"),
@@ -10230,6 +10257,8 @@ def cmd_turn(args):
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
+        if source == "archive":
+            print("archived turn; session identity is not recorded", file=sys.stderr)
         print("#%d %s -> %s" % (payload["turn"], payload["agent"], payload["to"]))
         print(payload["done"])
     return 0
@@ -13744,8 +13773,8 @@ def main():
                    help="single-line summary of what you just did (empty = the — placeholder)")
     a.add_argument("--files", default="",
                    help="files touched this turn, comma-separated (empty = the — placeholder)")
-    a.add_argument("--body", default="",
-                   help="free turn body: a file path, or - to read stdin (empty = header-only turn)")
+    a.add_argument("--body-file", "--body", dest="body", default="", metavar="PATH|-",
+                   help="read turn body from PATH or - for stdin (legacy alias: --body; not literal text)")
     a.add_argument("--allow-large-body", action="store_true",
                    help=f"allow --body content above {MAX_BODY_BYTES} bytes")
     a.add_argument("--wait", action="store_true",

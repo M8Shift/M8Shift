@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - unavailable on Windows
     termios = None
     tty_module = None
 
-VERSION = "4.2.0"  # lockstep with m8shift.py; required for companion install/update
+VERSION = "4.5.0"  # lockstep with m8shift.py; required for companion install/update
 
 ALT_ON = "\x1b[?1049h\x1b[?25l"
 ALT_OFF = "\x1b[?25h\x1b[?1049l"
@@ -1907,6 +1907,7 @@ def main(argv=None):
 Agent orientation: use --help first in automation; pass --plain explicitly only
 when a scrolling status stream is intended.""",
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     p.add_argument("--interval", type=int, default=2,
                    help="refresh interval in seconds (default: 2)")
     p.add_argument("--plain", action="store_true",
