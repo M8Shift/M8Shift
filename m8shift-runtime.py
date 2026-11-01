@@ -2601,7 +2601,19 @@ def update_presence(core, agent, session_id, mode, state, run_id="", stale_after
     return presence[agent], findings
 
 
-def reserve_turn_before_launch(agent):
+def listener_managed_instance_env(agent, generation=""):
+    """Environment binding one listener process incarnation to core mutations."""
+    suffix = (generation or os.environ.get(LISTENER_GENERATION_ENV, "") or
+              ("pid-%s" % os.getpid()))
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", suffix):
+        suffix = hashlib.sha256(suffix.encode("utf-8", "surrogateescape")).hexdigest()[:24]
+    env = os.environ.copy()
+    env["M8SHIFT_INSTANCE"] = "listener-%s-%s" % (agent, suffix)
+    env["M8SHIFT_INSTANCE_MODE"] = "managed"
+    return env
+
+
+def reserve_turn_before_launch(agent, instance_env=None):
     """#320 — take the pen BEFORE the expensive work, not after it.
 
     A listener and an interactive session of the same identity could both take
@@ -2611,11 +2623,12 @@ def reserve_turn_before_launch(agent):
     or steals: a refused claim means the work is held elsewhere and this lane
     simply does not launch."""
     result = subprocess.run([sys.executable, CORE_PATH, "claim", agent],
-                            cwd=HERE, capture_output=True, text=True, timeout=30)
+                            cwd=HERE, env=instance_env,
+                            capture_output=True, text=True, timeout=30)
     return result.returncode == 0, (result.stderr or result.stdout).strip()
 
 
-def release_unused_reservation(agent, pre_turn):
+def release_unused_reservation(agent, pre_turn, instance_env=None):
     """Give the pen back when the work we reserved it for did not happen.
 
     Two independent readings of the reverted first attempt agreed that releasing
@@ -2644,7 +2657,7 @@ def release_unused_reservation(agent, pre_turn):
     result = subprocess.run(
         [sys.executable, CORE_PATH, "unclaim", agent,
          "--reason", "listener reservation abandoned: the reserved turn was not authored"],
-        cwd=HERE, capture_output=True, text=True, timeout=30)
+        cwd=HERE, env=instance_env, capture_output=True, text=True, timeout=30)
     return result.returncode == 0
 
 
@@ -10190,7 +10203,7 @@ def _core_ttl_minutes():
 
 
 def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
-                           now_utc=None):
+                           now_utc=None, instance_env=None):
     """One liveness tick during a live child turn. Returns a STRUCTURED result
     (Codex PR-B review B1 — refresh and heartbeat outcomes are independent;
     a refresh failure or exception NEVER suppresses the heartbeat attempt):
@@ -10212,7 +10225,8 @@ def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
         return result                    # neutral: nothing to protect
     result["working_window"] = True
     runner = run or (lambda argv: subprocess.run(
-        argv, cwd=HERE, capture_output=True, text=True, timeout=30))
+        argv, cwd=HERE, env=instance_env,
+        capture_output=True, text=True, timeout=30))
     expires = parse_utc(lk.get("expires") or "")
     now_dt = now_utc or now()
     if expires is not None and (expires - now_dt).total_seconds() \
@@ -10240,7 +10254,7 @@ def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
     return result
 
 
-def supervise_child_with_liveness(proc, agent, poll_s, say):
+def supervise_child_with_liveness(proc, agent, poll_s, say, instance_env=None):
     """Wait for a child runner while emitting liveness (RFC 049 PR B): a
     protective beat every min(poll, 60)s and the early refresh at ~TTL/2.
     Returns the child's exit code. Logging contract (Codex PR-B review H2):
@@ -10257,7 +10271,7 @@ def supervise_child_with_liveness(proc, agent, poll_s, say):
             return rc
         if time.monotonic() >= next_beat:
             try:
-                res = listener_liveness_tick(agent, cadence)
+                res = listener_liveness_tick(agent, cadence, instance_env=instance_env)
             except Exception as exc:    # noqa: BLE001 — belt: never kill supervision
                 res = None
                 if not episode["heartbeat"]:
@@ -12438,7 +12452,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             authors_a_turn = not notify_only and not (
                 (profile.get("review_delivery") or "none") == "artifact")
             if not resume and authors_a_turn:
-                ok, why = reserve_turn_before_launch(agent)
+                ok, why = reserve_turn_before_launch(agent, instance_env)
                 if not ok:
                     say(f"{agent}: this turn is reserved elsewhere "
                         f"({(why.splitlines()[0][:100] if why else 'claim refused')}) "
@@ -12456,7 +12470,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             say(f"{agent}: state={state} ({wake}) → launching one runner turn"
                 f"{' (resume-working)' if resume else ''}, run {run_id}.")
             try:
-                child = subprocess.Popen(argv, cwd=HERE)
+                child = subprocess.Popen(argv, cwd=HERE, env=instance_env)
             except OSError as e:
                 say(f"{agent}: runner launch failed ({type(e).__name__}; "
                     "listener_runner_launch_error).")
@@ -12466,11 +12480,11 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             else:
                 # RFC 049 PR B: the listener is the managed liveness producer
                 # while the child turn runs (protective beats + early refresh).
-                rc = supervise_child_with_liveness(child, agent, poll, say)
+                rc = supervise_child_with_liveness(child, agent, poll, say, instance_env)
             # One release point for every non-appending exit: launch failure, run
             # failure, HALT. It acts only on our own unadvanced hold, so a turn the
             # provider actually authored is never undone.
-            if reserved and release_unused_reservation(agent, reserved_turn):
+            if reserved and release_unused_reservation(agent, reserved_turn, instance_env):
                 say(f"{agent}: reservation released — the reserved turn was not "
                     "authored, so the pen is back where another producer can take it.")
             last_run_id = run_id
@@ -12977,6 +12991,7 @@ def cmd_listener_start(args):
             max_retries=args.max_retries, max_backoff=args.max_backoff,
             owns_log=supervised, notify_only=getattr(args, "notify_only", False),
             generation=generation)
+    instance_env = listener_managed_instance_env(agent, generation)
     paths = listener_paths(agent)
     if backend in LISTENER_SERVICE_BACKENDS:
         # OS service lifecycle (RFC 047 Phase D): generate the definition under
