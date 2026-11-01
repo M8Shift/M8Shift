@@ -5272,6 +5272,69 @@ def append_session_event(event, session_id, timestamp=None, **fields):
     write(prev + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n", SESSIONS)
 
 
+def _session_event_row(event, session_id, timestamp=None, **fields):
+    timestamp = timestamp or now()
+    row = {"event": event, "session_id": session_id,
+           "at": iso(timestamp), "m8shift_version": VERSION}
+    row.update(fields)
+    return row
+
+
+def append_session_event_batch(events, session_id, timestamp=None):
+    """Append a related evidence batch with one atomic replacement."""
+    timestamp = timestamp or now()
+    prev = read(SESSIONS) if os.path.exists(SESSIONS) else ""
+    if prev and not prev.endswith("\n"):
+        prev += "\n"
+    rows = [_session_event_row(kind, session_id, timestamp=timestamp, **fields)
+            for kind, fields in events]
+    payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                      for row in rows)
+    write(prev + payload, SESSIONS)
+
+
+def append_instance_change_batch(before, after, actor, timestamp, reason, live_override=False):
+    """Write state and instance-change evidence as one ledger replacement."""
+    if not after.get("session"):
+        return True
+    old_window = work_window_id(before.get("session"), before.get("state"),
+                                before.get("turn"), before.get("since")) or "-"
+    new_window = work_window_id(after.get("session"), after.get("state"),
+                                after.get("turn"), after.get("since")) or "-"
+    state_fields = {
+        "from_state": str(before.get("state") or "-"),
+        "to_state": str(after.get("state") or "-"),
+        "actor": actor, "turn": as_int(after.get("turn"), 0),
+        "operation": "instance-takeover",
+        "previous_work_window_id": old_window,
+        "work_window_id": new_window,
+    }
+    audit = {
+        "actor": actor, "turn": as_int(after.get("turn"), 0),
+        "basis": "live-override" if live_override else "operator-decision",
+        "reason": reason,
+        "displaced_holder": str(before.get("holder") or "none"),
+        "displaced_instance": str(before.get("holder_instance") or ""),
+        "displaced_mode": str(before.get("holder_mode") or ""),
+        "arriving_holder": str(after.get("holder") or "none"),
+        "arriving_instance": str(after.get("holder_instance") or ""),
+        "arriving_mode": str(after.get("holder_mode") or ""),
+        "previous_work_window_id": old_window,
+        "work_window_id": new_window,
+        "live_override": "true" if live_override else "false",
+    }
+    try:
+        append_session_event_batch([("state", state_fields),
+                                    ("instance_change", audit)],
+                                   after["session"], timestamp=timestamp)
+    except OSError as exc:
+        print("WARNING: instance takeover evidence write failed (%s); "
+              "the LOCK transition remains authoritative."
+              % exc.__class__.__name__, file=sys.stderr)
+        return False
+    return True
+
+
 def append_session_event_observational(event, session_id, timestamp=None, **fields):
     """Best-effort ledger append after an authoritative relay mutation."""
     try:
@@ -5321,6 +5384,19 @@ def _doctor_session_event_is_valid(row):
     if event in {"start", "done", "reset", "force", "pause", "resume",
                  "state", "work_tag"}:
         return True
+    if event == "instance_change":
+        required = ("actor", "basis", "reason", "displaced_holder",
+                    "displaced_instance", "displaced_mode", "arriving_holder",
+                    "arriving_instance", "arriving_mode",
+                    "previous_work_window_id", "work_window_id", "live_override")
+        if any(not isinstance(row.get(key), str) for key in required):
+            return False
+        if row["basis"] not in {"operator-decision", "live-override"}:
+            return False
+        if row["live_override"] not in {"true", "false"}:
+            return False
+        return bool(re.fullmatch(r"[0-9a-f]{8}", row["previous_work_window_id"])
+                    and re.fullmatch(r"[0-9a-f]{8}", row["work_window_id"]))
     if event != "review_return":
         return False
     required = {
@@ -12368,13 +12444,23 @@ def _guard_integrating(args, lk, op):
     low-level write, never through these public ops."""
     if not lk.get("integrating"):
         return
-    if op == "claim" and not getattr(args, "force", False):
+    if (op == "claim" and not getattr(args, "force", False)
+            and not getattr(args, "takeover_instance", False)):
         return   # the integrator may keep its own pen alive; the sentinel rides along untouched
     sys.exit(tr("integrating_locked", holder=lk.get("holder"), ref=lk.get("integrating")))
 
 
 def cmd_claim(args):
     work_item = clean_work_item(getattr(args, "work_item", ""))
+    takeover_instance = bool(getattr(args, "takeover_instance", False))
+    takeover_reason = (clean_field("--reason", getattr(args, "reason", "") or "")
+                       if takeover_instance else "")
+    if takeover_instance and (args.force or getattr(args, "refresh", False)
+                              or getattr(args, "check", False)):
+        sys.exit("refused: --takeover-instance is mutually exclusive with "
+                 "--force, --refresh and --check.")
+    if takeover_instance and not takeover_reason:
+        sys.exit("refused: --takeover-instance requires --reason.")
     if args.check:                       # read-only probe — never reaches the file_lock body below
         if work_item:
             sys.exit("refused: --work-item opens a work window and cannot be used with --check.")
@@ -12382,6 +12468,8 @@ def cmd_claim(args):
     if args.files or args.turns:         # probe-only flags on a real claim = a likely typo, not a no-op
         sys.exit(tr("check_flags_need_check"))
     instance_token, instance_mode = claim_instance_declaration()
+    if takeover_instance and not instance_token:
+        sys.exit("refused: --takeover-instance requires M8SHIFT_INSTANCE.")
     # RFC 049 two-phase force recovery: phase 1 observes a stale reclaim
     # candidate under the lock, captures its identity tuple, RELEASES the lock,
     # sleeps the grace OUTSIDE it (never blocking the holder's own refresh),
@@ -12391,8 +12479,9 @@ def cmd_claim(args):
     if getattr(args, "live_override", False):
         # M7: the override contract is unconditional — it exists ONLY as a
         # force-recovery escape and always demands an audited reason.
-        if not args.force:
-            sys.exit("refused: --live-override is only valid with --force.")
+        if not (args.force or takeover_instance):
+            sys.exit("refused: --live-override is only valid with --force "
+                     "or --takeover-instance.")
         if not clean_field("--reason", getattr(args, "reason", "") or ""):
             sys.exit("refused: --live-override requires --reason "
                      "(human-authorized recovery is audited).")
@@ -12473,12 +12562,24 @@ def cmd_claim(args):
             sys.exit(tr("claim_refused", st=st, holder=holder))
         reclaim = args.force and stale and holder not in (agent, "none")
         same_window = st == f"WORKING_{agent.upper()}" and holder == agent
-        if same_window:
+        instance_mismatch = same_window and holder_instance_mismatch(lk, agent)
+        if takeover_instance and not instance_mismatch:
+            sys.exit("refused: --takeover-instance requires a same-name WORKING "
+                     "window owned by another declared instance.")
+        if instance_mismatch and not takeover_instance:
             guard_holder_instance(lk, agent)
-        if work_item and same_window:
+        if instance_mismatch and takeover_instance:
+            fresh_beat = heartbeat_protective(lk, agent)
+            if fresh_beat and not (stale and getattr(args, "live_override", False)):
+                sys.exit("refused: holder instance appears alive; takeover requires "
+                         "an expired lease plus --live-override --reason.")
+            if getattr(args, "live_override", False) and not (stale and fresh_beat):
+                sys.exit("refused: --live-override is only valid for an expired "
+                         "same-name window with a fresh protective heartbeat.")
+        if work_item and same_window and not takeover_instance:
             sys.exit("refused: --work-item only applies when entering a WORKING window; "
                      "use `work-tag %s %s` for the current window." % (agent, work_item))
-        if not same_window:
+        if not same_window or takeover_instance:
             hold, hold_error = agent_usage_hold(agent)
             if hold or hold_error:
                 sys.exit(usage_throttle_message(agent, hold_error))
@@ -12493,20 +12594,26 @@ def cmd_claim(args):
         lk.update(
             holder=agent,
             state=f"WORKING_{agent.upper()}",
-            since=(lk.get("since") if same_window else iso(t)),
+            since=(lk.get("since") if same_window and not takeover_instance else iso(t)),
             expires=iso(t + dt.timedelta(minutes=TTL_MIN)),
             note=(return_note if preserve_return_note else
-                  (tr("note_reclaim", holder=holder) if reclaim
+                  ("instance takeover: " + takeover_reason if takeover_instance
+                   else tr("note_reclaim", holder=holder) if reclaim
                    else tr("note_holds", agent=agent))),
         )
         capture_agent_model(lk, agent)
         capture_agent_effort(lk, agent)
-        if not same_window:
+        if not same_window or takeover_instance:
             bind_holder_instance(lk, instance_token, instance_mode)
         guard.require_owned()
         write(set_lock(text, lk))
         guard.require_owned()
-        append_state_transition(before, lk, agent, "claim", t, work_item=work_item)
+        if takeover_instance:
+            append_instance_change_batch(
+                before, lk, agent, t, takeover_reason,
+                live_override=bool(getattr(args, "live_override", False)))
+        else:
+            append_state_transition(before, lk, agent, "claim", t, work_item=work_item)
         if getattr(args, "refresh", False):
             # RFC 049: an AUDIT beat (never protective) — sidecar failure is a
             # warning only, the TTL refresh stands (sidecar is not authority).
@@ -13860,8 +13967,11 @@ def main():
                         "your own WORKING lock (runners must use this, never a plain claim)")
     c.add_argument("--reason", default="",
                     help="record why a stale recovery is safe and what happens next")
+    c.add_argument("--takeover-instance", action="store_true",
+                   help="replace another instance of the same WORKING agent; requires "
+                        "M8SHIFT_INSTANCE and --reason, and writes instance-change evidence")
     c.add_argument("--live-override", action="store_true",
-                    help="with --force and --reason, override an ALIVE-EXPIRED "
+                    help="with --force or --takeover-instance and --reason, override an ALIVE-EXPIRED "
                          "refusal (fresh protective heartbeat) — exceptional, human-authorized "
                          "recovery; the override is audited in session events")
     c.add_argument("--check", action="store_true",
