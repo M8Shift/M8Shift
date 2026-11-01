@@ -1,7 +1,7 @@
 name: Holder instance binding
 on:
   pull_request:
-    branches: [release/4.5.0-integration, fix/563-kit-core-drift-45]
+    branches: [release/4.5.0-integration, fix/563-kit-core-drift-45, feat/564-holder-instance-binding-45]
     paths:
       - m8shift.py
       - tests/test_instance_binding_45.py
