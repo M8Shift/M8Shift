@@ -73,6 +73,34 @@ class RuntimeRunnerInstanceTests(unittest.TestCase):
                 runner.resume_eligible(args, "claude", "WORKING_CLAUDE", lock)
         self.assertEqual(raised.exception.code, 5)
 
+    def test_service_probe_requires_observed_health(self):
+        active = SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+        with mock.patch.object(runtime.subprocess, "run", return_value=active):
+            healthy = runtime.probe_service_backend(
+                {"backend": "systemd", "label": "m8shift-test"})
+        self.assertTrue(healthy["healthy"])
+
+        inactive = SimpleNamespace(returncode=3, stdout="inactive\n", stderr="")
+        with mock.patch.object(runtime.subprocess, "run", return_value=inactive):
+            unhealthy = runtime.probe_service_backend(
+                {"backend": "systemd", "label": "m8shift-test"})
+        self.assertFalse(unhealthy["healthy"])
+        self.assertTrue(unhealthy["terminal"])
+
+    def test_launchd_exit_78_reports_tcc_context_without_calling_it_healthy(self):
+        output = "last exit code = 78\n"
+        failed = SimpleNamespace(returncode=0, stdout=output, stderr="")
+        plan = {"backend": "launchd", "label": "m8shift-test"}
+        with mock.patch.object(runtime.subprocess, "run", return_value=failed):
+            health = runtime.probe_service_backend(plan)
+        self.assertFalse(health["healthy"])
+        self.assertEqual(health["exit_code"], 78)
+        message = runtime.service_start_failure_message(
+            plan, health,
+            {"platform": "darwin", "protected_folder": True})
+        self.assertIn("TCC", message)
+        self.assertIn("exit 78", message)
+
     def test_resume_working_accepts_matching_and_legacy_instances(self):
         args = SimpleNamespace(resume_working=True)
         matched = {"holder": "claude", "state": "WORKING_CLAUDE",
