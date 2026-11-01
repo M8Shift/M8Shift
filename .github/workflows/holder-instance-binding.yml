@@ -6,6 +6,7 @@ on:
       - m8shift.py
       - tests/test_instance_binding_45.py
       - tests/test_instance_runner_45.py
+      - tests/test_instance_takeover_45.py
       - m8shift-runtime.py
       - examples/headless_runner.py
       - checksums.sha256
@@ -26,3 +27,4 @@ jobs:
       - run: |
           python -m unittest discover -s tests -p 'test_instance_binding_45.py' -v
           python -m unittest discover -s tests -p 'test_instance_runner_45.py' -v
+          python -m unittest discover -s tests -p 'test_instance_takeover_45.py' -v
