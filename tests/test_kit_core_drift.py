@@ -16,6 +16,17 @@ spec.loader.exec_module(m8)
 
 
 class KitCoreDriftTests(unittest.TestCase):
+    def test_release_checksums_cover_every_usage_adapter(self):
+        root = Path(__file__).resolve().parents[1]
+        manifest = (root / "checksums.sha256").read_text(encoding="utf-8")
+        shipped = sorted(p.relative_to(root).as_posix()
+                         for p in (root / "examples" / "usage-adapters").glob("*.py"))
+        self.assertTrue(shipped)
+        for rel in shipped:
+            with self.subTest(adapter=rel):
+                self.assertIn("  " + rel + "\n", manifest)
+
+
     def test_manifest_records_core_hash_and_doctor_detects_same_version_edit(self):
         original_here = m8.HERE
         try:
