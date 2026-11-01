@@ -10747,6 +10747,76 @@ def run_service_argv(argv):
     return f"{' '.join(argv)} → rc={r.returncode}" + (f": {detail}" if detail else "")
 
 
+def probe_service_backend(plan):
+    """Read-only health probe: installation success is not startup success."""
+    backend = plan["backend"]
+    label = plan["label"]
+    if backend == "launchd":
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        argv = ["launchctl", "print", f"gui/{uid}/{label}"]
+    elif backend == "systemd":
+        argv = ["systemctl", "--user", "is-active", f"{label}.service"]
+    elif backend == "windows":
+        argv = ["schtasks", "/Query", "/TN", label, "/FO", "LIST", "/V"]
+    else:
+        return {"healthy": False, "terminal": True, "exit_code": None,
+                "detail": "unsupported service backend"}
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"healthy": False, "terminal": True, "exit_code": None,
+                "detail": "%s health probe failed: %s" % (argv[0], type(exc).__name__)}
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    first = output.splitlines()[0].strip() if output else ""
+    if backend == "launchd":
+        pid = re.search(r"(?m)^\s*pid\s*=\s*([1-9][0-9]*)\s*$", output)
+        exited = re.search(r"(?mi)^\s*last exit (?:code|status)\s*=\s*(-?[0-9]+)\s*$",
+                           output)
+        exit_code = int(exited.group(1)) if exited else None
+        healthy = result.returncode == 0 and pid is not None and exit_code in (None, 0)
+        return {"healthy": healthy,
+                "terminal": healthy or result.returncode != 0 or exit_code not in (None, 0),
+                "exit_code": exit_code,
+                "detail": "launchctl health rc=%s pid=%s exit=%s" %
+                          (result.returncode, pid.group(1) if pid else "-",
+                           exit_code if exit_code is not None else "-")}
+    if backend == "systemd":
+        state = first.casefold()
+        healthy = result.returncode == 0 and state == "active"
+        return {"healthy": healthy,
+                "terminal": healthy or state in {"failed", "inactive", "deactivating"}
+                            or result.returncode not in (0, 3),
+                "exit_code": None,
+                "detail": "systemd health rc=%s state=%s" %
+                          (result.returncode, first or "unknown")}
+    running = bool(re.search(r"(?mi)^\s*status\s*:\s*running\s*$", output))
+    return {"healthy": result.returncode == 0 and running,
+            "terminal": True, "exit_code": None,
+            "detail": "task health rc=%s running=%s" %
+                      (result.returncode, "true" if running else "false")}
+
+
+def wait_for_service_backend(plan, timeout=LISTENER_START_OBSERVE_TIMEOUT_S):
+    """Wait boundedly for asynchronous service startup, never infer health."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        health = probe_service_backend(plan)
+        if health["healthy"] or health["terminal"] or time.monotonic() >= deadline:
+            return health
+        time.sleep(0.05)
+
+
+def service_start_failure_message(plan, health, facts):
+    message = ("%s service %s did not become healthy: %s" %
+               (plan["backend"], plan["label"], health["detail"]))
+    if (plan["backend"] == "launchd" and health.get("exit_code") == 78
+            and facts.get("platform") == "darwin" and facts.get("protected_folder")):
+        message += (". exit 78 may indicate macOS TCC denied background access "
+                    "to the protected project folder; use the local backend or "
+                    "grant appropriate service access")
+    return message
+
+
 def listener_backend_record_path(agent):
     return os.path.join(LISTENERS_DIR, f"{agent}.backend.json")
 
@@ -10768,7 +10838,7 @@ def write_listener_backend_record(agent, doc):
     os.replace(tmp, path)
 
 
-def install_service_backend(agent, plan):
+def install_service_backend(agent, plan, facts=None):
     """Write the generated definition, record it, then drive the service manager
     with the plan's explicit argv steps. A required-step failure is persisted in
     the backend record (`doctor` → listener.backend_failed): the operator must
@@ -10796,6 +10866,13 @@ def install_service_backend(agent, plan):
             print(f"m8shift-runtime: {plan['backend']} service install failed: {detail}",
                   file=sys.stderr)
             return 1
+    health = wait_for_service_backend(plan)
+    if not health["healthy"]:
+        detail = service_start_failure_message(plan, health, facts or {})
+        record["last_error"] = detail[:300]
+        write_listener_backend_record(agent, record)
+        print("m8shift-runtime: " + detail, file=sys.stderr)
+        return 1
     return 0
 
 
@@ -12998,7 +13075,7 @@ def cmd_listener_start(args):
         # .m8shift/runtime/listeners/, then drive the service manager with the
         # plan's explicit argv steps. The payload is the SAME foreground loop.
         plan = backend_install_plan(backend, agent, args, runner_path, profile)
-        rc = install_service_backend(agent, plan)
+        rc = install_service_backend(agent, plan, facts)
         if rc != 0:
             return rc
         print(f"✓ listener installed for {agent} (backend {backend}, service {plan['label']})")
