@@ -5,6 +5,7 @@ on:
     paths:
       - m8shift.py
       - tests/test_kit_core_drift.py
+      - tests/test_563_runtime_integrity.py
       - checksums.sha256
       - .github/workflows/kit-core-drift.yml
   workflow_dispatch: {}
@@ -20,4 +21,6 @@ jobs:
         with:
           python-version-file: .python-version
       - run: sha256sum -c checksums.sha256
-      - run: python -m unittest discover -s tests -p 'test_kit_core_drift.py' -v
+      - run: |
+          python -m unittest discover -s tests -p 'test_kit_core_drift.py' -v
+          python -m unittest discover -s tests -p 'test_563_runtime_integrity.py' -v
