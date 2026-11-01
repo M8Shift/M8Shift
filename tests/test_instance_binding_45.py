@@ -19,10 +19,10 @@ class HolderInstanceBindingTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         shutil.copy(ROOT / "m8shift.py", self.root / "m8shift.py")
-        init = self.run("init")
+        init = self.cli("init")
         self.assertEqual(init.returncode, 0, init.stderr)
 
-    def run(self, *args, instance=None, mode="managed"):
+    def cli(self, *args, instance=None, mode="managed"):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         env.pop("M8SHIFT_INSTANCE", None)
         env.pop("M8SHIFT_INSTANCE_MODE", None)
@@ -48,13 +48,13 @@ class HolderInstanceBindingTests(unittest.TestCase):
         return result
 
     def test_bound_claim_records_instance_and_matching_append_clears_it(self):
-        claimed = self.run("claim", "claude", instance="lane-001", mode="managed")
+        claimed = self.cli("claim", "claude", instance="lane-001", mode="managed")
         self.assertEqual(claimed.returncode, 0, claimed.stderr)
         lock = self.lock()
         self.assertEqual(lock["holder_instance"], "lane-001")
         self.assertEqual(lock["holder_mode"], "managed")
 
-        appended = self.run(
+        appended = self.cli(
             "append", "claude", "--to", "codex", "--done", "ok",
             instance="lane-001")
         self.assertEqual(appended.returncode, 0, appended.stderr)
@@ -63,7 +63,7 @@ class HolderInstanceBindingTests(unittest.TestCase):
         self.assertNotIn("holder_mode", lock)
 
     def test_foreign_instance_is_refused_without_mutation(self):
-        claimed = self.run("claim", "claude", instance="lane-original")
+        claimed = self.cli("claim", "claude", instance="lane-original")
         self.assertEqual(claimed.returncode, 0, claimed.stderr)
         before = self.relay_bytes()
 
@@ -78,34 +78,34 @@ class HolderInstanceBindingTests(unittest.TestCase):
         )
         for argv in attempts:
             with self.subTest(argv=argv):
-                result = self.run(*argv, instance="lane-foreign")
+                result = self.cli(*argv, instance="lane-foreign")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("M8SHIFT_INSTANCE", result.stderr + result.stdout)
                 self.assertEqual(self.relay_bytes(), before)
 
     def test_legacy_unbound_window_remains_compatible(self):
-        claimed = self.run("claim", "claude")
+        claimed = self.cli("claim", "claude")
         self.assertEqual(claimed.returncode, 0, claimed.stderr)
         lock = self.lock()
         self.assertNotIn("holder_instance", lock)
-        refreshed = self.run("claim", "claude", "--refresh")
+        refreshed = self.cli("claim", "claude", "--refresh")
         self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
-        appended = self.run("append", "claude", "--to", "codex", "--done", "legacy")
+        appended = self.cli("append", "claude", "--to", "codex", "--done", "legacy")
         self.assertEqual(appended.returncode, 0, appended.stderr)
 
     def test_invalid_instance_is_refused_before_write(self):
         before = self.relay_bytes()
-        result = self.run("claim", "claude", instance="bad instance")
+        result = self.cli("claim", "claude", instance="bad instance")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("M8SHIFT_INSTANCE", result.stderr + result.stdout)
         self.assertEqual(self.relay_bytes(), before)
 
     def test_bound_window_requires_declared_instance_for_may_i_write(self):
-        claimed = self.run("claim", "claude", instance="lane-guarded")
+        claimed = self.cli("claim", "claude", instance="lane-guarded")
         self.assertEqual(claimed.returncode, 0, claimed.stderr)
-        missing = self.run("may-i-write", "claude")
+        missing = self.cli("may-i-write", "claude")
         self.assertEqual(missing.returncode, 3)
-        matching = self.run("may-i-write", "claude", instance="lane-guarded")
+        matching = self.cli("may-i-write", "claude", instance="lane-guarded")
         self.assertEqual(matching.returncode, 0, matching.stdout + matching.stderr)
 
 
