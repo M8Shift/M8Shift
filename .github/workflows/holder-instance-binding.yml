@@ -5,6 +5,9 @@ on:
     paths:
       - m8shift.py
       - tests/test_instance_binding_45.py
+      - tests/test_instance_runner_45.py
+      - m8shift-runtime.py
+      - examples/headless_runner.py
       - checksums.sha256
       - .github/workflows/holder-instance-binding.yml
   workflow_dispatch: {}
@@ -20,4 +23,6 @@ jobs:
         with:
           python-version-file: .python-version
       - run: sha256sum -c checksums.sha256
-      - run: python -m unittest discover -s tests -p 'test_instance_binding_45.py' -v
+      - run: |
+          python -m unittest discover -s tests -p 'test_instance_binding_45.py' -v
+          python -m unittest discover -s tests -p 'test_instance_runner_45.py' -v
