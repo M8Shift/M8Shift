@@ -107,7 +107,7 @@ class InstanceTakeoverTests(unittest.TestCase):
     def test_fresh_protective_heartbeat_blocks_foreign_takeover(self):
         self.claim_original()
         beat = self.cli(
-            "heartbeat", "claude", "--source", "test", "--cadence-seconds", "60",
+            "heartbeat", "claude", "--source", "wrapper", "--cadence-seconds", "60",
             instance="manual-original")
         self.assertEqual(beat.returncode, 0, beat.stderr)
         before = self.relay()
