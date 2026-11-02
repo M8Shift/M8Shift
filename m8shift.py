@@ -3392,8 +3392,12 @@ def _write_kit_manifest(installed, runners=None):
     previous = _read_kit_manifest(HERE)
     if runners is None:
         runners = _kit_list(previous, "runners")
+    core_path = os.path.join(HERE, "m8shift.py")
+    core_entry = {"script": "m8shift.py", "version": VERSION}
+    if os.path.isfile(core_path) and not os.path.islink(core_path):
+        core_entry["sha256"] = _sha256_file(core_path)
     data = {"schema": "m8shift.kit.v1",
-            "core": {"script": "m8shift.py", "version": VERSION},
+            "core": core_entry,
             "companions": installed}
     if runners:
         data["runners"] = runners
@@ -3705,6 +3709,35 @@ def _kit_doctor_findings():
         return [doctor_finding("kit.companions", "warning",
                                "%s has an unexpected schema." % KIT_MANIFEST_REL, KIT_MANIFEST_REL)]
     out = []
+    core = data.get("core")
+    if isinstance(core, dict) and core.get("script") == "m8shift.py":
+        core_path = os.path.join(HERE, "m8shift.py")
+        expected = core.get("sha256")
+        try:
+            info = os.lstat(core_path)
+        except OSError:
+            out.append(doctor_finding("kit.companions", "warning",
+                                      "core m8shift.py is listed but missing.", "m8shift.py",
+                                      "restore the verified core file"))
+        else:
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                out.append(doctor_finding("kit.companions", "warning",
+                                          "core m8shift.py is not a regular non-symlink file.", "m8shift.py",
+                                          "restore the verified core file"))
+            elif expected:
+                if not VERIFY_KIT_SHA256_RE.fullmatch(str(expected)):
+                    out.append(doctor_finding("kit.unverifiable", "info",
+                                              "core checksum in kit manifest is invalid; integrity is unverified.",
+                                              "m8shift.py"))
+                elif _sha256_file(core_path) != expected:
+                    out.append(doctor_finding("kit.drift", "warning",
+                                              "core m8shift.py bytes differ from the installed kit receipt.",
+                                              "m8shift.py",
+                                              "restore or explicitly update the verified core"))
+            else:
+                out.append(doctor_finding("kit.unverifiable", "info",
+                                          "legacy kit manifest has no core checksum; integrity is unverified.",
+                                          "m8shift.py"))
     for entry in (data.get("companions") or []):
         if not isinstance(entry, dict):
             continue
@@ -4520,9 +4553,13 @@ def _sync_kit_core_version(target_root):
         if not isinstance(data, dict):
             return
         core = data.get("core") or {}
-        if core.get("version") == actual:
+        actual_path = os.path.join(target_root, "m8shift.py")
+        actual_sha = _sha256_file(actual_path) if os.path.isfile(actual_path) and not os.path.islink(actual_path) else None
+        if core.get("version") == actual and (not actual_sha or core.get("sha256") == actual_sha):
             return
         data["core"] = {"script": "m8shift.py", "version": actual}
+        if actual_sha:
+            data["core"]["sha256"] = actual_sha
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)

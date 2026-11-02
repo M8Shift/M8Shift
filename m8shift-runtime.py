@@ -384,6 +384,7 @@ LISTENER_MAX_BACKOFF_S = 300
 # #370: how long `listener start` waits for the detached lane to become
 # observable before it refuses to call the start a success.
 LISTENER_START_OBSERVE_TIMEOUT_S = 10.0
+LISTENER_RESTORE_TIMEOUT_ENV = "M8SHIFT_LISTENER_RESTORE_TIMEOUT"
 LISTENER_DEFAULT_POLL_S = 20.0
 LISTENER_DEFAULT_MAX_RETRIES = 3
 LISTENER_DETACHED_ENV = "M8SHIFT_LISTENER_DETACHED"
@@ -9955,6 +9956,14 @@ def cmd_doctor(args):
         run_core_json("status", "--json")
     except Exception as e:  # noqa: BLE001 - report as diagnostic, do not traceback
         findings.append({"severity": "error", "check": "core.status", "message": str(e)})
+    kit_check = getattr(core, "_kit_doctor_findings", None)
+    if callable(kit_check):
+        try:
+            findings.extend(kit_check())
+        except Exception as exc:  # noqa: BLE001 - doctor remains diagnostic
+            findings.append({"severity": "warning", "check": "runtime.kit",
+                             "message": "core kit diagnostics unavailable: %s" %
+                                        type(exc).__name__})
     if os.path.isdir(RUNTIME_DIR) and not gitignored_runtime():
         findings.append({
             "severity": "warning",
@@ -10821,6 +10830,25 @@ def backend_service_state(record):
     return "loaded" if run_service_argv(argv) == "" else "not-loaded"
 
 
+def listener_start_observe_timeout(restoring=False):
+    """Return the bounded wait for a detached listener state file.
+
+    Normal starts keep the stable product timeout. A restored plan may use a
+    test/operator override; invalid, non-finite and non-positive values fail
+    back to the stable bound rather than disabling observation.
+    """
+    if not restoring:
+        return LISTENER_START_OBSERVE_TIMEOUT_S
+    raw = os.environ.get(LISTENER_RESTORE_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return LISTENER_START_OBSERVE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return LISTENER_START_OBSERVE_TIMEOUT_S
+    return value if math.isfinite(value) and value > 0 else LISTENER_START_OBSERVE_TIMEOUT_S
+
+
 def listener_log_threshold():
     """Writer-side rotation threshold in bytes: 5 MiB by default (RFC 047),
     injectable via M8SHIFT_LISTENER_LOG_MAX_BYTES so tests rotate at a tiny
@@ -11474,10 +11502,18 @@ def write_listener_state(agent, *, phase, consecutive_failures,
         # an existing state file without them is distinguishable from a current
         # one -- absence is reported, never migrated away silently.
         "session": current_relay_session(),
-        "started_at": previous.get("started_at") or iso(),
-        "updated_at": iso(),
     }
-    if generation and isinstance(process_pid, int) and process_pid > 0:
+    timestamp = iso()
+    has_process_identity = bool(generation) and isinstance(process_pid, int) and process_pid > 0
+    identity_changed = has_process_identity and (
+        generation != previous.get("generation")
+        or process_pid != previous.get("process_pid")
+    )
+    previous_started_at = previous.get("started_at") or ""
+    doc["first_started_at"] = previous.get("first_started_at") or previous_started_at or timestamp
+    doc["started_at"] = timestamp if identity_changed else previous_started_at or timestamp
+    doc["updated_at"] = timestamp
+    if has_process_identity:
         doc["generation"] = generation
         doc["process_pid"] = process_pid
     if reason:
@@ -12965,8 +13001,9 @@ def cmd_listener_start(args):
     # bounded, and say plainly when the lane does not appear.
     observed = False
     died_on_its_own = False
-    deadline = time.time() + LISTENER_START_OBSERVE_TIMEOUT_S
-    while time.time() < deadline:
+    observe_timeout = listener_start_observe_timeout(restore_plan is not None)
+    deadline = time.monotonic() + observe_timeout
+    while time.monotonic() < deadline:
         if os.path.exists(paths["state"]):
             observed = True
             break
@@ -12998,7 +13035,7 @@ def cmd_listener_start(args):
         if reaped:
             remove_listener_pid(agent)
         print(f"m8shift-runtime: listener for {agent} was launched (pid {pid}) but its "
-              f"state did not appear within {LISTENER_START_OBSERVE_TIMEOUT_S:g}s; "
+              f"state did not appear within {observe_timeout:g}s; "
               + ("the process was stopped so no unmanaged lane is left behind"
                  if reaped else
                  f"AND pid {pid} could not be stopped — a lane may be running "
