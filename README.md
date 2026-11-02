@@ -10,12 +10,17 @@ _Different agents. Different roles. One coordinated workflow._
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#tests)
-[![python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](#install)
+[![python](https://img.shields.io/badge/python-3.15-blue.svg)](#install)
 [![single file](https://img.shields.io/badge/single%20file-m8shift.py-orange.svg)](m8shift.py)
 [![no API key](https://img.shields.io/badge/API%20key-not%20required-success.svg)](#runs-anywhere--no-api-key)
 [![made with M8Shift](https://img.shields.io/badge/made%20with-%E2%9D%A4%20%26%20M8Shift-ff69b4.svg)](docs/en/specification.md#11-developing-m8shift-with-m8shift-dogfooding)
 
 </div>
+
+The **4.5.0 integration candidate** combines advisory routing and scoped relay,
+runner and test corrections. See the [4.5.0 release notes](docs/en/release-v4.5.0.md)
+for included changes and validation gates; a version string on an integration
+branch does not indicate a published release.
 
 ## 🧭 What is M8Shift?
 
@@ -84,7 +89,7 @@ Native Windows PowerShell:
 irm https://raw.githubusercontent.com/M8Shift/M8Shift/main/install.ps1 | iex
 ```
 
-Core prerequisites (both installers): **Python 3.12+** (stdlib only), write
+Core prerequisites (both installers): **Python 3.15.x** (stdlib only), write
 permission in the target directory, one downloader (`curl`, `wget`, or Python
 `urllib` for `install.sh`; `Invoke-WebRequest` for `install.ps1`), and SHA-256
 support for the default verification (`sha256sum`, `shasum`, or Python `hashlib`;
@@ -94,13 +99,13 @@ Windows; native Windows uses `install.ps1`. **Git is optional**: only worktree
 features (`m8shift-worktree.py`) and anchor case-renaming use it — the core relay
 installs and runs without it. No `sudo`/admin rights, no PATH change, no
 background service, and no package manager (package managers may provide Python,
-e.g. `apt install python3` or `winget install Python.Python.3.12`, but are never
+e.g. `winget install Python.Python.3.15` on Windows, but are never
 the only path).
 
 These installers download `m8shift.py` plus `m8shift-worktree.py`,
 `m8shift-runtime.py`, and `m8shift-context.py` into the current directory, verify
 the files against `checksums.sha256`, then run `m8shift.py init --agents
-claude,codex` through the detected Python 3.12+ interpreter. Both print the
+claude,codex` through the detected interpreter, preferring Python 3.15. Both print the
 prerequisites plus one capability line per optional helper (`available` /
 `unavailable` / `skipped` / `installed`) before any helper setup; an absent or
 unsupported helper degrades with a clear message and never blocks the core
@@ -108,6 +113,13 @@ install, and an opted-in helper that fails prints a prominent warning while the
 core install continues (exit 0 when the core install succeeded). The two
 installers are kept in lockstep for the core components — verified by static
 parity tests, and executed end-to-end where `pwsh` is available.
+
+**One supported Python series:** development and every Python CI job use the latest
+stable **3.15.x** bugfix release, selected by [`.python-version`](.python-version).
+Installers prefer that series. The previous 3.12 technical minimum remains an
+explicitly unsupported compatibility fallback so existing relays are not blocked
+solely by the support-policy change; older interpreters have no separate test lane
+or compatibility promise. See [Python support and migration](docs/en/python-support.md).
 
 For a read-only terminal dashboard, run `python3 m8shift-top.py`. It consumes
 the frozen `status --json` snapshot, uses an alternate screen on capable TTYs,
@@ -135,7 +147,7 @@ python3 m8shift-aliases.py --write --shell git-bash
 ```
 
 Use `--rc PATH` for a nonstandard startup file. This helper needs only the same
-Python 3.12+ prerequisite as M8Shift; it changes no PATH setting and installs no
+Python 3.15.x support policy as M8Shift; it changes no PATH setting and installs no
 package. Restart the shell or `source` the rc path printed after a write.
 
 For a pinned release, fetch the installer from the tag and use the same ref for the

@@ -262,7 +262,8 @@ class TestPureFunctions(unittest.TestCase):
         send.assert_not_called()
 
     def test_usage_watch_stale_lock_race_has_one_winner(self):
-        """Two stale breakers cannot both return ownership of different inodes."""
+        """Synchronize stale observations, not merely failed exclusive opens."""
+        import queue
         path = os.path.join(REPO, "m8shift-runtime.py")
         spec = importlib.util.spec_from_file_location("m8shift_runtime_lock_test", path)
         runtime = importlib.util.module_from_spec(spec)
@@ -274,28 +275,33 @@ class TestPureFunctions(unittest.TestCase):
                 json.dump({"pid": 999999, "token": "stale"}, fh)
 
             real_open, real_unlink = os.open, os.unlink
-            observed = 0
-            unlinks = 0
-            guard = threading.Lock()
-            both_observed = threading.Event()
+            real_read = runtime.read_json_diagnostic
+            both_read_stale = threading.Barrier(2, timeout=10)
             fresh_created = threading.Event()
             second_unlinked = threading.Event()
+            release = threading.Event()
+            guard = threading.Lock()
+            outcomes = queue.Queue()
+            errors = queue.Queue()
+            unlinks = 0
+
+            def racing_read(target, default):
+                doc, error = real_read(target, default)
+                if target == lock_path and not error and doc.get("token") == "stale":
+                    # Both stale decisions must be fixed before either unlinks.
+                    # An O_EXCL failure alone does not establish that fact.
+                    both_read_stale.wait()
+                return doc, error
 
             def racing_open(target, flags, *args, **kwargs):
-                nonlocal observed
-                try:
-                    fd = real_open(target, flags, *args, **kwargs)
-                except FileExistsError:
-                    if target == lock_path:
-                        with guard:
-                            observed += 1
-                            if observed == 2:
-                                both_observed.set()
-                        self.assertTrue(both_observed.wait(2))
-                    raise
-                if target == lock_path and observed >= 2 and not fresh_created.is_set():
-                    fresh_created.set()
-                    self.assertTrue(second_unlinked.wait(2))
+                fd = real_open(target, flags, *args, **kwargs)
+                with guard:
+                    first_replacement = target == lock_path and not fresh_created.is_set()
+                    if first_replacement:
+                        fresh_created.set()
+                if first_replacement and not second_unlinked.wait(10):
+                    os.close(fd)
+                    raise AssertionError("second stale breaker did not unlink the replacement")
                 return fd
 
             def racing_unlink(target, *args, **kwargs):
@@ -305,44 +311,60 @@ class TestPureFunctions(unittest.TestCase):
                 with guard:
                     unlinks += 1
                     ordinal = unlinks
-                if ordinal == 1:
-                    return real_unlink(target, *args, **kwargs)
                 if ordinal == 2:
-                    self.assertTrue(fresh_created.wait(2))
+                    if not fresh_created.wait(10):
+                        raise AssertionError("replacement inode was not created")
                     try:
                         return real_unlink(target, *args, **kwargs)
                     finally:
                         second_unlinked.set()
                 return real_unlink(target, *args, **kwargs)
 
-            successes, failures = [], []
-            release = threading.Event()
-
             def contender():
+                token = None
                 try:
-                    token = runtime.acquire_usage_watch_lock("claude")
-                    successes.append(token)
-                    release.wait(3)
-                    runtime.release_usage_watch_lock("claude", token)
-                except ValueError as exc:
-                    failures.append(str(exc))
+                    try:
+                        token = runtime.acquire_usage_watch_lock("claude")
+                    except ValueError as exc:
+                        outcomes.put(("busy", str(exc)))
+                        return
+                    outcomes.put(("acquired", token))
+                    if not release.wait(15):
+                        raise AssertionError("test did not release the winning lease")
+                except BaseException as exc:
+                    errors.put(exc)
+                    outcomes.put(("error", type(exc).__name__))
+                finally:
+                    if token is not None:
+                        try:
+                            runtime.release_usage_watch_lock("claude", token)
+                        except BaseException as exc:
+                            errors.put(exc)
 
             with mock.patch.object(runtime.os, "open", side_effect=racing_open), \
                     mock.patch.object(runtime.os, "unlink", side_effect=racing_unlink), \
-                    mock.patch.object(runtime, "fleet_process_start_ref",
-                                      side_effect=lambda pid: "ref-%s" % pid):
+                    mock.patch.object(runtime, "read_json_diagnostic", side_effect=racing_read), \
+                    mock.patch.object(runtime, "fleet_process_start_ref", side_effect=lambda pid: "ref-%s" % pid):
                 threads = [threading.Thread(target=contender) for _ in range(2)]
                 for thread in threads:
                     thread.start()
-                deadline = time.monotonic() + 3
-                while not successes and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                for thread in threads:
-                    thread.join(timeout=2.5)
-                release.set()
-                for thread in threads:
-                    thread.join(timeout=1)
-            self.assertEqual((len(successes), len(failures)), (1, 1))
+                observed = []
+                collision_observed = False
+                try:
+                    for _ in threads:
+                        observed.append(outcomes.get(timeout=15))
+                    collision_observed = fresh_created.is_set() and second_unlinked.is_set()
+                finally:
+                    release.set()
+                    both_read_stale.abort()
+                    fresh_created.set()
+                    second_unlinked.set()
+                    for thread in threads:
+                        thread.join(timeout=15)
+                self.assertFalse(any(thread.is_alive() for thread in threads), "test leaked a contender")
+            self.assertTrue(errors.empty(), list(errors.queue))
+            self.assertEqual(sorted(kind for kind, _value in observed), ["acquired", "busy"])
+            self.assertTrue(collision_observed, "the intended inode collision was not exercised")
 
     def test_usage_watch_lock_busy_is_reported_without_traceback(self):
         path = os.path.join(REPO, "m8shift-runtime.py")
@@ -1900,45 +1922,112 @@ class TestMutexGuards(CLIBase):
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
         before = self.lock()["expires"]
         evidence = os.path.join(self.d, "keeper-env.json")
+        release = os.path.join(self.d, "child-may-exit")
         child = (
-            "import json,os,sys,time; "
+            "import json,os,sys,time\n"
             "json.dump({k: os.environ.get(k) for k in "
-            "('M8SHIFT_AGENT','M8SHIFT_ROOT','M8SHIFT_BIN')}, "
-            "open(sys.argv[1], 'w')); time.sleep(1.8)"
+            "('M8SHIFT_AGENT','M8SHIFT_ROOT','M8SHIFT_BIN')}, open(sys.argv[1], 'w'))\n"
+            "deadline=time.monotonic()+45\n"
+            "while not os.path.exists(sys.argv[2]):\n"
+            "    if time.monotonic()>deadline: raise SystemExit(9)\n"
+            "    time.sleep(.02)\n"
         )
-        kept = self.cw("lease-keeper", "claude", "--cadence-seconds", "1", "--",
-                       sys.executable, "-c", child, evidence)
-        self.assertEqual(kept.returncode, 0, kept.stdout + kept.stderr)
-        self.assertGreater(self.lock()["expires"], before)
-        with open(evidence, encoding="utf-8") as fh:
-            env = json.load(fh)
-        self.assertEqual(env["M8SHIFT_AGENT"], "claude")
-        self.assertEqual(os.path.realpath(env["M8SHIFT_ROOT"]), os.path.realpath(self.d))
-        heartbeat = os.path.join(
-            self.d, ".m8shift", "holder-heartbeats", "claude.json")
-        with open(heartbeat, encoding="utf-8") as fh:
-            beat = json.load(fh)
-        self.assertEqual((beat["source"], beat["cadence_seconds"], beat["protective"]),
-                         ("wrapper", 1, True))
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift.py", "lease-keeper", "claude",
+             "--cadence-seconds", "1", "--", sys.executable, "-c", child,
+             evidence, release], cwd=self.d, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        try:
+            heartbeat = os.path.join(self.d, ".m8shift", "holder-heartbeats", "claude.json")
+            deadline = time.monotonic() + 20
+            observed = None
+            while time.monotonic() < deadline:
+                self.assertIsNone(proc.poll(), "keeper exited before a live protective beat")
+                try:
+                    with open(heartbeat, encoding="utf-8") as fh:
+                        beat = json.load(fh)
+                    with open(evidence, encoding="utf-8") as fh:
+                        env = json.load(fh)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    beat = {}
+                if ((beat.get("source"), beat.get("cadence_seconds"), beat.get("protective"))
+                        == ("wrapper", 1, True) and self.lock()["expires"] > before):
+                    observed = beat
+                    break
+                time.sleep(.02)
+            self.assertIsNotNone(observed, "no live protective beat and refreshed lease within 20s")
+            self.assertEqual(env["M8SHIFT_AGENT"], "claude")
+            self.assertEqual(os.path.realpath(env["M8SHIFT_ROOT"]), os.path.realpath(self.d))
+            # Release the child only AFTER observing the promised live invariant.
+            # The final on-disk beat may legitimately be audit-only claim-refresh.
+            with open(release, "w", encoding="ascii") as fh:
+                fh.write("exit\n")
+            stdout, stderr = proc.communicate(timeout=15)
+            self.assertEqual(proc.returncode, 0, stdout + stderr)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate(timeout=5)
 
     def test_lease_keeper_stops_child_when_refresh_loses_authority(self):
         self.init()
         self.assertEqual(self.cw("claim", "claude").returncode, 0)
+        release = os.path.join(self.d, "child-may-handoff")
+        handoff = os.path.join(self.d, "child-handed-off")
+        escaped = os.path.join(self.d, "child-survived-authority-loss")
         child = (
-            "import os,subprocess,sys,time; "
-            "subprocess.run([sys.executable, os.environ['M8SHIFT_BIN'], "
-            "'append', 'claude', '--to', 'codex', '--done', 'child handed off'], "
-            "env=os.environ, check=True, stdout=subprocess.DEVNULL); time.sleep(5)"
+            "import os,subprocess,sys,time\n"
+            "deadline=time.monotonic()+45\n"
+            "while not os.path.exists(sys.argv[1]):\n"
+            "    if time.monotonic()>deadline: raise SystemExit(9)\n"
+            "    time.sleep(.02)\n"
+            "subprocess.run([sys.executable,os.environ['M8SHIFT_BIN'],'append','claude',"
+            "'--to','codex','--done','child handed off'],env=os.environ,check=True,"
+            "stdout=subprocess.DEVNULL)\n"
+            "open(sys.argv[2],'w').write('handed off')\n"
+            "time.sleep(30)\n"
+            "open(sys.argv[3],'w').write('unmanaged child survived')\n"
         )
-        started = time.monotonic()
-        stopped = self.cw("lease-keeper", "claude", "--cadence-seconds", "1", "--",
-                          sys.executable, "-c", child)
-        elapsed = time.monotonic() - started
-        self.assertEqual(stopped.returncode, 4, stopped.stdout + stopped.stderr)
-        self.assertLess(elapsed, 4.0, "authority loss did not stop the child promptly")
-        self.assertIn("claim --refresh failed", stopped.stderr)
-        self.assertIn("child stopped", stopped.stderr)
-        self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        proc = subprocess.Popen(
+            [sys.executable, "m8shift.py", "lease-keeper", "claude",
+             "--cadence-seconds", "1", "--", sys.executable, "-c", child,
+             release, handoff, escaped], cwd=self.d, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        try:
+            heartbeat = os.path.join(self.d, ".m8shift", "holder-heartbeats", "claude.json")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                self.assertIsNone(proc.poll(), "keeper exited before handoff was enabled")
+                try:
+                    with open(heartbeat, encoding="utf-8") as fh:
+                        beat = json.load(fh)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    beat = {}
+                if beat.get("source") == "wrapper" and beat.get("protective") is True:
+                    break
+                time.sleep(.02)
+            else:
+                self.fail("no protective beat before enabling handoff within 20s")
+            with open(release, "w", encoding="ascii") as fh:
+                fh.write("handoff\n")
+            stdout, stderr = proc.communicate(timeout=20)
+            self.assertEqual(proc.returncode, 4, stdout + stderr)
+            self.assertFalse(os.path.exists(escaped), "unmanaged child was allowed to continue")
+            self.assertIn("failed", stderr)
+            self.assertIn("child stopped", stderr)
+            self.assertEqual(self.lock()["state"], "AWAITING_CODEX")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate(timeout=5)
 
     def test_force_refused_on_fresh_lock(self):
         """NR-1: claim --force does not steal a non-stale lock."""
@@ -3273,6 +3362,7 @@ class TestReadCommands(CLIBase):
         payload = json.loads(fetched.stdout)
         self.assertEqual(payload, {
             "schema": "m8shift.turn/1", "turn": 1,
+            "source": "live", "session": self.lock()["session"],
             "agent": "claude", "to": "codex", "at": mock.ANY,
             "done": complete,
         })
@@ -13352,6 +13442,17 @@ class TestInstallerGateIntegrity(unittest.TestCase):
             with self.subTest(cls=cls.__name__):
                 self.assertNotIn(pattern, inspect.getsource(cls))
 
+    def test_testcase_classes_have_one_module_binding(self):
+        """Both pytest and unittest discover aliases of the same TestCase class."""
+        module = sys.modules[type(self).__module__]
+        bindings = {}
+        for name, obj in vars(module).items():
+            if (isinstance(obj, type) and issubclass(obj, unittest.TestCase)
+                    and obj.__module__ == module.__name__):
+                bindings.setdefault(id(obj), []).append(name)
+        duplicates = [names for names in bindings.values() if len(names) > 1]
+        self.assertEqual(duplicates, [], "duplicate TestCase bindings repeat every test")
+
 
 class TestInstallerVerifyDefault(unittest.TestCase):
     """install.sh verifies downloads by DEFAULT (mirrors install.ps1); --no-verify or a
@@ -13798,8 +13899,6 @@ class TestInstallerVerifyDefaultContinued(TestInstallerVerifyDefault):
         self.assertIn("install --git https://github.com/rtk-ai/rtk --tag v0.43.0 --locked rtk", calls)
 
 
-TestInstallerUpgradeDelegate = _InstallerUpgradeDelegateTests
-
 # ───────────────────────── multi-OS core install (#24) ──────────────────────
 
 class TestInstallerMultiOSCore(unittest.TestCase):
@@ -14178,7 +14277,7 @@ class TestDoctorInstall(CLIBase):
     OPTIONAL helper is info, so `doctor --lint` stays green on a
     healthy-but-minimal install. Never networks, never repairs, never writes."""
 
-    INSTALL_IDS = {"install.python_floor", "install.core_missing",
+    INSTALL_IDS = {"install.python_floor", "install.python_support", "install.core_missing",
                    "install.manifest_invalid", "install.manifest_drift",
                    "install.git_absent", "install.helper_absent"}
 
@@ -14214,7 +14313,26 @@ class TestDoctorInstall(CLIBase):
         for f in d["findings"]:
             if f["check"].startswith("install."):
                 self.assertEqual(f["severity"], "info", f)
-                self.assertIn(f["check"], ("install.helper_absent", "install.git_absent"))
+                self.assertIn(f["check"], ("install.helper_absent", "install.git_absent",
+                                         "install.python_support"))
+
+    def test_python_support_distinguishes_compatible_fallback_from_below_floor(self):
+        for version, compatible, supported in (
+                ((3, 11, 18), False, False), ((3, 12, 16), True, False),
+                ((3, 15, 2), True, True), ((3, 16, 0), True, False)):
+            with self.subTest(version=version):
+                with mock.patch.object(cowork.sys, "version_info", version):
+                    report = cowork._install_report()
+                self.assertEqual(report["python"]["ok"], compatible)
+                self.assertEqual(report["python"]["supported"], supported)
+                findings = {finding["check"]: finding for finding in
+                            cowork._install_doctor_findings(report)}
+                self.assertEqual("install.python_floor" in findings, not compatible)
+                self.assertEqual("install.python_support" in findings,
+                                 compatible and not supported)
+                if compatible and not supported:
+                    self.assertEqual(findings["install.python_support"]["severity"], "info")
+                    self.assertIn("3.15.x", findings["install.python_support"]["fix_hint"])
 
     def test_without_flag_no_install_key_and_no_install_findings(self):
         self.init()
@@ -27155,16 +27273,35 @@ class TestRFC081FleetUpgrade(ListenerCLIBase):
         self.releases = []
         self.targets = []
         self.live_listeners = []
+        # Registered before any target can start, including failed setup paths.
+        self.addCleanup(self.cleanup_fleet_resources)
 
-    def tearDown(self):
+    def cleanup_fleet_resources(self):
+        from _fleet_fixture_cleanup import owned_listener_processes
+        errors = []
         for root, agent in self.live_listeners:
-            subprocess.run([
-                sys.executable, os.path.join(root, "m8shift-runtime.py"),
-                "listener", "stop", "--agent", agent, "--grace", "0.1",
-            ], cwd=root, capture_output=True, text=True, timeout=15)
-        for path in self.targets + self.releases:
-            shutil.rmtree(path, ignore_errors=True)
-        super().tearDown()
+            try:
+                stopped = subprocess.run([
+                    sys.executable, "-B", os.path.join(root, "m8shift-runtime.py"),
+                    "--project-root", root, "listener", "stop", "--agent", agent,
+                    "--grace", "0.1",
+                ], cwd=root, capture_output=True, text=True, timeout=15)
+                if stopped.returncode != 0:
+                    errors.append("listener stop failed: root=%s agent=%s rc=%s" %
+                                  (root, agent, stopped.returncode))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                errors.append("listener stop failed: root=%s agent=%s error=%s" %
+                              (root, agent, type(exc).__name__))
+        # Do not erase the fixture before proving its resident process is gone.
+        # Scope the census to this test's roots; another parallel test is not ours.
+        leaked = owned_listener_processes(self.targets)
+        if leaked:
+            errors.append("fleet fixture process leak: pids=%s roots=%s" %
+                          (leaked, self.targets))
+        else:
+            for path in self.targets + self.releases:
+                shutil.rmtree(path, ignore_errors=True)
+        self.assertFalse(errors, "\n".join(errors))
 
     def make_release(self, version="4.1.0"):
         root = tempfile.mkdtemp(prefix="m8shift-fleet-upgrade-source-")
@@ -27203,13 +27340,15 @@ class TestRFC081FleetUpgrade(ListenerCLIBase):
         ], cwd=root, capture_output=True, text=True)
         self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
         if notify_agent:
+            # Starting may daemonize before failing or timing out. Own cleanup
+            # before invocation, not after its return-code assertion.
+            self.live_listeners.append((os.path.realpath(root), notify_agent))
             started = subprocess.run([
                 sys.executable, "m8shift-runtime.py", "listener", "start",
                 "--agent", notify_agent, "--notify-only", "--backend", "local",
                 "--poll-interval", "0.1",
             ], cwd=root, capture_output=True, text=True, timeout=15)
             self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            self.live_listeners.append((os.path.realpath(root), notify_agent))
         if paused:
             claim = subprocess.run([
                 sys.executable, "m8shift.py", "claim", "codex",

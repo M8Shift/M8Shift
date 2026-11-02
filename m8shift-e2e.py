@@ -43,7 +43,7 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.epilog = old
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
-VERSION = "4.2.0"
+VERSION = "4.5.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 LIVE_ENV = "M8SHIFT_LIVE_E2E"      # truthy => attempt Tier B

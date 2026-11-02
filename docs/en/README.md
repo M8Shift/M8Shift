@@ -15,6 +15,7 @@ M8Shift is **free and open source**, released under the
 | [macos-iterm2.md](macos-iterm2.md) | Recommended macOS/iTerm2 truecolour setup for the read-only dashboard. |
 | [m8shift-top-reference.md](m8shift-top-reference.md) | Every dashboard element, key, colour, fallback, and the public-safe placeholder capture. |
 | [windows.md](windows.md) | Windows installation and execution notes. |
+| [python-support.md](python-support.md) | One supported Python series, CI selection, and migration from older interpreters. |
 
 ## Reference
 
@@ -44,6 +45,13 @@ M8Shift is **free and open source**, released under the
 | [status-performance-investigation.md](status-performance-investigation.md) | Measured `status --json` scaling, interpreter/build comparison, and incremental turn-fold prototype evidence. |
 | [multi-agent-scratch-validation.md](multi-agent-scratch-validation.md) | Scratch evidence for N-agent routing, pinned listeners, concurrent Codex limits, degree-2 worktrees, and safe roster expansion. |
 | [rtk-shell-output-policy.md](rtk-shell-output-policy.md) | Usage policy for the optional RTK shell-output adapter: recommended modes, forbidden diff mode, self-declared RTK visibility, and `rtk discover` audit guidance. |
+
+## Release notes
+
+| Document | Purpose |
+|----------|---------|
+| [release-v4.5.0.md](release-v4.5.0.md) | Current integration candidate: included source changes, one maintained Python line, validation gates and upgrade boundaries. |
+| [release-v4.2.0.md](release-v4.2.0.md) | Historical v4.2.0 feature release and its measured validation. |
 
 ## Operator runbooks
 

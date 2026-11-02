@@ -64,7 +64,7 @@ class HelpfulArgumentParser(argparse.ArgumentParser):
         self.epilog = old
         self.exit(2, "\n%s: error: %s\n" % (self.prog, message))
 
-VERSION = "4.2.0"
+VERSION = "4.5.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 PRESENCE_SCHEMA = "m8shift.runtime.presence.v1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -384,6 +384,7 @@ LISTENER_MAX_BACKOFF_S = 300
 # #370: how long `listener start` waits for the detached lane to become
 # observable before it refuses to call the start a success.
 LISTENER_START_OBSERVE_TIMEOUT_S = 10.0
+LISTENER_RESTORE_TIMEOUT_ENV = "M8SHIFT_LISTENER_RESTORE_TIMEOUT"
 LISTENER_DEFAULT_POLL_S = 20.0
 LISTENER_DEFAULT_MAX_RETRIES = 3
 LISTENER_DETACHED_ENV = "M8SHIFT_LISTENER_DETACHED"
@@ -2600,7 +2601,19 @@ def update_presence(core, agent, session_id, mode, state, run_id="", stale_after
     return presence[agent], findings
 
 
-def reserve_turn_before_launch(agent):
+def listener_managed_instance_env(agent, generation=""):
+    """Environment binding one listener process incarnation to core mutations."""
+    suffix = (generation or os.environ.get(LISTENER_GENERATION_ENV, "") or
+              ("pid-%s" % os.getpid()))
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", suffix):
+        suffix = hashlib.sha256(suffix.encode("utf-8", "surrogateescape")).hexdigest()[:24]
+    env = os.environ.copy()
+    env["M8SHIFT_INSTANCE"] = "listener-%s-%s" % (agent, suffix)
+    env["M8SHIFT_INSTANCE_MODE"] = "managed"
+    return env
+
+
+def reserve_turn_before_launch(agent, instance_env=None):
     """#320 — take the pen BEFORE the expensive work, not after it.
 
     A listener and an interactive session of the same identity could both take
@@ -2610,11 +2623,12 @@ def reserve_turn_before_launch(agent):
     or steals: a refused claim means the work is held elsewhere and this lane
     simply does not launch."""
     result = subprocess.run([sys.executable, CORE_PATH, "claim", agent],
-                            cwd=HERE, capture_output=True, text=True, timeout=30)
+                            cwd=HERE, env=instance_env,
+                            capture_output=True, text=True, timeout=30)
     return result.returncode == 0, (result.stderr or result.stdout).strip()
 
 
-def release_unused_reservation(agent, pre_turn):
+def release_unused_reservation(agent, pre_turn, instance_env=None):
     """Give the pen back when the work we reserved it for did not happen.
 
     Two independent readings of the reverted first attempt agreed that releasing
@@ -2643,7 +2657,7 @@ def release_unused_reservation(agent, pre_turn):
     result = subprocess.run(
         [sys.executable, CORE_PATH, "unclaim", agent,
          "--reason", "listener reservation abandoned: the reserved turn was not authored"],
-        cwd=HERE, capture_output=True, text=True, timeout=30)
+        cwd=HERE, env=instance_env, capture_output=True, text=True, timeout=30)
     return result.returncode == 0
 
 
@@ -9955,6 +9969,14 @@ def cmd_doctor(args):
         run_core_json("status", "--json")
     except Exception as e:  # noqa: BLE001 - report as diagnostic, do not traceback
         findings.append({"severity": "error", "check": "core.status", "message": str(e)})
+    kit_check = getattr(core, "_kit_doctor_findings", None)
+    if callable(kit_check):
+        try:
+            findings.extend(kit_check())
+        except Exception as exc:  # noqa: BLE001 - doctor remains diagnostic
+            findings.append({"severity": "warning", "check": "runtime.kit",
+                             "message": "core kit diagnostics unavailable: %s" %
+                                        type(exc).__name__})
     if os.path.isdir(RUNTIME_DIR) and not gitignored_runtime():
         findings.append({
             "severity": "warning",
@@ -10181,7 +10203,7 @@ def _core_ttl_minutes():
 
 
 def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
-                           now_utc=None):
+                           now_utc=None, instance_env=None):
     """One liveness tick during a live child turn. Returns a STRUCTURED result
     (Codex PR-B review B1 — refresh and heartbeat outcomes are independent;
     a refresh failure or exception NEVER suppresses the heartbeat attempt):
@@ -10203,7 +10225,8 @@ def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
         return result                    # neutral: nothing to protect
     result["working_window"] = True
     runner = run or (lambda argv: subprocess.run(
-        argv, cwd=HERE, capture_output=True, text=True, timeout=30))
+        argv, cwd=HERE, env=instance_env,
+        capture_output=True, text=True, timeout=30))
     expires = parse_utc(lk.get("expires") or "")
     now_dt = now_utc or now()
     if expires is not None and (expires - now_dt).total_seconds() \
@@ -10231,7 +10254,7 @@ def listener_liveness_tick(agent, cadence_s, run=None, lock_fields=None,
     return result
 
 
-def supervise_child_with_liveness(proc, agent, poll_s, say):
+def supervise_child_with_liveness(proc, agent, poll_s, say, instance_env=None):
     """Wait for a child runner while emitting liveness (RFC 049 PR B): a
     protective beat every min(poll, 60)s and the early refresh at ~TTL/2.
     Returns the child's exit code. Logging contract (Codex PR-B review H2):
@@ -10248,7 +10271,7 @@ def supervise_child_with_liveness(proc, agent, poll_s, say):
             return rc
         if time.monotonic() >= next_beat:
             try:
-                res = listener_liveness_tick(agent, cadence)
+                res = listener_liveness_tick(agent, cadence, instance_env=instance_env)
             except Exception as exc:    # noqa: BLE001 — belt: never kill supervision
                 res = None
                 if not episode["heartbeat"]:
@@ -10724,6 +10747,76 @@ def run_service_argv(argv):
     return f"{' '.join(argv)} → rc={r.returncode}" + (f": {detail}" if detail else "")
 
 
+def probe_service_backend(plan):
+    """Read-only health probe: installation success is not startup success."""
+    backend = plan["backend"]
+    label = plan["label"]
+    if backend == "launchd":
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        argv = ["launchctl", "print", f"gui/{uid}/{label}"]
+    elif backend == "systemd":
+        argv = ["systemctl", "--user", "is-active", f"{label}.service"]
+    elif backend == "windows":
+        argv = ["schtasks", "/Query", "/TN", label, "/FO", "LIST", "/V"]
+    else:
+        return {"healthy": False, "terminal": True, "exit_code": None,
+                "detail": "unsupported service backend"}
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"healthy": False, "terminal": True, "exit_code": None,
+                "detail": "%s health probe failed: %s" % (argv[0], type(exc).__name__)}
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    first = output.splitlines()[0].strip() if output else ""
+    if backend == "launchd":
+        pid = re.search(r"(?m)^\s*pid\s*=\s*([1-9][0-9]*)\s*$", output)
+        exited = re.search(r"(?mi)^\s*last exit (?:code|status)\s*=\s*(-?[0-9]+)\s*$",
+                           output)
+        exit_code = int(exited.group(1)) if exited else None
+        healthy = result.returncode == 0 and pid is not None and exit_code in (None, 0)
+        return {"healthy": healthy,
+                "terminal": healthy or result.returncode != 0 or exit_code not in (None, 0),
+                "exit_code": exit_code,
+                "detail": "launchctl health rc=%s pid=%s exit=%s" %
+                          (result.returncode, pid.group(1) if pid else "-",
+                           exit_code if exit_code is not None else "-")}
+    if backend == "systemd":
+        state = first.casefold()
+        healthy = result.returncode == 0 and state == "active"
+        return {"healthy": healthy,
+                "terminal": healthy or state in {"failed", "inactive", "deactivating"}
+                            or result.returncode not in (0, 3),
+                "exit_code": None,
+                "detail": "systemd health rc=%s state=%s" %
+                          (result.returncode, first or "unknown")}
+    running = bool(re.search(r"(?mi)^\s*status\s*:\s*running\s*$", output))
+    return {"healthy": result.returncode == 0 and running,
+            "terminal": True, "exit_code": None,
+            "detail": "task health rc=%s running=%s" %
+                      (result.returncode, "true" if running else "false")}
+
+
+def wait_for_service_backend(plan, timeout=LISTENER_START_OBSERVE_TIMEOUT_S):
+    """Wait boundedly for asynchronous service startup, never infer health."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        health = probe_service_backend(plan)
+        if health["healthy"] or health["terminal"] or time.monotonic() >= deadline:
+            return health
+        time.sleep(0.05)
+
+
+def service_start_failure_message(plan, health, facts):
+    message = ("%s service %s did not become healthy: %s" %
+               (plan["backend"], plan["label"], health["detail"]))
+    if (plan["backend"] == "launchd" and health.get("exit_code") == 78
+            and facts.get("platform") == "darwin" and facts.get("protected_folder")):
+        message += (". exit 78 may indicate macOS TCC denied background access "
+                    "to the protected project folder; use the local backend or "
+                    "grant appropriate service access")
+    return message
+
+
 def listener_backend_record_path(agent):
     return os.path.join(LISTENERS_DIR, f"{agent}.backend.json")
 
@@ -10745,7 +10838,7 @@ def write_listener_backend_record(agent, doc):
     os.replace(tmp, path)
 
 
-def install_service_backend(agent, plan):
+def install_service_backend(agent, plan, facts=None):
     """Write the generated definition, record it, then drive the service manager
     with the plan's explicit argv steps. A required-step failure is persisted in
     the backend record (`doctor` → listener.backend_failed): the operator must
@@ -10773,6 +10866,13 @@ def install_service_backend(agent, plan):
             print(f"m8shift-runtime: {plan['backend']} service install failed: {detail}",
                   file=sys.stderr)
             return 1
+    health = wait_for_service_backend(plan)
+    if not health["healthy"]:
+        detail = service_start_failure_message(plan, health, facts or {})
+        record["last_error"] = detail[:300]
+        write_listener_backend_record(agent, record)
+        print("m8shift-runtime: " + detail, file=sys.stderr)
+        return 1
     return 0
 
 
@@ -10819,6 +10919,25 @@ def backend_service_state(record):
     else:
         return "unknown"
     return "loaded" if run_service_argv(argv) == "" else "not-loaded"
+
+
+def listener_start_observe_timeout(restoring=False):
+    """Return the bounded wait for a detached listener state file.
+
+    Normal starts keep the stable product timeout. A restored plan may use a
+    test/operator override; invalid, non-finite and non-positive values fail
+    back to the stable bound rather than disabling observation.
+    """
+    if not restoring:
+        return LISTENER_START_OBSERVE_TIMEOUT_S
+    raw = os.environ.get(LISTENER_RESTORE_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return LISTENER_START_OBSERVE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return LISTENER_START_OBSERVE_TIMEOUT_S
+    return value if math.isfinite(value) and value > 0 else LISTENER_START_OBSERVE_TIMEOUT_S
 
 
 def listener_log_threshold():
@@ -11474,10 +11593,18 @@ def write_listener_state(agent, *, phase, consecutive_failures,
         # an existing state file without them is distinguishable from a current
         # one -- absence is reported, never migrated away silently.
         "session": current_relay_session(),
-        "started_at": previous.get("started_at") or iso(),
-        "updated_at": iso(),
     }
-    if generation and isinstance(process_pid, int) and process_pid > 0:
+    timestamp = iso()
+    has_process_identity = bool(generation) and isinstance(process_pid, int) and process_pid > 0
+    identity_changed = has_process_identity and (
+        generation != previous.get("generation")
+        or process_pid != previous.get("process_pid")
+    )
+    previous_started_at = previous.get("started_at") or ""
+    doc["first_started_at"] = previous.get("first_started_at") or previous_started_at or timestamp
+    doc["started_at"] = timestamp if identity_changed else previous_started_at or timestamp
+    doc["updated_at"] = timestamp
+    if has_process_identity:
         doc["generation"] = generation
         doc["process_pid"] = process_pid
     if reason:
@@ -12402,7 +12529,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             authors_a_turn = not notify_only and not (
                 (profile.get("review_delivery") or "none") == "artifact")
             if not resume and authors_a_turn:
-                ok, why = reserve_turn_before_launch(agent)
+                ok, why = reserve_turn_before_launch(agent, instance_env)
                 if not ok:
                     say(f"{agent}: this turn is reserved elsewhere "
                         f"({(why.splitlines()[0][:100] if why else 'claim refused')}) "
@@ -12420,7 +12547,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             say(f"{agent}: state={state} ({wake}) → launching one runner turn"
                 f"{' (resume-working)' if resume else ''}, run {run_id}.")
             try:
-                child = subprocess.Popen(argv, cwd=HERE)
+                child = subprocess.Popen(argv, cwd=HERE, env=instance_env)
             except OSError as e:
                 say(f"{agent}: runner launch failed ({type(e).__name__}; "
                     "listener_runner_launch_error).")
@@ -12430,11 +12557,11 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             else:
                 # RFC 049 PR B: the listener is the managed liveness producer
                 # while the child turn runs (protective beats + early refresh).
-                rc = supervise_child_with_liveness(child, agent, poll, say)
+                rc = supervise_child_with_liveness(child, agent, poll, say, instance_env)
             # One release point for every non-appending exit: launch failure, run
             # failure, HALT. It acts only on our own unadvanced hold, so a turn the
             # provider actually authored is never undone.
-            if reserved and release_unused_reservation(agent, reserved_turn):
+            if reserved and release_unused_reservation(agent, reserved_turn, instance_env):
                 say(f"{agent}: reservation released — the reserved turn was not "
                     "authored, so the pen is back where another producer can take it.")
             last_run_id = run_id
@@ -12941,13 +13068,14 @@ def cmd_listener_start(args):
             max_retries=args.max_retries, max_backoff=args.max_backoff,
             owns_log=supervised, notify_only=getattr(args, "notify_only", False),
             generation=generation)
+    instance_env = listener_managed_instance_env(agent, generation)
     paths = listener_paths(agent)
     if backend in LISTENER_SERVICE_BACKENDS:
         # OS service lifecycle (RFC 047 Phase D): generate the definition under
         # .m8shift/runtime/listeners/, then drive the service manager with the
         # plan's explicit argv steps. The payload is the SAME foreground loop.
         plan = backend_install_plan(backend, agent, args, runner_path, profile)
-        rc = install_service_backend(agent, plan)
+        rc = install_service_backend(agent, plan, facts)
         if rc != 0:
             return rc
         print(f"✓ listener installed for {agent} (backend {backend}, service {plan['label']})")
@@ -12965,8 +13093,9 @@ def cmd_listener_start(args):
     # bounded, and say plainly when the lane does not appear.
     observed = False
     died_on_its_own = False
-    deadline = time.time() + LISTENER_START_OBSERVE_TIMEOUT_S
-    while time.time() < deadline:
+    observe_timeout = listener_start_observe_timeout(restore_plan is not None)
+    deadline = time.monotonic() + observe_timeout
+    while time.monotonic() < deadline:
         if os.path.exists(paths["state"]):
             observed = True
             break
@@ -12998,7 +13127,7 @@ def cmd_listener_start(args):
         if reaped:
             remove_listener_pid(agent)
         print(f"m8shift-runtime: listener for {agent} was launched (pid {pid}) but its "
-              f"state did not appear within {LISTENER_START_OBSERVE_TIMEOUT_S:g}s; "
+              f"state did not appear within {observe_timeout:g}s; "
               + ("the process was stopped so no unmanaged lane is left behind"
                  if reaped else
                  f"AND pid {pid} could not be stopped — a lane may be running "

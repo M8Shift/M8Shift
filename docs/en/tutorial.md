@@ -20,7 +20,7 @@ it. If something looks different, read the **If you see something else** note.
 
 | Need | Value |
 |------|-------|
-| Tools | A terminal, Python 3, and the single file `m8shift.py` |
+| Tools | A terminal, Python 3.15.x, and the single file `m8shift.py` |
 | Time | About 10 minutes |
 
 ---

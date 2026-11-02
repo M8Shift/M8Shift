@@ -4,10 +4,10 @@
 # `pip download <name>==<v> -d /tmp/d && pip hash /tmp/d/*`).
 # pytest 9.1.1 needs Python >= 3.10 and pulls pygments, which is why the pin sat
 # at 8.3.5 until the floor moved to 3.12 (#252: GHSA-6w46-j5rx-g56g has no 8.x
-# backport). Both matrix legs still run the SAME pytest — that invariant is why
-# no environment marker selects a version here.
-# At floor 3.12 the `python_version < "3.11"` conditionals are dead: exceptiongroup
-# and tomli are no longer reachable and were removed rather than left as decoration.
+# backport). CI now uses the single maintained Python minor in .python-version;
+# no environment marker selects a different pytest for older interpreters.
+# Python 3.15 makes the `python_version < "3.11"` conditionals unreachable:
+# exceptiongroup and tomli are not part of this test dependency set.
 
 pytest==9.1.1 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c \

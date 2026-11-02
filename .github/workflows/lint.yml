@@ -9,19 +9,21 @@ name: Lint
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/4.5.0-integration]
     paths:
       - '**/*.py'
       - '**/*.sh'
       - 'hooks/**'
       - '.github/workflows/**'
+      - '.python-version'
   pull_request:
-    branches: [main]
+    branches: [main, release/4.5.0-integration]
     paths:
       - '**/*.py'
       - '**/*.sh'
       - 'hooks/**'
       - '.github/workflows/**'
+      - '.python-version'
   workflow_dispatch: {}
 
 permissions:
@@ -74,7 +76,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.x"
+          python-version-file: .python-version
+          check-latest: true
       - name: Install Bandit
         # Version-pinned dev tool; the project itself stays stdlib-only at
         # runtime — Bandit is CI-only and never imported by the shipped code.

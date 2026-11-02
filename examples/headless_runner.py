@@ -90,7 +90,7 @@ class RunnerInfrastructureError(Exception):
 
 LOCK_BEGIN = "<!-- M8SHIFT:LOCK:BEGIN -->"
 LOCK_END = "<!-- M8SHIFT:LOCK:END -->"
-VERSION = "4.2.0"
+VERSION = "4.5.0"
 RUNTIME_EVENT_SCHEMA = "m8shift.runtime.event.v1"
 RUN_PLAN_SCHEMA = "m8shift.headless.run_plan.v1"
 HANDSHAKE_SCHEMA = "m8shift.runner.handshake.v1"
@@ -913,11 +913,12 @@ def normalize_env_allowlist(raw):
 def resolve_argv(argv):
     if isinstance(argv, str):
         raise SystemExit("command argv must be an array, not a shell string")
-    if not isinstance(argv, list) or not all(isinstance(arg, str) and arg for arg in argv):
+    if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) and arg for arg in argv):
         raise SystemExit("command argv must be a non-empty list of non-empty strings")
     exe = argv[0]
     if any(ch.isspace() for ch in exe):
-        raise SystemExit("argv[0] must be one executable token, not a shell command")
+        raise SystemExit("--cmd expects an executable followed by separate arguments, not a quoted "
+                         "shell command; pass sh -c explicitly or use a script for pipes/redirection")
     if os.path.isabs(exe):
         if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
             raise RunnerInfrastructureError("provider_executable_unavailable")
@@ -1028,12 +1029,18 @@ def expected_post_run(me, lk, run_id="", relay_text=None):
 
 
 def resume_eligible(args, me, me_working, lk):
-    """RFC 047 PR 2: an explicit --resume-working run may ALSO start from this
-    agent's own WORKING lock (holder == agent). The pen is already held, so no
-    claim happens — the provider finishes the work and appends/dones."""
-    return bool(args.resume_working and lk
-                and lk.get("state", "") == me_working
-                and lk.get("holder", "") == me)
+    """A resumed WORKING window must belong to this exact runner instance."""
+    eligible = bool(args.resume_working and lk
+                    and lk.get("state", "") == me_working
+                    and lk.get("holder", "") == me)
+    if not eligible:
+        return False
+    holder_instance = lk.get("holder_instance", "") or ""
+    caller_instance = os.environ.get("M8SHIFT_INSTANCE", "") or ""
+    if (holder_instance or caller_instance) and holder_instance != caller_instance:
+        log("resume-working refused: M8SHIFT_INSTANCE does not match the held work window.")
+        raise SystemExit(5)
+    return True
 
 
 def make_run_plan(args, run_id, me, lk, resumed=False, relay_text=None):
@@ -1343,6 +1350,14 @@ def child_env_for_plan(plan, lk, m8shift_path):
         # A provider pin is injected directly and wins over any ambient allowlisted
         # declaration. RFC 056 still records it as self-declared/unverified provenance.
         env["M8SHIFT_AGENT_MODEL"] = plan["agent_model"]
+    instance = (lk.get("holder_instance")
+                if lk.get("holder") == plan.get("agent") else "") or                os.environ.get("M8SHIFT_INSTANCE", "") or ""
+    if instance:
+        env["M8SHIFT_INSTANCE"] = str(instance)
+        env["M8SHIFT_INSTANCE_MODE"] = str(
+            lk.get("holder_mode")
+            or os.environ.get("M8SHIFT_INSTANCE_MODE", "")
+            or "managed")
     return env
 
 
@@ -1511,9 +1526,14 @@ def main():
             "  the normal table (authored newer turn => advanced; still WORKING same turn =>\n"
             "  stuck_working). The marker is never exported for AWAITING/IDLE launches.\n"
             "\n"
+            "--cmd consumes separate argv tokens; it never evaluates a shell string.\n"
+            "Keep runner options before --cmd. Quote individual arguments, not the whole command.\n"
+            "For pipelines/redirection, invoke an explicit shell or a script.\n"
+            "\n"
             "examples:\n"
             "  headless_runner.py agent-a --once --cmd codex exec --full-auto\n"
             "  headless_runner.py agent-b --start-on-idle --cmd claude -p\n"
+            "  headless_runner.py agent-a --once --cmd sh -c \"command-one | command-two\"\n"
         ),
     )
     p.add_argument("--version", action="version", version=f"headless_runner.py {VERSION}")
@@ -1559,7 +1579,8 @@ def main():
     p.add_argument("--dry-run", action="store_true",
                    help="validate configuration, print the command argv as JSON, then exit")
     p.add_argument("--cmd", metavar="COMMAND", nargs=argparse.REMAINDER, required=True,
-                   help="the headless agent command (static argv; runs ONE turn)")
+                   help="executable followed by separate argument tokens, not one quoted shell string; "
+                        "for pipes/redirection use explicit sh -c or a script (runs ONE turn)")
     if len(sys.argv) == 1:
         p.print_help()
         return 0

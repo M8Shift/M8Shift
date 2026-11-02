@@ -1,5 +1,44 @@
 # Changelog
 
+## v4.5.0 — integration candidate (unreleased)
+
+- **Advisory decision engine and native routing bridge (#560).** Add an optional
+  deterministic risk/effort policy and a read-only bridge to the shipped runtime's
+  model catalog. Capability, context, tier and effort checks distinguish resolved,
+  blocked and review-required plans. Every result remains advisory with
+  `launch=false`; no provider, pen, approval or merge authority is granted.
+- **Session-aware turn lookup (#552).** Select a turn within its relay session and
+  refuse ambiguous legacy matches rather than returning another session's turn.
+- **Clearer command interfaces (#548, #555, #556).** TOP now answers `--version`;
+  `append` documents file-path semantics and accepts `--body-file`; the headless
+  runner diagnoses quoted shell strings while retaining its explicit argv contract.
+- **Deterministic lifecycle test witnesses (#529, #540, #561).** Register and reap
+  only fixture-owned fleet children, synchronize the lease-keeper exit witness,
+  and force the intended stale-lock race instead of relying on scheduling.
+  These changes retain the production locking semantics and test assertions.
+- **No duplicate upgrade-test collection.** Remove the second module binding of
+  the installer-upgrade TestCase: its four original scenarios now run once each,
+  with unchanged assertions. A cheap class-binding guard prevents this duplication
+  from returning under pytest or unittest.
+- **One maintained Python line.** CI and documented development target CPython
+  3.15.x. All Python workflows read `.python-version` and select its latest stable
+  bugfix; one full-suite job replaces the 3.12/3.14 matrix. Installers prefer
+  3.15 and warn on compatible fallback interpreters; `doctor --install` separates
+  minimum compatibility from support. The Python 3.12 technical execution floor
+  is retained, without a separate CI or maintenance promise. No new interpreter-
+  version refusal is introduced.
+- **Release identity and static-analysis clarity.** Synchronize the core,
+  companions, runners and current documentation at 4.5.0. Make the decision CLI's
+  terminating error branch explicit and explain the bridge's child-exit cleanup
+  race; refresh the shipped manifest from the resulting bytes.
+
+This candidate consolidates source PRs #6–#13 on the existing public v4.2.0
+lineage. It does not include the entire separate local backlog or private Forge
+history. Final CI, review and main-merge authorization apply to the final candidate
+SHA. See [release notes](docs/en/release-v4.5.0.md) for scope and upgrade boundaries.
+Protocol impact: **no** for this version synchronization and interpreter policy;
+existing LOCK states, one-pen authority and relay format are retained.
+
 ## v4.2.0 — 2026-08-23
 
 - **Loaded-versus-on-disk TOP identity (#334 / RFC 069 + RFC 081).** An

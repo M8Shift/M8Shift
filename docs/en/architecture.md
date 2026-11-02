@@ -1,8 +1,8 @@
 # 🏛️ Architecture Document — M8Shift
 
-> **Status**: `Current` · **Version**: protocol v1 · **Review**: 2026-07-14
+> **Status**: `Current` · **Version**: source 4.5.0 / protocol v1 · **Source sync**: 2026-10-28
 >
-> This architecture reflects the current v3 model: active roster of ≥2 agents, one
+> This architecture reflects the current v4 model: active roster of ≥2 agents, one
 > core pen (degree-1), append-only/read-only side ledgers, session history, i18n packs,
 > holder liveness (RFC 049: protective `heartbeat` beats, two-phase force recovery,
 > and A7 claim-on-pickup), a read-only usage advisory in the core display (RFC 051,
@@ -14,6 +14,12 @@
 > `m8shift-runtime.py` companion for presence/inbox/progress/listener/usage sidecars.
 > For command-level rules, see [protocol.md](protocol.md) and
 > [specification.md](specification.md).
+
+The 4.5.0 candidate adds the optional decision engine and its native-routing
+bridge outside the core. They read explicit task and model evidence, return
+advisory plans, and never acquire the pen or authorize provider execution.
+The [release notes](release-v4.5.0.md) distinguish that included scope from the
+separate backlog and private-branch porting work.
 
 This document follows the multi-view *Architecture Document* template
 (`architecture-document-template`, B. Florat, CC BY-SA 4.0), adapted to a
@@ -74,7 +80,8 @@ the human maintainer remains the arbiter. See [philosophy.md](philosophy.md).
 ### 1.4 Constraints
 
 - **A single state file**, readable by eye and by `grep`, versionable in clear text.
-- **Zero dependencies**: Python 3.12+ stdlib only; no installation.
+- **Zero dependencies**: Python 3.15.x stdlib only; no installation. Older
+  interpreters above the 3.12 technical floor are unmaintained compatibility fallbacks.
 - **Portable**: any project, any FS, paths with spaces/accents.
 - **N agents, one core writer** by design (`init --agents a,b,c…`); true parallel
   authoring is opt-in through isolated worktrees, not through the core relay.
@@ -491,7 +498,7 @@ remains a passive single-file relay. The implementation contract is tracked in
 
 | Item | Choice |
 |------|--------|
-| Language | Python **3.12+** |
+| Language | Python **3.15.x**, the sole maintained series; 3.12 remains the technical compatibility floor. |
 | Dependencies | **No Python dependencies** (stdlib: `argparse`, `contextlib`, `datetime`, `os`, `re`, `subprocess`, `sys`, `tempfile`, `time`); Git optional, to preserve a case rename in the index |
 | Distribution | **a single file** `m8shift.py` (embedded templates) |
 | Tests | stdlib `unittest` — `tests/test_m8shift.py`, `tests/test_worktree.py` |

@@ -5,7 +5,10 @@ for normal use — clone, copy `m8shift.py` into a repo, run it. Keep it that wa
 
 ## Ground rules
 
-- **Stdlib only.** No third-party dependencies, ever. The tool must run on a bare Python 3.12+.
+- **Stdlib only.** No third-party runtime dependencies. Python **3.15.x** is the
+  sole maintained and CI-tested interpreter series, selected by `.python-version`.
+  Use its latest stable bugfix release and the normal GIL build. The existing
+  3.12 technical floor remains a compatibility fallback, not another support lane.
 - **One file.** `m8shift.py` stays self-contained and runnable as-is.
 - **English is the source of truth.** The committed `m8shift.py` is **English-only**: it is the
   canonical source for every message key and every template. Other languages live as *packs*
@@ -15,6 +18,12 @@ for normal use — clone, copy `m8shift.py` into a repo, run it. Keep it that wa
   Do not create localized documentation trees (e.g. `docs/fr/`); the `i18n/<lang>/` packs
   drive the localized single-file build, not localized docs.
 - **Tests must stay green.** `python3 -m unittest discover -s tests`.
+
+All Python CI jobs read `.python-version`; the full suite runs once, with no
+multi-version matrix. Activate a Python 3.15 environment before running the local
+commands below. Older compatible interpreters are not proactively broken, but
+they receive no separate CI, backports, or compatibility promise. See
+[Python support and migration](docs/en/python-support.md).
 
 ## Language policy
 

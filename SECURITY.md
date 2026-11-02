@@ -24,6 +24,12 @@ Only the latest tagged release and `main` receive security fixes. There is no
 long-term-support branch. `X.Y.Z` releases are cut from `main`; fixes land on
 `main` and in the next tag.
 
+The 4.5.0 integration candidate targets one maintained interpreter line,
+CPython 3.15.x, as described in the [release notes](docs/en/release-v4.5.0.md).
+An integration branch is not a released security-support line; release status
+continues to follow the published tags. Advisory routing adds no authority to
+launch providers, write relay state, grant approvals or merge changes.
+
 ## Security model (what the tool guarantees)
 
 M8Shift's charter bounds the surface — several classes of vulnerability are

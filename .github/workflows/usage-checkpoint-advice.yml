@@ -1,0 +1,21 @@
+name: Usage checkpoint advice
+on:
+  pull_request:
+    branches: [release/4.5.0-integration]
+    paths:
+      - m8shift-usage-advisor.py
+      - tests/test_usage_checkpoint_advisor.py
+      - .github/workflows/usage-checkpoint-advice.yml
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  checkpoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version-file: .python-version
+      - run: python -m unittest discover -s tests -p 'test_usage_checkpoint_advisor.py' -v

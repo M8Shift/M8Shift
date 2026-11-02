@@ -1,5 +1,5 @@
 # CI lint (Bandit) requirements — full transitive closure, hash-pinned.
-# Lint job runs on python "3.x" (bandit needs >=3.10). Same regeneration
+# Lint uses the maintained Python minor from .python-version. Same regeneration
 # procedure as requirements-ci-test.txt.
 
 bandit==1.9.4 \

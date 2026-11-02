@@ -203,3 +203,33 @@ Tests (`tests/`): [`tests/test_m8shift.py`](../../../tests/test_m8shift.py) — 
 core relay suite covering init, claim/append mutex, turns/archive, ledgers, memory,
 tasks, cooperative turn requests, pause/resume/cooldown, session reports, and the
 read-only `doctor`/`contract` checks.
+
+## Lease-keeper test evidence (#540)
+
+The integration fixtures keep their child alive until the test has observed a
+protective wrapper heartbeat and refreshed lease. A fixed child sleep is not a
+synchronization mechanism. After exit, the last heartbeat file may legitimately
+contain an audit-only claim refresh; its final source is not the live invariant.
+Deterministic witnesses separately force an exit during refresh, an exit before
+the first beat, and authority loss. A protective beat after an observed exit
+makes those witnesses fail. Every fixture has bounded waits and explicit child
+cleanup. Protocol impact: no; these changes strengthen test synchronization
+without changing lease or heartbeat semantics.
+
+## Point lookup across archived sessions (#552)
+
+`turn N [--json]` searches the living journal first. An archived turn with the
+same number cannot shadow a live handoff. Only when the living journal has no
+match is the archive read. More than one match in the selected source is an
+explicit ambiguity (exit 4), never an arbitrary oldest-turn choice. An absent
+turn returns 3; a negative number returns 2; an unreadable archive returns 1.
+
+JSON adds `source: live|archive` and `session`. Live results carry the current
+LOCK session; legacy archive results carry `session: null` because the archive
+does not establish session identity. Plain-text archive results emit the same
+limitation on stderr. These are read-only projections; no historical record is
+rewritten or assigned an invented session. `log --all` and session-history
+folding are unchanged and are not certified by this point-lookup correction.
+
+Protocol impact: no relay mutation or state transition change. The JSON fields
+are additive and ambiguous historical point lookups now fail closed.

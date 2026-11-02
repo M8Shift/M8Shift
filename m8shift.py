@@ -144,7 +144,7 @@ def scaffold_write_gate(confirm_script_dir=False, script_dir=None, command="init
 LOCK_TIMEOUT = 10        # s: max wait to acquire the internal lock
 LOCK_STALE_S = 60        # s: beyond this, a lock file is deemed abandoned
 TTL_MIN = 30
-VERSION = "4.2.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
+VERSION = "4.5.0"       # m8shift.py script version (bump on release). Surfaced by `--version`,
                          # by `status`/`recap`, and stamped into the M8SHIFT.md banner — so a
                          # dogfooding COPY of this file is checkable against the source it was
                          # taken from (run `m8shift.py --version` in each location and compare).
@@ -163,6 +163,10 @@ AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
 FIELD_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")   # advisory turn-field key: snake_case / x_*
 MODEL_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 RUN_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+INSTANCE_MODES = frozenset(("managed", "manual"))
+INSTANCE_MISMATCH_MESSAGE = (
+    "refused: M8SHIFT_INSTANCE does not match the active holder instance for {agent}."
+)
 AGENT_EFFORTS = frozenset(("minimal", "low", "medium", "high", "xhigh", "max", "ultra"))
 # Turn fields the engine writes itself (routing) — an advisory field may not shadow them.
 ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff",
@@ -2048,6 +2052,15 @@ def validate_relay_text(text):
         errs.append(f"turn={lk.get('turn')!r}")
     if lk.get("holder") not in set(roster) | {"none"}:
         errs.append(f"holder={lk.get('holder')!r}")
+    holder_instance = lk.get("holder_instance")
+    holder_mode = lk.get("holder_mode")
+    if holder_instance is not None or holder_mode is not None:
+        if (not holder_instance or RUN_ID_RE.fullmatch(holder_instance) is None
+                or holder_mode not in INSTANCE_MODES
+                or not lk.get("state", "").startswith("WORKING_")
+                or lk.get("holder") in (None, "none")):
+            errs.append("holder_instance=%r,holder_mode=%r" %
+                        (holder_instance, holder_mode))
     # validate against KNOWN_LANGS (a curated superset), NOT the build-local LANGS, so a file
     # whose lang isn't bundled here is still loadable (resolve_lang downgrades it to en).
     if lk.get("lang") not in (None, *KNOWN_LANGS):
@@ -2273,6 +2286,46 @@ def _replace_lock_agents_value(text, agents):
             + text[i + match.end():])
 
 
+def claim_instance_declaration():
+    """Return the optional caller instance declaration, validated before writes."""
+    token = (os.environ.get("M8SHIFT_INSTANCE", "") or "").strip()
+    if token and RUN_ID_RE.fullmatch(token) is None:
+        sys.exit("refused: M8SHIFT_INSTANCE must use the run-id grammar.")
+    if not token:
+        return "", ""
+    mode = (os.environ.get("M8SHIFT_INSTANCE_MODE", "") or "").strip()
+    return token, mode if mode in INSTANCE_MODES else "unknown"
+
+
+def bind_holder_instance(lk, token, mode):
+    """Bind a new WORKING window; keep legacy unbound windows byte-compatible."""
+    if not token:
+        lk.pop("holder_instance", None)
+        lk.pop("holder_mode", None)
+        return
+    lk["holder_instance"] = token
+    lk["holder_mode"] = mode
+
+
+def clear_holder_instance(lk):
+    lk.pop("holder_instance", None)
+    lk.pop("holder_mode", None)
+
+
+def holder_instance_mismatch(lk, agent):
+    if (lk.get("holder") != agent
+            or lk.get("state") != "WORKING_%s" % agent.upper()):
+        return False
+    caller = (os.environ.get("M8SHIFT_INSTANCE", "") or "").strip()
+    holder = lk.get("holder_instance", "") or ""
+    return bool(caller or holder) and caller != holder
+
+
+def guard_holder_instance(lk, agent):
+    if holder_instance_mismatch(lk, agent):
+        sys.exit(INSTANCE_MISMATCH_MESSAGE.format(agent=agent))
+
+
 def cmd_roster_add(args):
     """Add one active identity while preserving the current work window bytewise."""
     raw_agent = (args.agent or "").strip()
@@ -2286,6 +2339,7 @@ def cmd_roster_add(args):
         text = load_or_die()
         actor = need_agent(by)
         lk = get_lock(text)
+        guard_holder_instance(lk, actor)
         expected = "WORKING_%s" % actor.upper()
         expiry = parse_iso(lk.get("expires"))
         if (lk.get("holder") != actor or lk.get("state") != expected
@@ -3392,8 +3446,12 @@ def _write_kit_manifest(installed, runners=None):
     previous = _read_kit_manifest(HERE)
     if runners is None:
         runners = _kit_list(previous, "runners")
+    core_path = os.path.join(HERE, "m8shift.py")
+    core_entry = {"script": "m8shift.py", "version": VERSION}
+    if os.path.isfile(core_path) and not os.path.islink(core_path):
+        core_entry["sha256"] = _sha256_file(core_path)
     data = {"schema": "m8shift.kit.v1",
-            "core": {"script": "m8shift.py", "version": VERSION},
+            "core": core_entry,
             "companions": installed}
     if runners:
         data["runners"] = runners
@@ -3705,6 +3763,35 @@ def _kit_doctor_findings():
         return [doctor_finding("kit.companions", "warning",
                                "%s has an unexpected schema." % KIT_MANIFEST_REL, KIT_MANIFEST_REL)]
     out = []
+    core = data.get("core")
+    if isinstance(core, dict) and core.get("script") == "m8shift.py":
+        core_path = os.path.join(HERE, "m8shift.py")
+        expected = core.get("sha256")
+        try:
+            info = os.lstat(core_path)
+        except OSError:
+            out.append(doctor_finding("kit.companions", "warning",
+                                      "core m8shift.py is listed but missing.", "m8shift.py",
+                                      "restore the verified core file"))
+        else:
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                out.append(doctor_finding("kit.companions", "warning",
+                                          "core m8shift.py is not a regular non-symlink file.", "m8shift.py",
+                                          "restore the verified core file"))
+            elif expected:
+                if not VERIFY_KIT_SHA256_RE.fullmatch(str(expected)):
+                    out.append(doctor_finding("kit.unverifiable", "info",
+                                              "core checksum in kit manifest is invalid; integrity is unverified.",
+                                              "m8shift.py"))
+                elif _sha256_file(core_path) != expected:
+                    out.append(doctor_finding("kit.drift", "warning",
+                                              "core m8shift.py bytes differ from the installed kit receipt.",
+                                              "m8shift.py",
+                                              "restore or explicitly update the verified core"))
+            else:
+                out.append(doctor_finding("kit.unverifiable", "info",
+                                          "legacy kit manifest has no core checksum; integrity is unverified.",
+                                          "m8shift.py"))
     for entry in (data.get("companions") or []):
         if not isinstance(entry, dict):
             continue
@@ -4520,9 +4607,13 @@ def _sync_kit_core_version(target_root):
         if not isinstance(data, dict):
             return
         core = data.get("core") or {}
-        if core.get("version") == actual:
+        actual_path = os.path.join(target_root, "m8shift.py")
+        actual_sha = _sha256_file(actual_path) if os.path.isfile(actual_path) and not os.path.islink(actual_path) else None
+        if core.get("version") == actual and (not actual_sha or core.get("sha256") == actual_sha):
             return
         data["core"] = {"script": "m8shift.py", "version": actual}
+        if actual_sha:
+            data["core"]["sha256"] = actual_sha
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)
@@ -5181,6 +5272,69 @@ def append_session_event(event, session_id, timestamp=None, **fields):
     write(prev + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n", SESSIONS)
 
 
+def _session_event_row(event, session_id, timestamp=None, **fields):
+    timestamp = timestamp or now()
+    row = {"event": event, "session_id": session_id,
+           "at": iso(timestamp), "m8shift_version": VERSION}
+    row.update(fields)
+    return row
+
+
+def append_session_event_batch(events, session_id, timestamp=None):
+    """Append a related evidence batch with one atomic replacement."""
+    timestamp = timestamp or now()
+    prev = read(SESSIONS) if os.path.exists(SESSIONS) else ""
+    if prev and not prev.endswith("\n"):
+        prev += "\n"
+    rows = [_session_event_row(kind, session_id, timestamp=timestamp, **fields)
+            for kind, fields in events]
+    payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                      for row in rows)
+    write(prev + payload, SESSIONS)
+
+
+def append_instance_change_batch(before, after, actor, timestamp, reason, live_override=False):
+    """Write state and instance-change evidence as one ledger replacement."""
+    if not after.get("session"):
+        return True
+    old_window = work_window_id(before.get("session"), before.get("state"),
+                                before.get("turn"), before.get("since")) or "-"
+    new_window = work_window_id(after.get("session"), after.get("state"),
+                                after.get("turn"), after.get("since")) or "-"
+    state_fields = {
+        "from_state": str(before.get("state") or "-"),
+        "to_state": str(after.get("state") or "-"),
+        "actor": actor, "turn": as_int(after.get("turn"), 0),
+        "operation": "instance-takeover",
+        "previous_work_window_id": old_window,
+        "work_window_id": new_window,
+    }
+    audit = {
+        "actor": actor, "turn": as_int(after.get("turn"), 0),
+        "basis": "live-override" if live_override else "operator-decision",
+        "reason": reason,
+        "displaced_holder": str(before.get("holder") or "none"),
+        "displaced_instance": str(before.get("holder_instance") or ""),
+        "displaced_mode": str(before.get("holder_mode") or ""),
+        "arriving_holder": str(after.get("holder") or "none"),
+        "arriving_instance": str(after.get("holder_instance") or ""),
+        "arriving_mode": str(after.get("holder_mode") or ""),
+        "previous_work_window_id": old_window,
+        "work_window_id": new_window,
+        "live_override": "true" if live_override else "false",
+    }
+    try:
+        append_session_event_batch([("state", state_fields),
+                                    ("instance_change", audit)],
+                                   after["session"], timestamp=timestamp)
+    except OSError as exc:
+        print("WARNING: instance takeover evidence write failed (%s); "
+              "the LOCK transition remains authoritative."
+              % exc.__class__.__name__, file=sys.stderr)
+        return False
+    return True
+
+
 def append_session_event_observational(event, session_id, timestamp=None, **fields):
     """Best-effort ledger append after an authoritative relay mutation."""
     try:
@@ -5230,6 +5384,19 @@ def _doctor_session_event_is_valid(row):
     if event in {"start", "done", "reset", "force", "pause", "resume",
                  "state", "work_tag"}:
         return True
+    if event == "instance_change":
+        required = ("actor", "basis", "reason", "displaced_holder",
+                    "displaced_instance", "displaced_mode", "arriving_holder",
+                    "arriving_instance", "arriving_mode",
+                    "previous_work_window_id", "work_window_id", "live_override")
+        if any(not isinstance(row.get(key), str) for key in required):
+            return False
+        if row["basis"] not in {"operator-decision", "live-override"}:
+            return False
+        if row["live_override"] not in {"true", "false"}:
+            return False
+        return bool(re.fullmatch(r"[0-9a-f]{8}", row["previous_work_window_id"])
+                    and re.fullmatch(r"[0-9a-f]{8}", row["work_window_id"]))
     if event != "review_return":
         return False
     required = {
@@ -7338,7 +7505,8 @@ def _install_report():
     }
     return {
         "python": {"version": "%d.%d.%d" % sys.version_info[:3], "floor": "3.12",
-                   "ok": sys.version_info >= (3, 12)},
+                   "ok": sys.version_info >= (3, 12),
+                   "supported_minor": "3.15", "supported": sys.version_info[:2] == (3, 15)},
         "core": {"script": "m8shift.py", "present": core_present,
                  "version": (_parse_script_version(core_path) if core_present else None),
                  "engine_version": VERSION},
@@ -7361,8 +7529,14 @@ def _install_doctor_findings(report):
     if not report["python"]["ok"]:
         out.append(doctor_finding(
             "install.python_floor", "warning",
-            "Python %s is below the supported floor 3.12." % report["python"]["version"],
-            "", "install Python 3.12+ and run m8shift.py through that interpreter"))
+            "Python %s is below the technical compatibility floor 3.12." % report["python"]["version"],
+            "", "install the supported Python 3.15.x and run m8shift.py through that interpreter"))
+    elif not report["python"]["supported"]:
+        out.append(doctor_finding(
+            "install.python_support", "info",
+            "Python %s is a compatibility fallback, not a maintained interpreter; "
+            "only Python 3.15.x receives CI and support." % report["python"]["version"],
+            "", "use Python 3.15.x for a supported installation"))
     if not report["core"]["present"]:
         out.append(doctor_finding(
             "install.core_missing", "warning",
@@ -7402,8 +7576,9 @@ def _print_install_report(rep):
     """Human rendering of the `doctor --install` snapshot (report, not findings)."""
     print("── install (read-only) ────────────────")
     py = rep["python"]
-    print("  python     %s (floor %s: %s)"
-          % (py["version"], py["floor"], "ok" if py["ok"] else "BELOW FLOOR"))
+    print("  python     %s (compatibility floor %s: %s; supported %s.x: %s)"
+          % (py["version"], py["floor"], "ok" if py["ok"] else "BELOW FLOOR",
+             py["supported_minor"], "yes" if py["supported"] else "NO — unsupported fallback"))
     core = rep["core"]
     if core["present"]:
         print("  core       %s v%s (engine v%s)"
@@ -8813,6 +8988,7 @@ def cmd_heartbeat(args):
         text = load_or_die()
         agent = need_agent(args.agent)
         lk = get_lock(text)
+        guard_holder_instance(lk, agent)
         if not (lk.get("state") == "WORKING_%s" % agent.upper()
                 and lk.get("holder") == agent):
             print("refused: heartbeat is only valid while '%s' holds a WORKING lock "
@@ -10213,14 +10389,33 @@ def cmd_turn(args):
     if args.number < 0:
         print("turn number must be non-negative.", file=sys.stderr)
         return 2
-    _text, turns = all_turns(include_archive=True)
-    turn = next((item for item in turns if item["n"] == args.number), None)
-    if turn is None:
+    text = load_or_die()
+    matches = [item for item in parse_turns(text) if item["n"] == args.number]
+    source = "live"
+    session = get_lock(text).get("session") or None
+    if not matches and os.path.exists(ARCHIVE):
+        # Turn numbers restart with each session. Never let a prefixed archive
+        # shadow the live handoff, and never guess between archived homonyms.
+        source, session = "archive", None
+        try:
+            matches = [item for item in parse_turns(read(ARCHIVE))
+                       if item["n"] == args.number]
+        except (OSError, UnicodeError):
+            print("turn archive could not be read.", file=sys.stderr)
+            return 1
+    if not matches:
         print("turn #%d not found." % args.number, file=sys.stderr)
         return 3
+    if len(matches) != 1:
+        print("turn #%d is ambiguous: %d matches in %s; no turn selected." %
+              (args.number, len(matches), source), file=sys.stderr)
+        return 4
+    turn = matches[0]
     fields = turn["fields"]
     payload = {
         "schema": "m8shift.turn/1",
+        "source": source,
+        "session": session,
         "turn": turn["n"],
         "agent": fields.get("from", turn["agent"]),
         "to": fields.get("to", "none"),
@@ -10230,6 +10425,8 @@ def cmd_turn(args):
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     else:
+        if source == "archive":
+            print("archived turn; session identity is not recorded", file=sys.stderr)
         print("#%d %s -> %s" % (payload["turn"], payload["agent"], payload["to"]))
         print(payload["done"])
     return 0
@@ -10438,6 +10635,9 @@ def cmd_may_i_write(args):
     expected = f"WORKING_{agent.upper()}"
     exp = parse_iso(lk.get("expires"))
     expired = st.startswith("WORKING_") and exp is not None and now() > exp
+    if holder_instance_mismatch(lk, agent):
+        print("STOP: " + INSTANCE_MISMATCH_MESSAGE.format(agent=agent))
+        return 3
     if holder == agent and st == expected and not expired:
         print(f"✓ may write: {agent} holds the pen (state={st}, expires={lk.get('expires', '-')}).")
         return 0
@@ -12244,19 +12444,32 @@ def _guard_integrating(args, lk, op):
     low-level write, never through these public ops."""
     if not lk.get("integrating"):
         return
-    if op == "claim" and not getattr(args, "force", False):
+    if (op == "claim" and not getattr(args, "force", False)
+            and not getattr(args, "takeover_instance", False)):
         return   # the integrator may keep its own pen alive; the sentinel rides along untouched
     sys.exit(tr("integrating_locked", holder=lk.get("holder"), ref=lk.get("integrating")))
 
 
 def cmd_claim(args):
     work_item = clean_work_item(getattr(args, "work_item", ""))
+    takeover_instance = bool(getattr(args, "takeover_instance", False))
+    takeover_reason = (clean_field("--reason", getattr(args, "reason", "") or "")
+                       if takeover_instance else "")
+    if takeover_instance and (args.force or getattr(args, "refresh", False)
+                              or getattr(args, "check", False)):
+        sys.exit("refused: --takeover-instance is mutually exclusive with "
+                 "--force, --refresh and --check.")
+    if takeover_instance and not takeover_reason:
+        sys.exit("refused: --takeover-instance requires --reason.")
     if args.check:                       # read-only probe — never reaches the file_lock body below
         if work_item:
             sys.exit("refused: --work-item opens a work window and cannot be used with --check.")
         return cmd_claim_check(args)
     if args.files or args.turns:         # probe-only flags on a real claim = a likely typo, not a no-op
         sys.exit(tr("check_flags_need_check"))
+    instance_token, instance_mode = claim_instance_declaration()
+    if takeover_instance and not instance_token:
+        sys.exit("refused: --takeover-instance requires M8SHIFT_INSTANCE.")
     # RFC 049 two-phase force recovery: phase 1 observes a stale reclaim
     # candidate under the lock, captures its identity tuple, RELEASES the lock,
     # sleeps the grace OUTSIDE it (never blocking the holder's own refresh),
@@ -12266,8 +12479,9 @@ def cmd_claim(args):
     if getattr(args, "live_override", False):
         # M7: the override contract is unconditional — it exists ONLY as a
         # force-recovery escape and always demands an audited reason.
-        if not args.force:
-            sys.exit("refused: --live-override is only valid with --force.")
+        if not (args.force or takeover_instance):
+            sys.exit("refused: --live-override is only valid with --force "
+                     "or --takeover-instance.")
         if not clean_field("--reason", getattr(args, "reason", "") or ""):
             sys.exit("refused: --live-override requires --reason "
                      "(human-authorized recovery is audited).")
@@ -12348,10 +12562,24 @@ def cmd_claim(args):
             sys.exit(tr("claim_refused", st=st, holder=holder))
         reclaim = args.force and stale and holder not in (agent, "none")
         same_window = st == f"WORKING_{agent.upper()}" and holder == agent
-        if work_item and same_window:
+        instance_mismatch = same_window and holder_instance_mismatch(lk, agent)
+        if takeover_instance and not instance_mismatch:
+            sys.exit("refused: --takeover-instance requires a same-name WORKING "
+                     "window owned by another declared instance.")
+        if instance_mismatch and not takeover_instance:
+            guard_holder_instance(lk, agent)
+        if instance_mismatch and takeover_instance:
+            fresh_beat = heartbeat_protective(lk, agent)
+            if fresh_beat and not (stale and getattr(args, "live_override", False)):
+                sys.exit("refused: holder instance appears alive; takeover requires "
+                         "an expired lease plus --live-override --reason.")
+            if getattr(args, "live_override", False) and not (stale and fresh_beat):
+                sys.exit("refused: --live-override is only valid for an expired "
+                         "same-name window with a fresh protective heartbeat.")
+        if work_item and same_window and not takeover_instance:
             sys.exit("refused: --work-item only applies when entering a WORKING window; "
                      "use `work-tag %s %s` for the current window." % (agent, work_item))
-        if not same_window:
+        if not same_window or takeover_instance:
             hold, hold_error = agent_usage_hold(agent)
             if hold or hold_error:
                 sys.exit(usage_throttle_message(agent, hold_error))
@@ -12366,18 +12594,26 @@ def cmd_claim(args):
         lk.update(
             holder=agent,
             state=f"WORKING_{agent.upper()}",
-            since=(lk.get("since") if same_window else iso(t)),
+            since=(lk.get("since") if same_window and not takeover_instance else iso(t)),
             expires=iso(t + dt.timedelta(minutes=TTL_MIN)),
             note=(return_note if preserve_return_note else
-                  (tr("note_reclaim", holder=holder) if reclaim
+                  ("instance takeover: " + takeover_reason if takeover_instance
+                   else tr("note_reclaim", holder=holder) if reclaim
                    else tr("note_holds", agent=agent))),
         )
         capture_agent_model(lk, agent)
         capture_agent_effort(lk, agent)
+        if not same_window or takeover_instance:
+            bind_holder_instance(lk, instance_token, instance_mode)
         guard.require_owned()
         write(set_lock(text, lk))
         guard.require_owned()
-        append_state_transition(before, lk, agent, "claim", t, work_item=work_item)
+        if takeover_instance:
+            append_instance_change_batch(
+                before, lk, agent, t, takeover_reason,
+                live_override=bool(getattr(args, "live_override", False)))
+        else:
+            append_state_transition(before, lk, agent, "claim", t, work_item=work_item)
         if getattr(args, "refresh", False):
             # RFC 049: an AUDIT beat (never protective) — sidecar failure is a
             # warning only, the TTL refresh stands (sidecar is not authority).
@@ -12563,10 +12799,12 @@ def cmd_yield_turn(args):
             sys.exit(f"refused: no open request #{args.request} from {to} to {agent}.")
         lk = get_lock(text)
         st = lk.get("state", "")
+        guard_holder_instance(lk, agent)
         if lk.get("holder") != agent or st not in (f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}"):
             sys.exit(f"refused: {agent} is not the current holder (state={st}, holder={lk.get('holder')}).")
         t = now()
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder=to,
             state=f"AWAITING_{to.upper()}",
@@ -12604,6 +12842,7 @@ def cmd_decline_turn(args):
             sys.exit(f"refused: no open request #{args.request} addressed to {agent}.")
         req = reqs[0]
         lk = get_lock(text)
+        guard_holder_instance(lk, agent)
         if lk.get("holder") != agent:
             sys.exit(f"refused: {agent} is not the current holder (holder={lk.get('holder')}).")
         guard.require_owned()
@@ -12899,7 +13138,8 @@ def cmd_append(args):
             sys.exit(tr("to_self_append"))
         lk = get_lock(text)
         st = lk.get("state", "")
-        _guard_integrating(args, lk, "append")   # §8: a normal append can't strand the sentinel
+        _guard_integrating(args, lk, "append")
+        guard_holder_instance(lk, agent)   # §8: a normal append can't strand the sentinel
         # append is allowed ONLY if you already hold the pen (prior exclusive claim).
         # This is what guarantees exclusivity of the WORK WINDOW, not just of the
         # journal write: you cannot work+append from IDLE.
@@ -12917,6 +13157,7 @@ def cmd_append(args):
         text = text.rstrip("\n") + "\n\n" + block
 
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder=to,
             state=f"AWAITING_{to.upper()}",
@@ -12947,6 +13188,7 @@ def cmd_pause(args):
         holder = lk.get("holder", "none")
         st = lk.get("state", "")
         _guard_integrating(args, lk, "pause")
+        guard_holder_instance(lk, agent)
         if st in ("DONE", "PAUSED"):
             sys.exit(f"refused: cannot pause from state={st}.")
         if holder != agent:
@@ -12954,6 +13196,7 @@ def cmd_pause(args):
         t = now()
         session_id = lk.get("session")
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder="none",
             state="PAUSED",
@@ -13086,6 +13329,7 @@ def cmd_work_tag(args):
         agent = need_agent(args.agent)
         lk = get_lock(text)
         state = lk.get("state", "")
+        guard_holder_instance(lk, agent)
         if state != f"WORKING_{agent.upper()}" or lk.get("holder") != agent:
             sys.exit("refused: work-tag is only valid for the current WORKING holder "
                      "(state=%s, holder=%s)." % (state, lk.get("holder")))
@@ -13130,6 +13374,7 @@ def cmd_unclaim(args):
         lk = get_lock(text)
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "unclaim")
+        guard_holder_instance(lk, agent)
         if lk.get("state") == "PAUSED":
             sys.exit("refused: session is PAUSED; unclaim changes nothing while paused.")
         if lk.get("state") != f"WORKING_{agent.upper()}" or holder != agent:
@@ -13138,6 +13383,7 @@ def cmd_unclaim(args):
                      "unclaim only undoes your own untouched claim.")
         t = now()
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             state=f"AWAITING_{agent.upper()}", holder=agent,
             since=iso(t), expires="-",
@@ -13164,6 +13410,7 @@ def cmd_release(args):
         lk = get_lock(text)
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "release")   # §8: refused while a merge is in flight
+        guard_holder_instance(lk, agent)
         if lk.get("state") == "PAUSED":
             sys.exit("refused: session is PAUSED; use `resume <agent> --reason ...` to assign new work.")
         if holder not in (agent, "none") and not args.force:
@@ -13175,6 +13422,7 @@ def cmd_release(args):
         forced = bool(args.force)   # RFC 049: an EXPLICIT --force release is
         # always audited (recovery-release), even when the releaser is the holder.
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder=to, state=f"AWAITING_{to.upper()}",
             since=iso(t), expires="-",
@@ -13209,6 +13457,7 @@ def cmd_done(args):
         prev_state = lk.get("state", "")
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "done")   # §8: refused while a merge is in flight
+        guard_holder_instance(lk, agent)
         if holder not in (agent, "none") and not args.force:
             sys.exit(tr("not_holder_done", holder=holder))
         t = now()
@@ -13216,6 +13465,7 @@ def cmd_done(args):
         session_id = lk.get("session")
         turn_end = as_int(lk.get("turn"), 0)
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(holder="none", state="DONE", since=iso(t), expires="-",
                   note=(tr("note_force_done", agent=agent, reason=reason)
                         if forced else tr("note_done", agent=agent)))
@@ -13717,8 +13967,11 @@ def main():
                         "your own WORKING lock (runners must use this, never a plain claim)")
     c.add_argument("--reason", default="",
                     help="record why a stale recovery is safe and what happens next")
+    c.add_argument("--takeover-instance", action="store_true",
+                   help="replace another instance of the same WORKING agent; requires "
+                        "M8SHIFT_INSTANCE and --reason, and writes instance-change evidence")
     c.add_argument("--live-override", action="store_true",
-                    help="with --force and --reason, override an ALIVE-EXPIRED "
+                    help="with --force or --takeover-instance and --reason, override an ALIVE-EXPIRED "
                          "refusal (fresh protective heartbeat) — exceptional, human-authorized "
                          "recovery; the override is audited in session events")
     c.add_argument("--check", action="store_true",
@@ -13744,8 +13997,8 @@ def main():
                    help="single-line summary of what you just did (empty = the — placeholder)")
     a.add_argument("--files", default="",
                    help="files touched this turn, comma-separated (empty = the — placeholder)")
-    a.add_argument("--body", default="",
-                   help="free turn body: a file path, or - to read stdin (empty = header-only turn)")
+    a.add_argument("--body-file", "--body", dest="body", default="", metavar="PATH|-",
+                   help="read turn body from PATH or - for stdin (legacy alias: --body; not literal text)")
     a.add_argument("--allow-large-body", action="store_true",
                    help=f"allow --body content above {MAX_BODY_BYTES} bytes")
     a.add_argument("--wait", action="store_true",
