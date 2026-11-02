@@ -163,6 +163,10 @@ AGENT_RE = r"[a-z][a-z0-9_-]*"   # normalized agent name (ASCII)
 FIELD_KEY_RE = re.compile(r"[a-z][a-z0-9_]*\Z")   # advisory turn-field key: snake_case / x_*
 MODEL_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:@/+~-]{0,127}\Z")
 RUN_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+INSTANCE_MODES = frozenset(("managed", "manual"))
+INSTANCE_MISMATCH_MESSAGE = (
+    "refused: M8SHIFT_INSTANCE does not match the active holder instance for {agent}."
+)
 AGENT_EFFORTS = frozenset(("minimal", "low", "medium", "high", "xhigh", "max", "ultra"))
 # Turn fields the engine writes itself (routing) — an advisory field may not shadow them.
 ENGINE_FIELDS = frozenset(("from", "to", "ask", "done", "files", "handoff",
@@ -2048,6 +2052,15 @@ def validate_relay_text(text):
         errs.append(f"turn={lk.get('turn')!r}")
     if lk.get("holder") not in set(roster) | {"none"}:
         errs.append(f"holder={lk.get('holder')!r}")
+    holder_instance = lk.get("holder_instance")
+    holder_mode = lk.get("holder_mode")
+    if holder_instance is not None or holder_mode is not None:
+        if (not holder_instance or RUN_ID_RE.fullmatch(holder_instance) is None
+                or holder_mode not in INSTANCE_MODES
+                or not lk.get("state", "").startswith("WORKING_")
+                or lk.get("holder") in (None, "none")):
+            errs.append("holder_instance=%r,holder_mode=%r" %
+                        (holder_instance, holder_mode))
     # validate against KNOWN_LANGS (a curated superset), NOT the build-local LANGS, so a file
     # whose lang isn't bundled here is still loadable (resolve_lang downgrades it to en).
     if lk.get("lang") not in (None, *KNOWN_LANGS):
@@ -2273,6 +2286,46 @@ def _replace_lock_agents_value(text, agents):
             + text[i + match.end():])
 
 
+def claim_instance_declaration():
+    """Return the optional caller instance declaration, validated before writes."""
+    token = (os.environ.get("M8SHIFT_INSTANCE", "") or "").strip()
+    if token and RUN_ID_RE.fullmatch(token) is None:
+        sys.exit("refused: M8SHIFT_INSTANCE must use the run-id grammar.")
+    if not token:
+        return "", ""
+    mode = (os.environ.get("M8SHIFT_INSTANCE_MODE", "") or "").strip()
+    return token, mode if mode in INSTANCE_MODES else "unknown"
+
+
+def bind_holder_instance(lk, token, mode):
+    """Bind a new WORKING window; keep legacy unbound windows byte-compatible."""
+    if not token:
+        lk.pop("holder_instance", None)
+        lk.pop("holder_mode", None)
+        return
+    lk["holder_instance"] = token
+    lk["holder_mode"] = mode
+
+
+def clear_holder_instance(lk):
+    lk.pop("holder_instance", None)
+    lk.pop("holder_mode", None)
+
+
+def holder_instance_mismatch(lk, agent):
+    if (lk.get("holder") != agent
+            or lk.get("state") != "WORKING_%s" % agent.upper()):
+        return False
+    caller = (os.environ.get("M8SHIFT_INSTANCE", "") or "").strip()
+    holder = lk.get("holder_instance", "") or ""
+    return bool(caller or holder) and caller != holder
+
+
+def guard_holder_instance(lk, agent):
+    if holder_instance_mismatch(lk, agent):
+        sys.exit(INSTANCE_MISMATCH_MESSAGE.format(agent=agent))
+
+
 def cmd_roster_add(args):
     """Add one active identity while preserving the current work window bytewise."""
     raw_agent = (args.agent or "").strip()
@@ -2286,6 +2339,7 @@ def cmd_roster_add(args):
         text = load_or_die()
         actor = need_agent(by)
         lk = get_lock(text)
+        guard_holder_instance(lk, actor)
         expected = "WORKING_%s" % actor.upper()
         expiry = parse_iso(lk.get("expires"))
         if (lk.get("holder") != actor or lk.get("state") != expected
@@ -8858,6 +8912,7 @@ def cmd_heartbeat(args):
         text = load_or_die()
         agent = need_agent(args.agent)
         lk = get_lock(text)
+        guard_holder_instance(lk, agent)
         if not (lk.get("state") == "WORKING_%s" % agent.upper()
                 and lk.get("holder") == agent):
             print("refused: heartbeat is only valid while '%s' holds a WORKING lock "
@@ -10504,6 +10559,9 @@ def cmd_may_i_write(args):
     expected = f"WORKING_{agent.upper()}"
     exp = parse_iso(lk.get("expires"))
     expired = st.startswith("WORKING_") and exp is not None and now() > exp
+    if holder_instance_mismatch(lk, agent):
+        print("STOP: " + INSTANCE_MISMATCH_MESSAGE.format(agent=agent))
+        return 3
     if holder == agent and st == expected and not expired:
         print(f"✓ may write: {agent} holds the pen (state={st}, expires={lk.get('expires', '-')}).")
         return 0
@@ -12323,6 +12381,7 @@ def cmd_claim(args):
         return cmd_claim_check(args)
     if args.files or args.turns:         # probe-only flags on a real claim = a likely typo, not a no-op
         sys.exit(tr("check_flags_need_check"))
+    instance_token, instance_mode = claim_instance_declaration()
     # RFC 049 two-phase force recovery: phase 1 observes a stale reclaim
     # candidate under the lock, captures its identity tuple, RELEASES the lock,
     # sleeps the grace OUTSIDE it (never blocking the holder's own refresh),
@@ -12414,6 +12473,8 @@ def cmd_claim(args):
             sys.exit(tr("claim_refused", st=st, holder=holder))
         reclaim = args.force and stale and holder not in (agent, "none")
         same_window = st == f"WORKING_{agent.upper()}" and holder == agent
+        if same_window:
+            guard_holder_instance(lk, agent)
         if work_item and same_window:
             sys.exit("refused: --work-item only applies when entering a WORKING window; "
                      "use `work-tag %s %s` for the current window." % (agent, work_item))
@@ -12440,6 +12501,8 @@ def cmd_claim(args):
         )
         capture_agent_model(lk, agent)
         capture_agent_effort(lk, agent)
+        if not same_window:
+            bind_holder_instance(lk, instance_token, instance_mode)
         guard.require_owned()
         write(set_lock(text, lk))
         guard.require_owned()
@@ -12629,10 +12692,12 @@ def cmd_yield_turn(args):
             sys.exit(f"refused: no open request #{args.request} from {to} to {agent}.")
         lk = get_lock(text)
         st = lk.get("state", "")
+        guard_holder_instance(lk, agent)
         if lk.get("holder") != agent or st not in (f"AWAITING_{agent.upper()}", f"WORKING_{agent.upper()}"):
             sys.exit(f"refused: {agent} is not the current holder (state={st}, holder={lk.get('holder')}).")
         t = now()
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder=to,
             state=f"AWAITING_{to.upper()}",
@@ -12670,6 +12735,7 @@ def cmd_decline_turn(args):
             sys.exit(f"refused: no open request #{args.request} addressed to {agent}.")
         req = reqs[0]
         lk = get_lock(text)
+        guard_holder_instance(lk, agent)
         if lk.get("holder") != agent:
             sys.exit(f"refused: {agent} is not the current holder (holder={lk.get('holder')}).")
         guard.require_owned()
@@ -12965,7 +13031,8 @@ def cmd_append(args):
             sys.exit(tr("to_self_append"))
         lk = get_lock(text)
         st = lk.get("state", "")
-        _guard_integrating(args, lk, "append")   # §8: a normal append can't strand the sentinel
+        _guard_integrating(args, lk, "append")
+        guard_holder_instance(lk, agent)   # §8: a normal append can't strand the sentinel
         # append is allowed ONLY if you already hold the pen (prior exclusive claim).
         # This is what guarantees exclusivity of the WORK WINDOW, not just of the
         # journal write: you cannot work+append from IDLE.
@@ -12983,6 +13050,7 @@ def cmd_append(args):
         text = text.rstrip("\n") + "\n\n" + block
 
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder=to,
             state=f"AWAITING_{to.upper()}",
@@ -13013,6 +13081,7 @@ def cmd_pause(args):
         holder = lk.get("holder", "none")
         st = lk.get("state", "")
         _guard_integrating(args, lk, "pause")
+        guard_holder_instance(lk, agent)
         if st in ("DONE", "PAUSED"):
             sys.exit(f"refused: cannot pause from state={st}.")
         if holder != agent:
@@ -13020,6 +13089,7 @@ def cmd_pause(args):
         t = now()
         session_id = lk.get("session")
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder="none",
             state="PAUSED",
@@ -13152,6 +13222,7 @@ def cmd_work_tag(args):
         agent = need_agent(args.agent)
         lk = get_lock(text)
         state = lk.get("state", "")
+        guard_holder_instance(lk, agent)
         if state != f"WORKING_{agent.upper()}" or lk.get("holder") != agent:
             sys.exit("refused: work-tag is only valid for the current WORKING holder "
                      "(state=%s, holder=%s)." % (state, lk.get("holder")))
@@ -13196,6 +13267,7 @@ def cmd_unclaim(args):
         lk = get_lock(text)
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "unclaim")
+        guard_holder_instance(lk, agent)
         if lk.get("state") == "PAUSED":
             sys.exit("refused: session is PAUSED; unclaim changes nothing while paused.")
         if lk.get("state") != f"WORKING_{agent.upper()}" or holder != agent:
@@ -13204,6 +13276,7 @@ def cmd_unclaim(args):
                      "unclaim only undoes your own untouched claim.")
         t = now()
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             state=f"AWAITING_{agent.upper()}", holder=agent,
             since=iso(t), expires="-",
@@ -13230,6 +13303,7 @@ def cmd_release(args):
         lk = get_lock(text)
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "release")   # §8: refused while a merge is in flight
+        guard_holder_instance(lk, agent)
         if lk.get("state") == "PAUSED":
             sys.exit("refused: session is PAUSED; use `resume <agent> --reason ...` to assign new work.")
         if holder not in (agent, "none") and not args.force:
@@ -13241,6 +13315,7 @@ def cmd_release(args):
         forced = bool(args.force)   # RFC 049: an EXPLICIT --force release is
         # always audited (recovery-release), even when the releaser is the holder.
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(
             holder=to, state=f"AWAITING_{to.upper()}",
             since=iso(t), expires="-",
@@ -13275,6 +13350,7 @@ def cmd_done(args):
         prev_state = lk.get("state", "")
         holder = lk.get("holder", "none")
         _guard_integrating(args, lk, "done")   # §8: refused while a merge is in flight
+        guard_holder_instance(lk, agent)
         if holder not in (agent, "none") and not args.force:
             sys.exit(tr("not_holder_done", holder=holder))
         t = now()
@@ -13282,6 +13358,7 @@ def cmd_done(args):
         session_id = lk.get("session")
         turn_end = as_int(lk.get("turn"), 0)
         before = dict(lk)
+        clear_holder_instance(lk)
         lk.update(holder="none", state="DONE", since=iso(t), expires="-",
                   note=(tr("note_force_done", agent=agent, reason=reason)
                         if forced else tr("note_done", agent=agent)))

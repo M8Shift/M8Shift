@@ -1029,12 +1029,18 @@ def expected_post_run(me, lk, run_id="", relay_text=None):
 
 
 def resume_eligible(args, me, me_working, lk):
-    """RFC 047 PR 2: an explicit --resume-working run may ALSO start from this
-    agent's own WORKING lock (holder == agent). The pen is already held, so no
-    claim happens — the provider finishes the work and appends/dones."""
-    return bool(args.resume_working and lk
-                and lk.get("state", "") == me_working
-                and lk.get("holder", "") == me)
+    """A resumed WORKING window must belong to this exact runner instance."""
+    eligible = bool(args.resume_working and lk
+                    and lk.get("state", "") == me_working
+                    and lk.get("holder", "") == me)
+    if not eligible:
+        return False
+    holder_instance = lk.get("holder_instance", "") or ""
+    caller_instance = os.environ.get("M8SHIFT_INSTANCE", "") or ""
+    if (holder_instance or caller_instance) and holder_instance != caller_instance:
+        log("resume-working refused: M8SHIFT_INSTANCE does not match the held work window.")
+        raise SystemExit(5)
+    return True
 
 
 def make_run_plan(args, run_id, me, lk, resumed=False, relay_text=None):
@@ -1344,6 +1350,14 @@ def child_env_for_plan(plan, lk, m8shift_path):
         # A provider pin is injected directly and wins over any ambient allowlisted
         # declaration. RFC 056 still records it as self-declared/unverified provenance.
         env["M8SHIFT_AGENT_MODEL"] = plan["agent_model"]
+    instance = (lk.get("holder_instance")
+                if lk.get("holder") == plan.get("agent") else "") or                os.environ.get("M8SHIFT_INSTANCE", "") or ""
+    if instance:
+        env["M8SHIFT_INSTANCE"] = str(instance)
+        env["M8SHIFT_INSTANCE_MODE"] = str(
+            lk.get("holder_mode")
+            or os.environ.get("M8SHIFT_INSTANCE_MODE", "")
+            or "managed")
     return env
 
 

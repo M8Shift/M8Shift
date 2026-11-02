@@ -1,0 +1,28 @@
+name: Holder instance binding
+on:
+  pull_request:
+    branches: [release/4.5.0-integration, fix/563-kit-core-drift-45]
+    paths:
+      - m8shift.py
+      - tests/test_instance_binding_45.py
+      - tests/test_instance_runner_45.py
+      - m8shift-runtime.py
+      - examples/headless_runner.py
+      - checksums.sha256
+      - .github/workflows/holder-instance-binding.yml
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  instance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version-file: .python-version
+      - run: sha256sum -c checksums.sha256
+      - run: |
+          python -m unittest discover -s tests -p 'test_instance_binding_45.py' -v
+          python -m unittest discover -s tests -p 'test_instance_runner_45.py' -v
