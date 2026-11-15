@@ -87,6 +87,27 @@ class RuntimeRunnerInstanceTests(unittest.TestCase):
         self.assertFalse(unhealthy["healthy"])
         self.assertTrue(unhealthy["terminal"])
 
+    def test_liveness_refresh_and_heartbeat_use_the_reserved_instance(self):
+        calls = []
+        env = runtime.listener_managed_instance_env("claude", "generation")
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        held = {"state": "WORKING_CLAUDE", "holder": "claude",
+                "expires": "2020-01-01T00:00:00Z"}
+        with mock.patch.object(runtime.subprocess, "run", side_effect=fake_run):
+            result = runtime.listener_liveness_tick(
+                "claude", 1, lock_fields=lambda: held, instance_env=env)
+        self.assertTrue(result["refresh_ok"])
+        self.assertTrue(result["heartbeat_ok"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("--refresh", calls[0][0])
+        self.assertIn("heartbeat", calls[1][0])
+        for _argv, kwargs in calls:
+            self.assertEqual(kwargs["env"]["M8SHIFT_INSTANCE"],
+                             "listener-claude-generation")
+            self.assertEqual(kwargs["env"]["M8SHIFT_INSTANCE_MODE"], "managed")
+
     def test_launchd_exit_78_reports_tcc_context_without_calling_it_healthy(self):
         output = "last exit code = 78\n"
         failed = SimpleNamespace(returncode=0, stdout=output, stderr="")

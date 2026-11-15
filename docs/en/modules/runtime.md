@@ -441,3 +441,32 @@ process on a shared host; it never kills another test's or an operator's listene
 The regression includes a genuine listener launched before an injected startup
 timeout, and a positive/negative process-census control. POSIX `ps` is required
 for this harness witness; absence is an explicit test skip, not measured coverage.
+
+## Proposed v4.5 backlog reliability overlay
+
+The work-branch [implementation report](../studies/backlog20-20261115/README.md)
+records these additions and their delivery status. Managed listener reservation,
+child execution and liveness use one bound instance. Listener startup and the
+reference runner each serialize their own lifecycle; the runner singleton is
+scoped to canonical relay root and agent and survives stale PID-file artifacts.
+A PID record alone is not evidence of autonomous pickup.
+
+The invoking managed listener checks only its own desired-running dead quota
+collector with a 300-second cadence. It does not recycle a live collector or
+select another provider. Managed quota watches can persist an unnamed
+checkpoint/cooldown advisory with bounded recovery state. Default core doctor
+delegates only to the recorded regular version/hash-matched installed runtime;
+its returned diagnostics remain advisory and duplicate kit findings are removed.
+
+Reference runner `--retain-output` explicitly enables private bounded stdout and
+stderr prefixes (64 KiB each), under `runtime/run-output`. The receipt contains
+relative path, retained/observed counts, digest and truncation; portable run
+ledger events contain no transcript. Private output may contain provider text.
+Without the flag no output payload is persisted. A provider exit and an output
+receipt still do not establish relay progress or job verification. Bare polling
+states that it lacks supervised stuck-WORKING recovery.
+
+Open task `blocked_on` declarations are bounded advisory status observations,
+not session-bound liveness or new mutex states. Generated launch identities
+remain provenance rather than authentication. The report lists unqualified
+native, live-provider and fleet gates; no deployment is implied by this guide.

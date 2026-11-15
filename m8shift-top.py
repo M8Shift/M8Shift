@@ -1801,7 +1801,7 @@ def load_activity_turn(engine, root, turn):
 
 def scroll_fallback(engine, root, extra):
     os.execve(sys.executable, [sys.executable, engine, "watch"] + extra,
-              dict(os.environ, M8SHIFT_ROOT=root))
+              dict(os.environ, M8SHIFT_ROOT=root, M8SHIFT_CLI_PROG="m8shift-top.py"))
 
 
 def read_key(stream=None, timeout=.03, selector=select.select):

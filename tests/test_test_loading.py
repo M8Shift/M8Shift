@@ -25,12 +25,17 @@ class TestLoadingCheckTests(unittest.TestCase):
             root = Path(tmp)
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             (root / "tests").mkdir()
+            (root / "core.py").write_text("VALUE = 1\n")
             test = root / "tests" / "test_demo.py"
             test.write_text("import unittest\nclass Example(unittest.TestCase):\n def test_ok(self): pass\n")
-            subprocess.run(["git", "-C", str(root), "add", "tests/test_demo.py"], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "tests/test_demo.py", "core.py"], check=True)
             subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], check=True)
             mod = load()
             self.assertEqual(mod.inspect(root)["discovered_cases"], 1)
+            (root / "core.py").write_text("VALUE = 2\n")
+            with self.assertRaisesRegex(ValueError, "uncommitted"):
+                mod.inspect(root)
+            (root / "core.py").write_text("VALUE = 1\n")
             test.write_text(test.read_text() + "# dirty\n")
             with self.assertRaisesRegex(ValueError, "uncommitted"):
                 mod.inspect(root)

@@ -178,7 +178,7 @@ def test_status_role_state_matrix_and_snapshot_shape():
         {"state": "IDLE", "agents": "claude,codex"}, None,
         {"started_at": "-", "duration_seconds": 0}, [])
     assert set(snap) == {"schema", "agents", "listeners", "attention", "last_turn", "ledger", "pen",
-                         "activity", "activity_limit", "activity_truncated", "gateway"}
+                         "activity", "activity_limit", "activity_truncated", "gateway", "declared_blocks"}
     assert snap["schema"] == "m8shift.status/1"
     assert all(set(row) == {"id", "model", "model_source", "effort",
                             "effort_source", "role_state", "usage"}

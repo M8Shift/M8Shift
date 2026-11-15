@@ -71,3 +71,16 @@ without a reset.
 6. Concurrent additions serialize without a lost roster member or any change to
    non-roster state.
 
+
+## v4.5 amendment — distinct missing anchor bootstrap (#558)
+
+The original bootstrap boundary above is superseded for new enrollment by
+`roster add`: after validating the holder and prospective relay, create the
+new identity's distinct anchor with its safety stanza if absent. Existing or
+shared anchors remain byte-identical, and a failed relay write removes only the
+new inode created by this operation. A duplicate roster addition stays a no-op;
+it does not repair a pre-existing missing anchor. Verify the new CLI's actual
+instruction-loading path before routing work. There is no shared identity
+rewrite or new LOCK state. The original relay/work-window preservation criteria
+remain in force; acceptance 3 now expects the distinct anchor and preserved
+`AGENTS.md` rather than only a manual-bootstrap warning.

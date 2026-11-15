@@ -28,6 +28,7 @@ AGENTS="claude,codex"
 PROJECT_NAME=""
 LANG_CODE=""
 RUN_INIT=1
+WITH_RUNNER=0
 WITH_WORKTREE=1
 WITH_RUNTIME=1
 WITH_CONTEXT=1
@@ -73,6 +74,7 @@ Options:
   --upgrade           Transactionally upgrade an existing project (never reinitializes it).
   --source-dir DIR    Read release files from DIR (offline/testable alternative to HTTPS).
   --no-init           Download files only; do not run init.
+  --with-runner       Install the manifest-verified examples/headless_runner.py.
   --no-worktree       Do not download m8shift-worktree.py.
   --no-runtime        Do not download m8shift-runtime.py.
   --no-context        Do not download m8shift-context.py.
@@ -237,7 +239,7 @@ add_expected_sha256() {
     *) die "--sha256 expects FILE:HEX" ;;
   esac
   case "$name" in
-    m8shift.py|m8shift-worktree.py|m8shift-runtime.py|m8shift-context.py|m8shift-headroom.py|m8shift-top.py) ;;
+    m8shift.py|m8shift-worktree.py|m8shift-runtime.py|m8shift-context.py|m8shift-headroom.py|m8shift-top.py|examples/headless_runner.py) ;;
     *) die "--sha256 file is not a shipped M8Shift component" ;;
   esac
   printf '%s' "$hex" | grep -Eiq '^[0-9a-f]{64}$' || die "--sha256 expects a 64-char hex digest"
@@ -395,6 +397,9 @@ while [ "$#" -gt 0 ]; do
       SOURCE_DIR="$2"
       shift 2
       ;;
+    --with-runner)
+      WITH_RUNNER=1
+      shift ;;
     --no-init)
       RUN_INIT=0
       shift
@@ -568,6 +573,7 @@ Dry run plan:
   agents: $AGENTS
   download worktree/runtime/context: $WITH_WORKTREE/$WITH_RUNTIME/$WITH_CONTEXT
   run init: $RUN_INIT
+  runner: $WITH_RUNNER
   RTK: $RTK_CHOICE (release $RTK_VERSION, $RTK_BASE_URL)
   RTK source build fallback: $RTK_SOURCE_BUILD
   Headroom: $HEADROOM_CHOICE (experimental)
@@ -589,6 +595,9 @@ print_capabilities
 # Manual --sha256 pins are self-sufficient: when they cover every file we will download,
 # skip the manifest so out-of-band pinning works even against a mirror with no manifest.
 pins_cover_downloads() {
+  if [ "$WITH_RUNNER" -eq 1 ]; then
+    printf '%s' "$EXPECTED_SHA256S" | grep -q ' examples/headless_runner.py$' || return 1
+  fi
   printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift.py$' || return 1
   if [ "$WITH_WORKTREE" -eq 1 ]; then
     printf '%s' "$EXPECTED_SHA256S" | grep -q ' m8shift-worktree.py$' || return 1
@@ -1025,7 +1034,12 @@ download_file() {
   local name="$1"
   local url="$BASE_URL/$name"
   local dest="$TARGET_DIR/$name"
-  local tmp="$TARGET_DIR/.$name.tmp.$$"
+  # Nested optional components must stage beside their final destination.
+  local dest_dir="${dest%/*}"
+  [ "$dest_dir" = "$dest" ] && dest_dir="$TARGET_DIR"
+  mkdir -p "$dest_dir"
+  local leaf="${name##*/}"
+  local tmp="$dest_dir/.$leaf.tmp.$$"
   rm -f "$tmp"
 
   printf '→ downloading %s\n' "$name"
@@ -1065,6 +1079,9 @@ if [ "$WITH_RUNTIME" -eq 1 ]; then
 fi
 if [ "$WITH_CONTEXT" -eq 1 ]; then
   download_file "m8shift-context.py"
+fi
+if [ "$WITH_RUNNER" -eq 1 ]; then
+  download_file "examples/headless_runner.py"
 fi
 if [ "$UPGRADE" -eq 1 ]; then
   download_file "m8shift-e2e.py"

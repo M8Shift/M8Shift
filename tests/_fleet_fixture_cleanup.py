@@ -7,7 +7,8 @@ import subprocess
 
 def owned_listener_processes(roots):
     """Return fixture PIDs, not a global kill list; fail when census is unavailable."""
-    roots = [os.path.realpath(root) for root in roots]
+    roots = sorted({alias for root in roots
+                    for alias in (os.path.abspath(root), os.path.realpath(root))})
     if not roots:
         return []
     try:

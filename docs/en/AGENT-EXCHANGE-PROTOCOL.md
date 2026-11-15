@@ -15,7 +15,7 @@ and passes the conformance profile in section 13.
 The normative body ends before Appendix A. Product-specific commands and file
 formats appear only in the appendix.
 
-<!-- m8shift-exchange-lockstep: protocol=d68fbaa829f703202a01714b4910718a1b432f831febf356b66cece654bdc2ba; stanza=34075b5d403a5f925790c51e79b1bd12ff94a6c74140a15944643baf45c463c9; pack=dbac370b550298a61c4ec0e1b0a76671434f1df130d2403f06cb60446769b547; rfc074=5873caa11d7047a04892c55a96c76611c278526fe4b5ffa85ed721f4523e6914 -->
+<!-- m8shift-exchange-lockstep: protocol=d68fbaa829f703202a01714b4910718a1b432f831febf356b66cece654bdc2ba; stanza=a9dc97800bf55ac7d73aecdbee1be0b6aa71340825425ee825324427771b236c; pack=dbac370b550298a61c4ec0e1b0a76671434f1df130d2403f06cb60446769b547; rfc074=5873caa11d7047a04892c55a96c76611c278526fe4b5ffa85ed721f4523e6914 -->
 
 ## 1. Scope, authority, and terminology
 
@@ -806,3 +806,13 @@ The public Worker embeds this file byte-for-byte. Its Markdown, HTML, and worker
 module MUST be regenerated from the canonical document. The generator check,
 Node contract, full repository tests, governed scrub, raw leak self-check, and
 byte identity check are required before review or deployment.
+
+### Managed launch identity and advisory pickup observations
+
+A managed M8Shift launch declares a roster identity in `M8SHIFT_AGENT` and an
+explicit root. These declarations provide provenance, not authentication; OS
+usernames and UI task paths do not determine the roster identity. All core
+pen-window checks continue to apply. Status may show a declared task blockage,
+which is advisory and session-unbound, or a pickup coverage observation. Neither
+is evidence that an expired pen remains protected. A runner PID file establishes
+pickup coverage only with a live PID and a contended kernel singleton lock.

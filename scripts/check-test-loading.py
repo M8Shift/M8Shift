@@ -17,12 +17,12 @@ def git(repo, *args):
 
 def inspect(repo, commit="HEAD"):
     repo = Path(repo).resolve()
-    sha = git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}")
+    sha = git(repo, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}")
     head = git(repo, "rev-parse", "HEAD")
     if sha != head:
         raise ValueError("requested commit is not the checked-out HEAD")
-    if git(repo, "status", "--porcelain", "--", "tests"):
-        raise ValueError("test directory has uncommitted changes")
+    if git(repo, "status", "--porcelain"):
+        raise ValueError("checkout has uncommitted changes; exact-tip discovery requires a clean tree")
     tracked = [s for s in git(repo, "ls-tree", "-r", "--name-only", sha, "--", "tests").splitlines()
                if Path(s).name.startswith("test_") and s.endswith(".py")]
     if not tracked:

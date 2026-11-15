@@ -3120,7 +3120,9 @@ class TestRosterAdd(CLIBase):
 
         result = self.cw("roster", "add", "gemini", "--by", "claude")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Bootstrap gemini manually", result.stdout)
+        self.assertIn("GEMINI.md: distinct anchor created", result.stdout)
+        with open(os.path.join(self.d, "GEMINI.md"), encoding="utf-8") as anchor:
+            self.assertIn("You are **gemini**", anchor.read())
         after = self.md()
         self.assertEqual(sum(a != b for a, b in zip(
             before.splitlines(keepends=True), after.splitlines(keepends=True))), 1)
@@ -3131,7 +3133,7 @@ class TestRosterAdd(CLIBase):
         self.assertEqual(dict((k, v) for k, v in before_lock.items() if k != "agents"),
                          dict((k, v) for k, v in after_lock.items() if k != "agents"))
         self.assertEqual(after_lock["agents"], "claude,codex,gemini")
-        self.assertFalse(os.path.exists(os.path.join(self.d, "GEMINI.md")))
+        self.assertTrue(os.path.isfile(os.path.join(self.d, "GEMINI.md")))
         for name, digest in evidence.items():
             self.assertEqual(self._file_sha(name), digest, name)
 
@@ -3252,7 +3254,7 @@ class TestReadCommands(CLIBase):
         self.assertEqual([a["role_state"] for a in d["snapshot"]["agents"]],
                          ["awaiting", "idle"])
         self.assertEqual(set(d["snapshot"]),
-                         {"schema", "agents", "listeners", "attention", "gateway",
+                         {"schema", "agents", "listeners", "attention", "gateway", "declared_blocks",
                           "last_turn", "ledger", "pen",
                           "activity", "activity_limit", "activity_truncated"})
         self.assertIsNone(d["snapshot"]["gateway"])
@@ -9769,9 +9771,13 @@ class TestRFC047ListenerPR2(ListenerCLIBase):
 
     def test_doctor_halted_repeated_non_completion_and_version_skew(self):
         self.init()
+        current_session = json.loads(self.cw("status", "--json").stdout)["session"]
+        current_time = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.seed_state(phase="halted", consecutive_failures=3,
+                        session=current_session, updated_at=current_time,
                         reason="max_retries_after_non_completion")
         self.seed_state(agent="codex", consecutive_failures=2,
+                        session=current_session, updated_at=current_time,
                         last_classification="non_completion",
                         runtime_version="0.0.1")             # skew via state sidecar
         os.makedirs(os.path.join(self.d, "examples"), exist_ok=True)
@@ -9784,6 +9790,7 @@ class TestRFC047ListenerPR2(ListenerCLIBase):
             for _ in range(2):                               # trailing ledger streak
                 fh.write(json.dumps({"schema": "m8shift.runtime.event.v1",
                                      "event": "run.ended", "agent": "gemini",
+                                     "session_id": current_session, "ts": current_time,
                                      "status": "non_completion"}) + "\n")
         checks, findings = self.doctor_checks()
         self.assertIn("listener.halted", checks)
@@ -10699,7 +10706,12 @@ class TestRuntimeCompanion(CLIBase):
         liveness = [f["message"] for f in json.loads(r.stdout)["findings"]
                     if f["check"] == "runtime.awaiting_unclaimed"]
         self.assertTrue(any("no live listener" in m for m in messages), messages)
-        self.assertTrue(any("none are fresh" in m for m in messages), messages)
+        stale_usage = [f for f in json.loads(r.stdout)["findings"]
+                       if f["check"] == "usage.measurement_stale"]
+        self.assertEqual(len(stale_usage), 1)
+        self.assertEqual(stale_usage[0]["agent"], "claude")
+        self.assertEqual(stale_usage[0]["threshold_seconds"], 60)
+        self.assertGreater(stale_usage[0]["age_seconds"], 60)
         self.assertFalse(any("advisory unavailable" in m for m in messages), messages)
         self.assertTrue(any("read-only review" in m and "WORKING_CLAUDE" in m
                             for m in liveness), liveness)
@@ -16972,9 +16984,9 @@ class TestTurnReservation(unittest.TestCase):
                      mock.patch.object(runtime, "reserve_turn_before_launch",
                                        return_value=(True, "")) as reserve, \
                      mock.patch.object(runtime, "release_unused_reservation",
-                                       return_value=False), \
+                                       return_value=False) as release, \
                      mock.patch.object(runtime.subprocess, "Popen",
-                                       side_effect=OSError("matrix launch stop")), \
+                                       side_effect=OSError("matrix launch stop")) as launch, \
                      mock.patch.object(runtime, "listener_run_classification",
                                        return_value=""), \
                      mock.patch.object(runtime, "listener_emit"), \
@@ -16982,11 +16994,21 @@ class TestTurnReservation(unittest.TestCase):
                      mock.patch.object(runtime.time, "sleep"):
                     rc = runtime.run_listener_loop(
                         "claude", profile, "runner", poll=0.01, max_ticks=1,
-                        max_retries=3, max_backoff=1, notify_only=notify_only)
+                        max_retries=3, max_backoff=1, notify_only=notify_only,
+                        generation="matrix-generation")
                 self.assertEqual(rc, 0)
                 self.assertEqual(
                     reserve.call_count, expected_reservations,
                     "%s lane reservation count" % lane)
+                if lane != "notify-only":
+                    child_env = launch.call_args.kwargs["env"]
+                    self.assertEqual(child_env["M8SHIFT_INSTANCE"],
+                                     "listener-claude-matrix-generation")
+                    self.assertEqual(child_env["M8SHIFT_INSTANCE_MODE"], "managed")
+                    if expected_reservations:
+                        self.assertEqual(reserve.call_args.args, ("claude", child_env))
+                        self.assertEqual(release.call_args.args,
+                                         ("claude", "7", child_env))
 
 class TestEphemeralRunnerRefusal(unittest.TestCase):
     """#283 — a lane pinned to a git worktree destroys itself later.
@@ -17083,7 +17105,7 @@ class TestEphemeralRunnerRefusal(unittest.TestCase):
         an operator hunting a process that does not exist. Observed against the
         shipped code before this fix."""
         module = self.runtime("m8shift_runtime_reaped")
-        source = inspect.getsource(module.cmd_listener_start)
+        source = inspect.getsource(module._run_listener_start_locked)
         self.assertIn("if not reaped and not listener_pid_alive(pid):", source)
 
 
@@ -27170,7 +27192,7 @@ class TestRFC049PRBListenerProducer(CLIBase):
                    "heartbeat_error": None}
         plans = [neutral, mk(False), mk(False), mk(True), mk(False)]
 
-        def fake_tick(agent, cadence):
+        def fake_tick(agent, cadence, instance_env=None):
             plan = plans[min(seq["i"], len(plans) - 1)]
             seq["i"] += 1
             return dict(plan)

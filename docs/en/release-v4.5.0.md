@@ -80,3 +80,15 @@ by this candidate.
 Protocol impact: **no** for this release-identity and interpreter-policy update.
 The included fixes restore existing session lookup and argv contracts; the new
 decision tools remain advisory and leave relay authority unchanged.
+
+## Proposed backlog20 work-branch overlay
+
+The [twenty-item implementation report](studies/backlog20-20261115/README.md)
+describes the proposed listener/runner ownership, quota/advice, roster/block
+visibility, private retained-output and executable-onboarding overlay. Its work
+branch is not the integration branch until merged. The report preserves the
+failed first full run and distinguishes subsequent focused corrections from a
+final combined gate. Advisor/JEV, real providers, native platform checks and
+live fleet redeployment remain separate acceptance work. The roster anchor
+side effect has an explicit RFC 071 amendment; no LOCK state or pen authority is
+added. The maintained Python 3.15 line remains unchanged.

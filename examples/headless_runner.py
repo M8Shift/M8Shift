@@ -48,6 +48,7 @@ launch. This runner writes immutable run plans plus bounded lifecycle metadata t
 `.m8shift/runtime/`; provider output is not copied into durable logs.
 """
 import argparse
+import base64
 import datetime as dt
 import errno
 import hashlib
@@ -55,6 +56,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -99,12 +101,13 @@ HANDSHAKE_CAPABILITIES = (
     "environment-write-probe-v1",
     "review-artifact-delivery-v1",
     "runner-exit-v2",
+    "bounded-output-retention-v1",
 )
 HANDSHAKE_OPTIONS = (
     "--agent-model", "--cmd", "--cwd", "--env-allowlist",
     "--m8shift", "--m8shift-py", "--once", "--resume-working",
     "--provider", "--review-delivery", "--run-id", "--runtime-dir",
-    "--start-on-idle",
+    "--start-on-idle", "--retain-output",
 )
 TEE_CAPTURE_LIMIT = 64 * 1024
 REVIEW_ARTIFACT_SCHEMA = "m8shift.review-artifact.v1"
@@ -211,7 +214,7 @@ def runner_handshake():
 class BoundedTTYTee:
     """Drain both child pipes, retain bounded bytes, echo only to real TTYs."""
 
-    def __init__(self, proc, limit=TEE_CAPTURE_LIMIT):
+    def __init__(self, proc, limit=TEE_CAPTURE_LIMIT, retain_output=False):
         self.proc = proc
         self.limit = limit
         self._capture = bytearray()
@@ -222,6 +225,7 @@ class BoundedTTYTee:
             "stderr": {"bytes": 0, "lines": 0},
         }
         self._last = {"stdout": b"", "stderr": b""}
+        self._retained = {name: bytearray() for name in self._counts} if retain_output else None
         self._threads = []
         for name, pipe, target in (
                 ("stdout", proc.stdout, sys.stdout),
@@ -244,6 +248,10 @@ class BoundedTTYTee:
                     self._counts[name]["bytes"] += len(chunk)
                     self._counts[name]["lines"] += chunk.count(b"\n")
                     self._last[name] = chunk[-1:]
+                    if self._retained is not None:
+                        room = self.limit - len(self._retained[name])
+                        if room > 0:
+                            self._retained[name].extend(chunk[:room])
                     room = self.limit - len(self._capture)
                     if room > 0:
                         self._capture.extend(chunk[:room])
@@ -296,7 +304,55 @@ class BoundedTTYTee:
             # Ephemeral only: the caller classifies this bounded tail and never
             # copies it into a plan, event, listener state, notification, or log.
             "_final_text": final_output,
+            "_retained_streams": ({name: bytes(value) for name, value in self._retained.items()}
+                                  if self._retained is not None else None),
         }
+
+
+def write_retained_output(runtime_dir, run_id, summary):
+    """Opt-in private output; portable ledgers receive only a bounded receipt."""
+    run_id = validate_run_id(run_id)
+    streams = summary.get("_retained_streams")
+    if not isinstance(streams, dict) or set(streams) != {"stdout", "stderr"}:
+        return None, "output_capture_unavailable"
+    relpath = os.path.join("run-output", run_id + ".json")
+    runtime_root = os.path.abspath(runtime_dir)
+    if os.path.islink(runtime_root):
+        return None, "output_capture_unsafe_path"
+    # Canonicalize system aliases such as macOS /var before checking the
+    # application-owned output directory; the explicit runtime root above
+    # must itself remain a non-symlink path.
+    directory = os.path.join(os.path.realpath(runtime_root), "run-output")
+    path = os.path.join(directory, run_id + ".json")
+    payload = {"schema": "m8shift.runner.output.v1", "run_id": run_id,
+               "max_bytes_per_stream": TEE_CAPTURE_LIMIT, "streams": {}}
+    for name, data in streams.items():
+        if not isinstance(data, bytes) or len(data) > TEE_CAPTURE_LIMIT:
+            return None, "output_capture_invalid"
+        total = summary["streams"][name]["bytes"]
+        payload["streams"][name] = {
+            "encoding": "base64", "data": base64.b64encode(data).decode("ascii"),
+            "sha256": hashlib.sha256(data).hexdigest(), "retained_bytes": len(data),
+            "observed_bytes": total, "truncated": total > len(data),
+        }
+    try:
+        if os.path.islink(directory):
+            return None, "output_capture_unsafe_path"
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        if os.path.islink(directory):
+            return None, "output_capture_unsafe_path"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        return None, "output_capture_write_failed"
+    return {"schema": payload["schema"], "path": relpath,
+            "streams": {name: {key: value for key, value in row.items() if key != "data"}
+                        for name, row in payload["streams"].items()}}, ""
 
 
 def _provider_reset_datetime(raw):
@@ -996,6 +1052,14 @@ def validate_run_plan(plan):
             raise SystemExit("run plan review_delivery input fingerprint is invalid")
     elif expected.get("type") == "review_artifact":
         raise SystemExit("run plan review_artifact expectation requires artifact delivery")
+    retention = plan.get("output_retention")
+    if retention is not None and (
+            not isinstance(retention, dict)
+            or set(retention) != {"enabled", "max_bytes_per_stream"}
+            or not isinstance(retention.get("enabled"), bool)
+            or type(retention.get("max_bytes_per_stream")) is not int
+            or retention["max_bytes_per_stream"] != TEE_CAPTURE_LIMIT):
+        raise SystemExit("run plan output retention fields are invalid")
     command = plan.get("command", {})
     if command:
         if command.get("shell") is not False:
@@ -1095,6 +1159,8 @@ def make_run_plan(args, run_id, me, lk, resumed=False, relay_text=None):
             "path": review_artifact_relpath(run_id),
             "max_output_bytes": REVIEW_ARTIFACT_MAX_BYTES,
         } if review_delivery == "artifact" else {"type": "none"}),
+        "output_retention": {"enabled": bool(getattr(args, "retain_output", False)),
+                             "max_bytes_per_stream": TEE_CAPTURE_LIMIT},
         "command": {
             "argv": argv,
             "shell": False,
@@ -1376,6 +1442,7 @@ def append_run_event(args, event, run_id, agent, **fields):
         "event": event,
         "run_id": run_id,
         "agent": agent,
+        "session_id": lk.get("session", ""),
         "ts": iso_now(),
         "runner_version": VERSION,
         "source": {"tool": "headless_runner.py", "version": VERSION},
@@ -1495,7 +1562,8 @@ def maybe_refresh_ttl(args, me, me_working, run_id):
                          returncode=r.returncode)
 
 
-def main():
+def _main():
+    global _ACTIVE_RUNNER_GUARD, _ACTIVE_RUNNER_CHILD
     if sys.argv[1:] == ["--handshake"]:
         runner_handshake()
         return 0
@@ -1515,7 +1583,7 @@ def main():
             "  3  external_transition — the relay moved outside this run's authorship (neutral,\n"
             "     never counted as a provider failure by a supervising listener)\n"
             "  4  suspended — relay is PAUSED (operator pause / usage cooldown; neutral)\n"
-            "  5  infrastructure — launch failure, immutable run-plan collision, or turn timeout\n"
+            "  5  infrastructure — singleton conflict, launch failure, plan collision, or timeout\n"
             "\n"
             "resume-working (RFC 047 PR 2):\n"
             "  --resume-working (with --once) also makes the run eligible when the relay is\n"
@@ -1574,6 +1642,9 @@ def main():
                    help="explicit reviewer mode: artifact persists a bounded final response without moving the relay")
     p.add_argument("--no-run-log", action="store_true",
                    help="disable .m8shift/runtime/runs.jsonl lifecycle logging")
+    p.add_argument("--retain-output", action="store_true",
+                   help="opt in to private bounded stdout/stderr prefixes under runtime/run-output; "
+                        "may contain sensitive provider text, never copied into the run ledger")
     p.add_argument("--once", action="store_true",
                    help="run at most one eligible turn, then exit")
     p.add_argument("--dry-run", action="store_true",
@@ -1608,6 +1679,23 @@ def main():
             raise SystemExit("provider executable or reviewer input is unavailable")
         print(json.dumps({"agent": me, "cmd": plan["argv"], "run_plan": plan, "runner_version": VERSION}, sort_keys=True))
         return 0
+
+    try:
+        guard = acquire_runner_singleton(args.m8shift, me)
+    except RunnerAlreadyRunning as exc:
+        pid = str(exc.pid) if exc.pid is not None else "unavailable"
+        log(f"runner for agent {me!r} is already running with PID {pid}; "
+            "refusing concurrent start.")
+        return 5
+    except OSError as exc:
+        log(f"runner singleton setup failed ({type(exc).__name__}; runner_singleton_error).")
+        return 5
+    _ACTIVE_RUNNER_GUARD = guard
+    install_runner_signal_handlers(guard, args.kill_grace)
+
+    if not args.once:
+        log("standalone polling has no stuck-WORKING recovery; use a supervised "
+            "listener for bounded --resume-working one-shot retries")
 
     while True:
         lk = read_lock(args.m8shift)
@@ -1704,7 +1792,8 @@ def main():
                              signature_id="provider_launch_error",
                              exception_type=exception_type)
             return 5
-        tee = BoundedTTYTee(proc)
+        _ACTIVE_RUNNER_CHILD = proc
+        tee = BoundedTTYTee(proc, retain_output=args.retain_output)
         started = time.monotonic()
         timed_out = False
         while True:
@@ -1725,6 +1814,13 @@ def main():
                 maybe_refresh_ttl(args, me, me_working, run_id)
 
         output_summary = tee.finish()
+        _ACTIVE_RUNNER_CHILD = None
+        if args.retain_output:
+            receipt, capture_error = write_retained_output(args.runtime_dir, run_id, output_summary)
+            append_run_event(args, "run.output_retained" if receipt else "run.output_unavailable",
+                             run_id, me, output_receipt=receipt, reason=capture_error)
+            if capture_error:
+                log("provider output retention failed (%s); inspect private runtime storage" % capture_error)
         post_environment = environment_probe(plan["cwd"], args.runtime_dir)
         output_fields = {
             "output_bytes": output_summary["bytes"],
@@ -1992,6 +2088,164 @@ def main():
             return once_rc
         if fails:
             time.sleep(min(args.interval * (2 ** fails), args.max_backoff))
+
+
+_ACTIVE_RUNNER_GUARD = None
+_ACTIVE_RUNNER_CHILD = None
+
+
+class RunnerAlreadyRunning(Exception):
+    """A live runner already owns this relay root's per-agent singleton."""
+
+    def __init__(self, pid):
+        super().__init__(pid)
+        self.pid = pid
+
+
+class RunnerSingleton:
+    """Kernel-backed runner lease with a human-readable, stale-tolerant PID file."""
+
+    def __init__(self, path, fd):
+        self.path = path
+        self.fd = fd
+        self.signal_handlers = {}
+        self.kill_grace = 0
+
+
+def _runner_pid_from_fd(fd):
+    """Read a contending owner's PID after its immediate publication window."""
+    for _ in range(20):
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            value = os.read(fd, 64).decode("ascii", "strict").strip()
+        except (OSError, UnicodeError):
+            value = ""
+        if re.fullmatch(r"[1-9][0-9]*", value):
+            return int(value)
+        time.sleep(0.01)
+    return None
+
+
+def _runner_lock_fd(fd):
+    if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+        import msvcrt
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _runner_unlock_fd(fd):
+    if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def acquire_runner_singleton(m8shift_path, agent):
+    """Own one runner lane for ``agent`` on the canonical relay root.
+
+    The file may survive SIGKILL, but the kernel lock cannot.  A replacement
+    therefore acquires and rewrites a stale PID file without guessing liveness
+    from ``kill(pid, 0)`` (which is unsafe after PID reuse).
+    """
+    relay_root = os.path.realpath(
+        os.path.dirname(os.path.abspath(m8shift_path)) or ".")
+    runtime_dir = os.path.join(relay_root, ".m8shift", "runtime")
+    os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
+    path = os.path.join(runtime_dir, f"runner-{agent}.pid")
+    if os.path.islink(path):
+        raise OSError(errno.ELOOP, "runner PID path is a symlink")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        try:
+            _runner_lock_fd(fd)
+        except (BlockingIOError, OSError) as exc:
+            pid = _runner_pid_from_fd(fd)
+            raise RunnerAlreadyRunning(pid) from exc
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, (str(os.getpid()) + "\n").encode("ascii"))
+        os.fsync(fd)
+        return RunnerSingleton(path, fd)
+    except Exception:
+        try:
+            _runner_unlock_fd(fd)
+        except OSError:
+            pass
+        os.close(fd)
+        raise
+
+
+def release_runner_singleton(guard):
+    """Remove our PID inode while locked, then release the kernel lease."""
+    if guard is None or guard.fd is None:
+        return
+    for signum, previous in guard.signal_handlers.items():
+        try:
+            signal.signal(signum, previous)
+        except (OSError, ValueError):
+            pass
+    guard.signal_handlers.clear()
+    try:
+        try:
+            held = os.fstat(guard.fd)
+            current = os.stat(guard.path, follow_symlinks=False)
+            if (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
+                os.unlink(guard.path)
+        except FileNotFoundError:
+            pass
+        finally:
+            _runner_unlock_fd(guard.fd)
+    finally:
+        os.close(guard.fd)
+        guard.fd = None
+
+
+def install_runner_signal_handlers(guard, kill_grace):
+    """Turn termination signals into a clean child stop plus outer cleanup."""
+    guard.kill_grace = max(0, kill_grace)
+
+    def stop_and_exit(signum, _frame):
+        global _ACTIVE_RUNNER_CHILD
+        proc = _ACTIVE_RUNNER_CHILD
+        if proc is not None and proc.poll() is None:
+            stop_child(proc, guard.kill_grace)
+        _ACTIVE_RUNNER_CHILD = None
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            guard.signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, stop_and_exit)
+        except (OSError, ValueError):
+            guard.signal_handlers.pop(signum, None)
+
+
+def main():
+    global _ACTIVE_RUNNER_GUARD, _ACTIVE_RUNNER_CHILD
+    try:
+        return _main()
+    finally:
+        proc = _ACTIVE_RUNNER_CHILD
+        if proc is not None and proc.poll() is None:
+            guard = _ACTIVE_RUNNER_GUARD
+            stop_child(proc, guard.kill_grace if guard is not None else 0)
+        _ACTIVE_RUNNER_CHILD = None
+        guard = _ACTIVE_RUNNER_GUARD
+        _ACTIVE_RUNNER_GUARD = None
+        release_runner_singleton(guard)
 
 
 if __name__ == "__main__":

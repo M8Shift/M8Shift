@@ -22,6 +22,7 @@ Examples:
 """
 import abc
 import argparse
+import contextlib
 import datetime as dt
 import fnmatch
 import hashlib
@@ -545,6 +546,8 @@ DOCTOR_BASELINE_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
 DOCTOR_BASELINE_ACTOR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\Z")
 DOCTOR_BASELINE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/#-]{0,255}\Z")
 DOCTOR_BASELINE_SEVERITIES = frozenset(("info", "warning", "error"))
+USAGE_STALE_FINDING_AGENT_LIMIT = 6
+USAGE_STALE_FINDING_AGENT_CAP = 24
 
 
 def now():
@@ -2003,7 +2006,11 @@ def usage_watch_reconcile_decision(watch, *, probe_ok=False, now_utc=None,
     if status == "legacy":
         return {"action": "recycle", "health": health}
     if status in ("stale", "degraded"):
-        return {"action": "recycle" if probe_ok else "investigate", "health": health}
+        decision = {"action": "recycle" if probe_ok else "investigate",
+                    "health": health}
+        if not probe_ok:
+            decision["finding_check"] = "usage.watch_probe_failed"
+        return decision
     return {"action": "keep" if status == "healthy" else "investigate",
             "health": health}
 
@@ -10108,7 +10115,7 @@ def cmd_doctor(args):
 
 
 def stale_state_findings(stale_after_seconds):
-    """One fail-open advisory for unattended relay and usage state; never gates."""
+    """Named fail-open findings for unattended relay and usage state."""
     def parse_timestamp(value):
         if not isinstance(value, str) or not value or value == "-":
             return None
@@ -10156,12 +10163,66 @@ def stale_state_findings(stale_after_seconds):
         snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
         if isinstance(snapshot, dict):
             snapshots.append(snapshot)
-    if snapshots:
-        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=stale_after_seconds)
-        if not any((parse_timestamp(row.get("captured_at")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= cutoff
-                   for row in snapshots):
-            findings.append({"severity": "info", "check": "runtime.stale_state",
-                             "message": "usage snapshots exist but none are fresh; recorded values with usable windows are shown and marked stale"})
+    observed_at = dt.datetime.now(dt.timezone.utc)
+    cutoff = observed_at - dt.timedelta(seconds=stale_after_seconds)
+    oldest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    latest_by_agent = {}
+    for snapshot in snapshots:
+        agent = snapshot.get("agent")
+        if not isinstance(agent, str) or not AGENT_RE.fullmatch(agent):
+            continue
+        captured = parse_timestamp(snapshot.get("captured_at")) or oldest
+        previous = latest_by_agent.get(agent)
+        if previous is None or captured > previous:
+            latest_by_agent[agent] = captured
+    stale_agents = [(agent, captured)
+                    for agent, captured in sorted(latest_by_agent.items())
+                    if captured < cutoff]
+    stale_agent_count = len(stale_agents)
+    for agent, captured in stale_agents[:USAGE_STALE_FINDING_AGENT_LIMIT]:
+        age = None if captured == oldest else max(
+            0, int((observed_at - captured).total_seconds()))
+        age_text = "unknown age" if age is None else "%ds old" % age
+        display_agent = _runtime_display_sanitize(
+            agent, cap=USAGE_STALE_FINDING_AGENT_CAP, fallback="?")
+        agent_truncated = display_agent != agent
+        if agent_truncated:
+            remedy = (
+                "the displayed identifier is truncated; inspect the bounded usage "
+                "ledger tail before reconciling that agent")
+        else:
+            remedy = (
+                "run `python3 m8shift-runtime.py usage watch reconcile --agent %s`"
+                % display_agent)
+        findings.append({
+            "severity": "warning",
+            "check": "usage.measurement_stale",
+            "message": (
+                "%s usage measurement is stale (%s; threshold %ds); this finding "
+                "does not block core claims or listener invocations, and the watch "
+                "loop does not own admission — %s" %
+                (display_agent, age_text, stale_after_seconds, remedy)),
+            "agent": display_agent,
+            "agent_truncated": agent_truncated,
+            "age_seconds": age,
+            "threshold_seconds": stale_after_seconds,
+        })
+    if stale_agent_count > USAGE_STALE_FINDING_AGENT_LIMIT:
+        omitted_agent_count = (
+            stale_agent_count - USAGE_STALE_FINDING_AGENT_LIMIT)
+        findings.append({
+            "severity": "warning",
+            "check": "usage.measurement_stale_omitted",
+            "message": (
+                "%d usage measurements are stale; %d are named above and %d "
+                "additional agent(s) are omitted by the bounded diagnostic" %
+                (stale_agent_count, USAGE_STALE_FINDING_AGENT_LIMIT,
+                 omitted_agent_count)),
+            "stale_agent_count": stale_agent_count,
+            "shown_agent_count": USAGE_STALE_FINDING_AGENT_LIMIT,
+            "omitted_agent_count": omitted_agent_count,
+            "threshold_seconds": stale_after_seconds,
+        })
     return findings
 
 
@@ -10318,8 +10379,81 @@ def listener_paths(agent):
         "pid": os.path.join(LISTENERS_DIR, f"{agent}.pid"),
         "state": os.path.join(LISTENERS_DIR, f"{agent}.json"),
         "plan": os.path.join(LISTENERS_DIR, f"{agent}.plan.json"),
+        "start_lock": os.path.join(LISTENERS_DIR, f"{agent}.start.lock"),
         "log": os.path.join(LISTENER_LOGS_DIR, f"{agent}-listener.log"),
     }
+
+
+_LISTENER_START_THREAD_LOCKS = {}
+_LISTENER_START_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def acquire_listener_start_transaction(agent):
+    """Take the per-lane startup transaction without a stale-file lease.
+
+    The kernel lock is released when the process exits, including an abrupt
+    crash.  The process-local lock covers concurrent callers in one embedded
+    runtime, where platform file-lock ownership can otherwise be process-wide.
+    """
+    os.makedirs(LISTENERS_DIR, mode=0o700, exist_ok=True)
+    path = listener_paths(agent)["start_lock"]
+    reject_symlinked_runtime_path(path)
+    with _LISTENER_START_THREAD_LOCKS_GUARD:
+        thread_lock = _LISTENER_START_THREAD_LOCKS.setdefault(
+            os.path.realpath(path), threading.Lock())
+    if not thread_lock.acquire(blocking=False):
+        sys.exit(f"m8shift-runtime: listener startup transaction for {agent!r} "
+                 "is already active; wait for that start to publish or refuse")
+    fd = None
+    try:
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags, 0o600)
+        os.chmod(path, 0o600)
+        if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        if fd is not None:
+            os.close(fd)
+        thread_lock.release()
+        sys.exit(f"m8shift-runtime: listener startup transaction for {agent!r} "
+                 "is already active; wait for that start to publish or refuse")
+    return thread_lock, fd
+
+
+def release_listener_start_transaction(transaction):
+    if not transaction:
+        return
+    thread_lock, fd = transaction
+    try:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+        thread_lock.release()
+
+
+@contextlib.contextmanager
+def listener_start_transaction(agent, *, enabled=True):
+    """Release the startup transaction on every return and exception path."""
+    transaction = acquire_listener_start_transaction(agent) if enabled else None
+    try:
+        yield
+    finally:
+        release_listener_start_transaction(transaction)
 
 
 def _path_is_within(path, root):
@@ -11064,11 +11198,36 @@ def listener_doctor_findings():
                 if doc.get("schema") == LISTENER_STATE_SCHEMA:
                     states[agent] = doc
     repeated = set()
+    current_session = current_relay_session()
+    observed_at = now()
+    def current_failure_evidence(row, timestamp_key):
+        session = row.get("session_id") or row.get("session")
+        timestamp = parse_utc(row.get(timestamp_key, ""))
+        return bool(current_session and session == current_session and timestamp
+                    and 0 <= (observed_at - timestamp).total_seconds() <= 300)
+
+    rows, err = read_jsonl_diagnostic(RUNS)
+    recent_runs = [row for row in rows if isinstance(row, dict)
+                   and row.get("event") == "run.ended"
+                   and current_failure_evidence(row, "ts")] if not err else []
+    latest_runs = {}
+    for row in recent_runs:
+        latest_runs[row.get("agent", "")] = row
     for agent, doc in sorted(states.items()):
         phase = doc.get("phase", "")
         fails = doc.get("consecutive_failures")
         fails = fails if isinstance(fails, int) and fails >= 0 else 0
-        if phase == "halted":
+        evidence_current = current_failure_evidence(doc, "updated_at")
+        if not evidence_current and (phase == "halted" or fails >= LISTENER_REPEATED_NON_COMPLETION_N):
+            findings.append({"severity": "info", "check": "listener.historical_state",
+                             "message": f"{agent}: recorded listener failures are stale, "
+                                        "unbound or from another session; no current failure is inferred"})
+        last_run = latest_runs.get(agent)
+        if (last_run and parse_utc(last_run["ts"]) >=
+                (parse_utc(doc.get("updated_at", "")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc))
+                and last_run.get("status") != "non_completion"):
+            fails = 0
+        if phase == "halted" and evidence_current:
             findings.append({
                 "severity": "warning",
                 "check": "listener.halted",
@@ -11076,7 +11235,7 @@ def listener_doctor_findings():
                             f"({doc.get('reason') or 'max retries reached'}) — inspect logs, "
                             "then clear explicitly with `listener start --restart`"),
             })
-        elif fails >= LISTENER_REPEATED_NON_COMPLETION_N:
+        elif fails >= LISTENER_REPEATED_NON_COMPLETION_N and evidence_current:
             repeated.add(agent)
             findings.append({
                 "severity": "warning",
@@ -11094,10 +11253,9 @@ def listener_doctor_findings():
                             f"but this companion is {VERSION} — restart the listener"),
             })
     # Trailing consecutive non_completion runs in the runtime ledger (per agent).
-    rows, err = read_jsonl_diagnostic(RUNS)
     if not err:
         streaks, closed = {}, set()
-        for row in reversed(rows):
+        for row in reversed(recent_runs):
             if row.get("event") != "run.ended":
                 continue
             agent = row.get("agent") or ""
@@ -12268,6 +12426,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
     """
     me_awaiting = f"AWAITING_{agent.upper()}"
     me_working = f"WORKING_{agent.upper()}"
+    instance_env = listener_managed_instance_env(agent, generation)
     persisted = read_listener_state(agent)
     phase = persisted.get("phase") if persisted.get("phase") in LISTENER_PHASES else "polling"
     fails = persisted.get("consecutive_failures")
@@ -12289,6 +12448,8 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
         say(f"{agent}: persisted halted phase found ({reason or 'max retries reached'}) — "
             "supervising without launches; clear it with `listener start --restart`.")
     usage_throttled = False
+    usage_watch_next = 0.0
+    usage_watch_episode = ""
     active_pin_override = None
 
     def save():
@@ -12345,6 +12506,20 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             # Any resident listener may observe and locally notify a stranded
             # peer lane. Dedup keeps the 20s poll from spamming configured tiers.
             maybe_notify_stranded(lk)
+            # The invoking managed listener owns only its desired dead collector.
+            # Never probe/start from a notify-only lane or turn this into admission.
+            if not notify_only and time.monotonic() >= usage_watch_next:
+                usage_watch_next = time.monotonic() + 300.0
+                watch_result = listener_usage_watch_tick(agent)
+                if watch_result == "started" or watch_result != usage_watch_episode:
+                    usage_watch_episode = watch_result
+                    if watch_result == "started":
+                        say(f"{agent}: usage.watch_restarted: dead desired-running "
+                            "collector restarted; measurement recovery is not yet proven.")
+                    elif watch_result in {"invalid", "stale", "degraded", "legacy", "unavailable"}:
+                        say(f"{agent}: usage.watch_{watch_result}: collector requires "
+                            "inspection; run `usage watch reconcile --agent "
+                            f"{agent}`; admission remains fail-open.")
             wake = ""
             if state == me_awaiting:
                 wake = "awaiting_turn"
@@ -12546,8 +12721,25 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             )
             say(f"{agent}: state={state} ({wake}) → launching one runner turn"
                 f"{' (resume-working)' if resume else ''}, run {run_id}.")
+            launch_env = instance_env
+            if resume and not reserved:
+                held_instance = lk.get("holder_instance") or ""
+                if held_instance and held_instance != instance_env["M8SHIFT_INSTANCE"]:
+                    phase = "halted"
+                    reason = "holder_instance_mismatch"
+                    say(f"{agent}: held work belongs to another instance; "
+                        "HALTED without launching or taking over its identity.")
+                    save()
+                    notify_halt(state, lk.get("holder", ""))
+                    continue
+                if not held_instance:
+                    # Legacy held windows have no instance credential. Adding
+                    # a new one at resume would make the child's append foreign.
+                    launch_env = dict(os.environ)
+                    launch_env.pop("M8SHIFT_INSTANCE", None)
+                    launch_env.pop("M8SHIFT_INSTANCE_MODE", None)
             try:
-                child = subprocess.Popen(argv, cwd=HERE, env=instance_env)
+                child = subprocess.Popen(argv, cwd=HERE, env=launch_env)
             except OSError as e:
                 say(f"{agent}: runner launch failed ({type(e).__name__}; "
                     "listener_runner_launch_error).")
@@ -12557,7 +12749,7 @@ def run_listener_loop(agent, profile, runner_path, *, poll, max_ticks, max_retri
             else:
                 # RFC 049 PR B: the listener is the managed liveness producer
                 # while the child turn runs (protective beats + early refresh).
-                rc = supervise_child_with_liveness(child, agent, poll, say, instance_env)
+                rc = supervise_child_with_liveness(child, agent, poll, say, launch_env)
             # One release point for every non-appending exit: launch failure, run
             # failure, HALT. It acts only on our own unadvanced hold, so a turn the
             # provider actually authored is never undone.
@@ -13009,6 +13201,23 @@ def cmd_listener_start(args):
                 "removes; the lane would die at its next tick, silently, hours or "
                 "days later. Point --runner at a path outside any worktree, or pass "
                 "--allow-ephemeral-runner to accept a lane with a known expiry.")
+    return _run_listener_start_transaction(
+        args, agent, restore_plan, supervised, profile, persisted_plan,
+        runner_path, backend, facts)
+
+
+def _run_listener_start_transaction(args, agent, restore_plan, supervised, profile,
+                                    persisted_plan, runner_path, backend, facts):
+    with listener_start_transaction(agent, enabled=not supervised):
+        outcome = _run_listener_start_locked(
+            args, agent, restore_plan, supervised, profile, persisted_plan,
+            runner_path, backend, facts)
+    # A foreground listener must release startup ownership before its lifetime loop.
+    return outcome() if callable(outcome) else outcome
+
+
+def _run_listener_start_locked(args, agent, restore_plan, supervised, profile,
+                               persisted_plan, runner_path, backend, facts):
     if not supervised:
         exists, pid = read_listener_pid(agent)
         # #370: restored after an adversarial review showed the removal was wrong.
@@ -13062,13 +13271,12 @@ def cmd_listener_start(args):
         generation = (os.environ.get(LISTENER_GENERATION_ENV, "")
                       or uuid.uuid4().hex)
         write_listener_pid(agent, os.getpid(), generation)
-        return run_listener_loop(
+        return lambda: run_listener_loop(
             agent, profile, runner_path,
             poll=args.poll_interval, max_ticks=args.max_ticks,
             max_retries=args.max_retries, max_backoff=args.max_backoff,
             owns_log=supervised, notify_only=getattr(args, "notify_only", False),
             generation=generation)
-    instance_env = listener_managed_instance_env(agent, generation)
     paths = listener_paths(agent)
     if backend in LISTENER_SERVICE_BACKENDS:
         # OS service lifecycle (RFC 047 Phase D): generate the definition under
@@ -13632,6 +13840,9 @@ USAGE_BUDGET = os.path.join(USAGE_DIR, "budget.json")            # Slice 4: opt-
 USAGE_BUDGET_EXAMPLE = os.path.join(USAGE_DIR, "budget.example.json")
 USAGE_LEDGER = os.path.join(RUNTIME_DIR, "usage.jsonl")
 USAGE_ERRORS = os.path.join(RUNTIME_DIR, "usage-adapter-errors.jsonl")
+USAGE_ADVISORIES_DIR = os.path.join(RUNTIME_DIR, "usage-advisories")
+USAGE_ADVISORY_SCHEMA = "m8shift.usage.advisory.v1"
+USAGE_ADVISORY_LATCH_SCHEMA = "m8shift.usage.advisory-latch.v1"
 USAGE_ADAPTERS_SCHEMA = "m8shift.usage.adapters.v1"
 USAGE_BUDGET_SCHEMA = "m8shift.usage.budget.v1"
 USAGE_BUDGET_MAX_CAP = 10 ** 12             # a trillion tokens: above any real plan, below float-overflow risk
@@ -14164,6 +14375,9 @@ def normalize_usage_snapshot(doc, *, agent, adapter_name, kind, raw_text="",
     warnings = []
     if not isinstance(doc, dict):
         return None, ["adapter output is not a JSON object"]
+    # A failed observation cannot supply numbers, including the top-level token
+    # fallback or budget-derived ratios. Apply the same floor at ledger reads.
+    doc = load_core().usage_observed_snapshot(doc)
     schema = doc.get("schema")
     if schema not in (None, USAGE_FIXTURE_SCHEMA):
         return None, [f"unsupported input schema {schema!r} (expected {USAGE_FIXTURE_SCHEMA})"]
@@ -15119,6 +15333,7 @@ def read_usage_ledger_diagnostic():
 
 def latest_usage_snapshots(rows, findings):
     latest = {}
+    core = load_core()
     for row in rows:
         if row.get("type") != "usage.snapshot":
             continue
@@ -15134,7 +15349,7 @@ def latest_usage_snapshots(rows, findings):
             findings.append({"severity": "warning", "check": "usage.ledger",
                              "message": "usage.snapshot event without agent skipped"})
             continue
-        latest[agent] = snapshot  # append order: last one wins
+        latest[agent] = core.usage_observed_snapshot(snapshot)  # last one wins
     return latest
 
 
@@ -15732,7 +15947,10 @@ def usage_guard_evaluate(args, agent_filter, *, apply_mode, snapshot_findings=No
                                         "(holds are placed on limit_hit only)"})
     return usage_pick_code(codes), {
         "verdict": verdict, "agents": report, "relay": relay, "hold": hold,
-        "applied": applied, "findings": findings}
+        "applied": applied, "findings": findings,
+        "advisories": [advice for row in report
+                       if (advice := usage_checkpoint_advice(
+                           row, latest.get(row["agent"], {}))) is not None]}
 
 
 def print_usage_guard_result(command, code, payload, json_mode):
@@ -15754,6 +15972,9 @@ def print_usage_guard_result(command, code, payload, json_mode):
               f"{freshness} "
               f"captured={row['captured_at'] or '-'}")
     applied = payload.get("applied")
+    if not payload.get("advisory_suppressed"):
+        for advice in payload.get("advisories", []):
+            print("  usage.advisory: " + usage_advisory_message(advice))
     if applied:
         print(f"  applied: {applied.get('action')}")
     print_usage_findings(payload["findings"])
@@ -15810,12 +16031,12 @@ def usage_watch_tick_probe(args, agent):
         measurement = snapshot.get("measurement") if isinstance(snapshot, dict) \
             and isinstance(snapshot.get("measurement"), dict) else None
         state = measurement.get("state") if measurement else None
-        if state in ("degraded", "unavailable"):
-            reason = measurement.get("reason")
+        if not usage_measurement_arrived(snapshot):
+            reason = measurement.get("reason") if measurement else None
             detail = f" ({reason})" if reason else ""
             findings.append({
                 "severity": "warning", "check": "usage.watch_measurement",
-                "message": (f"usage measurement {state}{detail}; "
+                "message": (f"usage measurement {state or 'invalid'}{detail}; "
                             "counted as an unsuccessful watcher read"),
             })
         else:
@@ -16055,6 +16276,7 @@ def cmd_usage_watch_reconcile(args, agent_filter):
                 watch, probe_ok=(probe_ok if health["status"] in ("stale", "degraded")
                                  else False))
             action = decision["action"]
+            finding_check = decision.get("finding_check", "usage.watch_health")
             if malformed_note:
                 action = "quarantined"
                 findings.append({"severity": "warning", "check": "usage.watch_registry",
@@ -16064,6 +16286,7 @@ def cmd_usage_watch_reconcile(args, agent_filter):
                 if not usage_watch_terminate(
                         watch.get("pid"), watch.get("process_start_ref", "")):
                     action = "investigate"
+                    finding_check = "usage.watch_terminate_failed"
                     probe_note = "stale/degraded watcher could not be terminated"
                 else:
                     watch = spawn_usage_watch(agent, watch)
@@ -16076,7 +16299,7 @@ def cmd_usage_watch_reconcile(args, agent_filter):
             elif action == "keep_stopped":
                 action = "stopped"
             if action == "investigate":
-                findings.append({"severity": "warning", "check": "usage.watch_health",
+                findings.append({"severity": "warning", "check": finding_check,
                                  "message": "%s: %s; %s" %
                                  (agent, health["finding"], probe_note or "probe unavailable")})
             results.append({"agent": agent, "action": action,
@@ -16178,6 +16401,7 @@ def cmd_usage_watch(args):
                     "total_ticks": ticks, "successful_ticks": successful_ticks,
                     "success_rate": successful_ticks / ticks,
                 })
+                persist_usage_checkpoint_advice(payload, lifecycle_agent, lease_id)
             # A watch tick that sees an ok verdict NEVER resumes anything (PR B
             # non-goal: no automatic resume; only `usage resume` may resume).
             print_usage_guard_result(f"usage watch tick {ticks}", code, payload, args.json)
@@ -16347,7 +16571,7 @@ def cmd_usage_resume(args):
 
 def usage_doctor_findings():
     """Advisory usage-sidecar diagnostics for `doctor` (existence-guarded)."""
-    findings = []
+    findings = usage_advisory_doctor_findings()
     if os.path.lexists(USAGE_HOLD_LEGACY):
         _hold, hold_err = _read_usage_hold_path(USAGE_HOLD_LEGACY, legacy=True)
         if hold_err:
@@ -16380,6 +16604,92 @@ def usage_doctor_findings():
         else:
             config_findings, _entries = usage_config_findings(doc)
             findings.extend(config_findings)
+            # #409: coverage is established by an arrived reading, not by a
+            # declaration in adapters.json.  In particular, an enabled adapter
+            # that keeps returning `unavailable` is the failure we need doctor
+            # to name; treating configuration as evidence would hide it.
+            status = run_core_json("status", "--json")
+            lock = status.get("lock") if isinstance(status, dict) else None
+            roster_field = status.get("agents", "") if isinstance(status, dict) else ""
+            if not roster_field and isinstance(lock, dict):
+                roster_field = lock.get("agents", "")
+            roster = [agent.strip() for agent in str(roster_field).split(",")
+                      if agent.strip()]
+            rows, _ledger_findings = read_usage_ledger_diagnostic()
+            arrived = set()
+            for row in rows:
+                if not isinstance(row, dict) or row.get("type") != "usage.snapshot":
+                    continue
+                payload = row.get("payload")
+                snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+                if not isinstance(snapshot, dict) \
+                        or snapshot.get("schema") != USAGE_SNAPSHOT_SCHEMA:
+                    continue
+                agent = snapshot.get("agent")
+                # Legacy normalized snapshots predate the explicit receipt and
+                # retain their existing success semantics.  Once a receipt is
+                # present, only `measured` is an arrived usable reading.
+                if isinstance(agent, str) and agent \
+                        and usage_measurement_arrived(snapshot):
+                    arrived.add(agent)
+            for agent in roster:
+                if agent not in arrived:
+                    findings.append({
+                        "severity": "warning",
+                        "check": "usage.measurement_missing",
+                        "message": (f"{agent}: no successful usage measurement has "
+                                    "ever arrived; adapter declarations and "
+                                    "unavailable/degraded snapshots do not establish "
+                                    "coverage"),
+                    })
+    if os.path.lexists(USAGE_WATCHERS_DIR):
+        if (os.path.islink(USAGE_WATCHERS_DIR)
+                or not os.path.isdir(USAGE_WATCHERS_DIR)):
+            findings.append({
+                "severity": "warning", "check": "usage.watch_registry",
+                "message": ".m8shift/runtime/usage-watchers must be a plain directory",
+            })
+        else:
+            for name in sorted(os.listdir(USAGE_WATCHERS_DIR)):
+                if not name.endswith(".json"):
+                    continue
+                agent = name[:-5]
+                if not AGENT_RE.fullmatch(agent):
+                    findings.append({
+                        "severity": "warning", "check": "usage.watch_registry",
+                        "message": (".m8shift/runtime/usage-watchers/%s has an "
+                                    "invalid agent name" % name),
+                    })
+                    continue
+                watch, err = read_usage_watch(agent)
+                if err:
+                    findings.append({
+                        "severity": "warning", "check": "usage.watch_registry",
+                        "message": "%s: %s" % (agent, err), "agent": agent,
+                    })
+                    continue
+                health = usage_watch_health(watch)
+                status = health["status"]
+                desired = watch.get("desired_state")
+                if status == "healthy" or (status == "stopped"
+                                             and desired == "stopped"):
+                    continue
+                message = "%s: %s" % (agent, health["finding"])
+                if status in ("stale", "degraded"):
+                    message += (
+                        "; reconcile preserves the live pid unless a successful "
+                        "adapter probe authorizes recycle; a failed probe is named "
+                        "usage.watch_probe_failed and core/listener admission remains "
+                        "fail-open")
+                message += ("; run `python3 m8shift-runtime.py usage watch "
+                            "reconcile --agent %s`" % agent)
+                findings.append({
+                    "severity": "warning",
+                    "check": "usage.watch_%s" % status,
+                    "message": message,
+                    "agent": agent,
+                    "health": health,
+                })
     for path in (USAGE_LEDGER, USAGE_ERRORS):
         if not os.path.exists(path):
             continue
@@ -17200,6 +17510,247 @@ the sole M8SHIFT.md writer; this companion owns only documented local sidecars."
     args = p.parse_args()
     _binding_a1_preflight(args)
     sys.exit(args.fn(args))
+
+
+
+
+
+
+
+def listener_usage_watch_tick(agent):
+    """#404: restore only this lane's explicitly desired, dead collector.
+
+    No adapter probe, signal, quarantine, default registration, or hold mutation.
+    Re-read intent and health under the existing per-agent startup transaction.
+    """
+    def observe():
+        watch, error = read_usage_watch(agent)
+        if error:
+            return watch, "invalid"
+        if not watch:
+            return watch, "absent"
+        if (watch.get("schema") != USAGE_WATCH_SCHEMA
+                or watch.get("agent") != agent
+                or watch.get("kind") != "usage_watch"):
+            return watch, "invalid"
+        if watch.get("desired_state") != "running":
+            return watch, "not_requested"
+        pid = watch.get("pid")
+        interval = watch.get("interval")
+        if (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+                or watch.get("phase") not in ("running", "starting", "stopped")
+                or watch.get("mode") not in ("advisory", "apply")
+                or not isinstance(interval, (int, float)) or isinstance(interval, bool)
+                or not math.isfinite(interval) or interval <= 0):
+            return watch, "invalid"
+        return watch, usage_watch_health(watch)["status"]
+
+    try:
+        watch, health = observe()
+        if health != "dead":
+            return health
+        token = acquire_usage_watch_lock(agent)
+        try:
+            watch, health = observe()
+            if health != "dead":
+                return health
+            if usage_watch_reconcile_decision(watch)["action"] != "start":
+                return "changed"
+            spawn_usage_watch(agent, watch)
+            return "started"
+        finally:
+            release_usage_watch_lock(agent, token)
+    except (OSError, ValueError, OverflowError):
+        return "unavailable"
+
+def usage_checkpoint_advice(row, snapshot):
+    """Pure first #412 slice: an unnamed checkpoint warning, never a route."""
+    agent = row.get("agent", "")
+    if (row.get("classification") != "near_limit" or not isinstance(agent, str)
+            or not AGENT_RE.fullmatch(agent)):
+        return None
+    binding = snapshot.get("decision_window")
+    binding = binding if isinstance(binding, dict) else {}
+    kind = binding.get("kind")
+    kind = kind if isinstance(kind, str) and USAGE_NAME_RE.fullmatch(kind) else "unknown"
+    reset_value = binding.get("resets_at")
+    reset = parse_utc(reset_value) if isinstance(reset_value, str) else None
+    reset = iso(reset) if reset and reset > now() else None
+    captured_value = snapshot.get("captured_at")
+    captured = parse_utc(captured_value) if isinstance(captured_value, str) else None
+    source = snapshot.get("source")
+    provenance = source.get("provenance") if isinstance(source, dict) else None
+    provenance = provenance if provenance in USAGE_PROVENANCE else "unknown"
+    identity = [agent, kind, reset, None, None]
+    key = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+    return {
+        "schema": USAGE_ADVISORY_SCHEMA, "authority": "advisory",
+        "action": "checkpoint_or_cooldown", "source_agent": agent,
+        "target_agent": None, "task_type": None,
+        "reason": "task_type_not_declared", "capability_floor": "not_evaluated",
+        "decision_ratio": row.get("decision_ratio"), "window_kind": kind,
+        "resets_at": reset, "captured_at": iso(captured) if captured else None,
+        "provenance": provenance, "recommendation_key": key,
+    }
+
+def usage_advisory_message(advice):
+    return ("%s: near limit (%g%% used, %s); checkpoint the current work unit "
+            "or plan a cooldown before the ceiling. No peer recommended: "
+            "task capability is not declared." % (
+                advice["source_agent"], advice["decision_ratio"] * 100,
+                advice["window_kind"]))
+
+def usage_advisory_latch_path(agent):
+    return os.path.join(USAGE_ADVISORIES_DIR, agent + ".json")
+
+def read_usage_advisory_latch(agent):
+    """Bounded derived state; corrupt data never becomes a suppression key."""
+    path = usage_advisory_latch_path(agent)
+    try:
+        reject_symlinked_runtime_path(path, ValueError)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 16384:
+                raise ValueError("not a bounded regular file")
+            raw = os.read(fd, 16385).decode("utf-8")
+        finally:
+            os.close(fd)
+        if len(raw) > 16384:
+            raise ValueError("oversized latch")
+        doc = json.loads(raw)
+        if (not isinstance(doc, dict) or doc.get("schema") != USAGE_ADVISORY_LATCH_SCHEMA
+                or doc.get("agent") != agent or not isinstance(doc.get("active"), bool)):
+            raise ValueError("invalid latch identity")
+        event = doc.get("event")
+        advice = event.get("payload") if isinstance(event, dict) else None
+        if (not isinstance(advice, dict) or advice.get("schema") != USAGE_ADVISORY_SCHEMA
+                or event.get("schema") != RUNTIME_EVENT_SCHEMA
+                or event.get("type") != "usage.advisory" or event.get("agent") != agent
+                or advice.get("source_agent") != agent
+                or advice.get("action") != "checkpoint_or_cooldown"
+                or advice.get("authority") != "advisory"
+                or advice.get("target_agent") is not None
+                or advice.get("task_type") is not None
+                or advice.get("capability_floor") != "not_evaluated"
+                or advice.get("reason") != "task_type_not_declared"
+                or not isinstance(advice.get("recommendation_key"), str)
+                or not USAGE_SHA256_RE.fullmatch(advice["recommendation_key"])
+                or not isinstance(advice.get("decision_ratio"), (int, float))
+                or isinstance(advice["decision_ratio"], bool)
+                or not math.isfinite(advice["decision_ratio"])
+                or not isinstance(advice.get("window_kind"), str)
+                or not USAGE_NAME_RE.fullmatch(advice["window_kind"])
+                or not parse_utc(event.get("ts", ""))):
+            raise ValueError("invalid advisory event")
+        reset = advice.get("resets_at")
+        if reset is not None and (not isinstance(reset, str) or not parse_utc(reset)):
+            raise ValueError("invalid reset")
+        expected = hashlib.sha256(canonical_json_bytes(
+            [agent, advice["window_kind"], reset, None, None])).hexdigest()
+        if advice["recommendation_key"] != expected:
+            raise ValueError("advisory identity does not match its payload")
+        return doc, None
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError, RecursionError, OverflowError, TypeError):
+        return {}, "unreadable or malformed advisory latch"
+
+def persist_usage_checkpoint_advice(payload, agent, lease_id):
+    """Managed owner only; atomic latch is the durable notification record.
+
+    The usage ledger receives an audit copy after the durable write. This ordering
+    never suppresses an unpersisted warning and prevents duplicate audit attempts
+    after restart. Doctor can recover the warning from the latch if audit fails.
+    """
+    def warn(check, message):
+        payload["findings"].append({"severity": "warning", "check": check,
+                                    "message": "%s: %s" % (agent, message)})
+
+    advice = next((a for a in payload.get("advisories", [])
+                   if a["source_agent"] == agent), None)
+    verdict = next((r["classification"] for r in payload.get("agents", [])
+                    if r["agent"] == agent), "unknown")
+    if not advice and verdict not in ("ok", "limit_hit"):
+        return
+    try:
+        token = acquire_usage_watch_lock(agent)
+        try:
+            watch, error = read_usage_watch(agent)
+            if (error or watch.get("schema") != USAGE_WATCH_SCHEMA
+                    or watch.get("agent") != agent or watch.get("kind") != "usage_watch"
+                    or watch.get("phase") != "running" or watch.get("pid") != os.getpid()
+                    or watch.get("lease_id") != lease_id
+                    or watch.get("desired_state") != "running"):
+                warn("usage.advisory_owner", "watcher no longer owns advisory publication")
+                return
+            previous, error = read_usage_advisory_latch(agent)
+            if error:
+                warn("usage.advisory_latch", error + "; pure warning remains visible")
+                return
+            path = usage_advisory_latch_path(agent)
+            if not advice:
+                if previous.get("active"):
+                    previous.update(active=False, cleared_at=iso(), clear_reason=verdict)
+                    write_fleet_json_atomic(path, previous)
+                return
+            if (previous.get("active") and previous["event"]["payload"]["recommendation_key"]
+                    == advice["recommendation_key"]):
+                payload["advisory_suppressed"] = True
+                return
+            event = runtime_event("usage.advisory", agent=agent,
+                                  idempotency_key=advice["recommendation_key"], payload=advice)
+            write_fleet_json_atomic(path, {"schema": USAGE_ADVISORY_LATCH_SCHEMA,
+                                          "agent": agent, "active": True, "event": event})
+            payload["advisory_persisted"] = True
+            append_jsonl(USAGE_LEDGER, event)
+        finally:
+            release_usage_watch_lock(agent, token)
+    except SystemExit as exc:
+        # Runtime path guards use sys.exit(message); the watch stop handler uses
+        # SystemExit(0). Never turn an operator's stop into a nonfatal I/O warning.
+        if not isinstance(exc.code, str):
+            raise
+        warn("usage.advisory_io", "advisory persistence refused; pure warning remains visible")
+    except (OSError, ValueError):
+        warn("usage.advisory_io", "advisory persistence or audit failed; pure warning remains visible")
+
+def usage_advisory_doctor_findings():
+    if not os.path.lexists(USAGE_ADVISORIES_DIR):
+        return []
+    findings = []
+    try:
+        reject_symlinked_runtime_path(USAGE_ADVISORIES_DIR, ValueError)
+        names = sorted(name for name in os.listdir(USAGE_ADVISORIES_DIR)
+                       if name.endswith(".json") and AGENT_RE.fullmatch(name[:-5]))
+        if len(names) > 64:
+            findings.append({"severity": "warning", "check": "usage.advisory_omitted",
+                             "message": "%d additional advisory records omitted" % (len(names) - 64)})
+        for name in names[:64]:
+            agent = name[:-5]
+            latch, error = read_usage_advisory_latch(agent)
+            if error:
+                findings.append({"severity": "warning", "check": "usage.advisory_latch",
+                                 "message": "%s: %s" % (agent, error)})
+            elif latch.get("active"):
+                event = latch["event"]
+                findings.append({"severity": "warning", "check": "usage.advisory",
+                                 "agent": agent, "authority": "advisory",
+                                 "message": "Recorded at %s: %s" % (
+                                     event["ts"], usage_advisory_message(event["payload"]))})
+    except (OSError, ValueError):
+        findings.append({"severity": "warning", "check": "usage.advisory_latch",
+                         "message": "usage advisory registry is unreadable"})
+    return findings
+
+def usage_measurement_arrived(snapshot):
+    """True only for a usable normalized reading (including legacy success)."""
+    if not isinstance(snapshot, dict):
+        return False
+    measurement = snapshot.get("measurement")
+    return measurement is None or (isinstance(measurement, dict)
+                                   and measurement.get("state") == "measured")
 
 
 if __name__ == "__main__":
